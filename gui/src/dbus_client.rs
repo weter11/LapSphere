@@ -1,7 +1,7 @@
 use anyhow::Result;
-use tokio::sync::{mpsc, oneshot};
 use tuxedo_common::types::*;
 use zbus::Connection;
+use tokio::sync::{mpsc, oneshot};
 
 #[derive(Clone)]
 pub struct DbusClient {
@@ -10,102 +10,59 @@ pub struct DbusClient {
 
 // Commands sent from UI to background task
 pub enum DbusCommand {
-    GetSystemInfo {
-        reply: oneshot::Sender<Result<SystemInfo>>,
-    },
-    GetCpuInfo {
-        reply: oneshot::Sender<Result<CpuInfo>>,
-    },
-    GetGpuInfo {
-        reply: oneshot::Sender<Result<Vec<GpuInfo>>>,
-    },
-    GetFanInfo {
-        reply: oneshot::Sender<Result<Vec<FanInfo>>>,
-    },
-    GetBatteryInfo {
-        reply: oneshot::Sender<Result<BatteryInfo>>,
-    },
-    GetStorageDeviceInfo {
-        reply: oneshot::Sender<Result<Vec<StorageDevice>>>,
-    },
-    GetMountInfo {
-        reply: oneshot::Sender<Result<Vec<MountInfo>>>,
-    },
-    GetWifiInfo {
-        reply: oneshot::Sender<Result<Vec<WiFiInfo>>>,
-    },
-    ApplyProfile {
-        profile: Profile,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    SetCpuGovernor {
-        governor: String,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    SetCpuBoost {
-        enabled: bool,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    PreviewKeyboard {
-        settings: KeyboardSettings,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    GetBatteryChargeThresholds {
-        reply: oneshot::Sender<Result<(u8, u8)>>,
-    },
-    SetBatteryChargeThresholds {
-        start: u8,
-        end: u8,
-        reply: oneshot::Sender<Result<()>>,
-    },
-    GetBatteryAvailableStartThresholds {
-        reply: oneshot::Sender<Result<Vec<u8>>>,
-    },
-    GetBatteryAvailableEndThresholds {
-        reply: oneshot::Sender<Result<Vec<u8>>>,
-    },
-    SetBatterySettings {
-        settings: BatterySettings,
-        reply: oneshot::Sender<Result<()>>,
-    },
+    GetSystemInfo { reply: oneshot::Sender<Result<SystemInfo>> },
+    GetCpuInfo { reply: oneshot::Sender<Result<CpuInfo>> },
+    GetGpuInfo { reply: oneshot::Sender<Result<Vec<GpuInfo>>> },
+    GetFanInfo { reply: oneshot::Sender<Result<Vec<FanInfo>>> },
+    GetBatteryInfo { reply: oneshot::Sender<Result<BatteryInfo>> },
+    GetStorageDeviceInfo { reply: oneshot::Sender<Result<Vec<StorageDevice>>> },
+    GetMountInfo { reply: oneshot::Sender<Result<Vec<MountInfo>>> },
+    GetWifiInfo { reply: oneshot::Sender<Result<Vec<WiFiInfo>>> },
+    ApplyProfile { profile: Profile, reply: oneshot::Sender<Result<()>> },
+    SetCpuGovernor { governor: String, reply: oneshot::Sender<Result<()>> },
+    SetCpuBoost { enabled: bool, reply: oneshot::Sender<Result<()>> },
+    PreviewKeyboard { settings: KeyboardSettings, reply: oneshot::Sender<Result<()>> },
+    GetBatteryChargeThresholds { reply: oneshot::Sender<Result<(u8, u8)>> },
+    SetBatteryChargeThresholds { start: u8, end: u8, reply: oneshot::Sender<Result<()>> },
+    GetBatteryAvailableStartThresholds { reply: oneshot::Sender<Result<Vec<u8>>> },
+    GetBatteryAvailableEndThresholds { reply: oneshot::Sender<Result<Vec<u8>>> },
+    SetBatterySettings { settings: BatterySettings, reply: oneshot::Sender<Result<()>> },
 }
 
 impl DbusClient {
     pub fn new() -> Result<Self> {
         let (command_tx, command_rx) = mpsc::unbounded_channel();
-
+        
         // Spawn background task that handles all DBus calls
         tokio::spawn(async move {
             if let Err(e) = dbus_worker(command_rx).await {
                 log::error!("DBus worker died: {}", e);
             }
         });
-
+        
         Ok(Self { command_tx })
     }
-
+    
     // Non-blocking methods - return immediately with oneshot receiver
-
+    
     pub fn get_cpu_info(&self) -> oneshot::Receiver<Result<CpuInfo>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.command_tx.send(DbusCommand::GetCpuInfo { reply: tx });
         rx
     }
-
+    
     pub fn get_system_info(&self) -> oneshot::Receiver<Result<SystemInfo>> {
         let (tx, rx) = oneshot::channel();
-        let _ = self
-            .command_tx
-            .send(DbusCommand::GetSystemInfo { reply: tx });
+        let _ = self.command_tx.send(DbusCommand::GetSystemInfo { reply: tx });
         rx
     }
-
+    
     pub fn get_gpu_info(&self) -> oneshot::Receiver<Result<Vec<GpuInfo>>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.command_tx.send(DbusCommand::GetGpuInfo { reply: tx });
         rx
     }
-
+    
     pub fn get_fan_info(&self) -> oneshot::Receiver<Result<Vec<FanInfo>>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.command_tx.send(DbusCommand::GetFanInfo { reply: tx });
@@ -114,25 +71,19 @@ impl DbusClient {
 
     pub fn get_battery_info(&self) -> oneshot::Receiver<Result<BatteryInfo>> {
         let (tx, rx) = oneshot::channel();
-        let _ = self
-            .command_tx
-            .send(DbusCommand::GetBatteryInfo { reply: tx });
+        let _ = self.command_tx.send(DbusCommand::GetBatteryInfo { reply: tx });
         rx
     }
 
     pub fn get_storage_device_info(&self) -> oneshot::Receiver<Result<Vec<StorageDevice>>> {
         let (tx, rx) = oneshot::channel();
-        let _ = self
-            .command_tx
-            .send(DbusCommand::GetStorageDeviceInfo { reply: tx });
+        let _ = self.command_tx.send(DbusCommand::GetStorageDeviceInfo { reply: tx });
         rx
     }
 
     pub fn get_mount_info(&self) -> oneshot::Receiver<Result<Vec<MountInfo>>> {
         let (tx, rx) = oneshot::channel();
-        let _ = self
-            .command_tx
-            .send(DbusCommand::GetMountInfo { reply: tx });
+        let _ = self.command_tx.send(DbusCommand::GetMountInfo { reply: tx });
         rx
     }
 
@@ -141,83 +92,60 @@ impl DbusClient {
         let _ = self.command_tx.send(DbusCommand::GetWifiInfo { reply: tx });
         rx
     }
-
+    
     pub fn apply_profile(&self, profile: Profile) -> oneshot::Receiver<Result<()>> {
         let (tx, rx) = oneshot::channel();
-        let _ = self.command_tx.send(DbusCommand::ApplyProfile {
-            profile: profile.clone(),
-            reply: tx,
+        let _ = self.command_tx.send(DbusCommand::ApplyProfile { 
+            profile: profile.clone(), 
+            reply: tx 
         });
         rx
     }
-
+    
     pub fn set_cpu_governor(&self, governor: String) -> oneshot::Receiver<Result<()>> {
         let (tx, rx) = oneshot::channel();
-        let _ = self.command_tx.send(DbusCommand::SetCpuGovernor {
-            governor,
-            reply: tx,
-        });
+        let _ = self.command_tx.send(DbusCommand::SetCpuGovernor { governor, reply: tx });
         rx
     }
-
-    pub fn preview_keyboard_settings(
-        &self,
-        settings: KeyboardSettings,
-    ) -> oneshot::Receiver<Result<()>> {
+    
+    pub fn preview_keyboard_settings(&self, settings: KeyboardSettings) -> oneshot::Receiver<Result<()>> {
         let (tx, rx) = oneshot::channel();
-        let _ = self.command_tx.send(DbusCommand::PreviewKeyboard {
-            settings: settings.clone(),
-            reply: tx,
+        let _ = self.command_tx.send(DbusCommand::PreviewKeyboard { 
+            settings: settings.clone(), 
+            reply: tx 
         });
         rx
     }
-
+    
     pub fn get_battery_charge_thresholds(&self) -> oneshot::Receiver<Result<(u8, u8)>> {
         let (tx, rx) = oneshot::channel();
-        let _ = self
-            .command_tx
-            .send(DbusCommand::GetBatteryChargeThresholds { reply: tx });
+        let _ = self.command_tx.send(DbusCommand::GetBatteryChargeThresholds { reply: tx });
         rx
     }
-
-    pub fn set_battery_charge_thresholds(
-        &self,
-        start: u8,
-        end: u8,
-    ) -> oneshot::Receiver<Result<()>> {
+    
+    pub fn set_battery_charge_thresholds(&self, start: u8, end: u8) -> oneshot::Receiver<Result<()>> {
         let (tx, rx) = oneshot::channel();
-        let _ = self
-            .command_tx
-            .send(DbusCommand::SetBatteryChargeThresholds {
-                start,
-                end,
-                reply: tx,
-            });
+        let _ = self.command_tx.send(DbusCommand::SetBatteryChargeThresholds { 
+            start, end, reply: tx 
+        });
         rx
     }
 
     pub fn get_battery_available_start_thresholds(&self) -> oneshot::Receiver<Result<Vec<u8>>> {
         let (tx, rx) = oneshot::channel();
-        let _ = self
-            .command_tx
-            .send(DbusCommand::GetBatteryAvailableStartThresholds { reply: tx });
+        let _ = self.command_tx.send(DbusCommand::GetBatteryAvailableStartThresholds { reply: tx });
         rx
     }
 
     pub fn get_battery_available_end_thresholds(&self) -> oneshot::Receiver<Result<Vec<u8>>> {
         let (tx, rx) = oneshot::channel();
-        let _ = self
-            .command_tx
-            .send(DbusCommand::GetBatteryAvailableEndThresholds { reply: tx });
+        let _ = self.command_tx.send(DbusCommand::GetBatteryAvailableEndThresholds { reply: tx });
         rx
     }
 
     pub fn set_battery_settings(&self, settings: BatterySettings) -> oneshot::Receiver<Result<()>> {
         let (tx, rx) = oneshot::channel();
-        let _ = self.command_tx.send(DbusCommand::SetBatterySettings {
-            settings,
-            reply: tx,
-        });
+        let _ = self.command_tx.send(DbusCommand::SetBatterySettings { settings, reply: tx });
         rx
     }
 }
@@ -225,7 +153,7 @@ impl DbusClient {
 // Background worker - handles all DBus calls asynchronously
 async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Result<()> {
     let connection = Connection::system().await?;
-
+    
     while let Some(command) = command_rx.recv().await {
         match command {
             DbusCommand::GetSystemInfo { reply } => {
@@ -298,7 +226,7 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
             }
         }
     }
-
+    
     Ok(())
 }
 
@@ -309,9 +237,8 @@ async fn get_system_info_impl(conn: &Connection) -> Result<SystemInfo> {
         "com.tuxedo.Control",
         "/com/tuxedo/Control",
         "com.tuxedo.Control",
-    )
-    .await?;
-
+    ).await?;
+    
     let json: String = proxy.call("GetSystemInfo", &()).await?;
     Ok(serde_json::from_str(&json)?)
 }
@@ -322,9 +249,8 @@ async fn get_cpu_info_impl(conn: &Connection) -> Result<CpuInfo> {
         "com.tuxedo.Control",
         "/com/tuxedo/Control",
         "com.tuxedo.Control",
-    )
-    .await?;
-
+    ).await?;
+    
     let json: String = proxy.call("GetCpuInfo", &()).await?;
     Ok(serde_json::from_str(&json)?)
 }
@@ -335,9 +261,8 @@ async fn get_gpu_info_impl(conn: &Connection) -> Result<Vec<GpuInfo>> {
         "com.tuxedo.Control",
         "/com/tuxedo/Control",
         "com.tuxedo.Control",
-    )
-    .await?;
-
+    ).await?;
+    
     let json: String = proxy.call("GetGpuInfo", &()).await?;
     Ok(serde_json::from_str(&json)?)
 }
@@ -348,9 +273,8 @@ async fn get_fan_info_impl(conn: &Connection) -> Result<Vec<FanInfo>> {
         "com.tuxedo.Control",
         "/com/tuxedo/Control",
         "com.tuxedo.Control",
-    )
-    .await?;
-
+    ).await?;
+    
     let json: String = proxy.call("GetFanInfo", &()).await?;
     Ok(serde_json::from_str(&json)?)
 }
@@ -361,8 +285,7 @@ async fn get_battery_info_impl(conn: &Connection) -> Result<BatteryInfo> {
         "com.tuxedo.Control",
         "/com/tuxedo/Control",
         "com.tuxedo.Control",
-    )
-    .await?;
+    ).await?;
 
     let json: String = proxy.call("GetBatteryInfo", &()).await?;
     Ok(serde_json::from_str(&json)?)
@@ -374,8 +297,7 @@ async fn get_storage_device_info_impl(conn: &Connection) -> Result<Vec<StorageDe
         "com.tuxedo.Control",
         "/com/tuxedo/Control",
         "com.tuxedo.Control",
-    )
-    .await?;
+    ).await?;
 
     let json: String = proxy.call("GetStorageDeviceInfo", &()).await?;
     Ok(serde_json::from_str(&json)?)
@@ -387,8 +309,7 @@ async fn get_mount_info_impl(conn: &Connection) -> Result<Vec<MountInfo>> {
         "com.tuxedo.Control",
         "/com/tuxedo/Control",
         "com.tuxedo.Control",
-    )
-    .await?;
+    ).await?;
 
     let json: String = proxy.call("GetMountInfo", &()).await?;
     Ok(serde_json::from_str(&json)?)
@@ -400,8 +321,7 @@ async fn get_wifi_info_impl(conn: &Connection) -> Result<Vec<WiFiInfo>> {
         "com.tuxedo.Control",
         "/com/tuxedo/Control",
         "com.tuxedo.Control",
-    )
-    .await?;
+    ).await?;
 
     let json: String = proxy.call("GetWifiInfo", &()).await?;
     Ok(serde_json::from_str(&json)?)
@@ -413,13 +333,10 @@ async fn apply_profile_impl(conn: &Connection, profile: &Profile) -> Result<()> 
         "com.tuxedo.Control",
         "/com/tuxedo/Control",
         "com.tuxedo.Control",
-    )
-    .await?;
-
+    ).await?;
+    
     let json = serde_json::to_string(profile)?;
-    proxy
-        .call::<_, _, ()>("ApplyProfile", &(json.as_str(),))
-        .await?;
+    proxy.call::<_, _, ()>("ApplyProfile", &(json.as_str(),)).await?;
     Ok(())
 }
 
@@ -429,12 +346,9 @@ async fn set_cpu_governor_impl(conn: &Connection, governor: &str) -> Result<()> 
         "com.tuxedo.Control",
         "/com/tuxedo/Control",
         "com.tuxedo.Control",
-    )
-    .await?;
-
-    proxy
-        .call::<_, _, ()>("SetCpuGovernor", &(governor,))
-        .await?;
+    ).await?;
+    
+    proxy.call::<_, _, ()>("SetCpuGovernor", &(governor,)).await?;
     Ok(())
 }
 
@@ -444,13 +358,10 @@ async fn preview_keyboard_impl(conn: &Connection, settings: &KeyboardSettings) -
         "com.tuxedo.Control",
         "/com/tuxedo/Control",
         "com.tuxedo.Control",
-    )
-    .await?;
-
+    ).await?;
+    
     let json = serde_json::to_string(settings)?;
-    proxy
-        .call::<_, _, ()>("PreviewKeyboardSettings", &(json.as_str(),))
-        .await?;
+    proxy.call::<_, _, ()>("PreviewKeyboardSettings", &(json.as_str(),)).await?;
     Ok(())
 }
 
@@ -460,8 +371,7 @@ async fn set_cpu_boost_impl(conn: &Connection, enabled: bool) -> Result<()> {
         "com.tuxedo.Control",
         "/com/tuxedo/Control",
         "com.tuxedo.Control",
-    )
-    .await?;
+    ).await?;
 
     proxy.call::<_, _, ()>("SetCpuBoost", &(enabled,)).await?;
     Ok(())
@@ -473,9 +383,8 @@ async fn get_battery_thresholds_impl(conn: &Connection) -> Result<(u8, u8)> {
         "com.tuxedo.Control",
         "/com/tuxedo/Control",
         "com.tuxedo.Control",
-    )
-    .await?;
-
+    ).await?;
+    
     let start: u8 = proxy.call("GetBatteryChargeStartThreshold", &()).await?;
     let end: u8 = proxy.call("GetBatteryChargeEndThreshold", &()).await?;
     Ok((start, end))
@@ -487,15 +396,10 @@ async fn set_battery_thresholds_impl(conn: &Connection, start: u8, end: u8) -> R
         "com.tuxedo.Control",
         "/com/tuxedo/Control",
         "com.tuxedo.Control",
-    )
-    .await?;
-
-    proxy
-        .call::<_, _, ()>("SetBatteryChargeStartThreshold", &(start,))
-        .await?;
-    proxy
-        .call::<_, _, ()>("SetBatteryChargeEndThreshold", &(end,))
-        .await?;
+    ).await?;
+    
+    proxy.call::<_, _, ()>("SetBatteryChargeStartThreshold", &(start,)).await?;
+    proxy.call::<_, _, ()>("SetBatteryChargeEndThreshold", &(end,)).await?;
     Ok(())
 }
 
@@ -505,12 +409,9 @@ async fn get_battery_available_start_thresholds_impl(conn: &Connection) -> Resul
         "com.tuxedo.Control",
         "/com/tuxedo/Control",
         "com.tuxedo.Control",
-    )
-    .await?;
+    ).await?;
 
-    let json: String = proxy
-        .call("GetBatteryAvailableStartThresholds", &())
-        .await?;
+    let json: String = proxy.call("GetBatteryAvailableStartThresholds", &()).await?;
     Ok(serde_json::from_str(&json)?)
 }
 
@@ -520,8 +421,7 @@ async fn get_battery_available_end_thresholds_impl(conn: &Connection) -> Result<
         "com.tuxedo.Control",
         "/com/tuxedo/Control",
         "com.tuxedo.Control",
-    )
-    .await?;
+    ).await?;
 
     let json: String = proxy.call("GetBatteryAvailableEndThresholds", &()).await?;
     Ok(serde_json::from_str(&json)?)
@@ -533,12 +433,9 @@ async fn set_battery_settings_impl(conn: &Connection, settings: BatterySettings)
         "com.tuxedo.Control",
         "/com/tuxedo/Control",
         "com.tuxedo.Control",
-    )
-    .await?;
+    ).await?;
 
     let json = serde_json::to_string(&settings)?;
-    proxy
-        .call::<_, _, ()>("SetBatterySettings", &(json.as_str(),))
-        .await?;
+    proxy.call::<_, _, ()>("SetBatterySettings", &(json.as_str(),)).await?;
     Ok(())
 }
