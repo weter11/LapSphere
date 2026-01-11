@@ -845,6 +845,27 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
                         .map(|t| t as f32);
                     let load = device.utilization_rates().ok().map(|u| u.gpu as f32);
                     let power = device.power_usage().ok().map(|p| p as f32 / 1000.0);
+                    let core_limits = device
+                        .clock_offset(
+                            Clock::Graphics,
+                            nvml_wrapper::enum_wrappers::device::PerformanceState::Zero,
+                        )
+                        .ok();
+                    let mem_limits = device
+                        .clock_offset(
+                            Clock::Memory,
+                            nvml_wrapper::enum_wrappers::device::PerformanceState::Zero,
+                        )
+                        .ok();
+                    let nvidia_offset_limits =
+                        core_limits
+                            .zip(mem_limits)
+                            .map(|(core, mem)| NvidiaOffsetLimits {
+                                core_min: core.min_clock_offset_mhz,
+                                core_max: core.max_clock_offset_mhz,
+                                mem_min: mem.min_clock_offset_mhz,
+                                mem_max: mem.max_clock_offset_mhz,
+                            });
 
                     gpus.push(GpuInfo {
                         name,
@@ -855,6 +876,7 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
                         load,
                         power,
                         voltage: None,
+                        nvidia_offset_limits,
                     });
                 }
             }
@@ -894,6 +916,7 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
                         load,
                         power,
                         voltage: None,
+                        nvidia_offset_limits: None,
                     });
                 }
             }
@@ -960,6 +983,7 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
                 load,
                 power,
                 voltage,
+                nvidia_offset_limits: None,
             });
         }
     }

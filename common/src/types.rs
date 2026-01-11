@@ -74,6 +74,7 @@ pub struct GpuInfo {
     pub load: Option<f32>,
     pub power: Option<f32>,
     pub voltage: Option<f32>,
+    pub nvidia_offset_limits: Option<NvidiaOffsetLimits>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -162,6 +163,7 @@ pub struct CpuSettings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GpuSettings {
     pub dgpu_tdp: Option<u32>,
+    pub nvidia_manual_oc: bool,
     pub nvidia_gpu_min_clock: Option<u32>,
     pub nvidia_gpu_max_clock: Option<u32>,
     pub nvidia_mem_min_clock: Option<u32>,
@@ -393,6 +395,7 @@ impl Default for GpuSettings {
     fn default() -> Self {
         Self {
             dgpu_tdp: None,
+            nvidia_manual_oc: false,
             nvidia_gpu_min_clock: None,
             nvidia_gpu_max_clock: None,
             nvidia_mem_min_clock: None,
@@ -401,6 +404,14 @@ impl Default for GpuSettings {
             nvidia_mem_offset: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NvidiaOffsetLimits {
+    pub core_min: i32,
+    pub core_max: i32,
+    pub mem_min: i32,
+    pub mem_max: i32,
 }
 
 impl Default for KeyboardSettings {

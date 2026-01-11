@@ -65,11 +65,12 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>)
             ui.add_space(16.0);
 
             // GPU tuning
-            let has_nvidia = state
+            let nvidia_info = state
                 .gpu_info
                 .iter()
-                .any(|g| g.name.to_lowercase().contains("nvidia"));
-            draw_gpu_tuning(ui, &mut state.config.profiles[idx], has_nvidia);
+                .find(|g| g.name.to_lowercase().contains("nvidia"))
+                .cloned();
+            draw_gpu_tuning(ui, &mut state.config.profiles[idx], nvidia_info);
             ui.add_space(16.0);
             ui.separator();
             ui.add_space(16.0);
@@ -276,12 +277,52 @@ fn draw_cpu_tuning(
     }
 }
 
-fn draw_gpu_tuning(ui: &mut Ui, profile: &mut Profile, has_nvidia: bool) {
+fn draw_gpu_tuning(
+    ui: &mut Ui,
+    profile: &mut Profile,
+    nvidia_info: Option<tuxedo_common::types::GpuInfo>,
+) {
     ui.heading("🎮 GPU Tuning");
     ui.add_space(8.0);
 
-    if !has_nvidia {
+    if nvidia_info.is_none() {
         ui.label("NVIDIA GPU not detected; overclock controls are disabled.");
+        return;
+    }
+
+    ui.checkbox(
+        &mut profile.gpu_settings.nvidia_manual_oc,
+        "Enable manual NVIDIA overclock",
+    );
+
+    let limits = nvidia_info.and_then(|g| g.nvidia_offset_limits).unwrap_or(
+        tuxedo_common::types::NvidiaOffsetLimits {
+            core_min: -500,
+            core_max: 500,
+            mem_min: -1000,
+            mem_max: 1000,
+        },
+    );
+
+    ui.horizontal(|ui| {
+        if ui.button("Reset locked clocks").clicked() {
+            profile.gpu_settings.nvidia_gpu_min_clock = None;
+            profile.gpu_settings.nvidia_gpu_max_clock = None;
+            profile.gpu_settings.nvidia_mem_min_clock = None;
+            profile.gpu_settings.nvidia_mem_max_clock = None;
+        }
+        if ui.button("Reset offsets").clicked() {
+            profile.gpu_settings.nvidia_core_offset = Some(0);
+            profile.gpu_settings.nvidia_mem_offset = Some(0);
+        }
+    });
+
+    if !profile.gpu_settings.nvidia_manual_oc {
+        ui.label(
+            RichText::new("Manual OC disabled; values will be reset to driver defaults.")
+                .italics()
+                .small(),
+        );
         return;
     }
 
@@ -334,13 +375,13 @@ fn draw_gpu_tuning(ui: &mut Ui, profile: &mut Profile, has_nvidia: bool) {
         ui.label("Core Offset:");
         ui.add(
             DragValue::new(&mut core_offset)
-                .clamp_range(-500..=500)
+                .clamp_range(limits.core_min..=limits.core_max)
                 .suffix(" MHz"),
         );
         ui.label("Mem Offset:");
         ui.add(
             DragValue::new(&mut mem_offset)
-                .clamp_range(-1000..=1000)
+                .clamp_range(limits.mem_min..=limits.mem_max)
                 .suffix(" MHz"),
         );
     });

@@ -208,6 +208,31 @@ fn apply_nvidia_gpu_settings(settings: &GpuSettings) -> Result<()> {
     let has_mem_clocks =
         settings.nvidia_mem_min_clock.is_some() && settings.nvidia_mem_max_clock.is_some();
 
+    if !settings.nvidia_manual_oc {
+        // Reset to defaults
+        if let Ok(nvml) = Nvml::init() {
+            if let Ok(mut device) = nvml.device_by_index(0) {
+                let _ = device.reset_gpu_locked_clocks();
+                let _ = device.reset_mem_locked_clocks();
+                let _ = device.set_clock_offset(Clock::Graphics, PerformanceState::Zero, 0);
+                let _ = device.set_clock_offset(Clock::Memory, PerformanceState::Zero, 0);
+            }
+        }
+
+        let _ = Command::new("nvidia-smi").args(["-rgc"]).output();
+        let _ = Command::new("nvidia-smi").args(["-rmc"]).output();
+        let _ = Command::new("nvidia-settings")
+            .args(["-a", "[gpu:0]/GPUGraphicsClockOffsetAllPerformanceLevels=0"])
+            .output();
+        let _ = Command::new("nvidia-settings")
+            .args([
+                "-a",
+                "[gpu:0]/GPUMemoryTransferRateOffsetAllPerformanceLevels=0",
+            ])
+            .output();
+        return Ok(());
+    }
+
     if !(has_gpu_clocks
         || has_mem_clocks
         || settings.nvidia_core_offset.is_some()
