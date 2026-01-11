@@ -4,9 +4,14 @@ use std::path::Path;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use crate::tuxedo_io::TuxedoIo;
-use systemstat::{System, Platform, saturating_sub_bytes};
-// use tuxedo_io::TuxedoIo;
+use systemstat::{System, Platform, saturating_sub_bytes, CPULoad};
+use std::time::Instant;
 use tuxedo_common::types::*;
+use lazy_static::lazy_static;
+
+lazy_static! {
+    static ref PREV_DISK_STATS: Mutex<Option<(Instant, HashMap<String, (u64, u64)>)>> = Mutex::new(None);
+}
 
 // Thread-safe storage for previous CPU stats
 static PREVIOUS_CPU_STATS: Mutex<Option<HashMap<u32, CpuStats>>> = Mutex::new(None);
@@ -849,7 +854,7 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
             let power = read_gpu_power(&device_path);
             
             // Read voltage (optional)
-            let voltage = read_gpu_voltage(&device_path);
+            let voltage = read_gpu_voltage(&device_path, vendor);
             
             gpus.push(GpuInfo {
                 name,
@@ -961,11 +966,30 @@ fn read_gpu_power(device_path: &str) -> Option<f32> {
     None
 }
 
-fn read_gpu_voltage(device_path: &str) -> Option<f32> {
+fn read_gpu_voltage(device_path: &str, vendor: &str) -> Option<f32> {
     let hwmon_path = format!("{}/hwmon", device_path);
     if let Ok(entries) = fs::read_dir(&hwmon_path) {
         for entry in entries.flatten() {
-            let voltage_input = entry.path().join("in0_input");
+            let hwmon_dir_path = entry.path();
+
+            // For AMD, look for vddgfx
+            if vendor == "0x1002" {
+                for i in 0..10 {
+                    let label_path = hwmon_dir_path.join(format!("in{}_label", i));
+                    if let Ok(label) = fs::read_to_string(&label_path) {
+                        if label.trim() == "vddgfx" {
+                            let input_path = hwmon_dir_path.join(format!("in{}_input", i));
+                            if let Ok(volt_str) = fs::read_to_string(&input_path) {
+                                if let Ok(millivolts) = volt_str.trim().parse::<f32>() {
+                                    return Some(millivolts / 1000.0);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let voltage_input = hwmon_dir_path.join("in0_input");
             if let Ok(volt_str) = fs::read_to_string(&voltage_input) {
                 if let Ok(millivolts) = volt_str.trim().parse::<f32>() {
                     return Some(millivolts / 1000.0);
@@ -1033,6 +1057,9 @@ pub fn get_wifi_info() -> Result<Vec<WiFiInfo>> {
         let (channel, channel_width) = read_wifi_channel(&interface);
         let (tx_rate, rx_rate) = read_wifi_rates(&interface);
         
+        // Get SSID
+        let ssid = read_wifi_ssid(&interface);
+
         wifi_devices.push(WiFiInfo {
             interface,
             driver,
@@ -1042,6 +1069,7 @@ pub fn get_wifi_info() -> Result<Vec<WiFiInfo>> {
             channel_width,
             tx_rate,
             rx_rate,
+            ssid,
         });
     }
     
@@ -1130,30 +1158,73 @@ fn read_wifi_channel(interface: &str) -> (Option<u32>, Option<u32>) {
     (None, None)
 }
 
+fn read_wifi_ssid(interface: &str) -> Option<String> {
+    if let Ok(output) = std::process::Command::new("iwgetid")
+        .arg(interface)
+        .arg("--raw")
+        .output()
+    {
+        if output.status.success() {
+            let ssid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !ssid.is_empty() {
+                return Some(ssid);
+            }
+        }
+    }
+    None
+}
+
 fn read_wifi_rates(interface: &str) -> (Option<f64>, Option<f64>) {
-    // Try to read from /sys/class/net/{interface}/statistics/
-    let tx_bytes_path = format!("/sys/class/net/{}/statistics/tx_bytes", interface);
-    let rx_bytes_path = format!("/sys/class/net/{}/statistics/rx_bytes", interface);
-    
-    // Note: This gives total bytes, not rates. Actual rate calculation would require
-    // storing previous values and time, similar to CPU load calculation.
-    // For now, we'll try to use iw to get link speed
-    
     if let Ok(output) = std::process::Command::new("iw")
         .args(&["dev", interface, "link"])
         .output()
     {
         if output.status.success() {
             let info = String::from_utf8_lossy(&output.stdout);
+            let mut tx_rate = None;
+            let mut rx_rate = None;
+
             for line in info.lines() {
-                if line.contains("tx bitrate:") {
-                    // Parse: "tx bitrate: 866.7 MBit/s"
+                if line.trim().starts_with("tx bitrate:") {
                     let parts: Vec<&str> = line.split_whitespace().collect();
-                    for (i, part) in parts.iter().enumerate() {
-                        if (*part == "bitrate:" || *part == "tx" || *part == "rx") && i + 1 < parts.len() {
-                            if let Ok(rate) = parts[i + 1].parse::<f64>() {
-                                // Assume both tx and rx are similar for now
-                                return (Some(rate), Some(rate));
+                    if parts.len() >= 3 {
+                        if let Ok(rate) = parts[2].parse::<f64>() {
+                            tx_rate = Some(rate);
+                        }
+                    }
+                }
+                if line.trim().starts_with("rx bitrate:") {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 3 {
+                        if let Ok(rate) = parts[2].parse::<f64>() {
+                            rx_rate = Some(rate);
+                        }
+                    }
+                }
+            }
+
+            if tx_rate.is_some() || rx_rate.is_some() {
+                return (tx_rate, rx_rate);
+            }
+        }
+    }
+
+    // Fallback to iwconfig
+    if let Ok(output) = std::process::Command::new("iwconfig")
+        .arg(interface)
+        .output()
+    {
+        if output.status.success() {
+            let info = String::from_utf8_lossy(&output.stdout);
+            for line in info.lines() {
+                if line.contains("Bit Rate=") {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    for part in parts {
+                        if part.starts_with("Rate=") {
+                            if let Some(rate_str) = part.split('=').nth(1) {
+                                if let Ok(rate) = rate_str.parse::<f64>() {
+                                    return (Some(rate), Some(rate));
+                                }
                             }
                         }
                     }
@@ -1174,6 +1245,8 @@ pub fn get_battery_info() -> Result<BatteryInfo> {
         return Err(anyhow!("No battery found"));
     };
 
+    let status = read_sysfs_string(&format!("{}/status", base))?;
+
     Ok(BatteryInfo {
         voltage_mv: read_sysfs_u64(&format!("{}/voltage_now", base))? / 1000,
         current_ma: read_sysfs_i64(&format!("{}/current_now", base))? / 1000,
@@ -1183,6 +1256,7 @@ pub fn get_battery_info() -> Result<BatteryInfo> {
         model: read_sysfs_string(&format!("{}/model_name", base))?,
         charge_start_threshold: read_sysfs_u64(&format!("{}/charge_control_start_threshold", base)).ok().map(|v| v as u8),
         charge_end_threshold: read_sysfs_u64(&format!("{}/charge_control_end_threshold", base)).ok().map(|v| v as u8),
+        status,
     })
 }
 
@@ -1210,6 +1284,24 @@ pub fn get_mount_info() -> Result<Vec<MountInfo>> {
     Ok(mounts_info)
 }
 
+pub fn get_ram_info() -> Result<RamInfo> {
+    let sys = System::new();
+    match sys.memory() {
+        Ok(mem) => {
+            let total_gb = mem.total.as_u64() as f64 / 1_073_741_824.0;
+            let used_gb = saturating_sub_bytes(mem.total, mem.free).as_u64() as f64 / 1_073_741_824.0;
+            let used_percent = if total_gb > 0.0 { (used_gb / total_gb) * 100.0 } else { 0.0 };
+
+            Ok(RamInfo {
+                total_gb,
+                used_gb,
+                used_percent,
+            })
+        },
+        Err(e) => Err(anyhow!("Failed to get RAM info: {}", e)),
+    }
+}
+
 fn read_sysfs_u64(path: &str) -> Result<u64> {
     Ok(fs::read_to_string(path)?.trim().parse()?)
 }
@@ -1223,7 +1315,35 @@ fn read_sysfs_string(path: &str) -> Result<String> {
 }
 
 pub fn get_storage_device_info() -> Result<Vec<StorageDevice>> {
+    let sys = System::new();
     let mut storage_devices = Vec::new();
+
+    let mut current_stats: HashMap<String, (u64, u64)> = HashMap::new();
+    if let Ok(disks) = sys.block_device_statistics() {
+        for disk in disks.values() {
+            current_stats.insert(disk.name.clone(), (disk.read_sectors as u64 * 512, disk.write_sectors as u64 * 512));
+        }
+    }
+
+    let mut rates = HashMap::new();
+    let mut prev_stats_lock = PREV_DISK_STATS.lock().unwrap();
+
+    if let Some((prev_time, ref prev_stats)) = *prev_stats_lock {
+        let now = Instant::now();
+        let duration = now.duration_since(prev_time).as_secs_f64();
+
+        if duration > 0.0 {
+            for (name, (current_read, current_write)) in &current_stats {
+                if let Some(&(prev_read, prev_write)) = prev_stats.get(name) {
+                    let read_rate = (*current_read - prev_read) as f64 / duration / 1_048_576.0;
+                    let write_rate = (*current_write - prev_write) as f64 / duration / 1_048_576.0;
+                    rates.insert(name.clone(), (read_rate, write_rate));
+                }
+            }
+        }
+    }
+
+    *prev_stats_lock = Some((Instant::now(), current_stats));
 
     for entry in std::fs::read_dir("/sys/block")? {
         let entry = entry?;
@@ -1263,11 +1383,15 @@ pub fn get_storage_device_info() -> Result<Vec<StorageDevice>> {
             }
         }
 
+        let (read_mb_s, write_mb_s) = rates.get(&dev_name).cloned().unwrap_or((0.0, 0.0));
+
         storage_devices.push(StorageDevice {
             device: format!("/dev/{}", dev_name),
             model,
             size_gb,
             temperature,
+            read_mb_s,
+            write_mb_s,
         });
     }
 

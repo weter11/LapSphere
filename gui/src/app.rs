@@ -1,7 +1,9 @@
-use egui::{Context, CentralPanel, TopBottomPanel};
+use egui::{Context, CentralPanel, TopBottomPanel, RichText};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
+use chrono::Local;
 use tuxedo_common::types::*;
+use anyhow::anyhow;
 
 use crate::dbus_client::DbusClient;
 use crate::theme::TuxedoTheme;
@@ -29,6 +31,7 @@ pub struct AppState {
     pub fan_info: Vec<FanInfo>,
     pub storage_device_info: Vec<StorageDevice>,
     pub mount_info: Vec<MountInfo>,
+    pub ram_info: Option<RamInfo>,
     pub available_start_thresholds: Vec<u8>,
     pub available_end_thresholds: Vec<u8>,
     
@@ -63,6 +66,7 @@ impl AppState {
             fan_info: Vec::new(),
             storage_device_info: Vec::new(),
             mount_info: Vec::new(),
+            ram_info: None,
             available_start_thresholds: Vec::new(),
             available_end_thresholds: Vec::new(),
             current_page: Page::Statistics,
@@ -116,6 +120,7 @@ pub struct TuxedoApp {
     theme: TuxedoTheme,
     
     // Background update channel
+    hw_update_tx: mpsc::UnboundedSender<HardwareUpdate>,
     hw_update_rx: mpsc::UnboundedReceiver<HardwareUpdate>,
     
     // Keyboard shortcuts
@@ -132,6 +137,7 @@ pub enum HardwareUpdate {
     FanInfo(Vec<FanInfo>),
     StorageDeviceInfo(Vec<StorageDevice>),
     MountInfo(Vec<MountInfo>),
+    RamInfo(RamInfo),
     AvailableThresholds(Vec<u8>, Vec<u8>),
     Error(String),
 }
@@ -173,13 +179,14 @@ impl TuxedoApp {
 
             // Fetch available thresholds
             let client_clone = client.clone();
+            let tx_clone = hw_update_tx.clone();
             tokio::spawn(async move {
                 let start_rx = client_clone.get_battery_available_start_thresholds();
                 let end_rx = client_clone.get_battery_available_end_thresholds();
 
                 match (start_rx.await, end_rx.await) {
                     (Ok(Ok(start)), Ok(Ok(end))) => {
-                        let _ = hw_update_tx.send(HardwareUpdate::AvailableThresholds(start, end));
+                        let _ = tx_clone.send(HardwareUpdate::AvailableThresholds(start, end));
                     }
                     _ => {}
                 }
@@ -194,6 +201,7 @@ impl TuxedoApp {
             state,
             dbus_client,
             theme,
+            hw_update_tx,
             hw_update_rx,
             shortcuts: KeyboardShortcuts::new(),
         }
@@ -227,12 +235,16 @@ impl TuxedoApp {
                 HardwareUpdate::MountInfo(info) => {
                     self.state.mount_info = info;
                 }
+                HardwareUpdate::RamInfo(info) => {
+                    self.state.ram_info = Some(info);
+                }
                 HardwareUpdate::AvailableThresholds(start, end) => {
                     self.state.available_start_thresholds = start;
                     self.state.available_end_thresholds = end;
                 }
                 HardwareUpdate::Error(err) => {
                     log::error!("Hardware update error: {}", err);
+                    self.state.show_message(err, true);
                 }
             }
         }
@@ -267,6 +279,12 @@ impl TuxedoApp {
                 ui.selectable_value(&mut self.state.current_page, Page::Settings, "⚙️ Settings");
                 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Date and Time
+                    let now = Local::now();
+                    ui.label(RichText::new(now.format("%Y-%m-%d %H:%M:%S").to_string()).monospace());
+
+                    ui.add_space(16.0);
+
                     // Current profile indicator
                     ui.label(format!("Profile: {}", self.state.config.current_profile));
                 });
@@ -316,7 +334,7 @@ impl eframe::App for TuxedoApp {
                     profiles::draw(ui, &mut self.state, self.dbus_client.as_ref());
                 }
                 Page::Tuning => {
-                    tuning::draw(ui, &mut self.state, self.dbus_client.as_ref());
+                    tuning::draw(ui, &mut self.state, self.dbus_client.as_ref(), &self.hw_update_tx);
                 }
                 Page::Settings => {
                     settings::draw(ui, &mut self.state, &mut self.theme, ctx);
@@ -332,50 +350,108 @@ impl eframe::App for TuxedoApp {
 fn start_background_polling(
     client: DbusClient,
     tx: mpsc::UnboundedSender<HardwareUpdate>,
-    _config: &AppConfig,
+    config: &AppConfig,
 ) {
+    let rates = &config.statistics_sections;
+
+    // CPU
+    let client_clone = client.clone();
+    let tx_clone = tx.clone();
+    let rate = Duration::from_millis(rates.cpu_poll_rate);
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(1000));
-        
+        let mut interval = tokio::time::interval(rate);
         loop {
             interval.tick().await;
+            if let Ok(Ok(info)) = client_clone.get_cpu_info().await {
+                if tx_clone.send(HardwareUpdate::CpuInfo(info)).is_err() { break; }
+            }
+        }
+    });
 
-            let client = client.clone();
-            let tx = tx.clone();
+    // GPU
+    let client_clone = client.clone();
+    let tx_clone = tx.clone();
+    let rate = Duration::from_millis(rates.gpu_poll_rate);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(rate);
+        loop {
+            interval.tick().await;
+            if let Ok(Ok(info)) = client_clone.get_gpu_info().await {
+                if tx_clone.send(HardwareUpdate::GpuInfo(info)).is_err() { break; }
+            }
+        }
+    });
 
-            tokio::spawn(async move {
-                let (cpu, gpu, fans, battery, wifi, storage_device, mount) = tokio::join!(
-                    client.get_cpu_info(),
-                    client.get_gpu_info(),
-                    client.get_fan_info(),
-                    client.get_battery_info(),
-                    client.get_wifi_info(),
-                    client.get_storage_device_info(),
-                    client.get_mount_info()
-                );
+    // Battery
+    let client_clone = client.clone();
+    let tx_clone = tx.clone();
+    let rate = Duration::from_millis(rates.battery_poll_rate);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(rate);
+        loop {
+            interval.tick().await;
+            if let Ok(Ok(info)) = client_clone.get_battery_info().await {
+                if tx_clone.send(HardwareUpdate::BatteryInfo(info)).is_err() { break; }
+            }
+        }
+    });
 
-                if let Ok(Ok(info)) = cpu {
-                    let _ = tx.send(HardwareUpdate::CpuInfo(info));
-                }
-                if let Ok(Ok(info)) = gpu {
-                    let _ = tx.send(HardwareUpdate::GpuInfo(info));
-                }
-                if let Ok(Ok(info)) = fans {
-                    let _ = tx.send(HardwareUpdate::FanInfo(info));
-                }
-                if let Ok(Ok(info)) = battery {
-                    let _ = tx.send(HardwareUpdate::BatteryInfo(info));
-                }
-                if let Ok(Ok(info)) = wifi {
-                    let _ = tx.send(HardwareUpdate::WifiInfo(info));
-                }
-                if let Ok(Ok(info)) = storage_device {
-                    let _ = tx.send(HardwareUpdate::StorageDeviceInfo(info));
-                }
-                if let Ok(Ok(info)) = mount {
-                    let _ = tx.send(HardwareUpdate::MountInfo(info));
-                }
-            });
+    // WiFi
+    let client_clone = client.clone();
+    let tx_clone = tx.clone();
+    let rate = Duration::from_millis(rates.wifi_poll_rate);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(rate);
+        loop {
+            interval.tick().await;
+            if let Ok(Ok(info)) = client_clone.get_wifi_info().await {
+                if tx_clone.send(HardwareUpdate::WifiInfo(info)).is_err() { break; }
+            }
+        }
+    });
+
+    // Storage and Mounts
+    let client_clone = client.clone();
+    let tx_clone = tx.clone();
+    let rate = Duration::from_millis(rates.storage_poll_rate);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(rate);
+        loop {
+            interval.tick().await;
+            if let Ok(Ok(info)) = client_clone.get_storage_device_info().await {
+                if tx_clone.send(HardwareUpdate::StorageDeviceInfo(info)).is_err() { break; }
+            }
+            if let Ok(Ok(info)) = client_clone.get_mount_info().await {
+                if tx_clone.send(HardwareUpdate::MountInfo(info)).is_err() { break; }
+            }
+        }
+    });
+
+    // Fans
+    let client_clone = client.clone();
+    let tx_clone = tx.clone();
+    let rate = Duration::from_millis(rates.fans_poll_rate);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(rate);
+        loop {
+            interval.tick().await;
+            if let Ok(Ok(info)) = client_clone.get_fan_info().await {
+                if tx_clone.send(HardwareUpdate::FanInfo(info)).is_err() { break; }
+            }
+        }
+    });
+
+    // RAM
+    let client_clone = client.clone();
+    let tx_clone = tx.clone();
+    let rate = Duration::from_millis(rates.cpu_poll_rate); // Use CPU poll rate for RAM
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(rate);
+        loop {
+            interval.tick().await;
+            if let Ok(Ok(info)) = client_clone.get_ram_info().await {
+                if tx_clone.send(HardwareUpdate::RamInfo(info)).is_err() { break; }
+            }
         }
     });
 }

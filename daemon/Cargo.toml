@@ -17,3 +17,4 @@ libc = "0.2"
 nix = { version = "0.27", features = ["ioctl"] }
 once_cell = "1.19"
 systemstat = "0.2"
+lazy_static = "1.4.0"

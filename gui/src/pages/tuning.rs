@@ -1,12 +1,18 @@
 use egui::{Ui, ScrollArea, RichText, Slider, ComboBox, TopBottomPanel};
-use crate::app::AppState;
+use crate::app::{AppState, HardwareUpdate};
 use crate::dbus_client::DbusClient;
 use tuxedo_common::types::{KeyboardMode, Profile, FanCurve};
 use crate::widgets::fan_curve_editor::FanCurveEditor;
+use tokio::sync::mpsc;
 
-pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>) {
+pub fn draw(
+    ui: &mut Ui,
+    state: &mut AppState,
+    dbus_client: Option<&DbusClient>,
+    hw_update_tx: &mpsc::UnboundedSender<HardwareUpdate>,
+) {
     let profile_idx = state.current_profile_index();
-    
+
     if profile_idx.is_none() {
         ui.label("No profile selected");
         return;
@@ -54,7 +60,14 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>)
             let cpu_info_clone = state.cpu_info.clone();
             if let Some(cpu_info) = &cpu_info_clone {
                 let cpu_caps = Some(&cpu_info.capabilities);
-                draw_cpu_tuning(ui, &mut state.config.profiles[idx], cpu_caps, cpu_info);
+                draw_cpu_tuning(
+                    ui,
+                    &mut state.config.profiles[idx],
+                    cpu_caps,
+                    cpu_info,
+                    dbus_client,
+                    hw_update_tx,
+                );
             } else {
                 ui.heading("🖥️ CPU Tuning");
                 ui.add_space(8.0);
@@ -88,6 +101,8 @@ fn draw_cpu_tuning(
     profile: &mut Profile,
     cpu_caps: Option<&tuxedo_common::types::CpuCapabilities>,
     cpu_info: &tuxedo_common::types::CpuInfo,
+    dbus_client: Option<&DbusClient>,
+    hw_update_tx: &mpsc::UnboundedSender<HardwareUpdate>,
 ) {
     ui.heading("🖥️ CPU Tuning");
     ui.add_space(8.0);
@@ -108,15 +123,37 @@ fn draw_cpu_tuning(
                 .clone()
                 .unwrap_or_else(|| "active".to_string());
             
+            let mut changed = false;
             ComboBox::from_id_source("amd_pstate_combo")
                 .selected_text(&current_pstate)
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut current_pstate, "active".to_string(), "Active");
-                    ui.selectable_value(&mut current_pstate, "passive".to_string(), "Passive");
-                    ui.selectable_value(&mut current_pstate, "guided".to_string(), "Guided");
+                    if ui.selectable_value(&mut current_pstate, "active".to_string(), "Active").changed() { changed = true; }
+                    if ui.selectable_value(&mut current_pstate, "passive".to_string(), "Passive").changed() { changed = true; }
+                    if ui.selectable_value(&mut current_pstate, "guided".to_string(), "Guided").changed() { changed = true; }
                 });
-            
-            profile.cpu_settings.amd_pstate_status = Some(current_pstate);
+
+            if changed {
+                profile.cpu_settings.amd_pstate_status = Some(current_pstate.clone());
+                if let Some(client) = dbus_client {
+                    let tx = hw_update_tx.clone();
+                    let pstate = current_pstate.clone();
+                    let client_clone = client.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = client_clone.set_amd_pstate_status(pstate).await {
+                            let _ = tx.send(HardwareUpdate::Error(format!("Failed to set AMD P-State: {}", e)));
+                        }
+                    });
+
+                    // Request CPU info refresh as this can change available governors etc
+                    let client_clone = client.clone();
+                    let tx_clone = hw_update_tx.clone();
+                    tokio::spawn(async move {
+                        if let Ok(Ok(info)) = client_clone.get_cpu_info().await {
+                            let _ = tx_clone.send(HardwareUpdate::CpuInfo(info));
+                        }
+                    });
+                }
+            }
             
             ui.label(RichText::new("(Active = best performance, Passive = better efficiency)")
                 .small()
@@ -138,15 +175,30 @@ fn draw_cpu_tuning(
                         .unwrap_or_else(|| "performance".to_string())
                 });
             
+            let mut changed = false;
             ComboBox::from_id_source("governor_combo")
                 .selected_text(&current_gov)
                 .show_ui(ui, |ui| {
                     for gov in &cpu_info.available_governors {
-                        ui.selectable_value(&mut current_gov, gov.clone(), gov);
+                        if ui.selectable_value(&mut current_gov, gov.clone(), gov).changed() {
+                            changed = true;
+                        }
                     }
                 });
-            
-            profile.cpu_settings.governor = Some(current_gov);
+
+            if changed {
+                profile.cpu_settings.governor = Some(current_gov.clone());
+                if let Some(client) = dbus_client {
+                    let client = client.clone();
+                    let tx = hw_update_tx.clone();
+                    let gov = current_gov.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = client.set_cpu_governor(gov).await {
+                            let _ = tx.send(HardwareUpdate::Error(format!("Failed to set governor: {}", e)));
+                        }
+                    });
+                }
+            }
         });
         ui.add_space(6.0);
     }
@@ -159,68 +211,114 @@ fn draw_cpu_tuning(
                 .clone()
                 .unwrap_or_else(|| "balance_performance".to_string());
             
+            let mut changed = false;
             ComboBox::from_id_source("epp_combo")
                 .selected_text(&current_epp)
                 .show_ui(ui, |ui| {
                     for epp in &cpu_info.available_epp_options {
-                        ui.selectable_value(&mut current_epp, epp.clone(), epp);
+                        if ui.selectable_value(&mut current_epp, epp.clone(), epp).changed() {
+                            changed = true;
+                        }
                     }
                 });
-            
-            profile.cpu_settings.energy_performance_preference = Some(current_epp);
+
+            if changed {
+                profile.cpu_settings.energy_performance_preference = Some(current_epp.clone());
+                if let Some(client) = dbus_client {
+                    let client = client.clone();
+                    let tx = hw_update_tx.clone();
+                    let epp = current_epp.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = client.set_energy_performance_preference(epp).await {
+                            let _ = tx.send(HardwareUpdate::Error(format!("Failed to set EPP: {}", e)));
+                        }
+                    });
+                }
+            }
         });
         ui.add_space(6.0);
     }
     
     // Frequency sliders
     if caps.has_scaling_min_freq && caps.has_scaling_max_freq {
-        ui.label(RichText::new("Frequency Limits:").strong());
-        
-        let mut min_freq = profile.cpu_settings.min_frequency
-            .unwrap_or(cpu_info.hw_min_freq) as f64 / 1000.0;
-        let mut max_freq = profile.cpu_settings.max_frequency
-            .unwrap_or(cpu_info.hw_max_freq) as f64 / 1000.0;
-        
-        // Ensure min <= max
-        if min_freq > max_freq {
-            min_freq = max_freq;
+        if cpu_info.hw_min_freq > 0 && cpu_info.hw_max_freq > 0 {
+            ui.label(RichText::new("Frequency Limits:").strong());
+
+            let mut min_freq = profile.cpu_settings.min_frequency
+                .unwrap_or(cpu_info.hw_min_freq) as f64 / 1000.0;
+            let mut max_freq = profile.cpu_settings.max_frequency
+                .unwrap_or(cpu_info.hw_max_freq) as f64 / 1000.0;
+
+            // Ensure min <= max
+            if min_freq > max_freq {
+                min_freq = max_freq;
+            }
+
+            let mut freq_changed = false;
+            ui.horizontal(|ui| {
+                ui.label("Min:");
+                let slider_min = ui.add(Slider::new(&mut min_freq,
+                    (cpu_info.hw_min_freq / 1000) as f64..=(cpu_info.hw_max_freq / 1000) as f64)
+                    .suffix(" MHz"));
+
+                if slider_min.changed() {
+                    if min_freq > max_freq { max_freq = min_freq; }
+                    freq_changed = true;
+                }
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("Max:");
+                let slider_max = ui.add(Slider::new(&mut max_freq,
+                    (cpu_info.hw_min_freq / 1000) as f64..=(cpu_info.hw_max_freq / 1000) as f64)
+                    .suffix(" MHz"));
+
+                if slider_max.changed() {
+                    if max_freq < min_freq { min_freq = max_freq; }
+                    freq_changed = true;
+                }
+            });
+
+            if freq_changed {
+                let min_khz = (min_freq * 1000.0) as u64;
+                let max_khz = (max_freq * 1000.0) as u64;
+
+                profile.cpu_settings.min_frequency = Some(min_khz);
+                profile.cpu_settings.max_frequency = Some(max_khz);
+
+                if let Some(client) = dbus_client {
+                let client = client.clone();
+                let tx = hw_update_tx.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = client.set_cpu_frequency_limits(min_khz, max_khz).await {
+                        let _ = tx.send(HardwareUpdate::Error(format!("Failed to set frequency limits: {}", e)));
+                    }
+                });
+                }
+            }
+
+            ui.add_space(6.0);
+        } else {
+            ui.label(RichText::new("Frequency Limits:").strong());
+            ui.label("Could not detect hardware frequency limits for this CPU.");
         }
-        
-        ui.horizontal(|ui| {
-            ui.label("Min:");
-            if ui.add(Slider::new(&mut min_freq, 
-                (cpu_info.hw_min_freq / 1000) as f64..=(cpu_info.hw_max_freq / 1000) as f64)
-                .suffix(" MHz")).changed() {
-                // Ensure min doesn't exceed max
-                if min_freq > max_freq {
-                    max_freq = min_freq;
-                }
-            }
-        });
-        
-        ui.horizontal(|ui| {
-            ui.label("Max:");
-            if ui.add(Slider::new(&mut max_freq,
-                (cpu_info.hw_min_freq / 1000) as f64..=(cpu_info.hw_max_freq / 1000) as f64)
-                .suffix(" MHz")).changed() {
-                // Ensure max doesn't go below min
-                if max_freq < min_freq {
-                    min_freq = max_freq;
-                }
-            }
-        });
-        
-        profile.cpu_settings.min_frequency = Some((min_freq * 1000.0) as u64);
-        profile.cpu_settings.max_frequency = Some((max_freq * 1000.0) as u64);
-        
-        ui.add_space(6.0);
     }
     
     // Boost checkbox
     if caps.has_boost {
         let mut boost = profile.cpu_settings.boost.unwrap_or(true);
-        ui.checkbox(&mut boost, "CPU Boost / Turbo");
-        profile.cpu_settings.boost = Some(boost);
+        if ui.checkbox(&mut boost, "CPU Boost / Turbo").changed() {
+            profile.cpu_settings.boost = Some(boost);
+            if let Some(client) = dbus_client {
+                let client = client.clone();
+                let tx = hw_update_tx.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = client.set_cpu_boost(boost).await {
+                        let _ = tx.send(HardwareUpdate::Error(format!("Failed to set boost: {}", e)));
+                    }
+                });
+            }
+        }
         
         // Show if boost is available for current pstate
         if caps.has_amd_pstate {
@@ -233,8 +331,18 @@ fn draw_cpu_tuning(
     // SMT checkbox
     if caps.has_smt {
         let mut smt = profile.cpu_settings.smt.unwrap_or(true);
-        ui.checkbox(&mut smt, "SMT / Hyperthreading");
-        profile.cpu_settings.smt = Some(smt);
+        if ui.checkbox(&mut smt, "SMT / Hyperthreading").changed() {
+            profile.cpu_settings.smt = Some(smt);
+            if let Some(client) = dbus_client {
+                let client = client.clone();
+                let tx = hw_update_tx.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = client.set_smt(smt).await {
+                        let _ = tx.send(HardwareUpdate::Error(format!("Failed to set SMT: {}", e)));
+                    }
+                });
+            }
+        }
     }
 }
 

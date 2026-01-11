@@ -13,6 +13,7 @@ pub enum DbusCommand {
     GetSystemInfo { reply: oneshot::Sender<Result<SystemInfo>> },
     GetCpuInfo { reply: oneshot::Sender<Result<CpuInfo>> },
     GetGpuInfo { reply: oneshot::Sender<Result<Vec<GpuInfo>>> },
+    GetRamInfo { reply: oneshot::Sender<Result<RamInfo>> },
     GetFanInfo { reply: oneshot::Sender<Result<Vec<FanInfo>>> },
     GetBatteryInfo { reply: oneshot::Sender<Result<BatteryInfo>> },
     GetStorageDeviceInfo { reply: oneshot::Sender<Result<Vec<StorageDevice>>> },
@@ -20,7 +21,11 @@ pub enum DbusCommand {
     GetWifiInfo { reply: oneshot::Sender<Result<Vec<WiFiInfo>>> },
     ApplyProfile { profile: Profile, reply: oneshot::Sender<Result<()>> },
     SetCpuGovernor { governor: String, reply: oneshot::Sender<Result<()>> },
+    SetCpuFrequencyLimits { min_freq: u64, max_freq: u64, reply: oneshot::Sender<Result<()>> },
     SetCpuBoost { enabled: bool, reply: oneshot::Sender<Result<()>> },
+    SetSmt { enabled: bool, reply: oneshot::Sender<Result<()>> },
+    SetAmdPstateStatus { status: String, reply: oneshot::Sender<Result<()>> },
+    SetEnergyPerformancePreference { epp: String, reply: oneshot::Sender<Result<()>> },
     PreviewKeyboard { settings: KeyboardSettings, reply: oneshot::Sender<Result<()>> },
     GetBatteryChargeThresholds { reply: oneshot::Sender<Result<(u8, u8)>> },
     SetBatteryChargeThresholds { start: u8, end: u8, reply: oneshot::Sender<Result<()>> },
@@ -92,6 +97,12 @@ impl DbusClient {
         let _ = self.command_tx.send(DbusCommand::GetWifiInfo { reply: tx });
         rx
     }
+
+    pub fn get_ram_info(&self) -> oneshot::Receiver<Result<RamInfo>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::GetRamInfo { reply: tx });
+        rx
+    }
     
     pub fn apply_profile(&self, profile: Profile) -> oneshot::Receiver<Result<()>> {
         let (tx, rx) = oneshot::channel();
@@ -101,10 +112,41 @@ impl DbusClient {
         });
         rx
     }
+
     
     pub fn set_cpu_governor(&self, governor: String) -> oneshot::Receiver<Result<()>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.command_tx.send(DbusCommand::SetCpuGovernor { governor, reply: tx });
+        rx
+    }
+
+    pub fn set_cpu_frequency_limits(&self, min_freq: u64, max_freq: u64) -> oneshot::Receiver<Result<()>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::SetCpuFrequencyLimits { min_freq, max_freq, reply: tx });
+        rx
+    }
+
+    pub fn set_cpu_boost(&self, enabled: bool) -> oneshot::Receiver<Result<()>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::SetCpuBoost { enabled, reply: tx });
+        rx
+    }
+
+    pub fn set_smt(&self, enabled: bool) -> oneshot::Receiver<Result<()>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::SetSmt { enabled, reply: tx });
+        rx
+    }
+
+    pub fn set_amd_pstate_status(&self, status: String) -> oneshot::Receiver<Result<()>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::SetAmdPstateStatus { status, reply: tx });
+        rx
+    }
+
+    pub fn set_energy_performance_preference(&self, epp: String) -> oneshot::Receiver<Result<()>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::SetEnergyPerformancePreference { epp, reply: tx });
         rx
     }
     
@@ -188,12 +230,32 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
                 let result = get_wifi_info_impl(&connection).await;
                 let _ = reply.send(result);
             }
+            DbusCommand::GetRamInfo { reply } => {
+                let result = get_ram_info_impl(&connection).await;
+                let _ = reply.send(result);
+            }
             DbusCommand::ApplyProfile { profile, reply } => {
                 let result = apply_profile_impl(&connection, &profile).await;
                 let _ = reply.send(result);
             }
             DbusCommand::SetCpuGovernor { governor, reply } => {
                 let result = set_cpu_governor_impl(&connection, &governor).await;
+                let _ = reply.send(result);
+            }
+            DbusCommand::SetCpuFrequencyLimits { min_freq, max_freq, reply } => {
+                let result = set_cpu_frequency_limits_impl(&connection, min_freq, max_freq).await;
+                let _ = reply.send(result);
+            }
+            DbusCommand::SetSmt { enabled, reply } => {
+                let result = set_smt_impl(&connection, enabled).await;
+                let _ = reply.send(result);
+            }
+            DbusCommand::SetAmdPstateStatus { status, reply } => {
+                let result = set_amd_pstate_status_impl(&connection, &status).await;
+                let _ = reply.send(result);
+            }
+            DbusCommand::SetEnergyPerformancePreference { epp, reply } => {
+                let result = set_energy_performance_preference_impl(&connection, &epp).await;
                 let _ = reply.send(result);
             }
             DbusCommand::SetCpuBoost { enabled, reply } => {
@@ -327,6 +389,18 @@ async fn get_wifi_info_impl(conn: &Connection) -> Result<Vec<WiFiInfo>> {
     Ok(serde_json::from_str(&json)?)
 }
 
+async fn get_ram_info_impl(conn: &Connection) -> Result<RamInfo> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "com.tuxedo.Control",
+        "/com/tuxedo/Control",
+        "com.tuxedo.Control",
+    ).await?;
+
+    let json: String = proxy.call("GetRamInfo", &()).await?;
+    Ok(serde_json::from_str(&json)?)
+}
+
 async fn apply_profile_impl(conn: &Connection, profile: &Profile) -> Result<()> {
     let proxy = zbus::Proxy::new(
         conn,
@@ -349,6 +423,54 @@ async fn set_cpu_governor_impl(conn: &Connection, governor: &str) -> Result<()> 
     ).await?;
     
     proxy.call::<_, _, ()>("SetCpuGovernor", &(governor,)).await?;
+    Ok(())
+}
+
+async fn set_cpu_frequency_limits_impl(conn: &Connection, min_freq: u64, max_freq: u64) -> Result<()> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "com.tuxedo.Control",
+        "/com/tuxedo/Control",
+        "com.tuxedo.Control",
+    ).await?;
+
+    proxy.call::<_, _, ()>("SetCpuFrequencyLimits", &(min_freq, max_freq)).await?;
+    Ok(())
+}
+
+async fn set_smt_impl(conn: &Connection, enabled: bool) -> Result<()> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "com.tuxedo.Control",
+        "/com/tuxedo/Control",
+        "com.tuxedo.Control",
+    ).await?;
+
+    proxy.call::<_, _, ()>("SetSmt", &(enabled,)).await?;
+    Ok(())
+}
+
+async fn set_amd_pstate_status_impl(conn: &Connection, status: &str) -> Result<()> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "com.tuxedo.Control",
+        "/com/tuxedo/Control",
+        "com.tuxedo.Control",
+    ).await?;
+
+    proxy.call::<_, _, ()>("SetAmdPstateStatus", &(status,)).await?;
+    Ok(())
+}
+
+async fn set_energy_performance_preference_impl(conn: &Connection, epp: &str) -> Result<()> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "com.tuxedo.Control",
+        "/com/tuxedo/Control",
+        "com.tuxedo.Control",
+    ).await?;
+
+    proxy.call::<_, _, ()>("SetEnergyPerformancePreference", &(epp,)).await?;
     Ok(())
 }
 
