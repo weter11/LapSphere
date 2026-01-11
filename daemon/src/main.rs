@@ -1,17 +1,17 @@
+mod battery_control;
 mod dbus_interface;
 mod fan_daemon;
 mod hardware_control;
 mod hardware_detection;
 mod tuxedo_io;
-mod battery_control;
 
 use anyhow::Result;
-use tokio::signal;
 use std::sync::{Arc, Mutex};
+use tokio::signal;
 use tuxedo_common::types::FanSettings;
 
 // Global fan daemon state
-pub static FAN_DAEMON_STATE: once_cell::sync::Lazy<Arc<Mutex<Option<FanSettings>>>> = 
+pub static FAN_DAEMON_STATE: once_cell::sync::Lazy<Arc<Mutex<Option<FanSettings>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
 
 #[tokio::main]
@@ -92,11 +92,15 @@ async fn fan_daemon_task(io: Arc<tuxedo_io::TuxedoIo>) {
 
         if settings != last_settings {
             if let Some(ref s) = settings {
-                sorted_curves = s.curves.iter().map(|c| {
-                    let mut points = c.points.clone();
-                    points.sort_by_key(|p| p.0);
-                    points
-                }).collect();
+                sorted_curves = s
+                    .curves
+                    .iter()
+                    .map(|c| {
+                        let mut points = c.points.clone();
+                        points.sort_by_key(|p| p.0);
+                        points
+                    })
+                    .collect();
             }
             last_settings = settings;
         }
@@ -111,12 +115,16 @@ async fn fan_daemon_task(io: Arc<tuxedo_io::TuxedoIo>) {
     }
 }
 
-fn apply_fan_curves(io: &tuxedo_io::TuxedoIo, settings: &FanSettings, sorted_curves: &[Vec<(u8, u8)>]) -> Result<()> {
+fn apply_fan_curves(
+    io: &tuxedo_io::TuxedoIo,
+    settings: &FanSettings,
+    sorted_curves: &[Vec<(u8, u8)>],
+) -> Result<()> {
     for (i, curve) in settings.curves.iter().enumerate() {
         if curve.fan_id >= io.get_fan_count() {
             continue;
         }
-        
+
         let temp = match io.get_fan_temperature(curve.fan_id) {
             Ok(t) => t as f32,
             Err(e) => {
@@ -124,16 +132,16 @@ fn apply_fan_curves(io: &tuxedo_io::TuxedoIo, settings: &FanSettings, sorted_cur
                 continue;
             }
         };
-        
+
         let speed = calculate_fan_speed(&sorted_curves[i], temp);
-        
+
         if let Err(e) = io.set_fan_speed(curve.fan_id, speed as u32) {
             log::error!("Failed to set fan {} speed: {}", curve.fan_id, e);
         } else {
             log::debug!("Fan {}: temp={}°C, speed={}%", curve.fan_id, temp, speed);
         }
     }
-    
+
     Ok(())
 }
 
@@ -141,29 +149,29 @@ fn calculate_fan_speed(sorted_points: &[(u8, u8)], temp: f32) -> u8 {
     if sorted_points.is_empty() {
         return 50; // Default fallback
     }
-    
+
     if sorted_points.len() == 1 {
         return sorted_points[0].1;
     }
-    
+
     if temp <= sorted_points[0].0 as f32 {
         return sorted_points[0].1;
     }
-    
+
     if temp >= sorted_points[sorted_points.len() - 1].0 as f32 {
         return sorted_points[sorted_points.len() - 1].1;
     }
-    
+
     for i in 0..sorted_points.len() - 1 {
         let (temp1, speed1) = sorted_points[i];
         let (temp2, speed2) = sorted_points[i + 1];
-        
+
         if temp >= temp1 as f32 && temp <= temp2 as f32 {
             let ratio = (temp - temp1 as f32) / (temp2 as f32 - temp1 as f32);
             let speed = speed1 as f32 + ratio * (speed2 as f32 - speed1 as f32);
             return speed.round() as u8;
         }
     }
-    
+
     50 // Fallback
 }

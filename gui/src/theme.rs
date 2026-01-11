@@ -1,4 +1,4 @@
-use egui::{Context, Style, Visuals, Color32, Rounding, Stroke, FontId, FontFamily, TextStyle};
+use egui::{Color32, Context, FontFamily, FontId, Rounding, Stroke, Style, TextStyle, Visuals};
 use tuxedo_common::types::Theme;
 
 pub struct TuxedoTheme {
@@ -11,61 +11,58 @@ impl TuxedoTheme {
             Theme::Auto | Theme::Dark => Self::dark_theme(),
             Theme::Light => Self::light_theme(),
         };
-        
+
         Self { visuals }
     }
-    
+
     pub fn apply(&self, ctx: &Context) {
         let mut style = Style::default();
         style.visuals = self.visuals.clone();
-        
+
         // Spacing
         style.spacing.item_spacing = egui::vec2(8.0, 6.0);
         style.spacing.button_padding = egui::vec2(12.0, 6.0);
         style.spacing.indent = 20.0;
         style.spacing.window_margin = egui::Margin::same(12.0);
         style.spacing.menu_margin = egui::Margin::same(8.0);
-        
+
         // Interaction
         style.interaction.resize_grab_radius_side = 6.0;
         style.interaction.resize_grab_radius_corner = 8.0;
-        
+
         ctx.set_style(style);
     }
 
-        pub fn apply_with_font_size(&self, ctx: &Context, font_size: &tuxedo_common::types::FontSize) {
+    pub fn apply_with_font_size(&self, ctx: &Context, font_size: &tuxedo_common::types::FontSize) {
         use tuxedo_common::types::FontSize;
-        
+
         let mut style = Style::default();
         style.visuals = self.visuals.clone();
-        
+
         // Spacing
         style.spacing.item_spacing = egui::vec2(8.0, 6.0);
         style.spacing.button_padding = egui::vec2(12.0, 6.0);
         style.spacing.indent = 20.0;
         style.spacing.window_margin = egui::Margin::same(12.0);
         style.spacing.menu_margin = egui::Margin::same(8.0);
-        
+
         // Interaction
         style.interaction.resize_grab_radius_side = 6.0;
         style.interaction.resize_grab_radius_corner = 8.0;
-        
+
         // Text styles with font size
         let (heading, body, button, small, mono) = match font_size {
             FontSize::Small => (18.0, 12.0, 12.0, 9.0, 11.0),
             FontSize::Medium => (22.0, 14.0, 14.0, 11.0, 13.0),
             FontSize::Large => (26.0, 16.0, 16.0, 13.0, 15.0),
         };
-        
+
         let mut text_styles = std::collections::BTreeMap::new();
         text_styles.insert(
             TextStyle::Heading,
             FontId::new(heading, FontFamily::Proportional),
         );
-        text_styles.insert(
-            TextStyle::Body,
-            FontId::new(body, FontFamily::Proportional),
-        );
+        text_styles.insert(TextStyle::Body, FontId::new(body, FontFamily::Proportional));
         text_styles.insert(
             TextStyle::Monospace,
             FontId::new(mono, FontFamily::Monospace),
@@ -78,15 +75,15 @@ impl TuxedoTheme {
             TextStyle::Small,
             FontId::new(small, FontFamily::Proportional),
         );
-        
+
         style.text_styles = text_styles;
         ctx.set_style(style);
     }
-    
+
     fn dark_theme() -> Visuals {
         Visuals {
             dark_mode: true,
-            
+
             // Colors
             widgets: egui::style::Widgets {
                 noninteractive: egui::style::WidgetVisuals {
@@ -130,16 +127,16 @@ impl TuxedoTheme {
                     expansion: 0.0,
                 },
             },
-            
+
             // Selection color (for sliders, checkboxes)
             selection: egui::style::Selection {
                 bg_fill: Color32::from_rgb(65, 120, 200),
                 stroke: Stroke::new(1.0, Color32::from_rgb(85, 140, 220)),
             },
-            
+
             // Hyperlinks
             hyperlink_color: Color32::from_rgb(90, 170, 255),
-            
+
             // Window
             window_fill: Color32::from_rgb(25, 26, 29),
             window_stroke: Stroke::new(1.0, Color32::from_rgb(50, 52, 56)),
@@ -150,10 +147,10 @@ impl TuxedoTheme {
                 color: Color32::from_black_alpha(100),
             },
             window_rounding: Rounding::same(8.0),
-            
+
             // Panel
             panel_fill: Color32::from_rgb(28, 29, 32),
-            
+
             // Popup
             popup_shadow: egui::epaint::Shadow {
                 offset: egui::vec2(0.0, 4.0),
@@ -161,38 +158,38 @@ impl TuxedoTheme {
                 spread: 0.0,
                 color: Color32::from_black_alpha(120),
             },
-            
+
             // Text colors
             override_text_color: Some(Color32::from_rgb(220, 220, 220)),
             warn_fg_color: Color32::from_rgb(255, 165, 0),
             error_fg_color: Color32::from_rgb(255, 80, 80),
-            
+
             // Other
             faint_bg_color: Color32::from_rgb(40, 42, 46),
             extreme_bg_color: Color32::from_rgb(15, 16, 18),
             code_bg_color: Color32::from_rgb(35, 37, 40),
-            
+
             ..Visuals::dark()
         }
     }
-    
+
     fn light_theme() -> Visuals {
         Visuals {
             dark_mode: false,
-            
+
             widgets: egui::style::Widgets {
                 noninteractive: egui::style::WidgetVisuals {
-                    bg_fill: Color32::from_rgb(248, 248, 250),
-                    weak_bg_fill: Color32::from_rgb(248, 248, 250),
-                    bg_stroke: Stroke::new(1.0, Color32::from_rgb(220, 220, 225)),
+                    bg_fill: Color32::from_rgb(240, 240, 244),
+                    weak_bg_fill: Color32::from_rgb(240, 240, 244),
+                    bg_stroke: Stroke::new(1.0, Color32::from_rgb(200, 200, 205)),
                     rounding: Rounding::same(6.0),
                     fg_stroke: Stroke::new(1.0, Color32::from_rgb(40, 40, 40)),
                     expansion: 0.0,
                 },
                 inactive: egui::style::WidgetVisuals {
-                    bg_fill: Color32::from_rgb(240, 242, 245),
-                    weak_bg_fill: Color32::from_rgb(240, 242, 245),
-                    bg_stroke: Stroke::new(1.0, Color32::from_rgb(210, 212, 218)),
+                    bg_fill: Color32::from_rgb(230, 232, 238),
+                    weak_bg_fill: Color32::from_rgb(230, 232, 238),
+                    bg_stroke: Stroke::new(1.0, Color32::from_rgb(190, 192, 200)),
                     rounding: Rounding::same(6.0),
                     fg_stroke: Stroke::new(1.0, Color32::from_rgb(60, 60, 60)),
                     expansion: 0.0,
@@ -222,16 +219,16 @@ impl TuxedoTheme {
                     expansion: 0.0,
                 },
             },
-            
+
             selection: egui::style::Selection {
                 bg_fill: Color32::from_rgb(60, 120, 200),
                 stroke: Stroke::new(1.0, Color32::from_rgb(40, 100, 180)),
             },
-            
+
             hyperlink_color: Color32::from_rgb(40, 100, 200),
-            
-            window_fill: Color32::from_rgb(255, 255, 255),
-            window_stroke: Stroke::new(1.0, Color32::from_rgb(230, 230, 235)),
+
+            window_fill: Color32::from_rgb(250, 250, 252),
+            window_stroke: Stroke::new(1.0, Color32::from_rgb(210, 210, 215)),
             window_shadow: egui::epaint::Shadow {
                 offset: egui::vec2(0.0, 8.0),
                 blur: 16.0,
@@ -239,17 +236,17 @@ impl TuxedoTheme {
                 color: Color32::from_black_alpha(40),
             },
             window_rounding: Rounding::same(8.0),
-            
-            panel_fill: Color32::from_rgb(250, 250, 252),
-            
+
+            panel_fill: Color32::from_rgb(235, 237, 242),
+
             override_text_color: Some(Color32::from_rgb(40, 40, 40)),
             warn_fg_color: Color32::from_rgb(200, 120, 0),
             error_fg_color: Color32::from_rgb(200, 40, 40),
-            
+
             faint_bg_color: Color32::from_rgb(245, 245, 248),
             extreme_bg_color: Color32::from_rgb(240, 240, 245),
             code_bg_color: Color32::from_rgb(242, 242, 246),
-            
+
             ..Visuals::light()
         }
     }
@@ -258,25 +255,25 @@ impl TuxedoTheme {
 // Helper functions for consistent colors
 pub fn temp_color(temp: f32) -> Color32 {
     if temp < 50.0 {
-        Color32::from_rgb(80, 180, 240)  // Cool blue
+        Color32::from_rgb(80, 180, 240) // Cool blue
     } else if temp < 70.0 {
         Color32::from_rgb(100, 200, 120) // Green
     } else if temp < 85.0 {
-        Color32::from_rgb(255, 200, 60)  // Yellow/orange
+        Color32::from_rgb(255, 200, 60) // Yellow/orange
     } else {
-        Color32::from_rgb(255, 80, 80)   // Hot red
+        Color32::from_rgb(255, 80, 80) // Hot red
     }
 }
 
 pub fn load_color(load: f32) -> Color32 {
     if load < 30.0 {
-        Color32::from_rgb(80, 180, 240)  // Low - blue
+        Color32::from_rgb(80, 180, 240) // Low - blue
     } else if load < 60.0 {
         Color32::from_rgb(100, 200, 120) // Medium - green
     } else if load < 85.0 {
-        Color32::from_rgb(255, 200, 60)  // High - yellow
+        Color32::from_rgb(255, 200, 60) // High - yellow
     } else {
-        Color32::from_rgb(255, 100, 60)  // Very high - orange/red
+        Color32::from_rgb(255, 100, 60) // Very high - orange/red
     }
 }
 
@@ -286,8 +283,8 @@ pub fn power_color(watts: f32) -> Color32 {
     } else if watts < 25.0 {
         Color32::from_rgb(100, 180, 240) // Medium - blue
     } else if watts < 45.0 {
-        Color32::from_rgb(255, 200, 60)  // High - yellow
+        Color32::from_rgb(255, 200, 60) // High - yellow
     } else {
-        Color32::from_rgb(255, 100, 60)  // Very high - orange
+        Color32::from_rgb(255, 100, 60) // Very high - orange
     }
 }

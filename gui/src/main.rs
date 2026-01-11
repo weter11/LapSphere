@@ -1,8 +1,8 @@
 mod app;
 mod dbus_client;
-mod theme;
-mod pages;
 mod keyboard_shortcuts;
+mod pages;
+mod theme;
 mod widgets;
 
 use app::TuxedoApp;
@@ -14,7 +14,7 @@ fn main() -> Result<(), eframe::Error> {
     // This is required for `tokio::spawn` to work in the `DbusClient`.
     let rt = tokio::runtime::Runtime::new().expect("Unable to create a Tokio runtime");
     let _enter = rt.enter();
-    
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([733.0, 500.0])
@@ -22,7 +22,7 @@ fn main() -> Result<(), eframe::Error> {
             .with_icon(load_icon()),
         ..Default::default()
     };
-    
+
     eframe::run_native(
         "TUXEDO Control Center",
         options,

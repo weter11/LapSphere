@@ -1,4 +1,4 @@
-pub mod statistics;
 pub mod profiles;
-pub mod tuning;
 pub mod settings;
+pub mod statistics;
+pub mod tuning;
