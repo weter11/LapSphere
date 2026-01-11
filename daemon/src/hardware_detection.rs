@@ -1,8 +1,11 @@
 use crate::tuxedo_io::TuxedoIo;
 use anyhow::{anyhow, Result};
+use nvml_wrapper::enum_wrappers::device::{Clock, TemperatureSensor};
+use nvml_wrapper::Nvml;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 use std::sync::Mutex;
 use systemstat::{saturating_sub_bytes, Platform, System};
 // use tuxedo_io::TuxedoIo;
@@ -826,6 +829,81 @@ pub fn get_system_info() -> Result<SystemInfo> {
 }
 
 pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
+    // Prefer NVML for NVIDIA devices
+    if let Ok(nvml) = Nvml::init() {
+        if let Ok(count) = nvml.device_count() {
+            let mut gpus = Vec::new();
+            for idx in 0..count {
+                if let Ok(device) = nvml.device_by_index(idx) {
+                    let name = device
+                        .name()
+                        .unwrap_or_else(|_| format!("NVIDIA GPU {}", idx));
+                    let frequency = device.clock_info(Clock::Graphics).ok().map(|f| f as u64);
+                    let temperature = device
+                        .temperature(TemperatureSensor::Gpu)
+                        .ok()
+                        .map(|t| t as f32);
+                    let load = device.utilization_rates().ok().map(|u| u.gpu as f32);
+                    let power = device.power_usage().ok().map(|p| p as f32 / 1000.0);
+
+                    gpus.push(GpuInfo {
+                        name,
+                        gpu_type: GpuType::Discrete,
+                        status: "active".to_string(),
+                        frequency,
+                        temperature,
+                        load,
+                        power,
+                        voltage: None,
+                    });
+                }
+            }
+
+            if !gpus.is_empty() {
+                return Ok(gpus);
+            }
+        }
+    }
+
+    // Fallback to nvidia-smi for NVIDIA devices
+    if let Ok(output) = Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=name,clocks.sm,temperature.gpu,utilization.gpu,power.draw",
+            "--format=csv,noheader,nounits",
+        ])
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut gpus = Vec::new();
+            for line in stdout.lines() {
+                let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
+                if parts.len() >= 5 {
+                    let name = parts[0].to_string();
+                    let frequency = parts[1].parse::<u64>().ok();
+                    let temperature = parts[2].parse::<f32>().ok();
+                    let load = parts[3].parse::<f32>().ok();
+                    let power = parts[4].parse::<f32>().ok();
+
+                    gpus.push(GpuInfo {
+                        name,
+                        gpu_type: GpuType::Discrete,
+                        status: "active".to_string(),
+                        frequency,
+                        temperature,
+                        load,
+                        power,
+                        voltage: None,
+                    });
+                }
+            }
+
+            if !gpus.is_empty() {
+                return Ok(gpus);
+            }
+        }
+    }
+
     let mut gpus = Vec::new();
 
     for i in 0..4 {

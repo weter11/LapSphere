@@ -1,39 +1,39 @@
-use egui::{Ui, ScrollArea, RichText, Slider, ComboBox, TopBottomPanel};
 use crate::app::AppState;
 use crate::dbus_client::DbusClient;
-use tuxedo_common::types::{KeyboardMode, Profile, FanCurve};
 use crate::widgets::fan_curve_editor::FanCurveEditor;
+use egui::{ComboBox, DragValue, RichText, ScrollArea, Slider, TopBottomPanel, Ui};
+use tuxedo_common::types::{FanCurve, KeyboardMode, Profile};
 
 pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>) {
     let profile_idx = state.current_profile_index();
-    
+
     if profile_idx.is_none() {
         ui.label("No profile selected");
         return;
     }
-    
+
     let idx = profile_idx.unwrap();
     let profile_name = state.config.profiles[idx].name.clone();
     let is_standard = profile_name == "Standard";
-    
+
     // Top bar with profile name, save, and reset buttons
     TopBottomPanel::top("tuning_header").show_inside(ui, |ui| {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.heading(format!("Editing: {}", profile_name));
-            
+
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Save button - always visible
                 if ui.button("💾 Save").clicked() {
                     let _ = state.save_config();
-                    
+
                     // Also apply to hardware
                     if let Some(client) = dbus_client {
                         let profile_clone = state.config.profiles[idx].clone();
                         let _rx = client.apply_profile(profile_clone);
                     }
                 }
-                
+
                 // Reset to default button
                 if ui.button("↺ Reset to Default").clicked() {
                     state.config.profiles[idx] = create_default_profile_for_reset(is_standard);
@@ -43,13 +43,13 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>)
         });
         ui.add_space(8.0);
     });
-    
+
     // Main content
     ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.add_space(8.0);
-            
+
             // CPU tuning
             let cpu_info_clone = state.cpu_info.clone();
             if let Some(cpu_info) = &cpu_info_clone {
@@ -63,19 +63,29 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>)
             ui.add_space(16.0);
             ui.separator();
             ui.add_space(16.0);
-            
+
+            // GPU tuning
+            let has_nvidia = state
+                .gpu_info
+                .iter()
+                .any(|g| g.name.to_lowercase().contains("nvidia"));
+            draw_gpu_tuning(ui, &mut state.config.profiles[idx], has_nvidia);
+            ui.add_space(16.0);
+            ui.separator();
+            ui.add_space(16.0);
+
             // Keyboard tuning
             draw_keyboard_tuning(ui, &mut state.config.profiles[idx], dbus_client);
             ui.add_space(16.0);
             ui.separator();
             ui.add_space(16.0);
-            
+
             // Screen tuning
             draw_screen_tuning(ui, &mut state.config.profiles[idx]);
             ui.add_space(16.0);
             ui.separator();
             ui.add_space(16.0);
-            
+
             // Fan tuning
             let fan_count = state.fan_info.len().max(2);
             draw_fan_tuning(ui, &mut state.config.profiles[idx], fan_count);
@@ -91,7 +101,7 @@ fn draw_cpu_tuning(
 ) {
     ui.heading("🖥️ CPU Tuning");
     ui.add_space(8.0);
-    
+
     let caps = match cpu_caps {
         Some(c) => c,
         None => {
@@ -99,15 +109,17 @@ fn draw_cpu_tuning(
             return;
         }
     };
-    
+
     // AMD P-State section (if available)
     if caps.has_amd_pstate {
         ui.label(RichText::new("AMD P-State Mode:").strong());
         ui.horizontal(|ui| {
-            let mut current_pstate = profile.cpu_settings.amd_pstate_status
+            let mut current_pstate = profile
+                .cpu_settings
+                .amd_pstate_status
                 .clone()
                 .unwrap_or_else(|| "active".to_string());
-            
+
             ComboBox::from_id_source("amd_pstate_combo")
                 .selected_text(&current_pstate)
                 .show_ui(ui, |ui| {
@@ -115,29 +127,31 @@ fn draw_cpu_tuning(
                     ui.selectable_value(&mut current_pstate, "passive".to_string(), "Passive");
                     ui.selectable_value(&mut current_pstate, "guided".to_string(), "Guided");
                 });
-            
+
             profile.cpu_settings.amd_pstate_status = Some(current_pstate);
-            
-            ui.label(RichText::new("(Active = best performance, Passive = better efficiency)")
-                .small()
-                .italics());
+
+            ui.label(
+                RichText::new("(Active = best performance, Passive = better efficiency)")
+                    .small()
+                    .italics(),
+            );
         });
         ui.add_space(6.0);
     }
-    
+
     // Governor
     if caps.has_scaling_governor && !cpu_info.available_governors.is_empty() {
         ui.label(RichText::new("Governor:").strong());
         ui.horizontal(|ui| {
-            let mut current_gov = profile.cpu_settings.governor
-                .clone()
-                .unwrap_or_else(|| {
-                    // Use first available governor as default
-                    cpu_info.available_governors.first()
-                        .cloned()
-                        .unwrap_or_else(|| "performance".to_string())
-                });
-            
+            let mut current_gov = profile.cpu_settings.governor.clone().unwrap_or_else(|| {
+                // Use first available governor as default
+                cpu_info
+                    .available_governors
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "performance".to_string())
+            });
+
             ComboBox::from_id_source("governor_combo")
                 .selected_text(&current_gov)
                 .show_ui(ui, |ui| {
@@ -145,20 +159,22 @@ fn draw_cpu_tuning(
                         ui.selectable_value(&mut current_gov, gov.clone(), gov);
                     }
                 });
-            
+
             profile.cpu_settings.governor = Some(current_gov);
         });
         ui.add_space(6.0);
     }
-    
+
     // EPP
     if caps.has_energy_performance_preference && !cpu_info.available_epp_options.is_empty() {
         ui.label(RichText::new("Energy Performance Preference:").strong());
         ui.horizontal(|ui| {
-            let mut current_epp = profile.cpu_settings.energy_performance_preference
+            let mut current_epp = profile
+                .cpu_settings
+                .energy_performance_preference
                 .clone()
                 .unwrap_or_else(|| "balance_performance".to_string());
-            
+
             ComboBox::from_id_source("epp_combo")
                 .selected_text(&current_epp)
                 .show_ui(ui, |ui| {
@@ -166,70 +182,92 @@ fn draw_cpu_tuning(
                         ui.selectable_value(&mut current_epp, epp.clone(), epp);
                     }
                 });
-            
+
             profile.cpu_settings.energy_performance_preference = Some(current_epp);
         });
         ui.add_space(6.0);
     }
-    
+
     // Frequency sliders
     if caps.has_scaling_min_freq && caps.has_scaling_max_freq {
         ui.label(RichText::new("Frequency Limits:").strong());
-        
-        let mut min_freq = profile.cpu_settings.min_frequency
-            .unwrap_or(cpu_info.hw_min_freq) as f64 / 1000.0;
-        let mut max_freq = profile.cpu_settings.max_frequency
-            .unwrap_or(cpu_info.hw_max_freq) as f64 / 1000.0;
-        
+
+        let mut min_freq = profile
+            .cpu_settings
+            .min_frequency
+            .unwrap_or(cpu_info.hw_min_freq) as f64
+            / 1000.0;
+        let mut max_freq = profile
+            .cpu_settings
+            .max_frequency
+            .unwrap_or(cpu_info.hw_max_freq) as f64
+            / 1000.0;
+
         // Ensure min <= max
         if min_freq > max_freq {
             min_freq = max_freq;
         }
-        
+
         ui.horizontal(|ui| {
             ui.label("Min:");
-            if ui.add(Slider::new(&mut min_freq, 
-                (cpu_info.hw_min_freq / 1000) as f64..=(cpu_info.hw_max_freq / 1000) as f64)
-                .suffix(" MHz")).changed() {
+            if ui
+                .add(
+                    Slider::new(
+                        &mut min_freq,
+                        (cpu_info.hw_min_freq / 1000) as f64..=(cpu_info.hw_max_freq / 1000) as f64,
+                    )
+                    .suffix(" MHz"),
+                )
+                .changed()
+            {
                 // Ensure min doesn't exceed max
                 if min_freq > max_freq {
                     max_freq = min_freq;
                 }
             }
         });
-        
+
         ui.horizontal(|ui| {
             ui.label("Max:");
-            if ui.add(Slider::new(&mut max_freq,
-                (cpu_info.hw_min_freq / 1000) as f64..=(cpu_info.hw_max_freq / 1000) as f64)
-                .suffix(" MHz")).changed() {
+            if ui
+                .add(
+                    Slider::new(
+                        &mut max_freq,
+                        (cpu_info.hw_min_freq / 1000) as f64..=(cpu_info.hw_max_freq / 1000) as f64,
+                    )
+                    .suffix(" MHz"),
+                )
+                .changed()
+            {
                 // Ensure max doesn't go below min
                 if max_freq < min_freq {
                     min_freq = max_freq;
                 }
             }
         });
-        
+
         profile.cpu_settings.min_frequency = Some((min_freq * 1000.0) as u64);
         profile.cpu_settings.max_frequency = Some((max_freq * 1000.0) as u64);
-        
+
         ui.add_space(6.0);
     }
-    
+
     // Boost checkbox
     if caps.has_boost {
         let mut boost = profile.cpu_settings.boost.unwrap_or(true);
         ui.checkbox(&mut boost, "CPU Boost / Turbo");
         profile.cpu_settings.boost = Some(boost);
-        
+
         // Show if boost is available for current pstate
         if caps.has_amd_pstate {
-            ui.label(RichText::new("(Available in all AMD P-State modes)")
-                .small()
-                .italics());
+            ui.label(
+                RichText::new("(Available in all AMD P-State modes)")
+                    .small()
+                    .italics(),
+            );
         }
     }
-    
+
     // SMT checkbox
     if caps.has_smt {
         let mut smt = profile.cpu_settings.smt.unwrap_or(true);
@@ -238,22 +276,100 @@ fn draw_cpu_tuning(
     }
 }
 
-fn draw_keyboard_tuning(
-    ui: &mut Ui,
-    profile: &mut Profile,
-    dbus_client: Option<&DbusClient>,
-) {
+fn draw_gpu_tuning(ui: &mut Ui, profile: &mut Profile, has_nvidia: bool) {
+    ui.heading("🎮 GPU Tuning");
+    ui.add_space(8.0);
+
+    if !has_nvidia {
+        ui.label("NVIDIA GPU not detected; overclock controls are disabled.");
+        return;
+    }
+
+    ui.label(RichText::new("Locked GPU Clocks (MHz)").strong());
+    let mut gpu_min = profile.gpu_settings.nvidia_gpu_min_clock.unwrap_or(0);
+    let mut gpu_max = profile.gpu_settings.nvidia_gpu_max_clock.unwrap_or(0);
+    ui.horizontal(|ui| {
+        ui.label("GPU Min:");
+        ui.add(
+            DragValue::new(&mut gpu_min)
+                .clamp_range(0..=4000)
+                .suffix(" MHz"),
+        );
+        ui.label("GPU Max:");
+        ui.add(
+            DragValue::new(&mut gpu_max)
+                .clamp_range(0..=4000)
+                .suffix(" MHz"),
+        );
+    });
+    profile.gpu_settings.nvidia_gpu_min_clock = if gpu_min > 0 { Some(gpu_min) } else { None };
+    profile.gpu_settings.nvidia_gpu_max_clock = if gpu_max > 0 { Some(gpu_max) } else { None };
+
+    ui.add_space(6.0);
+    ui.label(RichText::new("Locked Memory Clocks (MHz)").strong());
+    let mut mem_min = profile.gpu_settings.nvidia_mem_min_clock.unwrap_or(0);
+    let mut mem_max = profile.gpu_settings.nvidia_mem_max_clock.unwrap_or(0);
+    ui.horizontal(|ui| {
+        ui.label("Mem Min:");
+        ui.add(
+            DragValue::new(&mut mem_min)
+                .clamp_range(0..=8000)
+                .suffix(" MHz"),
+        );
+        ui.label("Mem Max:");
+        ui.add(
+            DragValue::new(&mut mem_max)
+                .clamp_range(0..=8000)
+                .suffix(" MHz"),
+        );
+    });
+    profile.gpu_settings.nvidia_mem_min_clock = if mem_min > 0 { Some(mem_min) } else { None };
+    profile.gpu_settings.nvidia_mem_max_clock = if mem_max > 0 { Some(mem_max) } else { None };
+
+    ui.add_space(6.0);
+    ui.label(RichText::new("Clock Offsets (MHz)").strong());
+    let mut core_offset = profile.gpu_settings.nvidia_core_offset.unwrap_or(0);
+    let mut mem_offset = profile.gpu_settings.nvidia_mem_offset.unwrap_or(0);
+    ui.horizontal(|ui| {
+        ui.label("Core Offset:");
+        ui.add(
+            DragValue::new(&mut core_offset)
+                .clamp_range(-500..=500)
+                .suffix(" MHz"),
+        );
+        ui.label("Mem Offset:");
+        ui.add(
+            DragValue::new(&mut mem_offset)
+                .clamp_range(-1000..=1000)
+                .suffix(" MHz"),
+        );
+    });
+    profile.gpu_settings.nvidia_core_offset = Some(core_offset);
+    profile.gpu_settings.nvidia_mem_offset = Some(mem_offset);
+
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new("Applied via NVML if available; falls back to nvidia-smi/nvidia-settings.")
+            .small()
+            .italics(),
+    );
+}
+
+fn draw_keyboard_tuning(ui: &mut Ui, profile: &mut Profile, dbus_client: Option<&DbusClient>) {
     ui.heading("⌨️ Keyboard Backlight");
     ui.add_space(8.0);
-    
-    ui.checkbox(&mut profile.keyboard_settings.control_enabled, "Control keyboard backlight");
+
+    ui.checkbox(
+        &mut profile.keyboard_settings.control_enabled,
+        "Control keyboard backlight",
+    );
     ui.add_space(6.0);
-    
+
     if profile.keyboard_settings.control_enabled {
         // Mode selector
         ui.horizontal(|ui| {
             ui.label("Mode:");
-            
+
             let current_mode_name = match &profile.keyboard_settings.mode {
                 KeyboardMode::SingleColor { .. } => "Single Color",
                 KeyboardMode::Breathe { .. } => "Breathe",
@@ -261,29 +377,63 @@ fn draw_keyboard_tuning(
                 KeyboardMode::Wave { .. } => "Wave",
                 _ => "Other",
             };
-            
+
             ComboBox::from_id_source("keyboard_mode")
                 .selected_text(current_mode_name)
                 .show_ui(ui, |ui| {
-                    if ui.selectable_label(current_mode_name == "Single Color", "Single Color").clicked() {
-                        profile.keyboard_settings.mode = KeyboardMode::SingleColor { r: 255, g: 255, b: 255, brightness: 50 };
+                    if ui
+                        .selectable_label(current_mode_name == "Single Color", "Single Color")
+                        .clicked()
+                    {
+                        profile.keyboard_settings.mode = KeyboardMode::SingleColor {
+                            r: 255,
+                            g: 255,
+                            b: 255,
+                            brightness: 50,
+                        };
                     }
-                    if ui.selectable_label(current_mode_name == "Breathe", "Breathe").clicked() {
-                        profile.keyboard_settings.mode = KeyboardMode::Breathe { r: 255, g: 255, b: 255, brightness: 50, speed: 50 };
+                    if ui
+                        .selectable_label(current_mode_name == "Breathe", "Breathe")
+                        .clicked()
+                    {
+                        profile.keyboard_settings.mode = KeyboardMode::Breathe {
+                            r: 255,
+                            g: 255,
+                            b: 255,
+                            brightness: 50,
+                            speed: 50,
+                        };
                     }
-                    if ui.selectable_label(current_mode_name == "Cycle", "Cycle").clicked() {
-                        profile.keyboard_settings.mode = KeyboardMode::Cycle { brightness: 50, speed: 50 };
+                    if ui
+                        .selectable_label(current_mode_name == "Cycle", "Cycle")
+                        .clicked()
+                    {
+                        profile.keyboard_settings.mode = KeyboardMode::Cycle {
+                            brightness: 50,
+                            speed: 50,
+                        };
                     }
-                    if ui.selectable_label(current_mode_name == "Wave", "Wave").clicked() {
-                        profile.keyboard_settings.mode = KeyboardMode::Wave { brightness: 50, speed: 50 };
+                    if ui
+                        .selectable_label(current_mode_name == "Wave", "Wave")
+                        .clicked()
+                    {
+                        profile.keyboard_settings.mode = KeyboardMode::Wave {
+                            brightness: 50,
+                            speed: 50,
+                        };
                     }
                 });
         });
         ui.add_space(6.0);
-        
+
         // Mode-specific controls
         match &mut profile.keyboard_settings.mode {
-            KeyboardMode::SingleColor { r, g, b, brightness } => {
+            KeyboardMode::SingleColor {
+                r,
+                g,
+                b,
+                brightness,
+            } => {
                 ui.horizontal(|ui| {
                     ui.label("Red:");
                     ui.add(Slider::new(r, 0..=255));
@@ -300,7 +450,7 @@ fn draw_keyboard_tuning(
                     ui.label("Brightness:");
                     ui.add(Slider::new(brightness, 0..=100).suffix("%"));
                 });
-                
+
                 // Color preview
                 let color = egui::Color32::from_rgb(*r, *g, *b);
                 ui.horizontal(|ui| {
@@ -310,7 +460,7 @@ fn draw_keyboard_tuning(
             }
             _ => {}
         }
-        
+
         // Preview button
         if ui.button("👁️ Preview").clicked() {
             if let Some(client) = dbus_client {
@@ -323,10 +473,13 @@ fn draw_keyboard_tuning(
 fn draw_screen_tuning(ui: &mut Ui, profile: &mut Profile) {
     ui.heading("🖥️ Screen");
     ui.add_space(8.0);
-    
-    ui.checkbox(&mut profile.screen_settings.system_control, "Use system brightness control");
+
+    ui.checkbox(
+        &mut profile.screen_settings.system_control,
+        "Use system brightness control",
+    );
     ui.add_space(6.0);
-    
+
     if !profile.screen_settings.system_control {
         ui.horizontal(|ui| {
             ui.label("Brightness:");
@@ -338,10 +491,13 @@ fn draw_screen_tuning(ui: &mut Ui, profile: &mut Profile) {
 fn draw_fan_tuning(ui: &mut Ui, profile: &mut Profile, fan_count: usize) {
     ui.heading("💨 Fan Control");
     ui.add_space(8.0);
-    
-    ui.checkbox(&mut profile.fan_settings.control_enabled, "Enable custom fan curves");
+
+    ui.checkbox(
+        &mut profile.fan_settings.control_enabled,
+        "Enable custom fan curves",
+    );
     ui.add_space(6.0);
-    
+
     if profile.fan_settings.control_enabled {
         // Ensure curves exist
         while profile.fan_settings.curves.len() < fan_count {
@@ -351,13 +507,13 @@ fn draw_fan_tuning(ui: &mut Ui, profile: &mut Profile, fan_count: usize) {
                 points: vec![(0, 0), (50, 50), (70, 75), (85, 100)],
             });
         }
-        
+
         // Show editor for each fan
         for curve in profile.fan_settings.curves.iter_mut() {
             if (curve.fan_id as usize) < fan_count {
                 ui.separator();
                 ui.add_space(8.0);
-                
+
                 egui::CollapsingHeader::new(format!("Fan {} Configuration", curve.fan_id))
                     .default_open(curve.fan_id == 0)
                     .show(ui, |ui| {
@@ -372,7 +528,7 @@ fn draw_fan_tuning(ui: &mut Ui, profile: &mut Profile, fan_count: usize) {
 
 fn create_default_profile_for_reset(is_standard: bool) -> Profile {
     use tuxedo_common::types::*;
-    
+
     if is_standard {
         Profile {
             name: "Standard".to_string(),

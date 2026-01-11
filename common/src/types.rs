@@ -162,6 +162,12 @@ pub struct CpuSettings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GpuSettings {
     pub dgpu_tdp: Option<u32>,
+    pub nvidia_gpu_min_clock: Option<u32>,
+    pub nvidia_gpu_max_clock: Option<u32>,
+    pub nvidia_mem_min_clock: Option<u32>,
+    pub nvidia_mem_max_clock: Option<u32>,
+    pub nvidia_core_offset: Option<i32>,
+    pub nvidia_mem_offset: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -385,7 +391,15 @@ impl Default for CpuSettings {
 
 impl Default for GpuSettings {
     fn default() -> Self {
-        Self { dgpu_tdp: None }
+        Self {
+            dgpu_tdp: None,
+            nvidia_gpu_min_clock: None,
+            nvidia_gpu_max_clock: None,
+            nvidia_mem_min_clock: None,
+            nvidia_mem_max_clock: None,
+            nvidia_core_offset: None,
+            nvidia_mem_offset: None,
+        }
     }
 }
 
