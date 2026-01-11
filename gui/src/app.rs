@@ -133,6 +133,8 @@ pub struct TuxedoApp {
     last_storage_poll: Instant,
     last_mount_poll: Instant,
     last_fan_poll: Instant,
+    time_label: String,
+    last_time_tick: Instant,
 }
 
 #[derive(Debug)]
@@ -208,6 +210,8 @@ impl TuxedoApp {
             last_storage_poll: now - Duration::from_millis(cfg.storage_poll_rate),
             last_mount_poll: now - Duration::from_millis(cfg.storage_poll_rate),
             last_fan_poll: now - Duration::from_millis(cfg.fans_poll_rate),
+            time_label: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            last_time_tick: now,
         }
     }
 
@@ -402,6 +406,11 @@ impl TuxedoApp {
             ui.horizontal(|ui| {
                 ui.add_space(12.0);
 
+                if self.last_time_tick.elapsed() >= Duration::from_secs(1) {
+                    self.time_label = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+                    self.last_time_tick = Instant::now();
+                }
+
                 // Navigation tabs
                 ui.selectable_value(
                     &mut self.state.current_page,
@@ -415,10 +424,7 @@ impl TuxedoApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // Current profile indicator
                     ui.label(format!("Profile: {}", self.state.config.current_profile));
-                    ui.label(
-                        egui::RichText::new(Local::now().format("%Y-%m-%d %H:%M:%S").to_string())
-                            .monospace(),
-                    );
+                    ui.label(egui::RichText::new(&self.time_label).monospace());
                 });
             });
             ui.add_space(8.0);

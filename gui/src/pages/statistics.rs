@@ -342,13 +342,14 @@ fn draw_battery_info(ui: &mut Ui, state: &AppState) {
                             (battery.voltage_mv as f64 * battery.current_ma as f64) / 1_000_000.0;
                         if power_w.abs() > 0.1 {
                             ui.label("Power:");
-                            let status = battery.status.to_lowercase();
-                            let direction = if status.contains("dis") {
+                            let direction = if battery.status.eq_ignore_ascii_case("Discharging") {
                                 "(discharging)"
-                            } else if status.contains("full") {
+                            } else if battery.status.eq_ignore_ascii_case("Full") {
                                 "(full)"
-                            } else {
+                            } else if battery.status.eq_ignore_ascii_case("Charging") {
                                 "(charging)"
+                            } else {
+                                battery.status.as_str()
                             };
                             ui.colored_label(
                                 power_color(power_w.abs() as f32),
