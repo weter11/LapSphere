@@ -14,6 +14,14 @@ impl ControlInterface {
         }
     }
 
+    async fn get_ram_info(&self) -> Result<String, zbus::fdo::Error> {
+        match crate::hardware_detection::get_ram_info() {
+            Ok(info) => serde_json::to_string(&info)
+                .map_err(|e| zbus::fdo::Error::Failed(e.to_string())),
+            Err(e) => Err(zbus::fdo::Error::Failed(e.to_string())),
+        }
+    }
+
     async fn get_cpu_info(&self) -> Result<String, zbus::fdo::Error> {
         match crate::hardware_detection::get_cpu_info() {
             Ok(info) => serde_json::to_string(&info)

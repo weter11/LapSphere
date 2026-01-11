@@ -18,6 +18,9 @@ pub fn draw(ui: &mut Ui, state: &mut AppState) {
                 draw_cpu_info(ui, state);
                 ui.add_space(12.0);
             }
+
+            draw_ram_info(ui, state);
+            ui.add_space(12.0);
             
             if state.config.statistics_sections.show_gpu {
                 draw_gpu_info(ui, state);
@@ -42,6 +45,41 @@ pub fn draw(ui: &mut Ui, state: &mut AppState) {
             if state.config.statistics_sections.show_fans {
                 draw_fan_info(ui, state);
                 ui.add_space(12.0);
+            }
+        });
+}
+
+fn draw_ram_info(ui: &mut Ui, state: &AppState) {
+    CollapsingHeader::new(RichText::new("🧠 RAM Usage").heading())
+        .default_open(true)
+        .show(ui, |ui| {
+            if let Some(ref ram) = state.ram_info {
+                Grid::new("ram_grid")
+                    .num_columns(2)
+                    .spacing([40.0, 8.0])
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.label("Usage:");
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                ProgressBar::new(ram.used_percent as f32 / 100.0)
+                                    .text(format!("{:.1}%", ram.used_percent))
+                                    .desired_width(200.0)
+                            );
+                        });
+                        ui.end_row();
+
+                        ui.label("Used:");
+                        ui.label(format!("{:.2} GB", ram.used_gb));
+                        ui.end_row();
+
+                        ui.label("Total:");
+                        ui.label(format!("{:.2} GB", ram.total_gb));
+                        ui.end_row();
+                    });
+            } else {
+                ui.spinner();
+                ui.label("Loading RAM information...");
             }
         });
 }
@@ -290,6 +328,12 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                                 );
                                 ui.end_row();
                             }
+
+                            if let Some(voltage) = gpu.voltage {
+                                ui.label("Voltage:");
+                                ui.label(format!("{:.3} V", voltage));
+                                ui.end_row();
+                            }
                         });
                 }
             } else {
@@ -332,9 +376,9 @@ fn draw_battery_info(ui: &mut Ui, state: &AppState) {
                             ui.label("Power:");
                             ui.colored_label(
                                 power_color(power_w.abs() as f32),
-                                format!("{:.1} W {}", 
+                                format!("{:.1} W ({})",
                                     power_w.abs(),
-                                    if power_w > 0.0 { "(charging)" } else { "(discharging)" }
+                                    battery.status
                                 )
                             );
                             ui.end_row();
@@ -379,6 +423,12 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
                         .spacing([40.0, 6.0])
                         .striped(true)
                         .show(ui, |ui| {
+                            if let Some(ssid) = &wifi.ssid {
+                                ui.label("Network (SSID):");
+                                ui.label(RichText::new(ssid).strong());
+                                ui.end_row();
+                            }
+
                             ui.label("Driver:");
                             ui.label(&wifi.driver);
                             ui.end_row();
@@ -420,14 +470,14 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
                             
                             if let Some(tx_rate) = wifi.tx_rate {
                                 ui.label("TX Rate:");
-                                ui.label(RichText::new(format!("{:.1} Mbps", tx_rate))
+                                ui.label(RichText::new(format!("{:.1} Mbit/s", tx_rate))
                                     .monospace());
                                 ui.end_row();
                             }
                             
                             if let Some(rx_rate) = wifi.rx_rate {
                                 ui.label("RX Rate:");
-                                ui.label(RichText::new(format!("{:.1} Mbps", rx_rate))
+                                ui.label(RichText::new(format!("{:.1} Mbit/s", rx_rate))
                                     .monospace());
                                 ui.end_row();
                             }
@@ -440,6 +490,7 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
                                 );
                                 ui.end_row();
                             }
+
                         });
                     
                     ui.add_space(8.0);
@@ -478,6 +529,14 @@ fn draw_storage_info(ui: &mut Ui, state: &AppState) {
                                 );
                                 ui.end_row();
                             }
+
+                            ui.label("Read Speed:");
+                            ui.label(format!("{:.2} MB/s", device.read_mb_s));
+                            ui.end_row();
+
+                            ui.label("Write Speed:");
+                            ui.label(format!("{:.2} MB/s", device.write_mb_s));
+                            ui.end_row();
                         });
                     ui.add_space(8.0);
                 }

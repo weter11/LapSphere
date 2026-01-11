@@ -177,81 +177,19 @@ impl TuxedoTheme {
     }
     
     fn light_theme() -> Visuals {
-        Visuals {
-            dark_mode: false,
-            
-            widgets: egui::style::Widgets {
-                noninteractive: egui::style::WidgetVisuals {
-                    bg_fill: Color32::from_rgb(248, 248, 250),
-                    weak_bg_fill: Color32::from_rgb(248, 248, 250),
-                    bg_stroke: Stroke::new(1.0, Color32::from_rgb(220, 220, 225)),
-                    rounding: Rounding::same(6.0),
-                    fg_stroke: Stroke::new(1.0, Color32::from_rgb(40, 40, 40)),
-                    expansion: 0.0,
-                },
-                inactive: egui::style::WidgetVisuals {
-                    bg_fill: Color32::from_rgb(240, 242, 245),
-                    weak_bg_fill: Color32::from_rgb(240, 242, 245),
-                    bg_stroke: Stroke::new(1.0, Color32::from_rgb(210, 212, 218)),
-                    rounding: Rounding::same(6.0),
-                    fg_stroke: Stroke::new(1.0, Color32::from_rgb(60, 60, 60)),
-                    expansion: 0.0,
-                },
-                hovered: egui::style::WidgetVisuals {
-                    bg_fill: Color32::from_rgb(230, 232, 238),
-                    weak_bg_fill: Color32::from_rgb(230, 232, 238),
-                    bg_stroke: Stroke::new(1.0, Color32::from_rgb(190, 192, 198)),
-                    rounding: Rounding::same(6.0),
-                    fg_stroke: Stroke::new(1.5, Color32::from_rgb(30, 30, 30)),
-                    expansion: 1.0,
-                },
-                active: egui::style::WidgetVisuals {
-                    bg_fill: Color32::from_rgb(60, 120, 200),
-                    weak_bg_fill: Color32::from_rgb(60, 120, 200),
-                    bg_stroke: Stroke::new(1.0, Color32::from_rgb(40, 100, 180)),
-                    rounding: Rounding::same(6.0),
-                    fg_stroke: Stroke::new(2.0, Color32::WHITE),
-                    expansion: 1.0,
-                },
-                open: egui::style::WidgetVisuals {
-                    bg_fill: Color32::from_rgb(235, 237, 242),
-                    weak_bg_fill: Color32::from_rgb(235, 237, 242),
-                    bg_stroke: Stroke::new(1.0, Color32::from_rgb(200, 202, 208)),
-                    rounding: Rounding::same(6.0),
-                    fg_stroke: Stroke::new(1.0, Color32::from_rgb(40, 40, 40)),
-                    expansion: 0.0,
-                },
-            },
-            
-            selection: egui::style::Selection {
-                bg_fill: Color32::from_rgb(60, 120, 200),
-                stroke: Stroke::new(1.0, Color32::from_rgb(40, 100, 180)),
-            },
-            
-            hyperlink_color: Color32::from_rgb(40, 100, 200),
-            
-            window_fill: Color32::from_rgb(255, 255, 255),
-            window_stroke: Stroke::new(1.0, Color32::from_rgb(230, 230, 235)),
-            window_shadow: egui::epaint::Shadow {
-                offset: egui::vec2(0.0, 8.0),
-                blur: 16.0,
-                spread: 0.0,
-                color: Color32::from_black_alpha(40),
-            },
-            window_rounding: Rounding::same(8.0),
-            
-            panel_fill: Color32::from_rgb(250, 250, 252),
-            
-            override_text_color: Some(Color32::from_rgb(40, 40, 40)),
-            warn_fg_color: Color32::from_rgb(200, 120, 0),
-            error_fg_color: Color32::from_rgb(200, 40, 40),
-            
-            faint_bg_color: Color32::from_rgb(245, 245, 248),
-            extreme_bg_color: Color32::from_rgb(240, 240, 245),
-            code_bg_color: Color32::from_rgb(242, 242, 246),
-            
-            ..Visuals::light()
-        }
+        let mut visuals = Visuals::light();
+        visuals.override_text_color = Some(Color32::from_rgb(20, 20, 20));
+        visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(20, 20, 20));
+        visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(20, 20, 20));
+        visuals.widgets.hovered.fg_stroke = Stroke::new(1.5, Color32::from_rgb(0, 0, 0));
+        visuals.widgets.hovered.bg_fill = Color32::from_gray(210);
+        visuals.widgets.active.fg_stroke = Stroke::new(2.0, Color32::from_rgb(0, 0, 0));
+        visuals.widgets.active.bg_fill = Color32::from_gray(200);
+        visuals.selection.stroke = Stroke::new(1.0, Color32::from_rgb(0, 120, 215));
+        visuals.selection.bg_fill = Color32::from_rgb(0, 120, 215).linear_multiply(0.3);
+        visuals.window_fill = Color32::from_gray(230);
+        visuals.panel_fill = Color32::from_gray(240);
+        visuals
     }
 }
 

@@ -134,6 +134,15 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>)
                 if state.config.profiles[idx].name == state.config.current_profile {
                     if let Some(client) = dbus_client {
                         let profile_clone = state.config.profiles[idx].clone();
+
+                        // Re-apply freq limits, as they can be reset by other tools
+                        if let (Some(min), Some(max)) = (
+                            profile_clone.cpu_settings.min_frequency,
+                            profile_clone.cpu_settings.max_frequency
+                        ) {
+                            let _ = client.set_cpu_frequency_limits(min, max);
+                        }
+
                         let _rx = client.apply_profile(profile_clone);
                     }
                 }

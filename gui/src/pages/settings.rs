@@ -155,15 +155,17 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Co
             // Polling Rates
             ui.label(RichText::new("Polling Rates").strong().heading());
             ui.add_space(8.0);
-            ui.label(RichText::new("How often to update each section (in seconds)").small().italics());
+            ui.label(RichText::new("How often to update each section (in seconds). Requires app restart.").small().italics());
             ui.add_space(6.0);
             
+            let mut changed = false;
+
             let mut cpu_poll = (state.config.statistics_sections.cpu_poll_rate as f32) / 1000.0;
             ui.horizontal(|ui| {
                 ui.label("CPU:");
                 if ui.add(Slider::new(&mut cpu_poll, 0.5..=10.0).step_by(0.5).suffix(" s")).changed() {
                     state.config.statistics_sections.cpu_poll_rate = (cpu_poll * 1000.0) as u64;
-                    let _ = state.save_config();
+                    changed = true;
                 }
             });
             
@@ -172,7 +174,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Co
                 ui.label("GPU:");
                 if ui.add(Slider::new(&mut gpu_poll, 0.5..=10.0).step_by(0.5).suffix(" s")).changed() {
                     state.config.statistics_sections.gpu_poll_rate = (gpu_poll * 1000.0) as u64;
-                    let _ = state.save_config();
+                    changed = true;
                 }
             });
             
@@ -181,7 +183,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Co
                 ui.label("Battery:");
                 if ui.add(Slider::new(&mut battery_poll, 0.5..=30.0).step_by(0.5).suffix(" s")).changed() {
                     state.config.statistics_sections.battery_poll_rate = (battery_poll * 1000.0) as u64;
-                    let _ = state.save_config();
+                    changed = true;
                 }
             });
             
@@ -190,7 +192,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Co
                 ui.label("WiFi:");
                 if ui.add(Slider::new(&mut wifi_poll, 0.5..=30.0).step_by(0.5).suffix(" s")).changed() {
                     state.config.statistics_sections.wifi_poll_rate = (wifi_poll * 1000.0) as u64;
-                    let _ = state.save_config();
+                    changed = true;
                 }
             });
             
@@ -199,7 +201,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Co
                 ui.label("Storage:");
                 if ui.add(Slider::new(&mut storage_poll, 5.0..=60.0).step_by(0.5).suffix(" s")).changed() {
                     state.config.statistics_sections.storage_poll_rate = (storage_poll * 1000.0) as u64;
-                    let _ = state.save_config();
+                    changed = true;
                 }
             });
             
@@ -208,9 +210,13 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Co
                 ui.label("Fans:");
                 if ui.add(Slider::new(&mut fans_poll, 0.5..=10.0).step_by(0.5).suffix(" s")).changed() {
                     state.config.statistics_sections.fans_poll_rate = (fans_poll * 1000.0) as u64;
-                    let _ = state.save_config();
+                    changed = true;
                 }
             });
+
+            if changed {
+                let _ = state.save_config();
+            }
         });
 }
 
