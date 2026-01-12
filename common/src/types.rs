@@ -25,8 +25,8 @@ pub struct CpuInfo {
     pub amd_pstate_status: Option<String>,
     pub min_freq: Option<u64>,
     pub max_freq: Option<u64>,
-    pub hw_min_freq: u64,
-    pub hw_max_freq: u64,
+    pub hw_min_freq: Option<u64>,
+    pub hw_max_freq: Option<u64>,
     pub energy_performance_preference: Option<String>,
     pub available_epp_options: Vec<String>,
     pub scheduler: String,
@@ -65,6 +65,15 @@ pub struct CoreInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryInfo {
+    pub total_gib: f64,
+    pub used_gib: f64,
+    pub free_gib: f64,
+    pub available_gib: f64,
+    pub used_percent: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GpuInfo {
     pub name: String,
     pub gpu_type: GpuType,
@@ -84,6 +93,7 @@ pub enum GpuType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatteryInfo {
+    pub status: String,
     pub voltage_mv: u64,
     pub current_ma: i64,
     pub charge_percent: u64,
@@ -160,6 +170,11 @@ pub struct CpuSettings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GpuSettings {
     pub dgpu_tdp: Option<u32>,
+    pub min_gpu_clock: Option<u32>,
+    pub max_gpu_clock: Option<u32>,
+    pub min_mem_clock: Option<u32>,
+    pub max_mem_clock: Option<u32>,
+    pub manual_clocks: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -351,7 +366,14 @@ impl Default for CpuSettings {
 
 impl Default for GpuSettings {
     fn default() -> Self {
-        Self { dgpu_tdp: None }
+        Self {
+            dgpu_tdp: None,
+            min_gpu_clock: None,
+            max_gpu_clock: None,
+            min_mem_clock: None,
+            max_mem_clock: None,
+            manual_clocks: false,
+        }
     }
 }
 

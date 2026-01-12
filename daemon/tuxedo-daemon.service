@@ -1,4 +1,11 @@
-[D-BUS Service]
-Name=tuxedo-daemon
-Exec=/usr/local/bin/tuxedo-daemon
+[Unit]
+Description=TUXEDO Control Center Daemon
+
+[Service]
+Type=dbus
+BusName=com.tuxedo.Control
+ExecStart=/usr/local/bin/tuxedo-daemon
 User=root
+
+[Install]
+WantedBy=multi-user.target

@@ -14,6 +14,14 @@ impl ControlInterface {
         }
     }
 
+    async fn get_memory_info(&self) -> Result<String, zbus::fdo::Error> {
+        match crate::hardware_detection::get_memory_info() {
+            Ok(info) => serde_json::to_string(&info)
+                .map_err(|e| zbus::fdo::Error::Failed(e.to_string())),
+            Err(e) => Err(zbus::fdo::Error::Failed(e.to_string())),
+        }
+    }
+
     async fn get_cpu_info(&self) -> Result<String, zbus::fdo::Error> {
         match crate::hardware_detection::get_cpu_info() {
             Ok(info) => serde_json::to_string(&info)
@@ -291,6 +299,42 @@ async fn set_tdp_profile(&self, profile: &str) -> Result<(), zbus::fdo::Error> {
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
         crate::hardware_control::apply_battery_settings(&settings)
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
+
+    async fn set_gpu_locked_clocks(&self, device_index: u32, min_clock: u32, max_clock: u32) -> Result<(), zbus::fdo::Error> {
+        crate::hardware_control::set_gpu_locked_clocks(device_index, min_clock, max_clock)
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
+
+    async fn set_memory_locked_clocks(&self, device_index: u32, min_clock: u32, max_clock: u32) -> Result<(), zbus::fdo::Error> {
+        crate::hardware_control::set_memory_locked_clocks(device_index, min_clock, max_clock)
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
+
+    async fn reset_memory_locked_clocks(&self, device_index: u32) -> Result<(), zbus::fdo::Error> {
+        crate::hardware_control::reset_memory_locked_clocks(device_index)
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
+
+    async fn reset_gpu_clocks(&self, device_index: u32) -> Result<(), zbus::fdo::Error> {
+        crate::hardware_control::reset_gpu_clocks(device_index)
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
+
+    async fn get_gpu_clock_ranges(&self, device_index: u32) -> Result<String, zbus::fdo::Error> {
+        match crate::hardware_detection::get_gpu_clock_ranges(device_index) {
+            Ok(ranges) => serde_json::to_string(&ranges)
+                .map_err(|e| zbus::fdo::Error::Failed(e.to_string())),
+            Err(e) => Err(zbus::fdo::Error::Failed(e.to_string())),
+        }
+    }
+
+    async fn get_gpu_mem_clock_ranges(&self, device_index: u32) -> Result<String, zbus::fdo::Error> {
+        match crate::hardware_detection::get_gpu_mem_clock_ranges(device_index) {
+            Ok(ranges) => serde_json::to_string(&ranges)
+                .map_err(|e| zbus::fdo::Error::Failed(e.to_string())),
+            Err(e) => Err(zbus::fdo::Error::Failed(e.to_string())),
+        }
     }
 }
 
