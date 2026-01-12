@@ -344,23 +344,40 @@ fn draw_prime_profile_settings(ui: &mut Ui, state: &mut AppState, dbus_client: O
         .italics());
     ui.add_space(6.0);
     
-    // Get current profile from the first profile's GPU settings as the global setting
+    // Get current saved profile from config
     let current_profile = state.current_profile()
         .and_then(|p| p.gpu_settings.prime_profile.clone())
         .unwrap_or_else(|| "on-demand".to_string());
     
-    let mut selected_profile = current_profile.clone();
+    // Initialize pending selection if not set
+    if state.pending_prime_profile.is_none() {
+        state.pending_prime_profile = Some(current_profile.clone());
+    }
+    
+    // Use the pending selection for the combo box
+    let mut selected_profile = state.pending_prime_profile.clone().unwrap_or(current_profile.clone());
     
     ui.horizontal(|ui| {
         ui.label("Current Profile:");
         ComboBox::from_id_source("settings_prime_profile_combo")
             .selected_text(&selected_profile)
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut selected_profile, "on-demand".to_string(), "On-Demand");
-                ui.selectable_value(&mut selected_profile, "nvidia".to_string(), "NVIDIA");
-                ui.selectable_value(&mut selected_profile, "intel".to_string(), "Intel");
+                if ui.selectable_value(&mut selected_profile, "on-demand".to_string(), "On-Demand").clicked() {
+                    state.pending_prime_profile = Some("on-demand".to_string());
+                }
+                if ui.selectable_value(&mut selected_profile, "nvidia".to_string(), "NVIDIA").clicked() {
+                    state.pending_prime_profile = Some("nvidia".to_string());
+                }
+                if ui.selectable_value(&mut selected_profile, "intel".to_string(), "Intel").clicked() {
+                    state.pending_prime_profile = Some("intel".to_string());
+                }
             });
     });
+    
+    // Update pending selection if changed
+    if state.pending_prime_profile.as_ref() != Some(&selected_profile) {
+        state.pending_prime_profile = Some(selected_profile.clone());
+    }
     
     ui.add_space(8.0);
     
@@ -382,7 +399,7 @@ fn draw_prime_profile_settings(ui: &mut Ui, state: &mut AppState, dbus_client: O
     
     ui.add_space(12.0);
     
-    // Apply button that also updates the profile and prompts for restart
+    // Show Apply button if selection differs from saved config
     if selected_profile != current_profile {
         ui.horizontal(|ui| {
             if ui.button("💾 Apply Prime Profile").clicked() {
@@ -396,6 +413,9 @@ fn draw_prime_profile_settings(ui: &mut Ui, state: &mut AppState, dbus_client: O
                 if let Some(client) = dbus_client {
                     let _ = client.set_prime_profile(&selected_profile);
                 }
+                
+                // Reset pending to new value
+                state.pending_prime_profile = Some(selected_profile.clone());
                 
                 state.show_message("Prime profile applied. Please restart your laptop for changes to take effect.", false);
             }
