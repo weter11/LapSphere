@@ -19,6 +19,9 @@ pub fn draw(ui: &mut Ui, state: &mut AppState) {
                 ui.add_space(12.0);
             }
             
+            draw_memory_info(ui, state);
+            ui.add_space(12.0);
+
             if state.config.statistics_sections.show_gpu {
                 draw_gpu_info(ui, state);
                 ui.add_space(12.0);
@@ -42,6 +45,43 @@ pub fn draw(ui: &mut Ui, state: &mut AppState) {
             if state.config.statistics_sections.show_fans {
                 draw_fan_info(ui, state);
                 ui.add_space(12.0);
+            }
+        });
+}
+
+fn draw_memory_info(ui: &mut Ui, state: &AppState) {
+    CollapsingHeader::new(RichText::new("🧠 Memory (RAM)").heading())
+        .default_open(true)
+        .show(ui, |ui| {
+            if let Some(ref mem) = state.memory_info {
+                Grid::new("memory_grid")
+                    .num_columns(2)
+                    .spacing([40.0, 8.0])
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.label("Usage:");
+                        ui.add(
+                            ProgressBar::new(mem.used_percent / 100.0)
+                                .text(format!("{:.1}%", mem.used_percent))
+                                .fill(load_color(mem.used_percent))
+                        );
+                        ui.end_row();
+
+                        ui.label("Used:");
+                        ui.label(format!("{:.2} GiB", mem.used_gib));
+                        ui.end_row();
+
+                        ui.label("Available:");
+                        ui.label(format!("{:.2} GiB", mem.available_gib));
+                        ui.end_row();
+
+                        ui.label("Total:");
+                        ui.label(format!("{:.2} GiB", mem.total_gib));
+                        ui.end_row();
+                    });
+            } else {
+                ui.spinner();
+                ui.label("Loading memory information...");
             }
         });
 }
@@ -327,15 +367,16 @@ fn draw_battery_info(ui: &mut Ui, state: &AppState) {
                         ui.label(format!("{:.2} A", current_a.abs()));
                         ui.end_row();
                         
+                        ui.label("Status:");
+                        ui.label(&battery.status);
+                        ui.end_row();
+
                         let power_w = (battery.voltage_mv as f64 * battery.current_ma as f64) / 1_000_000.0;
                         if power_w.abs() > 0.1 {
                             ui.label("Power:");
                             ui.colored_label(
                                 power_color(power_w.abs() as f32),
-                                format!("{:.1} W {}", 
-                                    power_w.abs(),
-                                    if power_w > 0.0 { "(charging)" } else { "(discharging)" }
-                                )
+                                format!("{:.1} W", power_w.abs())
                             );
                             ui.end_row();
                         }

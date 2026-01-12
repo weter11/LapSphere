@@ -1,4 +1,5 @@
-use egui::{Context, CentralPanel, TopBottomPanel};
+use chrono::Local;
+use egui::{Context, CentralPanel, TopBottomPanel, RichText};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 use tuxedo_common::types::*;
@@ -22,6 +23,7 @@ pub struct AppState {
     
     // Hardware info (updated in background)
     pub system_info: Option<SystemInfo>,
+    pub memory_info: Option<MemoryInfo>,
     pub cpu_info: Option<CpuInfo>,
     pub gpu_info: Vec<GpuInfo>,
     pub battery_info: Option<BatteryInfo>,
@@ -29,6 +31,8 @@ pub struct AppState {
     pub fan_info: Vec<FanInfo>,
     pub storage_device_info: Vec<StorageDevice>,
     pub mount_info: Vec<MountInfo>,
+    pub gpu_clock_ranges: Option<(u32, u32)>,
+    pub gpu_mem_clock_ranges: Option<(u32, u32)>,
     pub available_start_thresholds: Vec<u8>,
     pub available_end_thresholds: Vec<u8>,
     
@@ -56,6 +60,7 @@ impl AppState {
         Self {
             config: AppConfig::default(),
             system_info: None,
+            memory_info: None,
             cpu_info: None,
             gpu_info: Vec::new(),
             battery_info: None,
@@ -63,6 +68,8 @@ impl AppState {
             fan_info: Vec::new(),
             storage_device_info: Vec::new(),
             mount_info: Vec::new(),
+            gpu_clock_ranges: None,
+            gpu_mem_clock_ranges: None,
             available_start_thresholds: Vec::new(),
             available_end_thresholds: Vec::new(),
             current_page: Page::Statistics,
@@ -116,6 +123,7 @@ pub struct TuxedoApp {
     theme: TuxedoTheme,
     
     // Background update channel
+    hw_update_tx: mpsc::UnboundedSender<HardwareUpdate>,
     hw_update_rx: mpsc::UnboundedReceiver<HardwareUpdate>,
     
     // Keyboard shortcuts
@@ -125,6 +133,7 @@ pub struct TuxedoApp {
 #[derive(Debug)]
 pub enum HardwareUpdate {
     SystemInfo(SystemInfo),
+    MemoryInfo(MemoryInfo),
     CpuInfo(CpuInfo),
     GpuInfo(Vec<GpuInfo>),
     BatteryInfo(BatteryInfo),
@@ -132,6 +141,8 @@ pub enum HardwareUpdate {
     FanInfo(Vec<FanInfo>),
     StorageDeviceInfo(Vec<StorageDevice>),
     MountInfo(Vec<MountInfo>),
+    GpuClockRanges(Result<(u32, u32), String>),
+    GpuMemClockRanges(Result<Vec<u32>, String>),
     AvailableThresholds(Vec<u8>, Vec<u8>),
     Error(String),
 }
@@ -173,13 +184,14 @@ impl TuxedoApp {
 
             // Fetch available thresholds
             let client_clone = client.clone();
+            let tx_clone = hw_update_tx.clone();
             tokio::spawn(async move {
                 let start_rx = client_clone.get_battery_available_start_thresholds();
                 let end_rx = client_clone.get_battery_available_end_thresholds();
 
                 match (start_rx.await, end_rx.await) {
                     (Ok(Ok(start)), Ok(Ok(end))) => {
-                        let _ = hw_update_tx.send(HardwareUpdate::AvailableThresholds(start, end));
+                        let _ = tx_clone.send(HardwareUpdate::AvailableThresholds(start, end));
                     }
                     _ => {}
                 }
@@ -194,6 +206,7 @@ impl TuxedoApp {
             state,
             dbus_client,
             theme,
+            hw_update_tx,
             hw_update_rx,
             shortcuts: KeyboardShortcuts::new(),
         }
@@ -205,6 +218,9 @@ impl TuxedoApp {
             match update {
                 HardwareUpdate::SystemInfo(info) => {
                     self.state.system_info = Some(info);
+                }
+                HardwareUpdate::MemoryInfo(info) => {
+                    self.state.memory_info = Some(info);
                 }
                 HardwareUpdate::CpuInfo(info) => {
                     self.state.cpu_info = Some(info);
@@ -226,6 +242,23 @@ impl TuxedoApp {
                 }
                 HardwareUpdate::MountInfo(info) => {
                     self.state.mount_info = info;
+                }
+                HardwareUpdate::GpuClockRanges(result) => {
+                    match result {
+                        Ok(ranges) => self.state.gpu_clock_ranges = Some(ranges),
+                        Err(e) => self.state.show_message(format!("Failed to get GPU clock ranges: {}", e), true),
+                    }
+                }
+                HardwareUpdate::GpuMemClockRanges(result) => {
+                    match result {
+                        Ok(mut ranges) => {
+                            if !ranges.is_empty() {
+                                ranges.sort_unstable();
+                                self.state.gpu_mem_clock_ranges = Some((*ranges.first().unwrap(), *ranges.last().unwrap()));
+                            }
+                        },
+                        Err(e) => self.state.show_message(format!("Failed to get GPU memory clock ranges: {}", e), true),
+                    }
                 }
                 HardwareUpdate::AvailableThresholds(start, end) => {
                     self.state.available_start_thresholds = start;
@@ -267,6 +300,14 @@ impl TuxedoApp {
                 ui.selectable_value(&mut self.state.current_page, Page::Settings, "⚙️ Settings");
                 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(12.0);
+                    let time_str = Local::now().format("%H:%M:%S").to_string();
+                    ui.label(RichText::new(time_str).monospace());
+
+                    ui.add_space(12.0);
+                    let date_str = Local::now().format("%Y-%m-%d").to_string();
+                    ui.label(RichText::new(date_str).monospace());
+
                     // Current profile indicator
                     ui.label(format!("Profile: {}", self.state.config.current_profile));
                 });
@@ -316,7 +357,8 @@ impl eframe::App for TuxedoApp {
                     profiles::draw(ui, &mut self.state, self.dbus_client.as_ref());
                 }
                 Page::Tuning => {
-                    tuning::draw(ui, &mut self.state, self.dbus_client.as_ref());
+                    let hw_update_tx = self.hw_update_tx.clone();
+                    tuning::draw(ui, &mut self.state, self.dbus_client.as_ref(), hw_update_tx);
                 }
                 Page::Settings => {
                     settings::draw(ui, &mut self.state, &mut self.theme, ctx);
@@ -344,9 +386,10 @@ fn start_background_polling(
             let tx = tx.clone();
 
             tokio::spawn(async move {
-                let (cpu, gpu, fans, battery, wifi, storage_device, mount) = tokio::join!(
+                let (cpu, gpu, memory, fans, battery, wifi, storage_device, mount) = tokio::join!(
                     client.get_cpu_info(),
                     client.get_gpu_info(),
+                    client.get_memory_info(),
                     client.get_fan_info(),
                     client.get_battery_info(),
                     client.get_wifi_info(),
@@ -359,6 +402,9 @@ fn start_background_polling(
                 }
                 if let Ok(Ok(info)) = gpu {
                     let _ = tx.send(HardwareUpdate::GpuInfo(info));
+                }
+                if let Ok(Ok(info)) = memory {
+                    let _ = tx.send(HardwareUpdate::MemoryInfo(info));
                 }
                 if let Ok(Ok(info)) = fans {
                     let _ = tx.send(HardwareUpdate::FanInfo(info));

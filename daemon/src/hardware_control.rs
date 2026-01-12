@@ -1,4 +1,6 @@
 use anyhow::{anyhow, Result};
+use nvml_wrapper::Nvml;
+use once_cell::sync::Lazy;
 use std::fs;
 use std::path::Path;
 use tuxedo_common::types::*;
@@ -444,6 +446,48 @@ fn find_keyboard_backlight_path() -> Option<String> {
     
     log::warn!("No keyboard backlight found");
     None
+}
+
+use nvml_wrapper::enums::device::GpuLockedClocksSetting;
+
+static NVML: Lazy<Result<Nvml, nvml_wrapper::error::NvmlError>> = Lazy::new(|| Nvml::init());
+
+pub fn get_nvml() -> Result<&'static Nvml> {
+    match &*NVML {
+        Ok(nvml) => Ok(nvml),
+        Err(e) => Err(anyhow!("Failed to initialize NVML: {}", e)),
+    }
+}
+
+pub fn set_gpu_locked_clocks(device_index: u32, min_clock: u32, max_clock: u32) -> Result<()> {
+    let nvml = get_nvml()?;
+    let mut device = nvml.device_by_index(device_index)?;
+    device.set_gpu_locked_clocks(GpuLockedClocksSetting::Numeric {
+        min_clock_mhz: min_clock,
+        max_clock_mhz: max_clock,
+    })?;
+    Ok(())
+}
+
+pub fn set_memory_locked_clocks(device_index: u32, min_clock: u32, max_clock: u32) -> Result<()> {
+    let nvml = get_nvml()?;
+    let mut device = nvml.device_by_index(device_index)?;
+    device.set_mem_locked_clocks(min_clock, max_clock)?;
+    Ok(())
+}
+
+pub fn reset_memory_locked_clocks(device_index: u32) -> Result<()> {
+    let nvml = get_nvml()?;
+    let mut device = nvml.device_by_index(device_index)?;
+    device.reset_mem_locked_clocks()?;
+    Ok(())
+}
+
+pub fn reset_gpu_clocks(device_index: u32) -> Result<()> {
+    let nvml = get_nvml()?;
+    let mut device = nvml.device_by_index(device_index)?;
+    device.reset_gpu_locked_clocks()?;
+    Ok(())
 }
 
 pub fn set_energy_performance_preference(epp: &str) -> Result<()> {

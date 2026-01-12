@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use nvml_wrapper::Nvml;
 use std::fs;
 use std::path::Path;
 use std::collections::HashMap;
@@ -500,22 +501,13 @@ fn read_frequency_limits() -> (Option<u64>, Option<u64>) {
     (min_freq, max_freq)
 }
 
-fn read_hw_frequency_limits() -> Result<(u64, u64)> {
+fn read_hw_frequency_limits() -> Result<(Option<u64>, Option<u64>)> {
     let min_path = "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq";
     let max_path = "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq";
-    
-    let min_freq: u64 = if let Ok(s) = fs::read_to_string(min_path) {
-        s.trim().parse().unwrap_or(400000)
-    } else {
-        400000
-    };
-    
-    let max_freq: u64 = if let Ok(s) = fs::read_to_string(max_path) {
-        s.trim().parse().unwrap_or(5000000)
-    } else {
-        5000000
-    };
-    
+
+    let min_freq = fs::read_to_string(min_path).ok().and_then(|s| s.trim().parse().ok());
+    let max_freq = fs::read_to_string(max_path).ok().and_then(|s| s.trim().parse().ok());
+
     Ok((min_freq, max_freq))
 }
 
@@ -726,9 +718,9 @@ pub fn get_cpu_info() -> Result<CpuInfo> {
     };
     
     let (hw_min_freq, hw_max_freq) = if capabilities.has_cpuinfo_min_freq && capabilities.has_cpuinfo_max_freq {
-        read_hw_frequency_limits().unwrap_or((400000, 5000000))
+        read_hw_frequency_limits().unwrap_or((None, None))
     } else {
-        (400000, 5000000)
+        (None, None)
     };
     
     let energy_performance_preference = if capabilities.has_energy_performance_preference {
@@ -780,6 +772,25 @@ pub fn get_cpu_info() -> Result<CpuInfo> {
     })
 }
 
+pub fn get_memory_info() -> Result<MemoryInfo> {
+    let sys = System::new();
+    let mem = sys.memory()?;
+
+    let total_gib = mem.total.as_u64() as f64 / (1024.0 * 1024.0 * 1024.0);
+    let free_gib = mem.free.as_u64() as f64 / (1024.0 * 1024.0 * 1024.0);
+    let available_gib = mem.platform_memory.meminfo.get("MemAvailable").map_or(0.0, |v| v.as_u64() as f64 / (1024.0 * 1024.0 * 1024.0));
+    let used_gib = total_gib - available_gib;
+    let used_percent = if total_gib > 0.0 { (used_gib / total_gib * 100.0) as f32 } else { 0.0 };
+
+    Ok(MemoryInfo {
+        total_gib,
+        used_gib,
+        free_gib,
+        available_gib,
+        used_percent,
+    })
+}
+
 pub fn get_system_info() -> Result<SystemInfo> {
     let product_name = fs::read_to_string("/sys/class/dmi/id/product_name")
         .unwrap_or_else(|_| "Unknown".to_string())
@@ -804,6 +815,14 @@ pub fn get_system_info() -> Result<SystemInfo> {
 }
 
 pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
+    if Path::new("/sys/bus/pci/drivers/nvidia").exists() {
+        if let Ok(nvidia_gpus) = get_nvidia_gpu_info() {
+            if !nvidia_gpus.is_empty() {
+                return Ok(nvidia_gpus);
+            }
+        }
+    }
+
     let mut gpus = Vec::new();
     
     for i in 0..4 {
@@ -868,6 +887,74 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
         return Err(anyhow!("No GPUs detected"));
     }
     
+    Ok(gpus)
+}
+
+use crate::hardware_control::get_nvml;
+
+pub fn get_gpu_clock_ranges(device_index: u32) -> Result<(u32, u32)> {
+    let nvml = get_nvml()?;
+    let device = nvml.device_by_index(device_index)?;
+
+    // First, get the memory clocks to pass to supported_graphics_clocks
+    let mut mem_clocks = device.supported_memory_clocks()?;
+    if mem_clocks.is_empty() {
+        return Err(anyhow!("No supported memory clocks found, cannot determine graphics clock ranges"));
+    }
+    mem_clocks.sort_unstable();
+    // Use the highest memory clock to get the widest range of graphics clocks
+    let target_mem_clock = *mem_clocks.last().unwrap();
+
+    let mut clocks = device.supported_graphics_clocks(target_mem_clock)?;
+    if clocks.is_empty() {
+        return Err(anyhow!("No supported graphics clocks found for locking"));
+    }
+    clocks.sort_unstable();
+    let min_clock = *clocks.first().unwrap();
+    let max_clock = *clocks.last().unwrap();
+    Ok((min_clock, max_clock))
+}
+
+pub fn get_gpu_mem_clock_ranges(device_index: u32) -> Result<Vec<u32>> {
+    let nvml = get_nvml()?;
+    let device = nvml.device_by_index(device_index)?;
+    let clocks = device.supported_memory_clocks()?;
+    Ok(clocks)
+}
+
+fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
+    let nvml = get_nvml()?;
+    let mut gpus = Vec::new();
+
+    let device_count = nvml.device_count()?;
+    for i in 0..device_count {
+        let device = nvml.device_by_index(i)?;
+
+        let name = device.name()?;
+        let gpu_type = if i == 0 {
+            GpuType::Integrated
+        } else {
+            GpuType::Discrete
+        };
+        let status = "N/A".to_string();
+        let frequency = device.clock_info(nvml_wrapper::enum_wrappers::device::Clock::Graphics).ok().map(|c| c as u64);
+        let temperature = device.temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu).ok().map(|t| t as f32);
+        let load = device.utilization_rates().ok().map(|u| u.gpu as f32);
+        let power = device.power_usage().ok().map(|p| p as f32 / 1000.0);
+        let voltage = None;
+
+        gpus.push(GpuInfo {
+            name,
+            gpu_type,
+            status,
+            frequency,
+            temperature,
+            load,
+            power,
+            voltage,
+        });
+    }
+
     Ok(gpus)
 }
 
@@ -1174,7 +1261,10 @@ pub fn get_battery_info() -> Result<BatteryInfo> {
         return Err(anyhow!("No battery found"));
     };
 
+    let status = read_sysfs_string(&format!("{}/status", base)).unwrap_or_else(|_| "Unknown".to_string());
+
     Ok(BatteryInfo {
+        status,
         voltage_mv: read_sysfs_u64(&format!("{}/voltage_now", base))? / 1000,
         current_ma: read_sysfs_i64(&format!("{}/current_now", base))? / 1000,
         charge_percent: read_sysfs_u64(&format!("{}/capacity", base))?,
