@@ -815,16 +815,20 @@ pub fn get_system_info() -> Result<SystemInfo> {
 }
 
 pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
+    let mut gpus = Vec::new();
+    
+    // First, try to get NVIDIA GPU info via NVML
     if Path::new("/sys/bus/pci/drivers/nvidia").exists() {
         if let Ok(nvidia_gpus) = get_nvidia_gpu_info() {
-            if !nvidia_gpus.is_empty() {
-                return Ok(nvidia_gpus);
+            for mut gpu in nvidia_gpus {
+                // NVIDIA discrete GPU, not integrated
+                gpu.gpu_type = GpuType::Discrete;
+                gpus.push(gpu);
             }
         }
     }
 
-    let mut gpus = Vec::new();
-
+    // Also get iGPU info from /sys/class/drm for Intel/AMD integrated graphics
     for i in 0..4 {
         let card_path = format!("/sys/class/drm/card{}", i);
         if !Path::new(&card_path).exists() {
@@ -836,22 +840,29 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
         
         if let Ok(vendor) = fs::read_to_string(&vendor_path) {
             let vendor = vendor.trim();
+            
+            // Skip NVIDIA GPUs as we already got them from NVML
+            if vendor == "0x10de" {
+                continue;
+            }
+            
+            let device_id_path = format!("{}/device", device_path);
+            let device_id = fs::read_to_string(&device_id_path)
+                .unwrap_or_else(|_| "unknown".to_string())
+                .trim()
+                .to_string();
+            
             let name = match vendor {
-                "0x1002" => format!("AMD GPU {}", i),
-                "0x10de" => format!("NVIDIA GPU {}", i),
-                "0x8086" => format!("Intel GPU {}", i),
+                "0x1002" => get_amd_gpu_name(&device_id).unwrap_or_else(|| format!("AMD iGPU")),
+                "0x8086" => get_intel_gpu_name(&device_id).unwrap_or_else(|| format!("Intel iGPU")),
                 _ => format!("GPU {}", i),
             };
             
-            let gpu_type = if i == 0 {
-                GpuType::Integrated
-            } else {
-                GpuType::Discrete
-            };
+            let gpu_type = GpuType::Integrated;
             
             let status_path = format!("{}/power/runtime_status", device_path);
             let status = fs::read_to_string(&status_path)
-                .unwrap_or_else(|_| "unknown".to_string())
+                .unwrap_or_else(|_| "active".to_string())
                 .trim()
                 .to_string();
             
@@ -892,6 +903,43 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
     }
     
     Ok(gpus)
+}
+
+/// Get AMD GPU name from device ID
+fn get_amd_gpu_name(device_id: &str) -> Option<String> {
+    // Common AMD iGPU device IDs
+    match device_id {
+        // Radeon Vega series (Ryzen APUs)
+        "0x15dd" => Some("AMD Radeon Vega 8".to_string()),
+        "0x15d8" => Some("AMD Radeon Vega 3".to_string()),
+        "0x1636" => Some("AMD Radeon Graphics (Renoir)".to_string()),
+        "0x1638" => Some("AMD Radeon Graphics (Cezanne)".to_string()),
+        // RDNA2/RDNA3 iGPUs
+        "0x164c" => Some("AMD Radeon 680M".to_string()),
+        "0x164d" => Some("AMD Radeon 660M".to_string()),
+        "0x15bf" => Some("AMD Radeon 780M".to_string()),
+        "0x15c8" => Some("AMD Radeon 760M".to_string()),
+        _ => None,
+    }
+}
+
+/// Get Intel GPU name from device ID
+fn get_intel_gpu_name(device_id: &str) -> Option<String> {
+    // Common Intel iGPU device IDs
+    match device_id {
+        // Intel UHD Graphics
+        "0x3ea0" | "0x3ea5" => Some("Intel UHD Graphics 620".to_string()),
+        "0x9a49" => Some("Intel UHD Graphics (Tiger Lake)".to_string()),
+        "0x9a78" => Some("Intel UHD Graphics (Rocket Lake)".to_string()),
+        // Intel Iris Xe
+        "0x9a40" | "0x9a60" => Some("Intel Iris Xe Graphics".to_string()),
+        "0xa7a0" | "0xa7a1" => Some("Intel Iris Xe Graphics (Alder Lake)".to_string()),
+        // Intel Iris Plus
+        "0x8a52" | "0x8a5a" => Some("Intel Iris Plus Graphics".to_string()),
+        // Intel Arc
+        "0x56a0" | "0x56a1" => Some("Intel Arc Graphics (DG2)".to_string()),
+        _ => None,
+    }
 }
 
 use crate::hardware_control::get_nvml;
