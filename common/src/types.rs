@@ -175,6 +175,9 @@ pub struct GpuSettings {
     pub min_mem_clock: Option<u32>,
     pub max_mem_clock: Option<u32>,
     pub manual_clocks: bool,
+    pub core_offset: Option<i32>,
+    pub memory_offset: Option<i32>,
+    pub prime_profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -373,6 +376,9 @@ impl Default for GpuSettings {
             min_mem_clock: None,
             max_mem_clock: None,
             manual_clocks: false,
+            core_offset: Some(0),
+            memory_offset: Some(0),
+            prime_profile: Some("on-demand".to_string()),
         }
     }
 }

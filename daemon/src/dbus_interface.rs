@@ -336,6 +336,31 @@ async fn set_tdp_profile(&self, profile: &str) -> Result<(), zbus::fdo::Error> {
             Err(e) => Err(zbus::fdo::Error::Failed(e.to_string())),
         }
     }
+
+    async fn set_gpu_core_offset(&self, device_index: u32, offset: i32) -> Result<(), zbus::fdo::Error> {
+        crate::hardware_control::set_gpu_core_offset(device_index, offset)
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
+
+    async fn set_gpu_memory_offset(&self, device_index: u32, offset: i32) -> Result<(), zbus::fdo::Error> {
+        crate::hardware_control::set_gpu_memory_offset(device_index, offset)
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
+
+    async fn get_gpu_core_offset_limits(&self, device_index: u32) -> Result<(i32, i32), zbus::fdo::Error> {
+        crate::hardware_detection::get_gpu_core_offset_limits(device_index)
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
+
+    async fn get_gpu_memory_offset_limits(&self, device_index: u32) -> Result<(i32, i32), zbus::fdo::Error> {
+        crate::hardware_detection::get_gpu_memory_offset_limits(device_index)
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
+
+    async fn set_prime_profile(&self, profile: &str) -> Result<(), zbus::fdo::Error> {
+        crate::hardware_control::set_prime_profile(profile)
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
 }
 
 pub async fn start_service(_connection: Connection) -> Result<()> {

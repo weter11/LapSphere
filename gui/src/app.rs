@@ -33,6 +33,8 @@ pub struct AppState {
     pub mount_info: Vec<MountInfo>,
     pub gpu_clock_ranges: Option<(u32, u32)>,
     pub gpu_mem_clock_ranges: Option<(u32, u32)>,
+    pub gpu_core_offset_limits: Option<(i32, i32)>,
+    pub gpu_mem_offset_limits: Option<(i32, i32)>,
     pub available_start_thresholds: Vec<u8>,
     pub available_end_thresholds: Vec<u8>,
     
@@ -70,6 +72,8 @@ impl AppState {
             mount_info: Vec::new(),
             gpu_clock_ranges: None,
             gpu_mem_clock_ranges: None,
+            gpu_core_offset_limits: None,
+            gpu_mem_offset_limits: None,
             available_start_thresholds: Vec::new(),
             available_end_thresholds: Vec::new(),
             current_page: Page::Statistics,
@@ -143,6 +147,8 @@ pub enum HardwareUpdate {
     MountInfo(Vec<MountInfo>),
     GpuClockRanges(Result<(u32, u32), String>),
     GpuMemClockRanges(Result<Vec<u32>, String>),
+    GpuCoreOffsetLimits(Result<(i32, i32), String>),
+    GpuMemOffsetLimits(Result<(i32, i32), String>),
     AvailableThresholds(Vec<u8>, Vec<u8>),
     Error(String),
 }
@@ -258,6 +264,18 @@ impl TuxedoApp {
                             }
                         },
                         Err(e) => self.state.show_message(format!("Failed to get GPU memory clock ranges: {}", e), true),
+                    }
+                }
+                HardwareUpdate::GpuCoreOffsetLimits(result) => {
+                    match result {
+                        Ok(limits) => self.state.gpu_core_offset_limits = Some(limits),
+                        Err(e) => self.state.show_message(format!("Failed to get GPU core offset limits: {}", e), true),
+                    }
+                }
+                HardwareUpdate::GpuMemOffsetLimits(result) => {
+                    match result {
+                        Ok(limits) => self.state.gpu_mem_offset_limits = Some(limits),
+                        Err(e) => self.state.show_message(format!("Failed to get GPU memory offset limits: {}", e), true),
                     }
                 }
                 HardwareUpdate::AvailableThresholds(start, end) => {

@@ -824,7 +824,7 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
     }
 
     let mut gpus = Vec::new();
-    
+
     for i in 0..4 {
         let card_path = format!("/sys/class/drm/card{}", i);
         if !Path::new(&card_path).exists() {
@@ -891,6 +891,7 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
 }
 
 use crate::hardware_control::get_nvml;
+use nvml_wrapper::enum_wrappers::device::{Clock, PerformanceState};
 
 pub fn get_gpu_clock_ranges(device_index: u32) -> Result<(u32, u32)> {
     let nvml = get_nvml()?;
@@ -920,6 +921,20 @@ pub fn get_gpu_mem_clock_ranges(device_index: u32) -> Result<Vec<u32>> {
     let device = nvml.device_by_index(device_index)?;
     let clocks = device.supported_memory_clocks()?;
     Ok(clocks)
+}
+
+pub fn get_gpu_core_offset_limits(device_index: u32) -> Result<(i32, i32)> {
+    let nvml = get_nvml()?;
+    let device = nvml.device_by_index(device_index)?;
+    let offset_info = device.clock_offset(Clock::Graphics, PerformanceState::Zero)?;
+    Ok((offset_info.min_clock_offset_mhz, offset_info.max_clock_offset_mhz))
+}
+
+pub fn get_gpu_memory_offset_limits(device_index: u32) -> Result<(i32, i32)> {
+    let nvml = get_nvml()?;
+    let device = nvml.device_by_index(device_index)?;
+    let offset_info = device.clock_offset(Clock::Memory, PerformanceState::Zero)?;
+    Ok((offset_info.min_clock_offset_mhz, offset_info.max_clock_offset_mhz))
 }
 
 fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
