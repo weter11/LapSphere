@@ -858,6 +858,9 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
             // Read frequency
             let frequency = read_gpu_frequency(&device_path);
             
+            // Read memory frequency for iGPUs
+            let memory_frequency = read_gpu_memory_frequency(&device_path);
+            
             // Read temperature
             let temperature = read_gpu_temperature(&device_path);
             
@@ -875,6 +878,7 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
                 gpu_type,
                 status,
                 frequency,
+                memory_frequency,
                 temperature,
                 load,
                 power,
@@ -951,8 +955,21 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         } else {
             GpuType::Discrete
         };
-        let status = "N/A".to_string();
+        
+        // Get performance state for status
+        let status = match device.performance_state() {
+            Ok(state) => format!("{:?}", state),
+            Err(_) => {
+                // Fall back to power state
+                match device.power_state() {
+                    Ok(state) => format!("{:?}", state),
+                    Err(_) => "Active".to_string(),
+                }
+            }
+        };
+        
         let frequency = device.clock_info(nvml_wrapper::enum_wrappers::device::Clock::Graphics).ok().map(|c| c as u64);
+        let memory_frequency = device.clock_info(nvml_wrapper::enum_wrappers::device::Clock::Memory).ok().map(|c| c as u64);
         let temperature = device.temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu).ok().map(|t| t as f32);
         let load = device.utilization_rates().ok().map(|u| u.gpu as f32);
         let power = device.power_usage().ok().map(|p| p as f32 / 1000.0);
@@ -963,6 +980,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             gpu_type,
             status,
             frequency,
+            memory_frequency,
             temperature,
             load,
             power,
@@ -995,6 +1013,25 @@ fn read_gpu_frequency(device_path: &str) -> Option<u64> {
         }
     }
     
+    None
+}
+
+fn read_gpu_memory_frequency(device_path: &str) -> Option<u64> {
+    // AMD - memory clock from pp_dpm_mclk
+    if let Ok(freq_str) = fs::read_to_string(format!("{}/pp_dpm_mclk", device_path)) {
+        for line in freq_str.lines() {
+            if line.contains('*') {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    if let Ok(freq) = parts[1].trim_end_matches("Mhz").parse::<u64>() {
+                        return Some(freq);
+                    }
+                }
+            }
+        }
+    }
+    
+    // Intel doesn't typically expose memory frequency separately
     None
 }
 

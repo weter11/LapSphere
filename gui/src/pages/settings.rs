@@ -1,8 +1,9 @@
 use egui::{Ui, ScrollArea, RichText, Slider, ComboBox, Context};
 use crate::app::AppState;
+use crate::dbus_client::DbusClient;
 use crate::theme::TuxedoTheme;
 
-pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Context) {
+pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Context, dbus_client: Option<&DbusClient>) {
     ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -147,6 +148,13 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Co
             
             // Battery Charge Control
             draw_battery_settings(ui, state);
+            
+            ui.add_space(16.0);
+            ui.separator();
+            ui.add_space(16.0);
+            
+            // NVIDIA Prime Profile
+            draw_prime_profile_settings(ui, state, dbus_client);
             
             ui.add_space(16.0);
             ui.separator();
@@ -317,4 +325,92 @@ fn apply_font_size(ctx: &Context, font_size: &tuxedo_common::types::FontSize) {
     ].into();
     
     ctx.set_style(style);
+}
+
+fn draw_prime_profile_settings(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>) {
+    ui.heading("🎮 NVIDIA Prime Profile");
+    ui.add_space(8.0);
+    
+    // Check if NVIDIA GPU is present
+    let has_nvidia = state.gpu_info.iter().any(|g| g.name.contains("NVIDIA"));
+    
+    if !has_nvidia {
+        ui.label("NVIDIA GPU not detected. Prime profile switching is only available for NVIDIA GPUs.");
+        return;
+    }
+    
+    ui.label(RichText::new("⚠️ Changing the Prime profile requires a system restart to take effect.")
+        .small()
+        .italics());
+    ui.add_space(6.0);
+    
+    // Get current profile from the first profile's GPU settings as the global setting
+    let current_profile = state.current_profile()
+        .and_then(|p| p.gpu_settings.prime_profile.clone())
+        .unwrap_or_else(|| "on-demand".to_string());
+    
+    let mut selected_profile = current_profile.clone();
+    
+    ui.horizontal(|ui| {
+        ui.label("Current Profile:");
+        ComboBox::from_id_source("settings_prime_profile_combo")
+            .selected_text(&selected_profile)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut selected_profile, "on-demand".to_string(), "On-Demand");
+                ui.selectable_value(&mut selected_profile, "nvidia".to_string(), "NVIDIA");
+                ui.selectable_value(&mut selected_profile, "intel".to_string(), "Intel");
+            });
+    });
+    
+    ui.add_space(8.0);
+    
+    // Description of each mode
+    ui.vertical(|ui| {
+        match selected_profile.as_str() {
+            "on-demand" => {
+                ui.label(RichText::new("On-Demand: The discrete GPU is used for demanding applications while the integrated GPU handles normal tasks. Best balance of performance and power efficiency.").small());
+            }
+            "nvidia" => {
+                ui.label(RichText::new("NVIDIA: Always use the discrete NVIDIA GPU. Maximum performance but higher power consumption.").small());
+            }
+            "intel" => {
+                ui.label(RichText::new("Intel: Always use the integrated Intel GPU. Disables the NVIDIA GPU for maximum battery life.").small());
+            }
+            _ => {}
+        }
+    });
+    
+    ui.add_space(12.0);
+    
+    // Apply button that also updates the profile and prompts for restart
+    if selected_profile != current_profile {
+        ui.horizontal(|ui| {
+            if ui.button("💾 Apply Prime Profile").clicked() {
+                // Update the GPU settings in all profiles
+                for profile in &mut state.config.profiles {
+                    profile.gpu_settings.prime_profile = Some(selected_profile.clone());
+                }
+                let _ = state.save_config();
+                
+                // Apply via dbus
+                if let Some(client) = dbus_client {
+                    let _ = client.set_prime_profile(&selected_profile);
+                }
+                
+                state.show_message("Prime profile applied. Please restart your laptop for changes to take effect.", false);
+            }
+            
+            if ui.button("🔄 Restart Now").clicked() {
+                // Trigger system restart
+                let _ = std::process::Command::new("systemctl")
+                    .args(&["reboot"])
+                    .spawn();
+            }
+        });
+        
+        ui.add_space(4.0);
+        ui.label(RichText::new("⚠️ The restart button will immediately reboot your laptop!")
+            .small()
+            .color(egui::Color32::from_rgb(255, 150, 50)));
+    }
 }
