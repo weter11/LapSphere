@@ -75,6 +75,7 @@ pub struct GpuInfo {
     pub power: Option<f32>,
     pub voltage: Option<f32>,
     pub nvidia_offset_limits: Option<NvidiaOffsetLimits>,
+    pub gpu_backend: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
