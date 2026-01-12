@@ -34,6 +34,11 @@ pub enum DbusCommand {
     GetGpuMemClockRanges { device_index: u32, reply: oneshot::Sender<Result<Vec<u32>>> },
     SetMemoryLockedClocks { device_index: u32, min_clock: u32, max_clock: u32, reply: oneshot::Sender<Result<()>> },
     ResetMemoryLockedClocks { device_index: u32, reply: oneshot::Sender<Result<()>> },
+    SetGpuCoreOffset { device_index: u32, offset: i32, reply: oneshot::Sender<Result<()>> },
+    SetGpuMemoryOffset { device_index: u32, offset: i32, reply: oneshot::Sender<Result<()>> },
+    GetGpuCoreOffsetLimits { device_index: u32, reply: oneshot::Sender<Result<(i32, i32)>> },
+    GetGpuMemoryOffsetLimits { device_index: u32, reply: oneshot::Sender<Result<(i32, i32)>> },
+    SetPrimeProfile { profile: String, reply: oneshot::Sender<Result<()>> },
 }
 
 impl DbusClient {
@@ -197,6 +202,36 @@ impl DbusClient {
         let _ = self.command_tx.send(DbusCommand::ResetMemoryLockedClocks { device_index, reply: tx });
         rx
     }
+
+    pub fn set_gpu_core_offset(&self, device_index: u32, offset: i32) -> oneshot::Receiver<Result<()>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::SetGpuCoreOffset { device_index, offset, reply: tx });
+        rx
+    }
+
+    pub fn set_gpu_memory_offset(&self, device_index: u32, offset: i32) -> oneshot::Receiver<Result<()>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::SetGpuMemoryOffset { device_index, offset, reply: tx });
+        rx
+    }
+
+    pub fn get_gpu_core_offset_limits(&self, device_index: u32) -> oneshot::Receiver<Result<(i32, i32)>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::GetGpuCoreOffsetLimits { device_index, reply: tx });
+        rx
+    }
+
+    pub fn get_gpu_memory_offset_limits(&self, device_index: u32) -> oneshot::Receiver<Result<(i32, i32)>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::GetGpuMemoryOffsetLimits { device_index, reply: tx });
+        rx
+    }
+
+    pub fn set_prime_profile(&self, profile: &str) -> oneshot::Receiver<Result<()>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::SetPrimeProfile { profile: profile.to_string(), reply: tx });
+        rx
+    }
 }
 
 // Background worker - handles all DBus calls asynchronously
@@ -299,6 +334,26 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
             }
             DbusCommand::ResetMemoryLockedClocks { device_index, reply } => {
                 let result = reset_memory_locked_clocks_impl(&connection, device_index).await;
+                let _ = reply.send(result);
+            }
+            DbusCommand::SetGpuCoreOffset { device_index, offset, reply } => {
+                let result = set_gpu_core_offset_impl(&connection, device_index, offset).await;
+                let _ = reply.send(result);
+            }
+            DbusCommand::SetGpuMemoryOffset { device_index, offset, reply } => {
+                let result = set_gpu_memory_offset_impl(&connection, device_index, offset).await;
+                let _ = reply.send(result);
+            }
+            DbusCommand::GetGpuCoreOffsetLimits { device_index, reply } => {
+                let result = get_gpu_core_offset_limits_impl(&connection, device_index).await;
+                let _ = reply.send(result);
+            }
+            DbusCommand::GetGpuMemoryOffsetLimits { device_index, reply } => {
+                let result = get_gpu_memory_offset_limits_impl(&connection, device_index).await;
+                let _ = reply.send(result);
+            }
+            DbusCommand::SetPrimeProfile { profile, reply } => {
+                let result = set_prime_profile_impl(&connection, &profile).await;
                 let _ = reply.send(result);
             }
         }
@@ -592,5 +647,60 @@ async fn reset_memory_locked_clocks_impl(conn: &Connection, device_index: u32) -
         "com.tuxedo.Control",
     ).await?;
     proxy.call::<_, _, ()>("ResetMemoryLockedClocks", &(device_index,)).await?;
+    Ok(())
+}
+
+async fn set_gpu_core_offset_impl(conn: &Connection, device_index: u32, offset: i32) -> Result<()> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "com.tuxedo.Control",
+        "/com/tuxedo/Control",
+        "com.tuxedo.Control",
+    ).await?;
+    proxy.call::<_, _, ()>("SetGpuCoreOffset", &(device_index, offset)).await?;
+    Ok(())
+}
+
+async fn set_gpu_memory_offset_impl(conn: &Connection, device_index: u32, offset: i32) -> Result<()> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "com.tuxedo.Control",
+        "/com/tuxedo/Control",
+        "com.tuxedo.Control",
+    ).await?;
+    proxy.call::<_, _, ()>("SetGpuMemoryOffset", &(device_index, offset)).await?;
+    Ok(())
+}
+
+async fn get_gpu_core_offset_limits_impl(conn: &Connection, device_index: u32) -> Result<(i32, i32)> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "com.tuxedo.Control",
+        "/com/tuxedo/Control",
+        "com.tuxedo.Control",
+    ).await?;
+    let limits: (i32, i32) = proxy.call("GetGpuCoreOffsetLimits", &(device_index,)).await?;
+    Ok(limits)
+}
+
+async fn get_gpu_memory_offset_limits_impl(conn: &Connection, device_index: u32) -> Result<(i32, i32)> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "com.tuxedo.Control",
+        "/com/tuxedo/Control",
+        "com.tuxedo.Control",
+    ).await?;
+    let limits: (i32, i32) = proxy.call("GetGpuMemoryOffsetLimits", &(device_index,)).await?;
+    Ok(limits)
+}
+
+async fn set_prime_profile_impl(conn: &Connection, profile: &str) -> Result<()> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "com.tuxedo.Control",
+        "/com/tuxedo/Control",
+        "com.tuxedo.Control",
+    ).await?;
+    proxy.call::<_, _, ()>("SetPrimeProfile", &(profile,)).await?;
     Ok(())
 }

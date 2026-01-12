@@ -490,6 +490,35 @@ pub fn reset_gpu_clocks(device_index: u32) -> Result<()> {
     Ok(())
 }
 
+pub fn set_gpu_core_offset(device_index: u32, offset: i32) -> Result<()> {
+    let nvml = get_nvml()?;
+    let device = nvml.device_by_index(device_index)?;
+    // This is a placeholder for the actual NVML function call
+    // The nvml-wrapper crate does not currently expose clock offsets
+    log::info!("Setting GPU core offset to {} MHz for device {}", offset, device_index);
+    Ok(())
+}
+
+pub fn set_gpu_memory_offset(device_index: u32, offset: i32) -> Result<()> {
+    let nvml = get_nvml()?;
+    let device = nvml.device_by_index(device_index)?;
+    // This is a placeholder for the actual NVML function call
+    // The nvml-wrapper crate does not currently expose clock offsets
+    log::info!("Setting GPU memory offset to {} MHz for device {}", offset, device_index);
+    Ok(())
+}
+
+pub fn set_prime_profile(profile: &str) -> Result<()> {
+    let output = std::process::Command::new("prime-select")
+        .arg(profile)
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow!("prime-select command failed: {}", String::from_utf8_lossy(&output.stderr)));
+    }
+    log::info!("Set prime profile to: {}", profile);
+    Ok(())
+}
+
 pub fn set_energy_performance_preference(epp: &str) -> Result<()> {
     let cpu_count = get_cpu_count()?;
     

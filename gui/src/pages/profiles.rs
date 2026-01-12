@@ -220,6 +220,9 @@ fn create_standard_profile() -> tuxedo_common::types::Profile {
             min_mem_clock: None,
             max_mem_clock: None,
             manual_clocks: false,
+            core_offset: Some(0),
+            memory_offset: Some(0),
+            prime_profile: Some("on-demand".to_string()),
         },
         keyboard_settings: KeyboardSettings {
             control_enabled: false,

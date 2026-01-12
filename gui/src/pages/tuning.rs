@@ -363,6 +363,57 @@ fn draw_gpu_tuning(
         } else {
             ui.label("Fetching memory clock ranges...");
         }
+
+        ui.add_space(16.0);
+
+        // GPU Core Offset
+        ui.label(RichText::new("GPU Core Offset:").strong());
+        if let Some((min_limit, max_limit)) = state.gpu_core_offset_limits {
+            let mut core_offset = profile.gpu_settings.core_offset.unwrap_or(0);
+            ui.add(Slider::new(&mut core_offset, min_limit..=max_limit).suffix(" MHz"));
+            profile.gpu_settings.core_offset = Some(core_offset);
+            if ui.button("Apply Core Offset").clicked() {
+            if let Some(client) = dbus_client {
+                let _ = client.set_gpu_core_offset(0, core_offset);
+            }
+        }
+
+        ui.add_space(16.0);
+
+        // GPU Memory Offset
+        ui.label(RichText::new("GPU Memory Offset:").strong());
+        if let Some((min_limit, max_limit)) = state.gpu_mem_offset_limits {
+            let mut memory_offset = profile.gpu_settings.memory_offset.unwrap_or(0);
+            ui.add(Slider::new(&mut memory_offset, min_limit..=max_limit).suffix(" MHz"));
+            profile.gpu_settings.memory_offset = Some(memory_offset);
+            if ui.button("Apply Memory Offset").clicked() {
+            if let Some(client) = dbus_client {
+                let _ = client.set_gpu_memory_offset(0, memory_offset);
+            }
+        }
+
+        ui.add_space(16.0);
+
+        ui.label(RichText::new("Clock and offset controls are managed by NVML.").small().italics());
+    }
+
+    // NVIDIA Prime Profile Selection
+    ui.add_space(16.0);
+    ui.label(RichText::new("NVIDIA Prime Profile:").strong());
+    let mut prime_profile = profile.gpu_settings.prime_profile.clone().unwrap_or_else(|| "on-demand".to_string());
+    ComboBox::from_id_source("prime_profile_combo")
+        .selected_text(prime_profile.clone())
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut prime_profile, "on-demand".to_string(), "On-Demand");
+            ui.selectable_value(&mut prime_profile, "nvidia".to_string(), "NVIDIA");
+            ui.selectable_value(&mut prime_profile, "intel".to_string(), "Intel");
+        });
+
+    if prime_profile != profile.gpu_settings.prime_profile.clone().unwrap_or_default() {
+        if let Some(client) = dbus_client {
+            let _ = client.set_prime_profile(&prime_profile);
+        }
+        profile.gpu_settings.prime_profile = Some(prime_profile);
     }
 }
 
@@ -524,6 +575,9 @@ fn create_default_profile_for_reset(is_standard: bool) -> Profile {
                 min_mem_clock: None,
                 max_mem_clock: None,
                 manual_clocks: false,
+                core_offset: Some(0),
+                memory_offset: Some(0),
+                prime_profile: Some("on-demand".to_string()),
             },
             keyboard_settings: KeyboardSettings {
                 control_enabled: false,
