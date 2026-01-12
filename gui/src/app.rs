@@ -176,13 +176,14 @@ impl TuxedoApp {
 
             // Fetch available thresholds
             let client_clone = client.clone();
+            let thresholds_tx = hw_update_tx.clone();
             tokio::spawn(async move {
                 let start_rx = client_clone.get_battery_available_start_thresholds();
                 let end_rx = client_clone.get_battery_available_end_thresholds();
 
                 match (start_rx.await, end_rx.await) {
                     (Ok(Ok(start)), Ok(Ok(end))) => {
-                        let _ = hw_update_tx.send(HardwareUpdate::AvailableThresholds(start, end));
+                        let _ = thresholds_tx.send(HardwareUpdate::AvailableThresholds(start, end));
                     }
                     _ => {}
                 }

@@ -213,7 +213,10 @@ fn create_standard_profile() -> tuxedo_common::types::Profile {
             tdp: None,
             amd_pstate_status: Some("active".to_string()),
         },
-        gpu_settings: GpuSettings { dgpu_tdp: None },
+        gpu_settings: GpuSettings {
+            dgpu_tdp: None,
+            ..GpuSettings::default()
+        },
         keyboard_settings: KeyboardSettings {
             control_enabled: false,
             mode: KeyboardMode::SingleColor {
