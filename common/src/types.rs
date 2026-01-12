@@ -79,6 +79,7 @@ pub struct GpuInfo {
     pub gpu_type: GpuType,
     pub status: String,
     pub frequency: Option<u64>,
+    pub memory_frequency: Option<u64>,
     pub temperature: Option<f32>,
     pub load: Option<f32>,
     pub power: Option<f32>,

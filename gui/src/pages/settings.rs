@@ -1,8 +1,9 @@
 use egui::{Ui, ScrollArea, RichText, Slider, ComboBox, Context};
 use crate::app::AppState;
+use crate::dbus_client::DbusClient;
 use crate::theme::TuxedoTheme;
 
-pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Context) {
+pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Context, dbus_client: Option<&DbusClient>) {
     ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -147,6 +148,13 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Co
             
             // Battery Charge Control
             draw_battery_settings(ui, state);
+            
+            ui.add_space(16.0);
+            ui.separator();
+            ui.add_space(16.0);
+            
+            // NVIDIA Prime Profile
+            draw_prime_profile_settings(ui, state, dbus_client);
             
             ui.add_space(16.0);
             ui.separator();
@@ -317,4 +325,129 @@ fn apply_font_size(ctx: &Context, font_size: &tuxedo_common::types::FontSize) {
     ].into();
     
     ctx.set_style(style);
+}
+
+fn draw_prime_profile_settings(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>) {
+    ui.heading("🎮 NVIDIA Prime Profile");
+    ui.add_space(8.0);
+    
+    // Check if NVIDIA GPU is present
+    let has_nvidia = state.gpu_info.iter().any(|g| g.name.contains("NVIDIA"));
+    
+    if !has_nvidia {
+        ui.label("NVIDIA GPU not detected. Prime profile switching is only available for NVIDIA GPUs.");
+        return;
+    }
+    
+    ui.label(RichText::new("⚠️ Changing the Prime profile requires a system restart to take effect.")
+        .small()
+        .italics());
+    ui.add_space(6.0);
+    
+    // Get current saved profile from config
+    let current_profile = state.current_profile()
+        .and_then(|p| p.gpu_settings.prime_profile.clone())
+        .unwrap_or_else(|| "on-demand".to_string());
+    
+    // Initialize pending selection if not set
+    if state.pending_prime_profile.is_none() {
+        state.pending_prime_profile = Some(current_profile.clone());
+    }
+    
+    // Use the pending selection for the combo box
+    let mut selected_profile = state.pending_prime_profile.clone().unwrap_or(current_profile.clone());
+    
+    ui.horizontal(|ui| {
+        ui.label("Current Profile:");
+        ComboBox::from_id_source("settings_prime_profile_combo")
+            .selected_text(&selected_profile)
+            .show_ui(ui, |ui| {
+                if ui.selectable_value(&mut selected_profile, "on-demand".to_string(), "On-Demand").clicked() {
+                    state.pending_prime_profile = Some("on-demand".to_string());
+                }
+                if ui.selectable_value(&mut selected_profile, "nvidia".to_string(), "NVIDIA").clicked() {
+                    state.pending_prime_profile = Some("nvidia".to_string());
+                }
+                if ui.selectable_value(&mut selected_profile, "intel".to_string(), "Intel").clicked() {
+                    state.pending_prime_profile = Some("intel".to_string());
+                }
+            });
+    });
+    
+    // Update pending selection if changed
+    if state.pending_prime_profile.as_ref() != Some(&selected_profile) {
+        state.pending_prime_profile = Some(selected_profile.clone());
+    }
+    
+    ui.add_space(8.0);
+    
+    // Description of each mode
+    ui.vertical(|ui| {
+        match selected_profile.as_str() {
+            "on-demand" => {
+                ui.label(RichText::new("On-Demand: The discrete GPU is used for demanding applications while the integrated GPU handles normal tasks. Best balance of performance and power efficiency.").small());
+            }
+            "nvidia" => {
+                ui.label(RichText::new("NVIDIA: Always use the discrete NVIDIA GPU. Maximum performance but higher power consumption.").small());
+            }
+            "intel" => {
+                ui.label(RichText::new("Intel: Always use the integrated Intel GPU. Disables the NVIDIA GPU for maximum battery life.").small());
+            }
+            _ => {}
+        }
+    });
+    
+    ui.add_space(12.0);
+    
+    // Show Apply button if selection differs from saved config
+    if selected_profile != current_profile {
+        ui.horizontal(|ui| {
+            if ui.button("💾 Apply Prime Profile").clicked() {
+                // Update the GPU settings in all profiles
+                for profile in &mut state.config.profiles {
+                    profile.gpu_settings.prime_profile = Some(selected_profile.clone());
+                }
+                let _ = state.save_config();
+                
+                // Apply via dbus
+                if let Some(client) = dbus_client {
+                    let _ = client.set_prime_profile(&selected_profile);
+                }
+                
+                // Reset pending to new value
+                state.pending_prime_profile = Some(selected_profile.clone());
+                
+                state.show_message("Prime profile applied. Please restart your laptop for changes to take effect.", false);
+            }
+        });
+        
+        ui.add_space(8.0);
+        
+        // Two-step restart confirmation
+        if !state.restart_confirmation_pending {
+            if ui.button("🔄 Restart Laptop...").clicked() {
+                state.restart_confirmation_pending = true;
+            }
+        } else {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Are you sure you want to restart now?").strong());
+            });
+            ui.horizontal(|ui| {
+                if ui.button("✅ Yes, Restart Now").clicked() {
+                    state.restart_confirmation_pending = false;
+                    // Trigger system restart via systemctl (requires polkit authorization)
+                    let _ = std::process::Command::new("systemctl")
+                        .args(["reboot"])
+                        .spawn();
+                }
+                if ui.button("❌ Cancel").clicked() {
+                    state.restart_confirmation_pending = false;
+                }
+            });
+            
+            ui.label(RichText::new("⚠️ This will immediately reboot your laptop! Save all work first.")
+                .small()
+                .color(egui::Color32::from_rgb(255, 100, 100)));
+        }
+    }
 }

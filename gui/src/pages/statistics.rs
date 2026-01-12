@@ -297,12 +297,32 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                             ui.end_row();
                             
                             ui.label("Status:");
-                            ui.label(&gpu.status);
+                            // Display performance state with better formatting
+                            let status_display = match gpu.status.as_str() {
+                                "P0" => "P0 (Maximum Performance)",
+                                "P1" => "P1 (High Performance)",
+                                "P2" => "P2 (Performance)",
+                                "P3" => "P3 (Balanced)",
+                                "P5" => "P5 (Balanced)",
+                                "P8" => "P8 (Power Saving)",
+                                "P12" => "P12 (Deep Power Saving)",
+                                "active" => "Active",
+                                "suspended" => "Suspended",
+                                "unknown" => "Unknown",
+                                other => other,
+                            };
+                            ui.label(status_display);
                             ui.end_row();
                             
                             if let Some(freq) = gpu.frequency {
-                                ui.label("Frequency:");
+                                ui.label("Core Frequency:");
                                 ui.label(format!("{} MHz", freq));
+                                ui.end_row();
+                            }
+                            
+                            if let Some(mem_freq) = gpu.memory_frequency {
+                                ui.label("Memory Frequency:");
+                                ui.label(format!("{} MHz", mem_freq));
                                 ui.end_row();
                             }
                             

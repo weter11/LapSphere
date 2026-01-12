@@ -41,6 +41,8 @@ pub struct AppState {
     // UI state
     pub current_page: Page,
     pub status_message: Option<StatusMessage>,
+    pub restart_confirmation_pending: bool,
+    pub pending_prime_profile: Option<String>,
     
     // Profile editing
     pub editing_profile_index: Option<usize>,
@@ -78,6 +80,8 @@ impl AppState {
             available_end_thresholds: Vec::new(),
             current_page: Page::Statistics,
             status_message: None,
+            restart_confirmation_pending: false,
+            pending_prime_profile: None,
             editing_profile_index: None,
             editing_profile_name: None,
             pending_battery_update: None,
@@ -379,7 +383,7 @@ impl eframe::App for TuxedoApp {
                     tuning::draw(ui, &mut self.state, self.dbus_client.as_ref(), hw_update_tx);
                 }
                 Page::Settings => {
-                    settings::draw(ui, &mut self.state, &mut self.theme, ctx);
+                    settings::draw(ui, &mut self.state, &mut self.theme, ctx, self.dbus_client.as_ref());
                 }
             }
         });

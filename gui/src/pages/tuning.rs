@@ -30,7 +30,10 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>,
                     // Also apply to hardware
                     if let Some(client) = dbus_client {
                         let profile_clone = state.config.profiles[idx].clone();
-                        let _rx = client.apply_profile(profile_clone);
+                        let _rx = client.apply_profile(profile_clone.clone());
+                        
+                        // Apply GPU settings on save
+                        apply_gpu_settings_on_save(client, &profile_clone.gpu_settings);
                     }
                 }
                 
@@ -269,15 +272,8 @@ fn draw_gpu_tuning(
         return;
     }
 
-    if ui.checkbox(&mut profile.gpu_settings.manual_clocks, "Enable Manual Clock Control").clicked() {
-        if !profile.gpu_settings.manual_clocks {
-            // Reset clocks when disabling manual control
-            if let Some(client) = dbus_client {
-                let _ = client.reset_gpu_clocks(0);
-                let _ = client.reset_memory_locked_clocks(0);
-            }
-        }
-    }
+    ui.checkbox(&mut profile.gpu_settings.manual_clocks, "Enable Manual Clock Control");
+    ui.label(RichText::new("GPU settings will be applied when you click Save. Disabling manual control will reset to factory settings.").small().italics());
 
     if profile.gpu_settings.manual_clocks {
         // Fetch ranges if they haven't been fetched yet
@@ -349,12 +345,6 @@ fn draw_gpu_tuning(
 
             profile.gpu_settings.min_gpu_clock = Some(min_gpu_clock);
             profile.gpu_settings.max_gpu_clock = Some(max_gpu_clock);
-
-            if ui.button("Apply GPU Clocks").clicked() {
-                if let Some(client) = dbus_client {
-                    let _ = client.set_gpu_locked_clocks(0, min_gpu_clock, max_gpu_clock);
-                }
-            }
         } else {
             ui.label("Fetching GPU clock ranges...");
         }
@@ -379,12 +369,6 @@ fn draw_gpu_tuning(
 
             profile.gpu_settings.min_mem_clock = Some(min_mem_clock);
             profile.gpu_settings.max_mem_clock = Some(max_mem_clock);
-
-            if ui.button("Apply Memory Clocks").clicked() {
-                if let Some(client) = dbus_client {
-                    let _ = client.set_memory_locked_clocks(0, min_mem_clock, max_mem_clock);
-                }
-            }
         } else {
             ui.label("Fetching memory clock ranges...");
         }
@@ -397,11 +381,6 @@ fn draw_gpu_tuning(
             let mut core_offset = profile.gpu_settings.core_offset.unwrap_or(0);
             ui.add(Slider::new(&mut core_offset, min_limit..=max_limit).suffix(" MHz"));
             profile.gpu_settings.core_offset = Some(core_offset);
-            if ui.button("Apply Core Offset").clicked() {
-                if let Some(client) = dbus_client {
-                    let _ = client.set_gpu_core_offset(0, core_offset);
-                }
-            }
         }
 
         ui.add_space(16.0);
@@ -412,37 +391,45 @@ fn draw_gpu_tuning(
             let mut memory_offset = profile.gpu_settings.memory_offset.unwrap_or(0);
             ui.add(Slider::new(&mut memory_offset, min_limit..=max_limit).suffix(" MHz"));
             profile.gpu_settings.memory_offset = Some(memory_offset);
-            if ui.button("Apply Memory Offset").clicked() {
-                if let Some(client) = dbus_client {
-                    let _ = client.set_gpu_memory_offset(0, memory_offset);
-                }
-            }
         } else {
             ui.label("Fetching GPU memory offset limits...");
         }
 
         ui.add_space(16.0);
 
-        ui.label(RichText::new("Clock and offset controls are managed by NVML.").small().italics());
+        ui.label(RichText::new("Clock and offset controls are applied when you click Save. They are managed by NVML.").small().italics());
     }}
+}
 
-    // NVIDIA Prime Profile Selection
-    ui.add_space(16.0);
-    ui.label(RichText::new("NVIDIA Prime Profile:").strong());
-    let mut prime_profile = profile.gpu_settings.prime_profile.clone().unwrap_or_else(|| "on-demand".to_string());
-    ComboBox::from_id_source("prime_profile_combo")
-        .selected_text(prime_profile.clone())
-        .show_ui(ui, |ui| {
-            ui.selectable_value(&mut prime_profile, "on-demand".to_string(), "On-Demand");
-            ui.selectable_value(&mut prime_profile, "nvidia".to_string(), "NVIDIA");
-            ui.selectable_value(&mut prime_profile, "intel".to_string(), "Intel");
-        });
-
-    if prime_profile != profile.gpu_settings.prime_profile.clone().unwrap_or_default() {
-        if let Some(client) = dbus_client {
-            let _ = client.set_prime_profile(&prime_profile);
+/// Apply GPU settings when the save button is clicked
+fn apply_gpu_settings_on_save(client: &DbusClient, gpu_settings: &tuxedo_common::types::GpuSettings) {
+    if gpu_settings.manual_clocks {
+        // Apply GPU locked clocks if set
+        if let (Some(min_clock), Some(max_clock)) = (gpu_settings.min_gpu_clock, gpu_settings.max_gpu_clock) {
+            let _ = client.set_gpu_locked_clocks(0, min_clock, max_clock);
         }
-        profile.gpu_settings.prime_profile = Some(prime_profile);
+        
+        // Apply memory locked clocks if set
+        if let (Some(min_mem), Some(max_mem)) = (gpu_settings.min_mem_clock, gpu_settings.max_mem_clock) {
+            let _ = client.set_memory_locked_clocks(0, min_mem, max_mem);
+        }
+        
+        // Apply core offset if set
+        if let Some(core_offset) = gpu_settings.core_offset {
+            let _ = client.set_gpu_core_offset(0, core_offset);
+        }
+        
+        // Apply memory offset if set
+        if let Some(memory_offset) = gpu_settings.memory_offset {
+            let _ = client.set_gpu_memory_offset(0, memory_offset);
+        }
+    } else {
+        // Reset to factory settings when manual control is disabled
+        let _ = client.reset_gpu_clocks(0);
+        let _ = client.reset_memory_locked_clocks(0);
+        // Reset offsets to 0
+        let _ = client.set_gpu_core_offset(0, 0);
+        let _ = client.set_gpu_memory_offset(0, 0);
     }
 }
 
