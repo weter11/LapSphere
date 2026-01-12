@@ -147,6 +147,8 @@ pub enum HardwareUpdate {
     MountInfo(Vec<MountInfo>),
     GpuClockRanges(Result<(u32, u32), String>),
     GpuMemClockRanges(Result<Vec<u32>, String>),
+    GpuCoreOffsetLimits(Result<(i32, i32), String>),
+    GpuMemOffsetLimits(Result<(i32, i32), String>),
     AvailableThresholds(Vec<u8>, Vec<u8>),
     Error(String),
 }
@@ -262,6 +264,18 @@ impl TuxedoApp {
                             }
                         },
                         Err(e) => self.state.show_message(format!("Failed to get GPU memory clock ranges: {}", e), true),
+                    }
+                }
+                HardwareUpdate::GpuCoreOffsetLimits(result) => {
+                    match result {
+                        Ok(limits) => self.state.gpu_core_offset_limits = Some(limits),
+                        Err(e) => self.state.show_message(format!("Failed to get GPU core offset limits: {}", e), true),
+                    }
+                }
+                HardwareUpdate::GpuMemOffsetLimits(result) => {
+                    match result {
+                        Ok(limits) => self.state.gpu_mem_offset_limits = Some(limits),
+                        Err(e) => self.state.show_message(format!("Failed to get GPU memory offset limits: {}", e), true),
                     }
                 }
                 HardwareUpdate::AvailableThresholds(start, end) => {

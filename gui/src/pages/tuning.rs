@@ -302,6 +302,30 @@ fn draw_gpu_tuning(
                     });
                 }
             }
+            if state.gpu_core_offset_limits.is_none() {
+                if let Some(client) = dbus_client {
+                    let client = client.clone();
+                    let tx = hw_update_tx.clone();
+                    tokio::spawn(async move {
+                        let res = client.get_gpu_core_offset_limits(0).await
+                            .map(|r| r.map_err(|e| e.to_string()))
+                            .unwrap_or_else(|e| Err(e.to_string()));
+                        let _ = tx.send(crate::app::HardwareUpdate::GpuCoreOffsetLimits(res));
+                    });
+                }
+            }
+            if state.gpu_mem_offset_limits.is_none() {
+                if let Some(client) = dbus_client {
+                    let client = client.clone();
+                    let tx = hw_update_tx.clone();
+                    tokio::spawn(async move {
+                        let res = client.get_gpu_memory_offset_limits(0).await
+                            .map(|r| r.map_err(|e| e.to_string()))
+                            .unwrap_or_else(|e| Err(e.to_string()));
+                        let _ = tx.send(crate::app::HardwareUpdate::GpuMemOffsetLimits(res));
+                    });
+                }
+            }
         }
     }
 
