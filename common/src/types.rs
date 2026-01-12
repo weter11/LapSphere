@@ -14,8 +14,8 @@ pub struct CpuInfo {
     pub median_load: f32,
     pub package_temp: f32,
     pub package_power: Option<f32>,
-    pub power_source: Option<String>,  // NEW: Shows source of power reading
-    pub all_power_sources: Vec<PowerSource>,  // NEW: All available power sources
+    pub power_source: Option<String>,
+    pub all_power_sources: Vec<PowerSource>,
     pub cores: Vec<CoreInfo>,
     pub governor: String,
     pub available_governors: Vec<String>,
@@ -27,13 +27,16 @@ pub struct CpuInfo {
     pub max_freq: Option<u64>,
     pub hw_min_freq: u64,
     pub hw_max_freq: u64,
+    pub available_pstate_controls: Vec<String>, // NEW: List of available controls for current pstate
+    pub energy_performance_preference: Option<String>, // NEW: EPP value
+    pub available_epp_preferences: Vec<String>, // NEW: Available EPP values
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PowerSource {
-    pub name: String,      // e.g., "RAPL", "amdgpu", "zenpower"
-    pub value: f32,        // Power in watts
-    pub description: String,  // e.g., "Intel RAPL", "AMD APU (CPU+iGPU)", "Zenpower driver"
+    pub name: String,
+    pub value: f32,
+    pub description: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,18 +51,27 @@ pub struct CoreInfo {
 pub struct GpuInfo {
     pub name: String,
     pub gpu_type: GpuType,
-    pub status: String,
+    pub status: GpuStatus, // NEW: Enum instead of string
     pub frequency: Option<u64>,
     pub temperature: Option<f32>,
     pub load: Option<f32>,
     pub power: Option<f32>,
     pub voltage: Option<f32>,
+    pub driver: Option<String>, // NEW: Driver name
+    pub pci_id: Option<String>, // NEW: PCI ID
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum GpuType {
     Integrated,
     Discrete,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum GpuStatus {
+    Active,
+    Suspended,
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,19 +84,37 @@ pub struct BatteryInfo {
     pub model: String,
     pub charge_start_threshold: Option<u8>,
     pub charge_end_threshold: Option<u8>,
+    pub status: BatteryStatus, // NEW: Charging/Discharging/Full/Unknown
+    pub power_draw_w: Option<f32>, // NEW: Actual power draw in watts
+    pub on_ac_power: bool, // NEW: Whether on AC power
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum BatteryStatus {
+    Charging,
+    Discharging,
+    Full,
+    NotCharging,
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FanInfo {
     pub id: u32,
     pub name: String,
-    pub rpm_or_percent: u32,
+    pub rpm: Option<u32>, // NEW: Actual RPM reading
+    pub duty_percent: u32, // Current duty cycle percentage
+    pub temperature: Option<f32>, // NEW: Associated temperature sensor
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WiFiInfo {
     pub interface: String,
+    pub chip_model: String, // NEW: Actual chip model
     pub driver: String,
+    pub link_speed_mbps: Option<u32>, // NEW: Link speed
+    pub signal_strength: Option<i32>, // NEW: Signal in dBm
+    pub ssid: Option<String>, // NEW: Connected SSID
     pub temperature: Option<f32>,
 }
 
@@ -118,6 +148,7 @@ pub struct CpuSettings {
     pub performance_profile: Option<String>,
     pub tdp: Option<u32>,
     pub amd_pstate_status: Option<String>,
+    pub energy_performance_preference: Option<String>, // NEW: EPP setting
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,8 +164,16 @@ pub struct KeyboardSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum KeyboardMode {
-    SingleColor { r: u8, g: u8, b: u8, brightness: u8 },
-    Effect { effect: String, speed: u8 },
+    SingleColor { 
+        r: u8, 
+        g: u8, 
+        b: u8, 
+        brightness: u8 
+    },
+    Effect { 
+        effect: String, 
+        speed: u8 
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,7 +240,7 @@ impl Default for AppConfig {
             start_minimized: false,
             autostart: false,
             fan_daemon_enabled: true,
-            app_monitoring_enabled: true,
+            app_monitoring_enabled: false, // Disabled by default per requirements
             cpu_scheduler: "CFS".to_string(),
             statistics_sections: StatisticsSections::default(),
             tuning_section_order: vec![
@@ -266,6 +305,7 @@ impl Default for CpuSettings {
             performance_profile: None,
             tdp: None,
             amd_pstate_status: None,
+            energy_performance_preference: None,
         }
     }
 }

@@ -6,6 +6,7 @@ pub struct ControlInterface;
 
 #[interface(name = "com.tuxedo.Control")]
 impl ControlInterface {
+    // System info
     async fn get_system_info(&self) -> Result<String, zbus::fdo::Error> {
         match crate::hardware_detection::get_system_info() {
             Ok(info) => serde_json::to_string(&info)
@@ -14,6 +15,7 @@ impl ControlInterface {
         }
     }
 
+    // CPU info
     async fn get_cpu_info(&self) -> Result<String, zbus::fdo::Error> {
         match crate::hardware_detection::get_cpu_info() {
             Ok(info) => serde_json::to_string(&info)
@@ -22,6 +24,7 @@ impl ControlInterface {
         }
     }
 
+    // GPU info
     async fn get_gpu_info(&self) -> Result<String, zbus::fdo::Error> {
         match crate::hardware_detection::get_gpu_info() {
             Ok(info) => serde_json::to_string(&info)
@@ -29,7 +32,35 @@ impl ControlInterface {
             Err(e) => Err(zbus::fdo::Error::Failed(e.to_string())),
         }
     }
+    
+    // Battery info
+    async fn get_battery_info(&self) -> Result<String, zbus::fdo::Error> {
+        match crate::hardware_detection::get_battery_info() {
+            Ok(info) => serde_json::to_string(&info)
+                .map_err(|e| zbus::fdo::Error::Failed(e.to_string())),
+            Err(e) => Err(zbus::fdo::Error::Failed(e.to_string())),
+        }
+    }
+    
+    // WiFi info
+    async fn get_wifi_info(&self) -> Result<String, zbus::fdo::Error> {
+        match crate::hardware_detection::get_wifi_info() {
+            Ok(info) => serde_json::to_string(&info)
+                .map_err(|e| zbus::fdo::Error::Failed(e.to_string())),
+            Err(e) => Err(zbus::fdo::Error::Failed(e.to_string())),
+        }
+    }
+    
+    // Fan info
+    async fn get_fan_info(&self) -> Result<String, zbus::fdo::Error> {
+        match crate::hardware_detection::get_fan_info() {
+            Ok(info) => serde_json::to_string(&info)
+                .map_err(|e| zbus::fdo::Error::Failed(e.to_string())),
+            Err(e) => Err(zbus::fdo::Error::Failed(e.to_string())),
+        }
+    }
 
+    // CPU control methods
     async fn set_cpu_governor(&self, governor: &str) -> Result<(), zbus::fdo::Error> {
         crate::hardware_control::set_cpu_governor(governor)
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
@@ -58,7 +89,13 @@ impl ControlInterface {
         crate::hardware_control::set_amd_pstate_status(status)
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
+    
+    async fn set_energy_performance_preference(&self, preference: &str) -> Result<(), zbus::fdo::Error> {
+        crate::hardware_control::set_energy_performance_preference(preference)
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
 
+    // Profile application
     async fn apply_profile(&self, profile_json: &str) -> Result<(), zbus::fdo::Error> {
         let profile: Profile = serde_json::from_str(profile_json)
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;

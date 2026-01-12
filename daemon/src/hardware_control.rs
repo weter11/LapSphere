@@ -17,7 +17,6 @@ pub fn set_cpu_governor(governor: &str) -> Result<()> {
 }
 
 pub fn set_cpu_frequency_limits(min_freq: u64, max_freq: u64) -> Result<()> {
-    // Check if frequency control is available
     let min_path = "/sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq";
     let max_path = "/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq";
     
@@ -89,16 +88,36 @@ pub fn set_amd_pstate_status(status: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn set_energy_performance_preference(preference: &str) -> Result<()> {
+    let cpu_count = get_cpu_count()?;
+    
+    // Validate that EPP is available
+    let test_path = "/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference";
+    if !Path::new(test_path).exists() {
+        return Err(anyhow!("Energy Performance Preference not available (requires AMD pstate active/passive mode)"));
+    }
+    
+    for i in 0..cpu_count {
+        let path = format!("/sys/devices/system/cpu/cpu{}/cpufreq/energy_performance_preference", i);
+        fs::write(&path, preference)
+            .map_err(|e| anyhow!("Failed to set EPP for CPU {}: {}", i, e))?;
+    }
+    
+    log::info!("Set Energy Performance Preference to: {}", preference);
+    Ok(())
+}
+
 pub fn apply_profile(profile: &Profile) -> Result<()> {
     log::info!("Applying profile: {}", profile.name);
+    
+    // Apply AMD pstate first (if changed, it affects available controls)
+    if let Some(ref amd_status) = profile.cpu_settings.amd_pstate_status {
+        set_amd_pstate_status(amd_status)?;
+    }
     
     // Apply CPU settings
     if let Some(ref governor) = profile.cpu_settings.governor {
         set_cpu_governor(governor)?;
-    }
-    
-    if let Some(ref amd_status) = profile.cpu_settings.amd_pstate_status {
-        set_amd_pstate_status(amd_status)?;
     }
     
     if let (Some(min), Some(max)) = (profile.cpu_settings.min_frequency, profile.cpu_settings.max_frequency) {
@@ -111,6 +130,10 @@ pub fn apply_profile(profile: &Profile) -> Result<()> {
     
     if let Some(smt) = profile.cpu_settings.smt {
         set_smt(smt)?;
+    }
+    
+    if let Some(ref epp) = profile.cpu_settings.energy_performance_preference {
+        set_energy_performance_preference(epp)?;
     }
     
     // Apply keyboard settings
@@ -133,30 +156,42 @@ fn apply_keyboard_settings(settings: &KeyboardSettings) -> Result<()> {
     
     match &settings.mode {
         KeyboardMode::SingleColor { r, g, b, brightness } => {
-            let color_path = "/sys/class/leds/rgb:kbd_backlight/multi_intensity";
-            let brightness_path = "/sys/class/leds/rgb:kbd_backlight/brightness";
+            // Try both possible paths
+            let paths = [
+                "/sys/class/leds/rgb:kbd_backlight",
+                "/sys/devices/platform/tuxedo_keyboard/leds/rgb:kbd_backlight",
+            ];
             
-            if Path::new(color_path).exists() {
-                fs::write(color_path, format!("{} {} {}", r, g, b))?;
-            }
-            
-            if Path::new(brightness_path).exists() {
-                // Read max brightness
-                let max_brightness_path = "/sys/class/leds/rgb:kbd_backlight/max_brightness";
-                let max_brightness: u32 = fs::read_to_string(max_brightness_path)?
-                    .trim()
-                    .parse()
-                    .unwrap_or(255);
+            let mut success = false;
+            for base_path in &paths {
+                let color_path = format!("{}/multi_intensity", base_path);
+                let brightness_path = format!("{}/brightness", base_path);
                 
-                let actual_brightness = ((*brightness as u32) * max_brightness) / 100;
-                fs::write(brightness_path, actual_brightness.to_string())?;
+                if Path::new(&color_path).exists() {
+                    fs::write(&color_path, format!("{} {} {}", r, g, b))?;
+                    
+                    // Read max brightness
+                    let max_brightness_path = format!("{}/max_brightness", base_path);
+                    let max_brightness: u32 = fs::read_to_string(&max_brightness_path)?
+                        .trim()
+                        .parse()
+                        .unwrap_or(255);
+                    
+                    let actual_brightness = ((*brightness as u32) * max_brightness) / 100;
+                    fs::write(&brightness_path, actual_brightness.to_string())?;
+                    
+                    success = true;
+                    log::info!("Set keyboard: RGB({}, {}, {}), brightness {}%", r, g, b, brightness);
+                    break;
+                }
             }
             
-            log::info!("Set keyboard: RGB({}, {}, {}), brightness {}%", r, g, b, brightness);
+            if !success {
+                log::warn!("No keyboard backlight control found");
+            }
         }
         KeyboardMode::Effect { effect, speed } => {
             log::info!("Keyboard effect mode not yet implemented: {} at speed {}", effect, speed);
-            // TODO: Implement tuxedo_keyboard driver effect modes
         }
     }
     
@@ -168,7 +203,6 @@ fn apply_screen_settings(settings: &ScreenSettings) -> Result<()> {
         return Ok(());
     }
     
-    // Try different backlight paths
     let backlight_paths = [
         "/sys/class/backlight/intel_backlight",
         "/sys/class/backlight/amdgpu_bl0",

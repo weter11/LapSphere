@@ -10,6 +10,7 @@ gtk = { version = "0.9", package = "gtk4", features = ["v4_14"] }
 libadwaita = { version = "0.7", features = ["v1_5"] }
 glib = "0.20"
 gio = "0.20"
+cairo-rs = "0.20"
 zbus = "4.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

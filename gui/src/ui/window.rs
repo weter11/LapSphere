@@ -31,6 +31,8 @@ impl TuxedoWindow {
         
         // Create view stack and switcher
         let view_stack = adw::ViewStack::new();
+        view_stack.set_vexpand(true);
+        view_stack.set_hexpand(true);
         let view_switcher = adw::ViewSwitcher::builder()
             .stack(&view_stack)
             .policy(adw::ViewSwitcherPolicy::Wide)

@@ -1,0 +1,9 @@
+# Ignore target folder (compiled binaries)
+/target/
+
+# Ignore Cargo.lock (optional, useful for libraries)
+Cargo.lock
+
+# Ignore other common Rust files
+**/*.rs.bk      # Backup files
+**/*.log        # Log files

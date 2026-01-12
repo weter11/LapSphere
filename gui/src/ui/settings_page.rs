@@ -19,7 +19,31 @@ pub fn create_page(config: Rc<RefCell<Config>>) -> ScrolledWindow {
     main_box.set_margin_end(24);
     
     // Appearance Group
-    let appearance_group = adw::PreferencesGroup::builder()
+    let appearance_group = create_appearance_group(config.clone());
+    main_box.append(&appearance_group);
+    
+    // Startup Group
+    let startup_group = create_startup_group(config.clone());
+    main_box.append(&startup_group);
+    
+    // Daemon Controls Group
+    let daemon_group = create_daemon_group(config.clone());
+    main_box.append(&daemon_group);
+    
+    // CPU Scheduler Group
+    let scheduler_group = create_scheduler_group(config.clone());
+    main_box.append(&scheduler_group);
+    
+    // Statistics Page Layout Group
+    let stats_layout_group = create_stats_layout_group(config.clone());
+    main_box.append(&stats_layout_group);
+    
+    scrolled.set_child(Some(&main_box));
+    scrolled
+}
+
+fn create_appearance_group(config: Rc<RefCell<Config>>) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::builder()
         .title("Appearance")
         .build();
     
@@ -49,7 +73,7 @@ pub fn create_page(config: Rc<RefCell<Config>>) -> ScrolledWindow {
         config_clone.borrow_mut().data.theme = theme.clone();
         let _ = config_clone.borrow().save();
         
-        // Apply theme immediately
+        // Apply theme IMMEDIATELY
         let style_manager = adw::StyleManager::default();
         match theme {
             tuxedo_common::types::Theme::Auto => {
@@ -64,11 +88,12 @@ pub fn create_page(config: Rc<RefCell<Config>>) -> ScrolledWindow {
         }
     });
     
-    appearance_group.add(&theme_row);
-    main_box.append(&appearance_group);
-    
-    // Startup Group
-    let startup_group = adw::PreferencesGroup::builder()
+    group.add(&theme_row);
+    group
+}
+
+fn create_startup_group(config: Rc<RefCell<Config>>) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::builder()
         .title("Startup")
         .build();
     
@@ -82,9 +107,10 @@ pub fn create_page(config: Rc<RefCell<Config>>) -> ScrolledWindow {
     minimized_row.connect_active_notify(move |row| {
         config_clone.borrow_mut().data.start_minimized = row.is_active();
         let _ = config_clone.borrow().save();
+        // Applied immediately - no restart needed
     });
     
-    startup_group.add(&minimized_row);
+    group.add(&minimized_row);
     
     let autostart_row = adw::SwitchRow::builder()
         .title("Enable autostart")
@@ -97,7 +123,7 @@ pub fn create_page(config: Rc<RefCell<Config>>) -> ScrolledWindow {
         config_clone.borrow_mut().data.autostart = row.is_active();
         let _ = config_clone.borrow().save();
         
-        // Create or remove autostart file
+        // Applied IMMEDIATELY
         if row.is_active() {
             let _ = create_autostart_file();
         } else {
@@ -105,11 +131,12 @@ pub fn create_page(config: Rc<RefCell<Config>>) -> ScrolledWindow {
         }
     });
     
-    startup_group.add(&autostart_row);
-    main_box.append(&startup_group);
-    
-    // Daemon Controls Group
-    let daemon_group = adw::PreferencesGroup::builder()
+    group.add(&autostart_row);
+    group
+}
+
+fn create_daemon_group(config: Rc<RefCell<Config>>) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::builder()
         .title("Daemon Controls")
         .build();
     
@@ -123,9 +150,10 @@ pub fn create_page(config: Rc<RefCell<Config>>) -> ScrolledWindow {
     fan_daemon_row.connect_active_notify(move |row| {
         config_clone.borrow_mut().data.fan_daemon_enabled = row.is_active();
         let _ = config_clone.borrow().save();
+        // Applied immediately
     });
     
-    daemon_group.add(&fan_daemon_row);
+    group.add(&fan_daemon_row);
     
     let app_monitoring_row = adw::SwitchRow::builder()
         .title("App monitoring")
@@ -137,13 +165,15 @@ pub fn create_page(config: Rc<RefCell<Config>>) -> ScrolledWindow {
     app_monitoring_row.connect_active_notify(move |row| {
         config_clone.borrow_mut().data.app_monitoring_enabled = row.is_active();
         let _ = config_clone.borrow().save();
+        // Applied immediately
     });
     
-    daemon_group.add(&app_monitoring_row);
-    main_box.append(&daemon_group);
-    
-    // CPU Scheduler Group (Global setting)
-    let scheduler_group = adw::PreferencesGroup::builder()
+    group.add(&app_monitoring_row);
+    group
+}
+
+fn create_scheduler_group(config: Rc<RefCell<Config>>) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::builder()
         .title("CPU Scheduler")
         .description("Global scheduler setting (not per-profile)")
         .build();
@@ -161,16 +191,20 @@ pub fn create_page(config: Rc<RefCell<Config>>) -> ScrolledWindow {
         let scheduler = if row.selected() == 0 { "CFS" } else { "EEVDF" };
         config_clone.borrow_mut().data.cpu_scheduler = scheduler.to_string();
         let _ = config_clone.borrow().save();
+        // Applied immediately
     });
     
-    scheduler_group.add(&scheduler_row);
-    main_box.append(&scheduler_group);
-    
-    // Statistics Page Layout Group
-    let stats_layout_group = adw::PreferencesGroup::builder()
+    group.add(&scheduler_row);
+    group
+}
+
+fn create_stats_layout_group(config: Rc<RefCell<Config>>) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::builder()
         .title("Statistics Page Layout")
+        .description("Changes apply immediately")
         .build();
     
+    // System Info
     let show_system_info_row = adw::SwitchRow::builder()
         .title("Show system info")
         .build();
@@ -180,10 +214,12 @@ pub fn create_page(config: Rc<RefCell<Config>>) -> ScrolledWindow {
     show_system_info_row.connect_active_notify(move |row| {
         config_clone.borrow_mut().data.statistics_sections.show_system_info = row.is_active();
         let _ = config_clone.borrow().save();
+        // Applied immediately - page will update on next view
     });
     
-    stats_layout_group.add(&show_system_info_row);
+    group.add(&show_system_info_row);
     
+    // CPU
     let show_cpu_row = adw::SwitchRow::builder()
         .title("Show CPU")
         .build();
@@ -193,10 +229,12 @@ pub fn create_page(config: Rc<RefCell<Config>>) -> ScrolledWindow {
     show_cpu_row.connect_active_notify(move |row| {
         config_clone.borrow_mut().data.statistics_sections.show_cpu = row.is_active();
         let _ = config_clone.borrow().save();
+        // Applied immediately
     });
     
-    stats_layout_group.add(&show_cpu_row);
+    group.add(&show_cpu_row);
     
+    // GPU
     let show_gpu_row = adw::SwitchRow::builder()
         .title("Show GPU")
         .build();
@@ -208,8 +246,9 @@ pub fn create_page(config: Rc<RefCell<Config>>) -> ScrolledWindow {
         let _ = config_clone.borrow().save();
     });
     
-    stats_layout_group.add(&show_gpu_row);
+    group.add(&show_gpu_row);
     
+    // Battery
     let show_battery_row = adw::SwitchRow::builder()
         .title("Show battery")
         .build();
@@ -221,50 +260,9 @@ pub fn create_page(config: Rc<RefCell<Config>>) -> ScrolledWindow {
         let _ = config_clone.borrow().save();
     });
     
-    stats_layout_group.add(&show_battery_row);
+    group.add(&show_battery_row);
     
-    let show_wifi_row = adw::SwitchRow::builder()
-        .title("Show WiFi")
-        .build();
-    show_wifi_row.set_active(config.borrow().data.statistics_sections.show_wifi);
-    
-    let config_clone = config.clone();
-    show_wifi_row.connect_active_notify(move |row| {
-        config_clone.borrow_mut().data.statistics_sections.show_wifi = row.is_active();
-        let _ = config_clone.borrow().save();
-    });
-    
-    stats_layout_group.add(&show_wifi_row);
-    
-    let show_storage_row = adw::SwitchRow::builder()
-        .title("Show storage")
-        .build();
-    show_storage_row.set_active(config.borrow().data.statistics_sections.show_storage);
-    
-    let config_clone = config.clone();
-    show_storage_row.connect_active_notify(move |row| {
-        config_clone.borrow_mut().data.statistics_sections.show_storage = row.is_active();
-        let _ = config_clone.borrow().save();
-    });
-    
-    stats_layout_group.add(&show_storage_row);
-    
-    let show_fans_row = adw::SwitchRow::builder()
-        .title("Show fans")
-        .build();
-    show_fans_row.set_active(config.borrow().data.statistics_sections.show_fans);
-    
-    let config_clone = config.clone();
-    show_fans_row.connect_active_notify(move |row| {
-        config_clone.borrow_mut().data.statistics_sections.show_fans = row.is_active();
-        let _ = config_clone.borrow().save();
-    });
-    
-    stats_layout_group.add(&show_fans_row);
-    main_box.append(&stats_layout_group);
-    
-    scrolled.set_child(Some(&main_box));
-    scrolled
+    group
 }
 
 fn create_autostart_file() -> std::io::Result<()> {
