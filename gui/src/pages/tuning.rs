@@ -272,15 +272,8 @@ fn draw_gpu_tuning(
         return;
     }
 
-    if ui.checkbox(&mut profile.gpu_settings.manual_clocks, "Enable Manual Clock Control").clicked() {
-        if !profile.gpu_settings.manual_clocks {
-            // Reset clocks when disabling manual control
-            if let Some(client) = dbus_client {
-                let _ = client.reset_gpu_clocks(0);
-                let _ = client.reset_memory_locked_clocks(0);
-            }
-        }
-    }
+    ui.checkbox(&mut profile.gpu_settings.manual_clocks, "Enable Manual Clock Control");
+    ui.label(RichText::new("GPU settings will be applied when you click Save. Disabling manual control will reset to factory settings.").small().italics());
 
     if profile.gpu_settings.manual_clocks {
         // Fetch ranges if they haven't been fetched yet

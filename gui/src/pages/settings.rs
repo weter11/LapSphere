@@ -399,18 +399,35 @@ fn draw_prime_profile_settings(ui: &mut Ui, state: &mut AppState, dbus_client: O
                 
                 state.show_message("Prime profile applied. Please restart your laptop for changes to take effect.", false);
             }
-            
-            if ui.button("🔄 Restart Now").clicked() {
-                // Trigger system restart
-                let _ = std::process::Command::new("systemctl")
-                    .args(&["reboot"])
-                    .spawn();
-            }
         });
         
-        ui.add_space(4.0);
-        ui.label(RichText::new("⚠️ The restart button will immediately reboot your laptop!")
-            .small()
-            .color(egui::Color32::from_rgb(255, 150, 50)));
+        ui.add_space(8.0);
+        
+        // Two-step restart confirmation
+        if !state.restart_confirmation_pending {
+            if ui.button("🔄 Restart Laptop...").clicked() {
+                state.restart_confirmation_pending = true;
+            }
+        } else {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Are you sure you want to restart now?").strong());
+            });
+            ui.horizontal(|ui| {
+                if ui.button("✅ Yes, Restart Now").clicked() {
+                    state.restart_confirmation_pending = false;
+                    // Trigger system restart via systemctl (requires polkit authorization)
+                    let _ = std::process::Command::new("systemctl")
+                        .args(["reboot"])
+                        .spawn();
+                }
+                if ui.button("❌ Cancel").clicked() {
+                    state.restart_confirmation_pending = false;
+                }
+            });
+            
+            ui.label(RichText::new("⚠️ This will immediately reboot your laptop! Save all work first.")
+                .small()
+                .color(egui::Color32::from_rgb(255, 100, 100)));
+        }
     }
 }

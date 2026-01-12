@@ -1046,7 +1046,9 @@ fn read_gpu_frequency(device_path: &str) -> Option<u64> {
             if line.contains('*') {
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 if parts.len() >= 2 {
-                    if let Ok(freq) = parts[1].trim_end_matches("Mhz").parse::<u64>() {
+                    // Handle both "Mhz" and "MHz" patterns
+                    let freq_str = parts[1].trim_end_matches("Mhz").trim_end_matches("MHz");
+                    if let Ok(freq) = freq_str.parse::<u64>() {
                         return Some(freq);
                     }
                 }
@@ -1071,7 +1073,9 @@ fn read_gpu_memory_frequency(device_path: &str) -> Option<u64> {
             if line.contains('*') {
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 if parts.len() >= 2 {
-                    if let Ok(freq) = parts[1].trim_end_matches("Mhz").parse::<u64>() {
+                    // Handle both "Mhz" and "MHz" patterns
+                    let freq_str = parts[1].trim_end_matches("Mhz").trim_end_matches("MHz");
+                    if let Ok(freq) = freq_str.parse::<u64>() {
                         return Some(freq);
                     }
                 }

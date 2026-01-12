@@ -41,6 +41,7 @@ pub struct AppState {
     // UI state
     pub current_page: Page,
     pub status_message: Option<StatusMessage>,
+    pub restart_confirmation_pending: bool,
     
     // Profile editing
     pub editing_profile_index: Option<usize>,
@@ -78,6 +79,7 @@ impl AppState {
             available_end_thresholds: Vec::new(),
             current_page: Page::Statistics,
             status_message: None,
+            restart_confirmation_pending: false,
             editing_profile_index: None,
             editing_profile_name: None,
             pending_battery_update: None,
