@@ -448,6 +448,7 @@ fn find_keyboard_backlight_path() -> Option<String> {
     None
 }
 
+use nvml_wrapper::enum_wrappers::device::{Clock, PerformanceState};
 use nvml_wrapper::enums::device::GpuLockedClocksSetting;
 
 static NVML: Lazy<Result<Nvml, nvml_wrapper::error::NvmlError>> = Lazy::new(|| Nvml::init());
@@ -492,23 +493,26 @@ pub fn reset_gpu_clocks(device_index: u32) -> Result<()> {
 
 pub fn set_gpu_core_offset(device_index: u32, offset: i32) -> Result<()> {
     let nvml = get_nvml()?;
-    let device = nvml.device_by_index(device_index)?;
-    // This is a placeholder for the actual NVML function call
-    // The nvml-wrapper crate does not currently expose clock offsets
-    log::info!("Setting GPU core offset to {} MHz for device {}", offset, device_index);
+    let mut device = nvml.device_by_index(device_index)?;
+    device.set_clock_offset(Clock::Graphics, PerformanceState::Zero, offset)?;
+    log::info!("Set GPU core offset to {} MHz for device {}", offset, device_index);
     Ok(())
 }
 
 pub fn set_gpu_memory_offset(device_index: u32, offset: i32) -> Result<()> {
     let nvml = get_nvml()?;
-    let device = nvml.device_by_index(device_index)?;
-    // This is a placeholder for the actual NVML function call
-    // The nvml-wrapper crate does not currently expose clock offsets
-    log::info!("Setting GPU memory offset to {} MHz for device {}", offset, device_index);
+    let mut device = nvml.device_by_index(device_index)?;
+    device.set_clock_offset(Clock::Memory, PerformanceState::Zero, offset)?;
+    log::info!("Set GPU memory offset to {} MHz for device {}", offset, device_index);
     Ok(())
 }
 
 pub fn set_prime_profile(profile: &str) -> Result<()> {
+    let valid_profiles = ["on-demand", "nvidia", "intel"];
+    if !valid_profiles.contains(&profile) {
+        return Err(anyhow!("Invalid prime profile: {}", profile));
+    }
+
     let output = std::process::Command::new("prime-select")
         .arg(profile)
         .output()?;

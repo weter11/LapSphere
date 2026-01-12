@@ -33,6 +33,8 @@ pub struct AppState {
     pub mount_info: Vec<MountInfo>,
     pub gpu_clock_ranges: Option<(u32, u32)>,
     pub gpu_mem_clock_ranges: Option<(u32, u32)>,
+    pub gpu_core_offset_limits: Option<(i32, i32)>,
+    pub gpu_mem_offset_limits: Option<(i32, i32)>,
     pub available_start_thresholds: Vec<u8>,
     pub available_end_thresholds: Vec<u8>,
     
@@ -70,6 +72,8 @@ impl AppState {
             mount_info: Vec::new(),
             gpu_clock_ranges: None,
             gpu_mem_clock_ranges: None,
+            gpu_core_offset_limits: None,
+            gpu_mem_offset_limits: None,
             available_start_thresholds: Vec::new(),
             available_end_thresholds: Vec::new(),
             current_page: Page::Statistics,

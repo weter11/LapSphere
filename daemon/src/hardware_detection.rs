@@ -815,16 +815,16 @@ pub fn get_system_info() -> Result<SystemInfo> {
 }
 
 pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
-    let mut gpus = Vec::new();
-
-    // First, try to get detailed NVIDIA info if available
     if Path::new("/sys/bus/pci/drivers/nvidia").exists() {
         if let Ok(nvidia_gpus) = get_nvidia_gpu_info() {
-            gpus.extend(nvidia_gpus);
+            if !nvidia_gpus.is_empty() {
+                return Ok(nvidia_gpus);
+            }
         }
     }
 
-    // Now, scan for other GPUs (AMD, Intel)
+    let mut gpus = Vec::new();
+
     for i in 0..4 {
         let card_path = format!("/sys/class/drm/card{}", i);
         if !Path::new(&card_path).exists() {
@@ -836,14 +836,9 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
         
         if let Ok(vendor) = fs::read_to_string(&vendor_path) {
             let vendor = vendor.trim();
-
-            // Skip NVIDIA, as we already got it from NVML
-            if vendor == "0x10de" {
-                continue;
-            }
-
             let name = match vendor {
                 "0x1002" => format!("AMD GPU {}", i),
+                "0x10de" => format!("NVIDIA GPU {}", i),
                 "0x8086" => format!("Intel GPU {}", i),
                 _ => format!("GPU {}", i),
             };
@@ -896,6 +891,7 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
 }
 
 use crate::hardware_control::get_nvml;
+use nvml_wrapper::enum_wrappers::device::{Clock, PerformanceState};
 
 pub fn get_gpu_clock_ranges(device_index: u32) -> Result<(u32, u32)> {
     let nvml = get_nvml()?;
@@ -928,13 +924,17 @@ pub fn get_gpu_mem_clock_ranges(device_index: u32) -> Result<Vec<u32>> {
 }
 
 pub fn get_gpu_core_offset_limits(device_index: u32) -> Result<(i32, i32)> {
-    // These are typical values, but should be queried from NVML if possible
-    Ok((-1000, 1000))
+    let nvml = get_nvml()?;
+    let device = nvml.device_by_index(device_index)?;
+    let offset_info = device.clock_offset(Clock::Graphics, PerformanceState::Zero)?;
+    Ok((offset_info.min_clock_offset_mhz, offset_info.max_clock_offset_mhz))
 }
 
 pub fn get_gpu_memory_offset_limits(device_index: u32) -> Result<(i32, i32)> {
-    // These are typical values, but should be queried from NVML if possible
-    Ok((-1000, 1000))
+    let nvml = get_nvml()?;
+    let device = nvml.device_by_index(device_index)?;
+    let offset_info = device.clock_offset(Clock::Memory, PerformanceState::Zero)?;
+    Ok((offset_info.min_clock_offset_mhz, offset_info.max_clock_offset_mhz))
 }
 
 fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
@@ -946,10 +946,12 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         let device = nvml.device_by_index(i)?;
 
         let name = device.name()?;
-        // It's safer to assume a detected NVIDIA GPU is discrete in this context,
-        // as iGPUs will be picked up by the sysfs scan.
-        let gpu_type = GpuType::Discrete;
-        let status = device.power_state().map(|s| format!("{:?}", s)).unwrap_or_else(|_| "N/A".to_string());
+        let gpu_type = if i == 0 {
+            GpuType::Integrated
+        } else {
+            GpuType::Discrete
+        };
+        let status = "N/A".to_string();
         let frequency = device.clock_info(nvml_wrapper::enum_wrappers::device::Clock::Graphics).ok().map(|c| c as u64);
         let temperature = device.temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu).ok().map(|t| t as f32);
         let load = device.utilization_rates().ok().map(|u| u.gpu as f32);

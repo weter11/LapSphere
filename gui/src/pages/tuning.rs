@@ -373,8 +373,9 @@ fn draw_gpu_tuning(
             ui.add(Slider::new(&mut core_offset, min_limit..=max_limit).suffix(" MHz"));
             profile.gpu_settings.core_offset = Some(core_offset);
             if ui.button("Apply Core Offset").clicked() {
-            if let Some(client) = dbus_client {
-                let _ = client.set_gpu_core_offset(0, core_offset);
+                if let Some(client) = dbus_client {
+                    let _ = client.set_gpu_core_offset(0, core_offset);
+                }
             }
         }
 
@@ -387,9 +388,12 @@ fn draw_gpu_tuning(
             ui.add(Slider::new(&mut memory_offset, min_limit..=max_limit).suffix(" MHz"));
             profile.gpu_settings.memory_offset = Some(memory_offset);
             if ui.button("Apply Memory Offset").clicked() {
-            if let Some(client) = dbus_client {
-                let _ = client.set_gpu_memory_offset(0, memory_offset);
+                if let Some(client) = dbus_client {
+                    let _ = client.set_gpu_memory_offset(0, memory_offset);
+                }
             }
+        } else {
+            ui.label("Fetching GPU memory offset limits...");
         }
 
         ui.add_space(16.0);
