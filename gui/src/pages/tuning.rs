@@ -276,58 +276,59 @@ fn draw_gpu_tuning(
                 let _ = client.reset_gpu_clocks(0);
                 let _ = client.reset_memory_locked_clocks(0);
             }
-        } else {
-            // Fetch ranges when enabling manual control for the first time
-            if state.gpu_clock_ranges.is_none() {
-                if let Some(client) = dbus_client {
-                    let client = client.clone();
-                    let tx = hw_update_tx.clone();
-                    tokio::spawn(async move {
-                        let res = client.get_gpu_clock_ranges(0).await
-                            .map(|r| r.map_err(|e| e.to_string()))
-                            .unwrap_or_else(|e| Err(e.to_string()));
-                        let _ = tx.send(crate::app::HardwareUpdate::GpuClockRanges(res));
-                    });
-                }
-            }
-            if state.gpu_mem_clock_ranges.is_none() {
-                if let Some(client) = dbus_client {
-                    let client = client.clone();
-                    let tx = hw_update_tx.clone();
-                    tokio::spawn(async move {
-                        let res = client.get_gpu_mem_clock_ranges(0).await
-                            .map(|r| r.map_err(|e| e.to_string()))
-                            .unwrap_or_else(|e| Err(e.to_string()));
-                        let _ = tx.send(crate::app::HardwareUpdate::GpuMemClockRanges(res));
-                    });
-                }
-            }
-            if state.gpu_core_offset_limits.is_none() {
-                if let Some(client) = dbus_client {
-                    let client = client.clone();
-                    let tx = hw_update_tx.clone();
-                    tokio::spawn(async move {
-                        let res = client.get_gpu_core_offset_limits(0).await
-                            .map(|r| r.map_err(|e| e.to_string()))
-                            .unwrap_or_else(|e| Err(e.to_string()));
-                        let _ = tx.send(crate::app::HardwareUpdate::GpuCoreOffsetLimits(res));
-                    });
-                }
-            }
-            if state.gpu_mem_offset_limits.is_none() {
-                if let Some(client) = dbus_client {
-                    let client = client.clone();
-                    let tx = hw_update_tx.clone();
-                    tokio::spawn(async move {
-                        let res = client.get_gpu_memory_offset_limits(0).await
-                            .map(|r| r.map_err(|e| e.to_string()))
-                            .unwrap_or_else(|e| Err(e.to_string()));
-                        let _ = tx.send(crate::app::HardwareUpdate::GpuMemOffsetLimits(res));
-                    });
-                }
-            }
         }
     }
+
+    if profile.gpu_settings.manual_clocks {
+        // Fetch ranges if they haven't been fetched yet
+        if state.gpu_clock_ranges.is_none() {
+            if let Some(client) = dbus_client {
+                let client = client.clone();
+                let tx = hw_update_tx.clone();
+                tokio::spawn(async move {
+                    let res = client.get_gpu_clock_ranges(0).await
+                        .map(|r| r.map_err(|e| e.to_string()))
+                        .unwrap_or_else(|e| Err(e.to_string()));
+                    let _ = tx.send(crate::app::HardwareUpdate::GpuClockRanges(res));
+                });
+            }
+        }
+        if state.gpu_mem_clock_ranges.is_none() {
+            if let Some(client) = dbus_client {
+                let client = client.clone();
+                let tx = hw_update_tx.clone();
+                tokio::spawn(async move {
+                    let res = client.get_gpu_mem_clock_ranges(0).await
+                        .map(|r| r.map_err(|e| e.to_string()))
+                        .unwrap_or_else(|e| Err(e.to_string()));
+                    let _ = tx.send(crate::app::HardwareUpdate::GpuMemClockRanges(res));
+                });
+            }
+        }
+        if state.gpu_core_offset_limits.is_none() {
+            if let Some(client) = dbus_client {
+                let client = client.clone();
+                let tx = hw_update_tx.clone();
+                tokio::spawn(async move {
+                    let res = client.get_gpu_core_offset_limits(0).await
+                        .map(|r| r.map_err(|e| e.to_string()))
+                        .unwrap_or_else(|e| Err(e.to_string()));
+                    let _ = tx.send(crate::app::HardwareUpdate::GpuCoreOffsetLimits(res));
+                });
+            }
+        }
+        if state.gpu_mem_offset_limits.is_none() {
+            if let Some(client) = dbus_client {
+                let client = client.clone();
+                let tx = hw_update_tx.clone();
+                tokio::spawn(async move {
+                    let res = client.get_gpu_memory_offset_limits(0).await
+                        .map(|r| r.map_err(|e| e.to_string()))
+                        .unwrap_or_else(|e| Err(e.to_string()));
+                    let _ = tx.send(crate::app::HardwareUpdate::GpuMemOffsetLimits(res));
+                });
+            }
+        }
 
     if profile.gpu_settings.manual_clocks {
         // GPU Locked Clocks section
@@ -423,7 +424,7 @@ fn draw_gpu_tuning(
         ui.add_space(16.0);
 
         ui.label(RichText::new("Clock and offset controls are managed by NVML.").small().italics());
-    }
+    }}
 
     // NVIDIA Prime Profile Selection
     ui.add_space(16.0);
