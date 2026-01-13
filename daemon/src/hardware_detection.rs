@@ -995,6 +995,8 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
     let mut gpus = Vec::new();
 
     // Try to get fan 2 temperature for VRAM temperature
+    // Note: In multi-GPU systems, this temperature will be applied to all NVIDIA GPUs
+    // as we assume fan 2 monitors the primary discrete GPU's VRAM
     let vram_temp = if TuxedoIo::is_available() {
         TuxedoIo::new().ok().and_then(|io| {
             // Fan 2 is fan_id 1 (0-indexed)
