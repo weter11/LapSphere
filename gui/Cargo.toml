@@ -29,7 +29,7 @@ chrono = "0.4"
 # System statistics
 systemstat = "0.2"
 parking_lot = "0.12.5"
-tray-item = { version = "0.10.0", features = ["libappindicator"] }
+ksni = { version = "0.3.3", features = ["tokio"] }
 
 [profile.release]
 opt-level = 3

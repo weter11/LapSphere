@@ -1,45 +1,86 @@
-use tray_item::{TrayItem, IconSource};
-use tuxedo_common::types::Profile;
+use ksni::{Tray, TrayMethods, menu::{StandardItem}};
 use std::sync::mpsc;
+use tuxedo_common::types::Profile;
 
-pub struct SystemTray {
-    _tray: TrayItem,
-    pub rx: mpsc::Receiver<TrayEvent>,
-}
-
-#[derive(Debug)]
 pub enum TrayEvent {
     ShowWindow,
     Quit,
     SwitchProfile(String),
 }
 
-impl SystemTray {
-    pub fn new(profiles: &[Profile], current_profile: &str) -> anyhow::Result<Self> {
-        let (tx, rx) = mpsc::channel();
-        let mut tray = TrayItem::new("TUXEDO Control Center", IconSource::Resource("tray-icon"))?;
+pub struct SystemTray {
+    tx: mpsc::Sender<TrayEvent>,
+    profiles: Vec<Profile>,
+    current_profile: String,
+}
 
-        let show_tx = tx.clone();
-        tray.add_menu_item("Show", move || {
-            let _ = show_tx.send(TrayEvent::ShowWindow);
-        })?;
+impl Tray for SystemTray {
+    fn activate(&mut self, _x: i32, _y: i32) {
+        let _ = self.tx.send(TrayEvent::ShowWindow);
+    }
 
-        let quit_tx = tx.clone();
-        tray.add_menu_item("Quit", move || {
-            let _ = quit_tx.send(TrayEvent::Quit);
-        })?;
+    fn category(&self) -> ksni::Category {
+        ksni::Category::ApplicationStatus
+    }
 
-        for profile in profiles {
+    fn id(&self) -> String {
+        "tuxedo-control-center".to_string()
+    }
+
+    fn title(&self) -> String {
+        "TUXEDO Control Center".to_string()
+    }
+
+    fn icon_name(&self) -> String {
+        "tuxedo-control-center".to_string()
+    }
+
+    fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
+        let mut menu = vec![
+            StandardItem {
+                label: "Show".into(),
+                activate: Box::new(|this: &mut Self| {
+                    let _ = this.tx.send(TrayEvent::ShowWindow);
+                }),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: "Quit".into(),
+                activate: Box::new(|this: &mut Self| {
+                    let _ = this.tx.send(TrayEvent::Quit);
+                }),
+                ..Default::default()
+            }
+            .into(),
+            ksni::MenuItem::Separator,
+        ];
+
+        for profile in &self.profiles {
             let profile_name = profile.name.clone();
-            let profile_tx = tx.clone();
-            tray.add_menu_item(&profile.name, move || {
-                let _ = profile_tx.send(TrayEvent::SwitchProfile(profile_name.clone()));
-            })?;
+            menu.push(
+                StandardItem {
+                    label: profile.name.clone(),
+                    activate: Box::new(move |this: &mut Self| {
+                        let _ = this.tx.send(TrayEvent::SwitchProfile(profile_name.clone()));
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+            );
         }
 
-        Ok(Self {
-            _tray: tray,
-            rx,
-        })
+        menu
+    }
+}
+
+pub async fn create_tray_service(profiles: &[Profile], current_profile: &str, tx: mpsc::Sender<TrayEvent>) {
+    let tray = SystemTray {
+        tx,
+        profiles: profiles.to_vec(),
+        current_profile: current_profile.to_string(),
+    };
+    if let Err(e) = tray.spawn().await {
+        log::error!("Failed to spawn tray service: {}", e);
     }
 }

@@ -36,27 +36,11 @@ fn main() -> Result<(), eframe::Error> {
         options,
         Box::new(|cc| {
             let app = TuxedoApp::new(cc, tray_rx);
-            let mut tray = system_tray::SystemTray::new(&app.state.config.lock().profiles, &app.state.current_profile_name()).unwrap();
-            let egui_ctx = cc.egui_ctx.clone();
+            let profiles = app.state.config.lock().profiles.clone();
+            let current_profile = app.state.current_profile_name();
 
-            std::thread::spawn(move || {
-                loop {
-                    match tray.rx.recv() {
-                        Ok(system_tray::TrayEvent::ShowWindow) => {
-                            tray_tx.send(system_tray::TrayEvent::ShowWindow).unwrap();
-                            egui_ctx.request_repaint();
-                        }
-                        Ok(system_tray::TrayEvent::Quit) => {
-                            tray_tx.send(system_tray::TrayEvent::Quit).unwrap();
-                            egui_ctx.request_repaint();
-                        }
-                        Ok(system_tray::TrayEvent::SwitchProfile(p)) => {
-                            tray_tx.send(system_tray::TrayEvent::SwitchProfile(p)).unwrap();
-                            egui_ctx.request_repaint();
-                        }
-                        Err(_) => {}
-                    }
-                }
+            tokio::spawn(async move {
+                system_tray::create_tray_service(&profiles, &current_profile, tray_tx).await;
             });
 
             Ok(Box::new(app))
