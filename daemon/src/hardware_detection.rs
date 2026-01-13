@@ -891,6 +891,7 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
                 frequency,
                 memory_frequency,
                 temperature,
+                vram_temperature: None,
                 load,
                 power,
                 voltage,
@@ -993,6 +994,16 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
     let nvml = get_nvml()?;
     let mut gpus = Vec::new();
 
+    // Try to get fan 2 temperature for VRAM temperature
+    let vram_temp = if TuxedoIo::is_available() {
+        TuxedoIo::new().ok().and_then(|io| {
+            // Fan 2 is fan_id 1 (0-indexed)
+            io.get_fan_temperature(1).ok().map(|t| t as f32)
+        })
+    } else {
+        None
+    };
+
     let device_count = nvml.device_count()?;
     for i in 0..device_count {
         let device = nvml.device_by_index(i)?;
@@ -1022,6 +1033,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         let load = device.utilization_rates().ok().map(|u| u.gpu as f32);
         let power = device.power_usage().ok().map(|p| p as f32 / 1000.0);
         let voltage = None;
+        let vram_temperature = vram_temp;
 
         gpus.push(GpuInfo {
             name,
@@ -1030,6 +1042,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             frequency,
             memory_frequency,
             temperature,
+            vram_temperature,
             load,
             power,
             voltage,

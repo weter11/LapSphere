@@ -335,6 +335,15 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                                 ui.end_row();
                             }
                             
+                            if let Some(vram_temp) = gpu.vram_temperature {
+                                ui.label("VRAM Temperature:");
+                                ui.colored_label(
+                                    temp_color(vram_temp),
+                                    format!("{:.1}°C", vram_temp)
+                                );
+                                ui.end_row();
+                            }
+                            
                             if let Some(load) = gpu.load {
                                 ui.label("Load:");
                                 ui.add(ProgressBar::new(load / 100.0)
