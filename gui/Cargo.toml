@@ -25,11 +25,11 @@ zbus = "4.4.0"
 
 # Time handling
 chrono = "0.4"
-tray-icon = "0.18"
 
 # System statistics
 systemstat = "0.2"
 parking_lot = "0.12.5"
+tray-item = { version = "0.10.0", features = ["libappindicator"] }
 
 [profile.release]
 opt-level = 3

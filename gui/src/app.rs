@@ -10,6 +10,7 @@ use crate::dbus_client::DbusClient;
 use crate::theme::TuxedoTheme;
 use crate::pages::{statistics, profiles, tuning, settings};
 use crate::keyboard_shortcuts::KeyboardShortcuts;
+use crate::system_tray;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Page {
@@ -121,7 +122,7 @@ impl AppState {
 }
 
 pub struct TuxedoApp {
-    state: AppState,
+    pub state: AppState,
     dbus_client: Option<DbusClient>,
     theme: TuxedoTheme,
     
@@ -131,6 +132,8 @@ pub struct TuxedoApp {
     
     // Keyboard shortcuts
     shortcuts: KeyboardShortcuts,
+
+    tray_rx: std::sync::mpsc::Receiver<system_tray::TrayEvent>,
 }
 
 #[derive(Debug)]
@@ -153,7 +156,7 @@ pub enum HardwareUpdate {
 }
 
 impl TuxedoApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, tray_rx: std::sync::mpsc::Receiver<system_tray::TrayEvent>) -> Self {
         let mut state = AppState::new();
         state.load_config();
         
@@ -214,6 +217,7 @@ impl TuxedoApp {
             hw_update_tx,
             hw_update_rx,
             shortcuts: KeyboardShortcuts::new(),
+            tray_rx,
         }
     }
     
@@ -358,6 +362,20 @@ impl TuxedoApp {
 
 impl eframe::App for TuxedoApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        if let Ok(event) = self.tray_rx.try_recv() {
+            match event {
+                system_tray::TrayEvent::ShowWindow => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                }
+                system_tray::TrayEvent::Quit => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                system_tray::TrayEvent::SwitchProfile(profile) => {
+                    self.state.config.lock().current_profile = profile;
+                }
+            }
+        }
+
         // Handle keyboard shortcuts
         self.shortcuts.handle_shortcuts(ctx, &mut self.state);
         
