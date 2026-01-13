@@ -5,17 +5,17 @@ use tuxedo_common::types::{KeyboardMode, Profile, FanCurve};
 use crate::widgets::fan_curve_editor::FanCurveEditor;
 
 pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>, hw_update_tx: tokio::sync::mpsc::UnboundedSender<crate::app::HardwareUpdate>) {
-    let profile_idx = state.current_profile_index();
-    
+    let profile_name = state.current_profile_name();
+    let profile_idx = state.config.lock().profiles.iter().position(|p| p.name == profile_name);
+
     if profile_idx.is_none() {
         ui.label("No profile selected");
         return;
     }
-    
+
     let idx = profile_idx.unwrap();
-    let profile_name = state.config.profiles[idx].name.clone();
     let is_standard = profile_name == "Standard";
-    
+
     // Top bar with profile name, save, and reset buttons
     TopBottomPanel::top("tuning_header").show_inside(ui, |ui| {
         ui.add_space(8.0);
@@ -29,7 +29,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>,
                     
                     // Also apply to hardware
                     if let Some(client) = dbus_client {
-                        let profile_clone = state.config.profiles[idx].clone();
+                        let profile_clone = state.config.lock().profiles[idx].clone();
                         let _rx = client.apply_profile(profile_clone.clone());
                         
                         // Apply GPU settings on save
@@ -39,7 +39,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>,
                 
                 // Reset to default button
                 if ui.button("↺ Reset to Default").clicked() {
-                    state.config.profiles[idx] = create_default_profile_for_reset(is_standard);
+                    state.config.lock().profiles[idx] = create_default_profile_for_reset(is_standard);
                     state.show_message("Profile reset to default settings (not saved)", false);
                 }
             });
@@ -57,7 +57,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>,
             let cpu_info_clone = state.cpu_info.clone();
             if let Some(cpu_info) = &cpu_info_clone {
                 let cpu_caps = Some(&cpu_info.capabilities);
-                draw_cpu_tuning(ui, &mut state.config.profiles[idx], cpu_caps, cpu_info);
+                draw_cpu_tuning(ui, &mut state.config.lock().profiles[idx], cpu_caps, cpu_info, dbus_client, hw_update_tx.clone());
             } else {
                 ui.heading("🖥️ CPU Tuning");
                 ui.add_space(8.0);
@@ -75,20 +75,20 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>,
             ui.add_space(16.0);
 
             // Keyboard tuning
-            draw_keyboard_tuning(ui, &mut state.config.profiles[idx], dbus_client);
+            draw_keyboard_tuning(ui, &mut state.config.lock().profiles[idx], dbus_client);
             ui.add_space(16.0);
             ui.separator();
             ui.add_space(16.0);
             
             // Screen tuning
-            draw_screen_tuning(ui, &mut state.config.profiles[idx]);
+            draw_screen_tuning(ui, &mut state.config.lock().profiles[idx]);
             ui.add_space(16.0);
             ui.separator();
             ui.add_space(16.0);
             
             // Fan tuning
             let fan_count = state.fan_info.len().max(2);
-            draw_fan_tuning(ui, &mut state.config.profiles[idx], fan_count);
+            draw_fan_tuning(ui, &mut state.config.lock().profiles[idx], fan_count);
             ui.add_space(16.0);
         });
 }
@@ -98,10 +98,12 @@ fn draw_cpu_tuning(
     profile: &mut Profile,
     cpu_caps: Option<&tuxedo_common::types::CpuCapabilities>,
     cpu_info: &tuxedo_common::types::CpuInfo,
+    dbus_client: Option<&DbusClient>,
+    hw_update_tx: tokio::sync::mpsc::UnboundedSender<crate::app::HardwareUpdate>,
 ) {
     ui.heading("🖥️ CPU Tuning");
     ui.add_space(8.0);
-    
+
     let caps = match cpu_caps {
         Some(c) => c,
         None => {
@@ -109,25 +111,43 @@ fn draw_cpu_tuning(
             return;
         }
     };
-    
+
     // AMD P-State section (if available)
     if caps.has_amd_pstate {
         ui.label(RichText::new("AMD P-State Mode:").strong());
         ui.horizontal(|ui| {
+            let mut pstate_changed = false;
             let mut current_pstate = profile.cpu_settings.amd_pstate_status
                 .clone()
                 .unwrap_or_else(|| "active".to_string());
-            
+
             ComboBox::from_id_source("amd_pstate_combo")
-                .selected_text(&current_pstate)
+                .selected_text(current_pstate.as_str())
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut current_pstate, "active".to_string(), "Active");
-                    ui.selectable_value(&mut current_pstate, "passive".to_string(), "Passive");
-                    ui.selectable_value(&mut current_pstate, "guided".to_string(), "Guided");
+                    if ui.selectable_value(&mut current_pstate, "active".to_string(), "Active").changed() { pstate_changed = true; }
+                    if ui.selectable_value(&mut current_pstate, "passive".to_string(), "Passive").changed() { pstate_changed = true; }
+                    if ui.selectable_value(&mut current_pstate, "guided".to_string(), "Guided").changed() { pstate_changed = true; }
                 });
-            
-            profile.cpu_settings.amd_pstate_status = Some(current_pstate);
-            
+
+            if pstate_changed {
+                profile.cpu_settings.amd_pstate_status = Some(current_pstate.clone());
+
+                // Reload CPU info to get new caps
+                if let Some(client) = dbus_client {
+                    let client = client.clone();
+                    let tx = hw_update_tx.clone();
+                    tokio::spawn(async move {
+                        let res = client.get_cpu_info().await;
+                        let final_res = match res {
+                            Ok(Ok(info)) => Ok(info),
+                            Ok(Err(e)) => Err(e.to_string()),
+                            Err(e) => Err(e.to_string()),
+                        };
+                        let _ = tx.send(crate::app::HardwareUpdate::CpuInfo(final_res));
+                    });
+                }
+            }
+
             ui.label(RichText::new("(Active = best performance, Passive = better efficiency)")
                 .small()
                 .italics());
@@ -261,7 +281,7 @@ fn draw_gpu_tuning(
     state: &mut AppState,
     hw_update_tx: tokio::sync::mpsc::UnboundedSender<crate::app::HardwareUpdate>,
 ) {
-    let profile = &mut state.config.profiles[profile_idx];
+    let profile = &mut state.config.lock().profiles[profile_idx];
     ui.heading("GPU Tuning");
     ui.add_space(8.0);
 

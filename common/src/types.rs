@@ -268,6 +268,7 @@ pub struct StatisticsSections {
     pub cpu_poll_rate: u64,
     pub gpu_poll_rate: u64,
     pub battery_poll_rate: u64,
+    pub memory_poll_rate: u64,
     pub wifi_poll_rate: u64,
     pub storage_poll_rate: u64,
     pub fans_poll_rate: u64,
@@ -330,6 +331,7 @@ impl Default for StatisticsSections {
             cpu_poll_rate: 1000,            // 1 second
             gpu_poll_rate: 2000,            // 2 seconds
             battery_poll_rate: 5000,        // 5 seconds
+            memory_poll_rate: 2000,         // 2 seconds
             wifi_poll_rate: 5000,           // 5 seconds
             storage_poll_rate: 30000,       // 30 seconds
             fans_poll_rate: 1000,           // 1 second

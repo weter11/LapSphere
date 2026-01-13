@@ -29,6 +29,7 @@ tray-icon = "0.18"
 
 # System statistics
 systemstat = "0.2"
+parking_lot = "0.12.5"
 
 [profile.release]
 opt-level = 3

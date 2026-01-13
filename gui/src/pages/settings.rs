@@ -20,7 +20,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Co
                 
                 use tuxedo_common::types::Theme;
                 let mut theme_changed = false;
-                let mut new_theme = state.config.theme.clone();
+                let mut new_theme = state.config.lock().theme.clone();
                 
                 if ui.selectable_value(&mut new_theme, Theme::Auto, "Auto").clicked() {
                     theme_changed = true;
@@ -33,7 +33,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Co
                 }
                 
                 if theme_changed {
-                    state.config.theme = new_theme.clone();
+                    state.config.lock().theme = new_theme.clone();
                     let _ = state.save_config();
                     
                     // Apply theme immediately
@@ -55,7 +55,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Co
                 
                 use tuxedo_common::types::FontSize;
                 let mut font_changed = false;
-                let mut new_font = state.config.font_size.clone();
+                let mut new_font = state.config.lock().font_size.clone();
                 
                 if ui.selectable_value(&mut new_font, FontSize::Small, "Small").clicked() {
                     font_changed = true;
@@ -68,7 +68,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Co
                 }
                 
                 if font_changed {
-                    state.config.font_size = new_font.clone();
+                    state.config.lock().font_size = new_font.clone();
                     let _ = state.save_config();
                     
                     // Apply font size immediately
@@ -84,11 +84,11 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Co
             ui.label(RichText::new("Startup").strong().heading());
             ui.add_space(8.0);
             
-            if ui.checkbox(&mut state.config.start_minimized, "Start minimized").changed() {
+            if ui.checkbox(&mut state.config.lock().start_minimized, "Start minimized").changed() {
                 let _ = state.save_config();
             }
             
-            if ui.checkbox(&mut state.config.autostart, "Enable autostart").changed() {
+            if ui.checkbox(&mut state.config.lock().autostart, "Enable autostart").changed() {
                 let _ = state.save_config();
                 // TODO: Create/remove autostart file
             }
@@ -101,13 +101,13 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Co
             ui.label(RichText::new("Daemon Controls").strong().heading());
             ui.add_space(8.0);
             
-            if ui.checkbox(&mut state.config.fan_daemon_enabled, "Fan daemon").changed() {
+            if ui.checkbox(&mut state.config.lock().fan_daemon_enabled, "Fan daemon").changed() {
                 let _ = state.save_config();
             }
             ui.label(RichText::new("Monitor temperatures and apply fan curves").small().italics());
             ui.add_space(6.0);
             
-            if ui.checkbox(&mut state.config.app_monitoring_enabled, "App monitoring").changed() {
+            if ui.checkbox(&mut state.config.lock().app_monitoring_enabled, "App monitoring").changed() {
                 let _ = state.save_config();
             }
             ui.label(RichText::new("Monitor running applications for automatic profile switching").small().italics());
@@ -120,25 +120,25 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Co
             ui.label(RichText::new("Statistics Page Layout").strong().heading());
             ui.add_space(8.0);
             
-            if ui.checkbox(&mut state.config.statistics_sections.show_system_info, "Show system info").changed() {
+            if ui.checkbox(&mut state.config.lock().statistics_sections.show_system_info, "Show system info").changed() {
                 let _ = state.save_config();
             }
-            if ui.checkbox(&mut state.config.statistics_sections.show_cpu, "Show CPU").changed() {
+            if ui.checkbox(&mut state.config.lock().statistics_sections.show_cpu, "Show CPU").changed() {
                 let _ = state.save_config();
             }
-            if ui.checkbox(&mut state.config.statistics_sections.show_gpu, "Show GPU").changed() {
+            if ui.checkbox(&mut state.config.lock().statistics_sections.show_gpu, "Show GPU").changed() {
                 let _ = state.save_config();
             }
-            if ui.checkbox(&mut state.config.statistics_sections.show_battery, "Show battery").changed() {
+            if ui.checkbox(&mut state.config.lock().statistics_sections.show_battery, "Show battery").changed() {
                 let _ = state.save_config();
             }
-            if ui.checkbox(&mut state.config.statistics_sections.show_wifi, "Show WiFi").changed() {
+            if ui.checkbox(&mut state.config.lock().statistics_sections.show_wifi, "Show WiFi").changed() {
                 let _ = state.save_config();
             }
-            if ui.checkbox(&mut state.config.statistics_sections.show_storage, "Show storage").changed() {
+            if ui.checkbox(&mut state.config.lock().statistics_sections.show_storage, "Show storage").changed() {
                 let _ = state.save_config();
             }
-            if ui.checkbox(&mut state.config.statistics_sections.show_fans, "Show fans").changed() {
+            if ui.checkbox(&mut state.config.lock().statistics_sections.show_fans, "Show fans").changed() {
                 let _ = state.save_config();
             }
             
@@ -165,83 +165,65 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Co
             ui.add_space(8.0);
             ui.label(RichText::new("How often to update each section (in seconds)").small().italics());
             ui.add_space(6.0);
-            
-            let mut cpu_poll = (state.config.statistics_sections.cpu_poll_rate as f32) / 1000.0;
-            ui.horizontal(|ui| {
-                ui.label("CPU:");
-                if ui.add(Slider::new(&mut cpu_poll, 0.5..=10.0).step_by(0.5).suffix(" s")).changed() {
-                    state.config.statistics_sections.cpu_poll_rate = (cpu_poll * 1000.0) as u64;
-                    let _ = state.save_config();
-                }
-            });
-            
-            let mut gpu_poll = (state.config.statistics_sections.gpu_poll_rate as f32) / 1000.0;
-            ui.horizontal(|ui| {
-                ui.label("GPU:");
-                if ui.add(Slider::new(&mut gpu_poll, 0.5..=10.0).step_by(0.5).suffix(" s")).changed() {
-                    state.config.statistics_sections.gpu_poll_rate = (gpu_poll * 1000.0) as u64;
-                    let _ = state.save_config();
-                }
-            });
-            
-            let mut battery_poll = (state.config.statistics_sections.battery_poll_rate as f32) / 1000.0;
-            ui.horizontal(|ui| {
-                ui.label("Battery:");
-                if ui.add(Slider::new(&mut battery_poll, 0.5..=30.0).step_by(0.5).suffix(" s")).changed() {
-                    state.config.statistics_sections.battery_poll_rate = (battery_poll * 1000.0) as u64;
-                    let _ = state.save_config();
-                }
-            });
-            
-            let mut wifi_poll = (state.config.statistics_sections.wifi_poll_rate as f32) / 1000.0;
-            ui.horizontal(|ui| {
-                ui.label("WiFi:");
-                if ui.add(Slider::new(&mut wifi_poll, 0.5..=30.0).step_by(0.5).suffix(" s")).changed() {
-                    state.config.statistics_sections.wifi_poll_rate = (wifi_poll * 1000.0) as u64;
-                    let _ = state.save_config();
-                }
-            });
-            
-            let mut storage_poll = (state.config.statistics_sections.storage_poll_rate as f32) / 1000.0;
-            ui.horizontal(|ui| {
-                ui.label("Storage:");
-                if ui.add(Slider::new(&mut storage_poll, 5.0..=60.0).step_by(0.5).suffix(" s")).changed() {
-                    state.config.statistics_sections.storage_poll_rate = (storage_poll * 1000.0) as u64;
-                    let _ = state.save_config();
-                }
-            });
-            
-            let mut fans_poll = (state.config.statistics_sections.fans_poll_rate as f32) / 1000.0;
-            ui.horizontal(|ui| {
-                ui.label("Fans:");
-                if ui.add(Slider::new(&mut fans_poll, 0.5..=10.0).step_by(0.5).suffix(" s")).changed() {
-                    state.config.statistics_sections.fans_poll_rate = (fans_poll * 1000.0) as u64;
-                    let _ = state.save_config();
-                }
-            });
+
+            let config = state.config.clone();
+            draw_polling_rate_slider(ui, "CPU:", 0.5..=10.0, &config, |c| &mut c.statistics_sections.cpu_poll_rate, dbus_client, state);
+            draw_polling_rate_slider(ui, "GPU:", 0.5..=10.0, &config, |c| &mut c.statistics_sections.gpu_poll_rate, dbus_client, state);
+            draw_polling_rate_slider(ui, "Memory:", 0.5..=10.0, &config, |c| &mut c.statistics_sections.memory_poll_rate, dbus_client, state);
+            draw_polling_rate_slider(ui, "Battery:", 0.5..=30.0, &config, |c| &mut c.statistics_sections.battery_poll_rate, dbus_client, state);
+            draw_polling_rate_slider(ui, "WiFi:", 0.5..=30.0, &config, |c| &mut c.statistics_sections.wifi_poll_rate, dbus_client, state);
+            draw_polling_rate_slider(ui, "Storage:", 5.0..=60.0, &config, |c| &mut c.statistics_sections.storage_poll_rate, dbus_client, state);
+            draw_polling_rate_slider(ui, "Fans:", 0.5..=10.0, &config, |c| &mut c.statistics_sections.fans_poll_rate, dbus_client, state);
         });
+}
+
+fn draw_polling_rate_slider(
+    ui: &mut Ui,
+    label: &str,
+    range: std::ops::RangeInclusive<f32>,
+    config: &std::sync::Arc<parking_lot::Mutex<tuxedo_common::types::AppConfig>>,
+    get_value_ms: impl Fn(&mut tuxedo_common::types::AppConfig) -> &mut u64,
+    dbus_client: Option<&DbusClient>,
+    state: &mut AppState,
+) {
+    let mut value_s = (*get_value_ms(&mut config.lock()) as f32) / 1000.0;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        if ui.add(Slider::new(&mut value_s, range).step_by(0.5).suffix(" s")).changed() {
+            *get_value_ms(&mut config.lock()) = (value_s * 1000.0) as u64;
+            let _ = state.save_config();
+            update_polling_rates(dbus_client, &config.lock().statistics_sections);
+        }
+    });
+}
+
+fn update_polling_rates(dbus_client: Option<&DbusClient>, rates: &tuxedo_common::types::StatisticsSections) {
+    if let Some(client) = dbus_client {
+        let rates_clone = rates.clone();
+        let _ = client.update_polling_rates(rates_clone);
+    }
 }
 
 fn draw_battery_settings(ui: &mut Ui, state: &mut AppState) {
     ui.heading("🔋 Battery Charge Control");
     ui.add_space(8.0);
 
-    if ui.checkbox(&mut state.config.battery_settings.control_enabled, "Enable charge thresholds").changed() {
+    if ui.checkbox(&mut state.config.lock().battery_settings.control_enabled, "Enable charge thresholds").changed() {
         let _ = state.save_config();
     }
     ui.add_space(6.0);
 
-    if state.config.battery_settings.control_enabled {
+    if state.config.lock().battery_settings.control_enabled {
         // Start Threshold
         ui.horizontal(|ui| {
             ui.label("Start Threshold:");
             if ComboBox::from_id_source("start_threshold_combo")
-                .selected_text(format!("{}%", state.config.battery_settings.charge_start_threshold))
+                .selected_text(format!("{}%", state.config.lock().battery_settings.charge_start_threshold))
                 .show_ui(ui, |ui| {
                     let mut changed = false;
                     for &threshold in &state.available_start_thresholds {
                         if ui.selectable_value(
-                            &mut state.config.battery_settings.charge_start_threshold,
+                            &mut state.config.lock().battery_settings.charge_start_threshold,
                             threshold,
                             format!("{}%", threshold),
                         ).clicked() {
@@ -259,12 +241,12 @@ fn draw_battery_settings(ui: &mut Ui, state: &mut AppState) {
         ui.horizontal(|ui| {
             ui.label("End Threshold:");
             if ComboBox::from_id_source("end_threshold_combo")
-                .selected_text(format!("{}%", state.config.battery_settings.charge_end_threshold))
+                .selected_text(format!("{}%", state.config.lock().battery_settings.charge_end_threshold))
                 .show_ui(ui, |ui| {
                     let mut changed = false;
                     for &threshold in &state.available_end_thresholds {
                         if ui.selectable_value(
-                            &mut state.config.battery_settings.charge_end_threshold,
+                            &mut state.config.lock().battery_settings.charge_end_threshold,
                             threshold,
                             format!("{}%", threshold),
                         ).clicked() {
@@ -279,12 +261,12 @@ fn draw_battery_settings(ui: &mut Ui, state: &mut AppState) {
         });
 
         // Validate thresholds
-        if state.config.battery_settings.charge_start_threshold >= state.config.battery_settings.charge_end_threshold {
+        if state.config.lock().battery_settings.charge_start_threshold >= state.config.lock().battery_settings.charge_end_threshold {
             if let Some(valid_start) = state.available_start_thresholds.iter()
-                .filter(|&&t| t < state.config.battery_settings.charge_end_threshold)
+                .filter(|&&t| t < state.config.lock().battery_settings.charge_end_threshold)
                 .last()
             {
-                state.config.battery_settings.charge_start_threshold = *valid_start;
+                state.config.lock().battery_settings.charge_start_threshold = *valid_start;
             }
         }
 
@@ -293,7 +275,7 @@ fn draw_battery_settings(ui: &mut Ui, state: &mut AppState) {
         if ui.button("💾 Apply Battery Settings").clicked() {
             // Create DBus client and apply settings
             if let Ok(client) = crate::dbus_client::DbusClient::new() {
-                let settings = state.config.battery_settings.clone();
+                let settings = state.config.lock().battery_settings.clone();
                 tokio::spawn(async move {
                     let rx = client.set_battery_settings(settings);
                     let _ = rx.await;
@@ -345,7 +327,8 @@ fn draw_prime_profile_settings(ui: &mut Ui, state: &mut AppState, dbus_client: O
     ui.add_space(6.0);
     
     // Get current saved profile from config
-    let current_profile = state.current_profile()
+    let current_profile = state.config.lock().profiles.iter()
+        .find(|p| p.name == state.config.lock().current_profile)
         .and_then(|p| p.gpu_settings.prime_profile.clone())
         .unwrap_or_else(|| "on-demand".to_string());
     
@@ -404,7 +387,7 @@ fn draw_prime_profile_settings(ui: &mut Ui, state: &mut AppState, dbus_client: O
         ui.horizontal(|ui| {
             if ui.button("💾 Apply Prime Profile").clicked() {
                 // Update the GPU settings in all profiles
-                for profile in &mut state.config.profiles {
+                for profile in &mut state.config.lock().profiles {
                     profile.gpu_settings.prime_profile = Some(selected_profile.clone());
                 }
                 let _ = state.save_config();

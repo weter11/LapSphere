@@ -39,6 +39,7 @@ pub enum DbusCommand {
     GetGpuCoreOffsetLimits { device_index: u32, reply: oneshot::Sender<Result<(i32, i32)>> },
     GetGpuMemoryOffsetLimits { device_index: u32, reply: oneshot::Sender<Result<(i32, i32)>> },
     SetPrimeProfile { profile: String, reply: oneshot::Sender<Result<()>> },
+    UpdatePollingRates { rates: StatisticsSections, reply: oneshot::Sender<Result<()>> },
 }
 
 impl DbusClient {
@@ -232,6 +233,12 @@ impl DbusClient {
         let _ = self.command_tx.send(DbusCommand::SetPrimeProfile { profile: profile.to_string(), reply: tx });
         rx
     }
+
+    pub fn update_polling_rates(&self, rates: StatisticsSections) -> oneshot::Receiver<Result<()>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::UpdatePollingRates { rates, reply: tx });
+        rx
+    }
 }
 
 // Background worker - handles all DBus calls asynchronously
@@ -356,9 +363,26 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
                 let result = set_prime_profile_impl(&connection, &profile).await;
                 let _ = reply.send(result);
             }
+            DbusCommand::UpdatePollingRates { rates, reply } => {
+                let result = update_polling_rates_impl(&connection, rates).await;
+                let _ = reply.send(result);
+            }
         }
     }
     
+    Ok(())
+}
+
+async fn update_polling_rates_impl(conn: &Connection, rates: StatisticsSections) -> Result<()> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "com.tuxedo.Control",
+        "/com/tuxedo/Control",
+        "com.tuxedo.Control",
+    ).await?;
+
+    let json = serde_json::to_string(&rates)?;
+    proxy.call::<_, _, ()>("UpdatePollingRates", &(json.as_str(),)).await?;
     Ok(())
 }
 

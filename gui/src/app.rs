@@ -1,6 +1,8 @@
 use chrono::Local;
 use egui::{Context, CentralPanel, TopBottomPanel, RichText};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot};
 use tuxedo_common::types::*;
 
@@ -19,7 +21,7 @@ pub enum Page {
 
 pub struct AppState {
     // Core data
-    pub config: AppConfig,
+    pub config: Arc<Mutex<AppConfig>>,
     
     // Hardware info (updated in background)
     pub system_info: Option<SystemInfo>,
@@ -62,7 +64,7 @@ pub struct StatusMessage {
 impl AppState {
     pub fn new() -> Self {
         Self {
-            config: AppConfig::default(),
+            config: Arc::new(Mutex::new(AppConfig::default())),
             system_info: None,
             memory_info: None,
             cpu_info: None,
@@ -88,14 +90,14 @@ impl AppState {
         }
     }
     
-pub fn load_config(&mut self) {
-    if let Ok(config) = load_config_from_disk() {
-        self.config = config;
+    pub fn load_config(&mut self) {
+        if let Ok(config) = load_config_from_disk() {
+            *self.config.lock() = config;
+        }
     }
-}
     
     pub fn save_config(&mut self) -> anyhow::Result<()> {
-        save_config_to_disk(&self.config)?;
+        save_config_to_disk(&self.config.lock())?;
         self.show_message("Configuration saved", false);
         Ok(())
     }
@@ -108,20 +110,13 @@ pub fn load_config(&mut self) {
         });
     }
     
-    pub fn current_profile(&self) -> Option<&Profile> {
-        self.config.profiles.iter()
-            .find(|p| p.name == self.config.current_profile)
+    pub fn current_profile_name(&self) -> String {
+        self.config.lock().current_profile.clone()
     }
-    
-    pub fn current_profile_mut(&mut self) -> Option<&mut Profile> {
-        let current = self.config.current_profile.clone();
-        self.config.profiles.iter_mut()
-            .find(|p| p.name == current)
-    }
-    
+
     pub fn current_profile_index(&self) -> Option<usize> {
-        self.config.profiles.iter()
-            .position(|p| p.name == self.config.current_profile)
+        let config = self.config.lock();
+        config.profiles.iter().position(|p| p.name == config.current_profile)
     }
 }
 
@@ -142,7 +137,7 @@ pub struct TuxedoApp {
 pub enum HardwareUpdate {
     SystemInfo(SystemInfo),
     MemoryInfo(MemoryInfo),
-    CpuInfo(CpuInfo),
+    CpuInfo(Result<CpuInfo, String>),
     GpuInfo(Vec<GpuInfo>),
     BatteryInfo(BatteryInfo),
     WifiInfo(Vec<WiFiInfo>),
@@ -209,8 +204,8 @@ impl TuxedoApp {
         }
         
         // Apply theme
-        let theme = TuxedoTheme::new(&state.config.theme);
-        theme.apply_with_font_size(&cc.egui_ctx, &state.config.font_size);
+        let theme = TuxedoTheme::new(&state.config.lock().theme);
+        theme.apply_with_font_size(&cc.egui_ctx, &state.config.lock().font_size);
         
         Self {
             state,
@@ -232,8 +227,11 @@ impl TuxedoApp {
                 HardwareUpdate::MemoryInfo(info) => {
                     self.state.memory_info = Some(info);
                 }
-                HardwareUpdate::CpuInfo(info) => {
-                    self.state.cpu_info = Some(info);
+                HardwareUpdate::CpuInfo(result) => {
+                    match result {
+                        Ok(info) => self.state.cpu_info = Some(info),
+                        Err(e) => self.state.show_message(format!("Failed to get CPU info: {}", e), true),
+                    }
                 }
                 HardwareUpdate::GpuInfo(info) => {
                     self.state.gpu_info = info;
@@ -331,7 +329,7 @@ impl TuxedoApp {
                     ui.label(RichText::new(date_str).monospace());
 
                     // Current profile indicator
-                    ui.label(format!("Profile: {}", self.state.config.current_profile));
+                    ui.label(format!("Profile: {}", self.state.current_profile_name()));
                 });
             });
             ui.add_space(8.0);
@@ -393,57 +391,151 @@ impl eframe::App for TuxedoApp {
     }
 }
 
+use std::future::Future;
+use std::pin::Pin;
+
+struct PollJob {
+    interval: Duration,
+    next_run: Instant,
+    poll_fn: Box<dyn Fn(&DbusClient, &mpsc::UnboundedSender<HardwareUpdate>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>,
+}
+
 fn start_background_polling(
     client: DbusClient,
     tx: mpsc::UnboundedSender<HardwareUpdate>,
-    _config: &AppConfig,
+    config: &Arc<Mutex<AppConfig>>,
 ) {
+    let config = config.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(1000));
-        
+        let mut jobs = vec![
+            PollJob {
+                interval: Duration::from_millis(config.lock().statistics_sections.cpu_poll_rate),
+                next_run: Instant::now(),
+                poll_fn: Box::new(|client, tx| {
+                    let client = client.clone();
+                    let tx = tx.clone();
+                    Box::pin(async move {
+                        if let Ok(cpu_res) = client.get_cpu_info().await {
+                            let _ = tx.send(HardwareUpdate::CpuInfo(cpu_res.map_err(|e| e.to_string())));
+                        }
+                    })
+                }),
+            },
+            PollJob {
+                interval: Duration::from_millis(config.lock().statistics_sections.memory_poll_rate),
+                next_run: Instant::now(),
+                poll_fn: Box::new(|client, tx| {
+                    let client = client.clone();
+                    let tx = tx.clone();
+                    Box::pin(async move {
+                        if let Ok(Ok(info)) = client.get_memory_info().await {
+                            let _ = tx.send(HardwareUpdate::MemoryInfo(info));
+                        }
+                    })
+                }),
+            },
+            PollJob {
+                interval: Duration::from_millis(config.lock().statistics_sections.gpu_poll_rate),
+                next_run: Instant::now(),
+                poll_fn: Box::new(|client, tx| {
+                    let client = client.clone();
+                    let tx = tx.clone();
+                    Box::pin(async move {
+                        if let Ok(Ok(info)) = client.get_gpu_info().await {
+                            let _ = tx.send(HardwareUpdate::GpuInfo(info));
+                        }
+                    })
+                }),
+            },
+            PollJob {
+                interval: Duration::from_millis(config.lock().statistics_sections.battery_poll_rate),
+                next_run: Instant::now(),
+                poll_fn: Box::new(|client, tx| {
+                    let client = client.clone();
+                    let tx = tx.clone();
+                    Box::pin(async move {
+                        if let Ok(Ok(info)) = client.get_battery_info().await {
+                            let _ = tx.send(HardwareUpdate::BatteryInfo(info));
+                        }
+                    })
+                }),
+            },
+            PollJob {
+                interval: Duration::from_millis(config.lock().statistics_sections.wifi_poll_rate),
+                next_run: Instant::now(),
+                poll_fn: Box::new(|client, tx| {
+                    let client = client.clone();
+                    let tx = tx.clone();
+                    Box::pin(async move {
+                        if let Ok(Ok(info)) = client.get_wifi_info().await {
+                            let _ = tx.send(HardwareUpdate::WifiInfo(info));
+                        }
+                    })
+                }),
+            },
+            PollJob {
+                interval: Duration::from_millis(config.lock().statistics_sections.storage_poll_rate),
+                next_run: Instant::now(),
+                poll_fn: Box::new(|client, tx| {
+                    let client = client.clone();
+                    let tx = tx.clone();
+                    Box::pin(async move {
+                        let (storage_device, mount) = tokio::join!(
+                            client.get_storage_device_info(),
+                            client.get_mount_info()
+                        );
+                        if let Ok(Ok(info)) = storage_device {
+                            let _ = tx.send(HardwareUpdate::StorageDeviceInfo(info));
+                        }
+                        if let Ok(Ok(info)) = mount {
+                            let _ = tx.send(HardwareUpdate::MountInfo(info));
+                        }
+                    })
+                }),
+            },
+            PollJob {
+                interval: Duration::from_millis(config.lock().statistics_sections.fans_poll_rate),
+                next_run: Instant::now(),
+                poll_fn: Box::new(|client, tx| {
+                    let client = client.clone();
+                    let tx = tx.clone();
+                    Box::pin(async move {
+                        if let Ok(Ok(info)) = client.get_fan_info().await {
+                            let _ = tx.send(HardwareUpdate::FanInfo(info));
+                        }
+                    })
+                }),
+            },
+        ];
+
         loop {
-            interval.tick().await;
+            // Update intervals
+            {
+                let config = config.lock();
+                jobs[0].interval = Duration::from_millis(config.statistics_sections.cpu_poll_rate);
+                jobs[1].interval = Duration::from_millis(config.statistics_sections.memory_poll_rate);
+                jobs[2].interval = Duration::from_millis(config.statistics_sections.gpu_poll_rate);
+                jobs[3].interval = Duration::from_millis(config.statistics_sections.battery_poll_rate);
+                jobs[4].interval = Duration::from_millis(config.statistics_sections.wifi_poll_rate);
+                jobs[5].interval = Duration::from_millis(config.statistics_sections.storage_poll_rate);
+                jobs[6].interval = Duration::from_millis(config.statistics_sections.fans_poll_rate);
+            }
 
-            let client = client.clone();
-            let tx = tx.clone();
+            // Find next job to run
+            let now = Instant::now();
+            let next_job = jobs.iter_mut().min_by_key(|j| j.next_run);
 
-            tokio::spawn(async move {
-                let (cpu, gpu, memory, fans, battery, wifi, storage_device, mount) = tokio::join!(
-                    client.get_cpu_info(),
-                    client.get_gpu_info(),
-                    client.get_memory_info(),
-                    client.get_fan_info(),
-                    client.get_battery_info(),
-                    client.get_wifi_info(),
-                    client.get_storage_device_info(),
-                    client.get_mount_info()
-                );
-
-                if let Ok(Ok(info)) = cpu {
-                    let _ = tx.send(HardwareUpdate::CpuInfo(info));
+            if let Some(job) = next_job {
+                if job.next_run <= now {
+                    // Run the job
+                    let fut = (job.poll_fn)(&client, &tx);
+                    fut.await;
+                    job.next_run = now + job.interval;
+                } else {
+                    // Sleep until the next job is ready
+                    tokio::time::sleep(job.next_run - now).await;
                 }
-                if let Ok(Ok(info)) = gpu {
-                    let _ = tx.send(HardwareUpdate::GpuInfo(info));
-                }
-                if let Ok(Ok(info)) = memory {
-                    let _ = tx.send(HardwareUpdate::MemoryInfo(info));
-                }
-                if let Ok(Ok(info)) = fans {
-                    let _ = tx.send(HardwareUpdate::FanInfo(info));
-                }
-                if let Ok(Ok(info)) = battery {
-                    let _ = tx.send(HardwareUpdate::BatteryInfo(info));
-                }
-                if let Ok(Ok(info)) = wifi {
-                    let _ = tx.send(HardwareUpdate::WifiInfo(info));
-                }
-                if let Ok(Ok(info)) = storage_device {
-                    let _ = tx.send(HardwareUpdate::StorageDeviceInfo(info));
-                }
-                if let Ok(Ok(info)) = mount {
-                    let _ = tx.send(HardwareUpdate::MountInfo(info));
-                }
-            });
+            }
         }
     });
 }

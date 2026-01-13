@@ -9,12 +9,12 @@ pub fn draw(ui: &mut Ui, state: &mut AppState) {
         .show(ui, |ui| {
             ui.add_space(8.0);
             
-            if state.config.statistics_sections.show_system_info {
+            if state.config.lock().statistics_sections.show_system_info {
                 draw_system_info(ui, state);
                 ui.add_space(12.0);
             }
             
-            if state.config.statistics_sections.show_cpu {
+            if state.config.lock().statistics_sections.show_cpu {
                 draw_cpu_info(ui, state);
                 ui.add_space(12.0);
             }
@@ -22,27 +22,27 @@ pub fn draw(ui: &mut Ui, state: &mut AppState) {
             draw_memory_info(ui, state);
             ui.add_space(12.0);
 
-            if state.config.statistics_sections.show_gpu {
+            if state.config.lock().statistics_sections.show_gpu {
                 draw_gpu_info(ui, state);
                 ui.add_space(12.0);
             }
             
-            if state.config.statistics_sections.show_battery {
+            if state.config.lock().statistics_sections.show_battery {
                 draw_battery_info(ui, state);
                 ui.add_space(12.0);
             }
 
-            if state.config.statistics_sections.show_wifi {
+            if state.config.lock().statistics_sections.show_wifi {
                 draw_wifi_info(ui, state);
                 ui.add_space(12.0);
             }
 
-            if state.config.statistics_sections.show_storage {
+            if state.config.lock().statistics_sections.show_storage {
                 draw_storage_info(ui, state);
                 ui.add_space(12.0);
             }
             
-            if state.config.statistics_sections.show_fans {
+            if state.config.lock().statistics_sections.show_fans {
                 draw_fan_info(ui, state);
                 ui.add_space(12.0);
             }

@@ -361,6 +361,13 @@ async fn set_tdp_profile(&self, profile: &str) -> Result<(), zbus::fdo::Error> {
         crate::hardware_control::set_prime_profile(profile)
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
+
+    async fn update_polling_rates(&self, rates_json: &str) -> Result<(), zbus::fdo::Error> {
+        let rates: tuxedo_common::types::StatisticsSections = serde_json::from_str(rates_json)
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        crate::update_polling_rates(rates)
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
 }
 
 pub async fn start_service(_connection: Connection) -> Result<()> {

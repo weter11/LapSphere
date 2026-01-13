@@ -11,8 +11,21 @@ use std::sync::{Arc, Mutex};
 use tuxedo_common::types::FanSettings;
 
 // Global fan daemon state
-pub static FAN_DAEMON_STATE: once_cell::sync::Lazy<Arc<Mutex<Option<FanSettings>>>> = 
+pub static FAN_DAEMON_STATE: once_cell::sync::Lazy<Arc<Mutex<Option<FanSettings>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
+
+// Global polling rates state
+pub static POLLING_RATES: once_cell::sync::Lazy<Arc<Mutex<tuxedo_common::types::StatisticsSections>>> =
+    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(Default::default())));
+
+/// Called from DBus to update the polling rates
+pub fn update_polling_rates(rates: tuxedo_common::types::StatisticsSections) -> Result<()> {
+    let mut state = POLLING_RATES.lock()
+        .map_err(|_| anyhow::anyhow!("Failed to acquire lock on polling rates"))?;
+    *state = rates;
+    log::info!("Updated polling rates");
+    Ok(())
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -78,16 +91,37 @@ async fn main() -> Result<()> {
 
 async fn fan_daemon_task(io: Arc<tuxedo_io::TuxedoIo>) {
     log::info!("Starting fan control daemon");
-    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(2));
+    let mut interval_duration = tokio::time::Duration::from_secs(2);
+    let mut interval = tokio::time::interval(interval_duration);
     let mut last_settings: Option<FanSettings> = None;
     let mut sorted_curves: Vec<Vec<(u8, u8)>> = Vec::new();
 
     loop {
         interval.tick().await;
 
+        // Update interval if polling rate has changed
+        match POLLING_RATES.lock() {
+            Ok(rates) => {
+                let new_duration = tokio::time::Duration::from_millis(rates.fans_poll_rate);
+                if new_duration != interval_duration {
+                    interval_duration = new_duration;
+                    interval = tokio::time::interval(interval_duration);
+                    log::info!("Fan daemon polling interval updated to {}ms", interval_duration.as_millis());
+                }
+            }
+            Err(e) => {
+                log::error!("Failed to lock polling rates: {}", e);
+            }
+        }
+
         let settings = {
-            let state = FAN_DAEMON_STATE.lock().unwrap();
-            state.clone()
+            match FAN_DAEMON_STATE.lock() {
+                Ok(state) => state.clone(),
+                Err(e) => {
+                    log::error!("Failed to lock fan daemon state: {}", e);
+                    None
+                }
+            }
         };
 
         if settings != last_settings {
