@@ -999,8 +999,8 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
     // as we assume fan 2 monitors the primary discrete GPU's VRAM
     let vram_temp = if TuxedoIo::is_available() {
         TuxedoIo::new().ok().and_then(|io| {
-            // Fan 2 is fan_id 1 (0-indexed)
-            io.get_fan_temperature(1).ok().map(|t| t as f32)
+            // Fan 2 is fan_id 2 (0-indexed: fan0, fan1, fan2)
+            io.get_fan_temperature(2).ok().map(|t| t as f32)
         })
     } else {
         None
