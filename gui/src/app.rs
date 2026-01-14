@@ -8,6 +8,7 @@ use crate::dbus_client::DbusClient;
 use crate::theme::TuxedoTheme;
 use crate::pages::{statistics, profiles, tuning, settings};
 use crate::keyboard_shortcuts::KeyboardShortcuts;
+use crate::polling_scheduler::{RefreshCoordinator, CoordinatorHandle};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Page {
@@ -50,6 +51,9 @@ pub struct AppState {
     
     // Async state
     pub pending_battery_update: Option<oneshot::Receiver<Result<(), anyhow::Error>>>,
+    
+    // Refresh coordinator handle
+    pub coordinator_handle: Option<CoordinatorHandle>,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +89,7 @@ impl AppState {
             editing_profile_index: None,
             editing_profile_name: None,
             pending_battery_update: None,
+            coordinator_handle: None,
         }
     }
     
@@ -178,10 +183,79 @@ impl TuxedoApp {
             }
         };
         
-        // Setup background polling
+        // Setup background polling with refresh coordinator
         let (hw_update_tx, hw_update_rx) = mpsc::unbounded_channel();
-        if let Some(ref client) = dbus_client {
-            start_background_polling(client.clone(), hw_update_tx.clone(), &state.config);
+        let coordinator_handle = if let Some(ref client) = dbus_client {
+            let coordinator = RefreshCoordinator::new();
+            let handle = coordinator.get_handle();
+            
+            // Setup refresh callback
+            let client_clone = client.clone();
+            let tx_clone = hw_update_tx.clone();
+            tokio::spawn(async move {
+                coordinator.run(move |component_id| {
+                    // Trigger refresh for the component
+                    let client = client_clone.clone();
+                    let tx = tx_clone.clone();
+                    let component = component_id.to_string();
+                    
+                    tokio::spawn(async move {
+                        match component.as_str() {
+                            "cpu" => {
+                                if let Ok(Ok(info)) = client.get_cpu_info().await {
+                                    let _ = tx.send(HardwareUpdate::CpuInfo(info));
+                                }
+                            }
+                            "gpu" => {
+                                if let Ok(Ok(info)) = client.get_gpu_info().await {
+                                    let _ = tx.send(HardwareUpdate::GpuInfo(info));
+                                }
+                            }
+                            "memory" => {
+                                if let Ok(Ok(info)) = client.get_memory_info().await {
+                                    let _ = tx.send(HardwareUpdate::MemoryInfo(info));
+                                }
+                            }
+                            "fans" => {
+                                if let Ok(Ok(info)) = client.get_fan_info().await {
+                                    let _ = tx.send(HardwareUpdate::FanInfo(info));
+                                }
+                            }
+                            "battery" => {
+                                if let Ok(Ok(info)) = client.get_battery_info().await {
+                                    let _ = tx.send(HardwareUpdate::BatteryInfo(info));
+                                }
+                            }
+                            "wifi" => {
+                                if let Ok(Ok(info)) = client.get_wifi_info().await {
+                                    let _ = tx.send(HardwareUpdate::WifiInfo(info));
+                                }
+                            }
+                            "storage" => {
+                                if let Ok(Ok(info)) = client.get_storage_device_info().await {
+                                    let _ = tx.send(HardwareUpdate::StorageDeviceInfo(info));
+                                }
+                            }
+                            "mount" => {
+                                if let Ok(Ok(info)) = client.get_mount_info().await {
+                                    let _ = tx.send(HardwareUpdate::MountInfo(info));
+                                }
+                            }
+                            _ => {}
+                        }
+                    });
+                }).await;
+            });
+            
+            // Register components with their refresh intervals
+            let _ = handle.register("cpu".to_string(), Duration::from_millis(state.config.statistics_sections.cpu_poll_rate));
+            let _ = handle.register("gpu".to_string(), Duration::from_millis(state.config.statistics_sections.gpu_poll_rate));
+            let _ = handle.register("memory".to_string(), Duration::from_millis(state.config.statistics_sections.cpu_poll_rate));
+            let _ = handle.register("fans".to_string(), Duration::from_millis(state.config.statistics_sections.fans_poll_rate));
+            let _ = handle.register("battery".to_string(), Duration::from_millis(state.config.statistics_sections.battery_poll_rate));
+            let _ = handle.register("wifi".to_string(), Duration::from_millis(state.config.statistics_sections.wifi_poll_rate));
+            let _ = handle.register("storage".to_string(), Duration::from_millis(state.config.statistics_sections.storage_poll_rate));
+            let _ = handle.register("mount".to_string(), Duration::from_millis(state.config.statistics_sections.storage_poll_rate));
 
             // Initial system info load
             let client_clone = client.clone();
@@ -206,7 +280,14 @@ impl TuxedoApp {
                     _ => {}
                 }
             });
-        }
+            
+            Some(handle)
+        } else {
+            None
+        };
+        
+        // Set coordinator handle in state
+        state.coordinator_handle = coordinator_handle.clone();
         
         // Apply theme
         let theme = TuxedoTheme::new(&state.config.theme);
@@ -391,61 +472,6 @@ impl eframe::App for TuxedoApp {
         // Request repaint if there are pending updates
         ctx.request_repaint_after(Duration::from_millis(500));
     }
-}
-
-fn start_background_polling(
-    client: DbusClient,
-    tx: mpsc::UnboundedSender<HardwareUpdate>,
-    _config: &AppConfig,
-) {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(1000));
-        
-        loop {
-            interval.tick().await;
-
-            let client = client.clone();
-            let tx = tx.clone();
-
-            tokio::spawn(async move {
-                let (cpu, gpu, memory, fans, battery, wifi, storage_device, mount) = tokio::join!(
-                    client.get_cpu_info(),
-                    client.get_gpu_info(),
-                    client.get_memory_info(),
-                    client.get_fan_info(),
-                    client.get_battery_info(),
-                    client.get_wifi_info(),
-                    client.get_storage_device_info(),
-                    client.get_mount_info()
-                );
-
-                if let Ok(Ok(info)) = cpu {
-                    let _ = tx.send(HardwareUpdate::CpuInfo(info));
-                }
-                if let Ok(Ok(info)) = gpu {
-                    let _ = tx.send(HardwareUpdate::GpuInfo(info));
-                }
-                if let Ok(Ok(info)) = memory {
-                    let _ = tx.send(HardwareUpdate::MemoryInfo(info));
-                }
-                if let Ok(Ok(info)) = fans {
-                    let _ = tx.send(HardwareUpdate::FanInfo(info));
-                }
-                if let Ok(Ok(info)) = battery {
-                    let _ = tx.send(HardwareUpdate::BatteryInfo(info));
-                }
-                if let Ok(Ok(info)) = wifi {
-                    let _ = tx.send(HardwareUpdate::WifiInfo(info));
-                }
-                if let Ok(Ok(info)) = storage_device {
-                    let _ = tx.send(HardwareUpdate::StorageDeviceInfo(info));
-                }
-                if let Ok(Ok(info)) = mount {
-                    let _ = tx.send(HardwareUpdate::MountInfo(info));
-                }
-            });
-        }
-    });
 }
 
 fn load_config_from_disk() -> anyhow::Result<AppConfig> {

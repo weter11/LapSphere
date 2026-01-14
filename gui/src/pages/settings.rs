@@ -170,8 +170,14 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Co
             ui.horizontal(|ui| {
                 ui.label("CPU:");
                 if ui.add(Slider::new(&mut cpu_poll, 0.5..=10.0).step_by(0.5).suffix(" s")).changed() {
-                    state.config.statistics_sections.cpu_poll_rate = (cpu_poll * 1000.0) as u64;
+                    let new_rate = (cpu_poll * 1000.0) as u64;
+                    state.config.statistics_sections.cpu_poll_rate = new_rate;
                     let _ = state.save_config();
+                    // Update coordinator interval
+                    if let Some(ref handle) = state.coordinator_handle {
+                        let _ = handle.update_interval("cpu".to_string(), std::time::Duration::from_millis(new_rate));
+                        let _ = handle.update_interval("memory".to_string(), std::time::Duration::from_millis(new_rate));
+                    }
                 }
             });
             
@@ -179,8 +185,13 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Co
             ui.horizontal(|ui| {
                 ui.label("GPU:");
                 if ui.add(Slider::new(&mut gpu_poll, 0.5..=10.0).step_by(0.5).suffix(" s")).changed() {
-                    state.config.statistics_sections.gpu_poll_rate = (gpu_poll * 1000.0) as u64;
+                    let new_rate = (gpu_poll * 1000.0) as u64;
+                    state.config.statistics_sections.gpu_poll_rate = new_rate;
                     let _ = state.save_config();
+                    // Update coordinator interval
+                    if let Some(ref handle) = state.coordinator_handle {
+                        let _ = handle.update_interval("gpu".to_string(), std::time::Duration::from_millis(new_rate));
+                    }
                 }
             });
             
@@ -188,8 +199,13 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Co
             ui.horizontal(|ui| {
                 ui.label("Battery:");
                 if ui.add(Slider::new(&mut battery_poll, 0.5..=30.0).step_by(0.5).suffix(" s")).changed() {
-                    state.config.statistics_sections.battery_poll_rate = (battery_poll * 1000.0) as u64;
+                    let new_rate = (battery_poll * 1000.0) as u64;
+                    state.config.statistics_sections.battery_poll_rate = new_rate;
                     let _ = state.save_config();
+                    // Update coordinator interval
+                    if let Some(ref handle) = state.coordinator_handle {
+                        let _ = handle.update_interval("battery".to_string(), std::time::Duration::from_millis(new_rate));
+                    }
                 }
             });
             
@@ -197,8 +213,13 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Co
             ui.horizontal(|ui| {
                 ui.label("WiFi:");
                 if ui.add(Slider::new(&mut wifi_poll, 0.5..=30.0).step_by(0.5).suffix(" s")).changed() {
-                    state.config.statistics_sections.wifi_poll_rate = (wifi_poll * 1000.0) as u64;
+                    let new_rate = (wifi_poll * 1000.0) as u64;
+                    state.config.statistics_sections.wifi_poll_rate = new_rate;
                     let _ = state.save_config();
+                    // Update coordinator interval
+                    if let Some(ref handle) = state.coordinator_handle {
+                        let _ = handle.update_interval("wifi".to_string(), std::time::Duration::from_millis(new_rate));
+                    }
                 }
             });
             
@@ -206,8 +227,14 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Co
             ui.horizontal(|ui| {
                 ui.label("Storage:");
                 if ui.add(Slider::new(&mut storage_poll, 5.0..=60.0).step_by(0.5).suffix(" s")).changed() {
-                    state.config.statistics_sections.storage_poll_rate = (storage_poll * 1000.0) as u64;
+                    let new_rate = (storage_poll * 1000.0) as u64;
+                    state.config.statistics_sections.storage_poll_rate = new_rate;
                     let _ = state.save_config();
+                    // Update coordinator interval
+                    if let Some(ref handle) = state.coordinator_handle {
+                        let _ = handle.update_interval("storage".to_string(), std::time::Duration::from_millis(new_rate));
+                        let _ = handle.update_interval("mount".to_string(), std::time::Duration::from_millis(new_rate));
+                    }
                 }
             });
             
@@ -215,8 +242,13 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Co
             ui.horizontal(|ui| {
                 ui.label("Fans:");
                 if ui.add(Slider::new(&mut fans_poll, 0.5..=10.0).step_by(0.5).suffix(" s")).changed() {
-                    state.config.statistics_sections.fans_poll_rate = (fans_poll * 1000.0) as u64;
+                    let new_rate = (fans_poll * 1000.0) as u64;
+                    state.config.statistics_sections.fans_poll_rate = new_rate;
                     let _ = state.save_config();
+                    // Update coordinator interval
+                    if let Some(ref handle) = state.coordinator_handle {
+                        let _ = handle.update_interval("fans".to_string(), std::time::Duration::from_millis(new_rate));
+                    }
                 }
             });
         });
