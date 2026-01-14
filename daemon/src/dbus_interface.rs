@@ -361,6 +361,17 @@ async fn set_tdp_profile(&self, profile: &str) -> Result<(), zbus::fdo::Error> {
         crate::hardware_control::set_prime_profile(profile)
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
+
+    // Polling scheduler methods
+    async fn update_polling_interval(&self, component: &str, interval_ms: u64) -> Result<(), zbus::fdo::Error> {
+        if let Some(handle) = crate::SCHEDULER_HANDLE.get() {
+            let interval = std::time::Duration::from_millis(interval_ms);
+            handle.update_interval(component.to_string(), interval)
+                .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+        } else {
+            Err(zbus::fdo::Error::Failed("Scheduler not initialized".to_string()))
+        }
+    }
 }
 
 pub async fn start_service(_connection: Connection) -> Result<()> {

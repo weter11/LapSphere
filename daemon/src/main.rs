@@ -4,15 +4,22 @@ mod hardware_control;
 mod hardware_detection;
 mod tuxedo_io;
 mod battery_control;
+mod polling_scheduler;
 
 use anyhow::Result;
 use tokio::signal;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tuxedo_common::types::FanSettings;
+use polling_scheduler::{PollingScheduler, PollJob};
 
 // Global fan daemon state
 pub static FAN_DAEMON_STATE: once_cell::sync::Lazy<Arc<Mutex<Option<FanSettings>>>> = 
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
+
+// Global polling scheduler handle
+pub static SCHEDULER_HANDLE: once_cell::sync::OnceCell<polling_scheduler::SchedulerHandle> = 
+    once_cell::sync::OnceCell::new();
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -55,12 +62,56 @@ async fn main() -> Result<()> {
         log::info!("Battery charge control not available");
     }
 
-    // Start fan daemon in background
+    // Create and start polling scheduler
+    let scheduler = PollingScheduler::new();
+    let scheduler_handle = scheduler.get_handle();
+    
+    // Store handle globally for DBus interface to use
+    SCHEDULER_HANDLE.set(scheduler_handle.clone()).ok();
+    
+    // Start scheduler in background
+    tokio::spawn(async move {
+        scheduler.run().await;
+    });
+
+    // Add fan control polling job if hardware is available
     if let Some(io) = tuxedo_io {
         let fan_io = Arc::new(io);
-        tokio::spawn(async move {
-            fan_daemon_task(fan_io).await;
-        });
+        let poll_fn = {
+            let fan_io = fan_io.clone();
+            move || {
+                let settings = {
+                    let state = FAN_DAEMON_STATE.lock().unwrap();
+                    state.clone()
+                };
+
+                if let Some(ref fan_settings) = settings {
+                    if fan_settings.control_enabled {
+                        // Sort curves for each fan
+                        let sorted_curves: Vec<Vec<(u8, u8)>> = fan_settings.curves.iter().map(|c| {
+                            let mut points = c.points.clone();
+                            points.sort_by_key(|p| p.0);
+                            points
+                        }).collect();
+
+                        apply_fan_curves(&fan_io, fan_settings, &sorted_curves)?;
+                    }
+                }
+                Ok(())
+            }
+        };
+
+        let fan_job = PollJob::new(
+            "fan_control".to_string(),
+            Duration::from_secs(2),
+            poll_fn,
+        );
+
+        if let Err(e) = scheduler_handle.add_job(fan_job) {
+            log::error!("Failed to add fan control job: {}", e);
+        } else {
+            log::info!("Fan control polling job added");
+        }
     }
 
     // Start DBus service
@@ -74,41 +125,6 @@ async fn main() -> Result<()> {
     log::info!("Shutting down daemon");
 
     Ok(())
-}
-
-async fn fan_daemon_task(io: Arc<tuxedo_io::TuxedoIo>) {
-    log::info!("Starting fan control daemon");
-    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(2));
-    let mut last_settings: Option<FanSettings> = None;
-    let mut sorted_curves: Vec<Vec<(u8, u8)>> = Vec::new();
-
-    loop {
-        interval.tick().await;
-
-        let settings = {
-            let state = FAN_DAEMON_STATE.lock().unwrap();
-            state.clone()
-        };
-
-        if settings != last_settings {
-            if let Some(ref s) = settings {
-                sorted_curves = s.curves.iter().map(|c| {
-                    let mut points = c.points.clone();
-                    points.sort_by_key(|p| p.0);
-                    points
-                }).collect();
-            }
-            last_settings = settings;
-        }
-
-        if let Some(ref fan_settings) = last_settings {
-            if fan_settings.control_enabled {
-                if let Err(e) = apply_fan_curves(&io, fan_settings, &sorted_curves) {
-                    log::error!("Failed to apply fan curves: {}", e);
-                }
-            }
-        }
-    }
 }
 
 fn apply_fan_curves(io: &tuxedo_io::TuxedoIo, settings: &FanSettings, sorted_curves: &[Vec<(u8, u8)>]) -> Result<()> {
