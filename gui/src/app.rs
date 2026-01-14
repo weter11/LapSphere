@@ -521,8 +521,11 @@ impl eframe::App for TuxedoApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         if let Some(client) = &self.dbus_client {
-            let _ = client.set_fan_auto(0);
-            let _ = client.shutdown_daemon();
+            let client = client.clone();
+            tokio::spawn(async move {
+                let _ = tokio::time::timeout(Duration::from_secs(2), client.set_fan_auto(0)).await;
+                let _ = tokio::time::timeout(Duration::from_secs(2), client.shutdown_daemon()).await;
+            });
         }
     }
 }

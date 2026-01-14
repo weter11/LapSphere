@@ -381,7 +381,9 @@ async fn set_tdp_profile(&self, profile: &str) -> Result<(), zbus::fdo::Error> {
 
         std::thread::spawn(|| {
             std::thread::sleep(Duration::from_millis(200));
-            std::process::exit(0);
+            unsafe {
+                libc::raise(libc::SIGINT);
+            }
         });
 
         Ok(())
