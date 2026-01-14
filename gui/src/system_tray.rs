@@ -6,7 +6,7 @@ use ksni::blocking::TrayMethods;
 use std::sync::mpsc;
 use tuxedo_common::types::Profile;
 
-const TRAY_ICON_SIZE: i32 = 32; // ksni icon dimensions are i32.
+const TRAY_ICON_SIZE: i32 = 32; // ksni::Icon uses i32 width/height (DBus int32).
 const TRAY_ICON_BYTES_PER_PIXEL: usize = 4;
 const TRAY_ICON_BYTE_LEN: usize =
     (TRAY_ICON_SIZE as usize) * (TRAY_ICON_SIZE as usize) * TRAY_ICON_BYTES_PER_PIXEL;
@@ -15,6 +15,14 @@ struct TrayState {
     profiles: Vec<String>,
     current_profile: usize,
     tx: mpsc::Sender<TrayEvent>,
+}
+
+impl TrayState {
+    fn send_event(&self, event: TrayEvent) {
+        if self.tx.send(event).is_err() {
+            log::warn!("System tray event channel closed.");
+        }
+    }
 }
 
 impl ksni::Tray for TrayState {
@@ -38,15 +46,15 @@ impl ksni::Tray for TrayState {
     }
 
     fn activate(&mut self, _x: i32, _y: i32) {
-        let _ = self.tx.send(TrayEvent::ShowWindow);
+        self.send_event(TrayEvent::ShowWindow);
     }
 
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         let mut items = Vec::new();
 
         if !self.profiles.is_empty() {
-            let last_index = self.profiles.len().saturating_sub(1);
-            let selected = self.current_profile.min(last_index);
+            // Clamp the selected index in case profiles changed since tray init.
+            let selected = self.current_profile.min(self.profiles.len() - 1);
             let options = self
                 .profiles
                 .iter()
@@ -63,7 +71,7 @@ impl ksni::Tray for TrayState {
                         selected,
                         select: Box::new(|tray: &mut Self, index| {
                             tray.current_profile = index;
-                            let _ = tray.tx.send(TrayEvent::SwitchProfile(index));
+                            tray.send_event(TrayEvent::SwitchProfile(index));
                         }),
                         options,
                     }
@@ -79,7 +87,7 @@ impl ksni::Tray for TrayState {
             StandardItem {
                 label: "Show Window".into(),
                 activate: Box::new(|tray: &mut Self| {
-                    let _ = tray.tx.send(TrayEvent::ShowWindow);
+                    tray.send_event(TrayEvent::ShowWindow);
                 }),
                 ..Default::default()
             }
@@ -90,7 +98,7 @@ impl ksni::Tray for TrayState {
             StandardItem {
                 label: "Statistics".into(),
                 activate: Box::new(|tray: &mut Self| {
-                    let _ = tray.tx.send(TrayEvent::ShowStatistics);
+                    tray.send_event(TrayEvent::ShowStatistics);
                 }),
                 ..Default::default()
             }
@@ -103,7 +111,7 @@ impl ksni::Tray for TrayState {
             StandardItem {
                 label: "Quit".into(),
                 activate: Box::new(|tray: &mut Self| {
-                    let _ = tray.tx.send(TrayEvent::Quit);
+                    tray.send_event(TrayEvent::Quit);
                 }),
                 ..Default::default()
             }
@@ -134,7 +142,7 @@ impl SystemTray {
             tx,
         };
 
-        let tray_handle = tray.assume_sni_available(true).spawn()?;
+        let tray_handle = tray.spawn()?;
 
         Ok(Self {
             _tray_handle: tray_handle,
@@ -168,22 +176,18 @@ impl SystemTray {
 
 pub enum TrayEvent {
     ShowWindow,
-    HideWindow,
     SwitchProfile(usize),
     ShowStatistics,
     Quit,
 }
 
 fn load_tray_icon() -> Vec<ksni::Icon> {
-    let mut rgba = vec![255u8; TRAY_ICON_BYTE_LEN];
-    for pixel in rgba.chunks_exact_mut(TRAY_ICON_BYTES_PER_PIXEL) {
-        // Convert RGBA to ARGB for ksni.
-        pixel.rotate_right(1);
-    }
+    // Placeholder icon until an embedded resource is wired in (ARGB, all channels 255).
+    let argb = vec![255u8; TRAY_ICON_BYTE_LEN];
 
     vec![ksni::Icon {
         width: TRAY_ICON_SIZE,
         height: TRAY_ICON_SIZE,
-        data: rgba,
+        data: argb,
     }]
 }

@@ -475,9 +475,6 @@ impl TuxedoApp {
                 TrayEvent::Quit => {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
-                TrayEvent::HideWindow => {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                }
             }
         }
     }
