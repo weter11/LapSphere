@@ -124,6 +124,8 @@ pub struct WiFiInfo {
     pub channel_width: Option<u32>,     // Channel width in MHz (20/40/80/160)
     pub tx_rate: Option<f64>,           // Upload rate in Mbps
     pub rx_rate: Option<f64>,           // Download rate in Mbps
+    pub ssid: Option<String>,
+    pub data_rate: Option<f64>,         // Link speed in Mbps
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,6 +134,8 @@ pub struct StorageDevice {
     pub model: String,
     pub size_gb: u64,
     pub temperature: Option<f32>,
+    pub read_speed: Option<f64>,
+    pub write_speed: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
