@@ -2,6 +2,7 @@ use anyhow::Result;
 use tuxedo_common::types::*;
 use zbus::{interface, Connection, ConnectionBuilder};
 use std::time::Duration;
+use nix::sys::signal::{raise, Signal};
 
 pub struct ControlInterface;
 
@@ -381,8 +382,8 @@ async fn set_tdp_profile(&self, profile: &str) -> Result<(), zbus::fdo::Error> {
 
         std::thread::spawn(|| {
             std::thread::sleep(Duration::from_millis(200));
-            unsafe {
-                libc::raise(libc::SIGINT);
+            if let Err(err) = raise(Signal::SIGINT) {
+                log::error!("Failed to signal daemon shutdown: {}", err);
             }
         });
 

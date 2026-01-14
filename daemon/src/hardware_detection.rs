@@ -965,12 +965,14 @@ fn get_intel_gpu_name(device_id: &str) -> Option<String> {
 use crate::hardware_control::get_nvml;
 use nvml_wrapper::enum_wrappers::device::{Clock, PerformanceState};
 
+const PCI_DOMAIN_LEN: usize = 4;
+
 fn read_nvidia_runtime_status(device: &nvml_wrapper::Device) -> Option<String> {
     let pci_info = device.pci_info().ok()?;
     let bus_id = pci_info.bus_id.trim().to_string();
     let sysfs_id = if let Some((domain, rest)) = bus_id.split_once(':') {
-        let domain = if domain.len() > 4 {
-            &domain[domain.len() - 4..]
+        let domain = if domain.len() > PCI_DOMAIN_LEN {
+            &domain[domain.len() - PCI_DOMAIN_LEN..]
         } else {
             domain
         };

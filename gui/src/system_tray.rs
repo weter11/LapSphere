@@ -4,6 +4,11 @@ use tray_icon::{
 };
 use tuxedo_common::types::Profile;
 
+const TRAY_ICON_SIZE: u32 = 32;
+const TRAY_ICON_BYTES_PER_PIXEL: usize = 4;
+const TRAY_ICON_BYTE_LEN: usize =
+    (TRAY_ICON_SIZE as usize) * (TRAY_ICON_SIZE as usize) * TRAY_ICON_BYTES_PER_PIXEL;
+
 pub struct SystemTray {
     _tray_icon: tray_icon::TrayIcon,
     menu_rx: std::sync::mpsc::Receiver<MenuEvent>,
@@ -130,6 +135,6 @@ pub enum TrayEvent {
 fn load_tray_icon() -> tray_icon::Icon {
     // Load from embedded bytes or file
     // For now, use a simple placeholder
-    let rgba = vec![255u8; 32 * 32 * 4];  // White 32x32
-    tray_icon::Icon::from_rgba(rgba, 32, 32).unwrap()
+    let rgba = vec![255u8; TRAY_ICON_BYTE_LEN];
+    tray_icon::Icon::from_rgba(rgba, TRAY_ICON_SIZE, TRAY_ICON_SIZE).unwrap()
 }
