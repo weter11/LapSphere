@@ -173,8 +173,8 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Co
                     let new_rate = (cpu_poll * 1000.0) as u64;
                     state.config.statistics_sections.cpu_poll_rate = new_rate;
                     let _ = state.save_config();
-                    // Update scheduler interval
-                    if let Some(ref handle) = state.scheduler_handle {
+                    // Update coordinator interval
+                    if let Some(ref handle) = state.coordinator_handle {
                         let _ = handle.update_interval("cpu".to_string(), std::time::Duration::from_millis(new_rate));
                         let _ = handle.update_interval("memory".to_string(), std::time::Duration::from_millis(new_rate));
                     }
@@ -188,8 +188,8 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Co
                     let new_rate = (gpu_poll * 1000.0) as u64;
                     state.config.statistics_sections.gpu_poll_rate = new_rate;
                     let _ = state.save_config();
-                    // Update scheduler interval
-                    if let Some(ref handle) = state.scheduler_handle {
+                    // Update coordinator interval
+                    if let Some(ref handle) = state.coordinator_handle {
                         let _ = handle.update_interval("gpu".to_string(), std::time::Duration::from_millis(new_rate));
                     }
                 }
@@ -202,8 +202,8 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Co
                     let new_rate = (battery_poll * 1000.0) as u64;
                     state.config.statistics_sections.battery_poll_rate = new_rate;
                     let _ = state.save_config();
-                    // Update scheduler interval
-                    if let Some(ref handle) = state.scheduler_handle {
+                    // Update coordinator interval
+                    if let Some(ref handle) = state.coordinator_handle {
                         let _ = handle.update_interval("battery".to_string(), std::time::Duration::from_millis(new_rate));
                     }
                 }
@@ -216,8 +216,8 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Co
                     let new_rate = (wifi_poll * 1000.0) as u64;
                     state.config.statistics_sections.wifi_poll_rate = new_rate;
                     let _ = state.save_config();
-                    // Update scheduler interval
-                    if let Some(ref handle) = state.scheduler_handle {
+                    // Update coordinator interval
+                    if let Some(ref handle) = state.coordinator_handle {
                         let _ = handle.update_interval("wifi".to_string(), std::time::Duration::from_millis(new_rate));
                     }
                 }
@@ -230,8 +230,8 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Co
                     let new_rate = (storage_poll * 1000.0) as u64;
                     state.config.statistics_sections.storage_poll_rate = new_rate;
                     let _ = state.save_config();
-                    // Update scheduler interval
-                    if let Some(ref handle) = state.scheduler_handle {
+                    // Update coordinator interval
+                    if let Some(ref handle) = state.coordinator_handle {
                         let _ = handle.update_interval("storage".to_string(), std::time::Duration::from_millis(new_rate));
                         let _ = handle.update_interval("mount".to_string(), std::time::Duration::from_millis(new_rate));
                     }
@@ -245,8 +245,8 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Co
                     let new_rate = (fans_poll * 1000.0) as u64;
                     state.config.statistics_sections.fans_poll_rate = new_rate;
                     let _ = state.save_config();
-                    // Update scheduler interval
-                    if let Some(ref handle) = state.scheduler_handle {
+                    // Update coordinator interval
+                    if let Some(ref handle) = state.coordinator_handle {
                         let _ = handle.update_interval("fans".to_string(), std::time::Duration::from_millis(new_rate));
                     }
                 }

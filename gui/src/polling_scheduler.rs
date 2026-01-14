@@ -1,146 +1,121 @@
-use std::collections::BinaryHeap;
-use std::cmp::Ordering;
-use std::sync::{Arc, RwLock};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use anyhow::Result;
 
-/// A single polling job with its schedule and action
-pub struct PollJob {
-    /// Unique identifier for this job
-    pub id: String,
-    /// Next time this job should run
-    pub next_run: Instant,
-    /// Interval between runs
-    pub interval: Duration,
-    /// The actual polling function (boxed to avoid lifetime issues)
-    pub poll_fn: Arc<dyn Fn() + Send + Sync>,
+/// Lightweight UI refresh coordinator - manages when to trigger UI updates
+/// Unlike a full scheduler, this just tracks intervals and notifies when refresh is needed
+pub struct RefreshCoordinator {
+    components: HashMap<String, ComponentRefresh>,
+    command_rx: mpsc::UnboundedReceiver<CoordinatorCommand>,
+    command_tx: mpsc::UnboundedSender<CoordinatorCommand>,
 }
 
-impl PollJob {
-    pub fn new<F>(id: String, interval: Duration, poll_fn: F) -> Self
-    where
-        F: Fn() + Send + Sync + 'static,
-    {
+/// Tracks refresh timing for a single component
+struct ComponentRefresh {
+    interval: Duration,
+    last_refresh: Instant,
+}
+
+impl ComponentRefresh {
+    fn new(interval: Duration) -> Self {
         Self {
-            id,
-            next_run: Instant::now(),
             interval,
-            poll_fn: Arc::new(poll_fn),
+            last_refresh: Instant::now(),
         }
     }
 
-    /// Execute the poll function and update next_run
-    pub fn execute(&mut self) {
-        (self.poll_fn)();
-        self.next_run = Instant::now() + self.interval;
+    fn should_refresh(&self) -> bool {
+        self.last_refresh.elapsed() >= self.interval
+    }
+
+    fn mark_refreshed(&mut self) {
+        self.last_refresh = Instant::now();
+    }
+
+    fn time_until_refresh(&self) -> Duration {
+        let elapsed = self.last_refresh.elapsed();
+        if elapsed >= self.interval {
+            Duration::from_millis(0)
+        } else {
+            self.interval - elapsed
+        }
     }
 }
 
-// Implement ordering for BinaryHeap (min-heap based on next_run)
-impl Ord for PollJob {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // Reverse ordering for min-heap (earliest next_run has highest priority)
-        other.next_run.cmp(&self.next_run)
-    }
-}
-
-impl PartialOrd for PollJob {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Eq for PollJob {}
-
-impl PartialEq for PollJob {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-    }
-}
-
-/// Commands that can be sent to the scheduler
-pub enum SchedulerCommand {
-    /// Add a new polling job
-    AddJob(PollJob),
-    /// Update the interval of an existing job
+/// Commands for the coordinator
+pub enum CoordinatorCommand {
+    /// Register a component with its refresh interval
+    Register(String, Duration),
+    /// Update component refresh interval
     UpdateInterval(String, Duration),
-    /// Remove a job by ID
-    RemoveJob(String),
-    /// Shutdown the scheduler
+    /// Unregister a component
+    Unregister(String),
+    /// Shutdown coordinator
     Shutdown,
 }
 
-/// The main polling scheduler that manages all polling jobs
-pub struct PollingScheduler {
-    jobs: Arc<RwLock<BinaryHeap<PollJob>>>,
-    command_rx: mpsc::UnboundedReceiver<SchedulerCommand>,
-    command_tx: mpsc::UnboundedSender<SchedulerCommand>,
-}
-
-impl PollingScheduler {
-    /// Create a new polling scheduler
+impl RefreshCoordinator {
+    /// Create a new refresh coordinator
     pub fn new() -> Self {
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         
         Self {
-            jobs: Arc::new(RwLock::new(BinaryHeap::new())),
+            components: HashMap::new(),
             command_rx,
             command_tx,
         }
     }
 
-    /// Get a handle to send commands to the scheduler
-    pub fn get_handle(&self) -> SchedulerHandle {
-        SchedulerHandle {
+    /// Get a handle to send commands
+    pub fn get_handle(&self) -> CoordinatorHandle {
+        CoordinatorHandle {
             command_tx: self.command_tx.clone(),
         }
     }
 
-    /// Run the scheduler loop
-    pub async fn run(mut self) {
-        log::debug!("Starting GUI polling scheduler");
+    /// Run the coordinator loop
+    pub async fn run(mut self, refresh_callback: impl Fn(&str) + Send + 'static) {
+        log::debug!("Starting UI refresh coordinator");
         
         loop {
-            // Calculate sleep duration until next job
-            let sleep_duration = {
-                let jobs = self.jobs.read().unwrap();
-                if let Some(next_job) = jobs.peek() {
-                    let now = Instant::now();
-                    if next_job.next_run > now {
-                        next_job.next_run - now
-                    } else {
-                        Duration::from_millis(0)
-                    }
-                } else {
-                    // No jobs, sleep for a while
-                    Duration::from_secs(1)
-                }
-            };
+            // Find next refresh time
+            let sleep_duration = self.components
+                .values()
+                .map(|c| c.time_until_refresh())
+                .min()
+                .unwrap_or(Duration::from_millis(100));
 
             // Wait for either timeout or command
             tokio::select! {
                 _ = tokio::time::sleep(sleep_duration) => {
-                    // Time to execute job(s)
-                    self.execute_due_jobs();
+                    // Check which components need refresh
+                    for (id, component) in self.components.iter_mut() {
+                        if component.should_refresh() {
+                            refresh_callback(id);
+                            component.mark_refreshed();
+                        }
+                    }
                 }
                 Some(cmd) = self.command_rx.recv() => {
                     match cmd {
-                        SchedulerCommand::AddJob(job) => {
-                            log::debug!("Adding poll job: {}", job.id);
-                            let mut jobs = self.jobs.write().unwrap();
-                            jobs.push(job);
+                        CoordinatorCommand::Register(id, interval) => {
+                            log::debug!("Registering component: {} with interval {:?}", id, interval);
+                            self.components.insert(id, ComponentRefresh::new(interval));
                         }
-                        SchedulerCommand::UpdateInterval(id, interval) => {
-                            log::debug!("Updating poll interval for {}: {:?}", id, interval);
-                            self.update_job_interval(&id, interval);
+                        CoordinatorCommand::UpdateInterval(id, interval) => {
+                            log::debug!("Updating interval for {}: {:?}", id, interval);
+                            if let Some(component) = self.components.get_mut(&id) {
+                                component.interval = interval;
+                                log::info!("Updated interval for {} to {:?}", id, interval);
+                            }
                         }
-                        SchedulerCommand::RemoveJob(id) => {
-                            log::debug!("Removing poll job: {}", id);
-                            self.remove_job(&id);
+                        CoordinatorCommand::Unregister(id) => {
+                            log::debug!("Unregistering component: {}", id);
+                            self.components.remove(&id);
                         }
-                        SchedulerCommand::Shutdown => {
-                            log::info!("Shutting down GUI polling scheduler");
+                        CoordinatorCommand::Shutdown => {
+                            log::info!("Shutting down UI refresh coordinator");
                             break;
                         }
                     }
@@ -148,91 +123,40 @@ impl PollingScheduler {
             }
         }
     }
-
-    /// Execute all jobs that are due
-    fn execute_due_jobs(&self) {
-        let now = Instant::now();
-        let mut jobs = self.jobs.write().unwrap();
-        let mut due_jobs = Vec::new();
-
-        // Collect all due jobs
-        while let Some(job) = jobs.peek() {
-            if job.next_run <= now {
-                due_jobs.push(jobs.pop().unwrap());
-            } else {
-                break;
-            }
-        }
-
-        // Execute jobs and re-insert them
-        for mut job in due_jobs {
-            job.execute();
-            jobs.push(job);
-        }
-    }
-
-    /// Update the interval of a job
-    fn update_job_interval(&self, id: &str, new_interval: Duration) {
-        let mut jobs = self.jobs.write().unwrap();
-        let mut temp_jobs: Vec<PollJob> = jobs.drain().collect();
-        
-        for job in &mut temp_jobs {
-            if job.id == id {
-                job.interval = new_interval;
-                // Reset next_run to reflect new interval
-                job.next_run = Instant::now() + new_interval;
-                log::info!("Updated interval for job {} to {:?}", id, new_interval);
-            }
-        }
-
-        for job in temp_jobs {
-            jobs.push(job);
-        }
-    }
-
-    /// Remove a job by ID
-    fn remove_job(&self, id: &str) {
-        let mut jobs = self.jobs.write().unwrap();
-        let temp_jobs: Vec<PollJob> = jobs.drain().filter(|j| j.id != id).collect();
-        
-        for job in temp_jobs {
-            jobs.push(job);
-        }
-    }
 }
 
-/// Handle to interact with the scheduler
+/// Handle to interact with the coordinator
 #[derive(Clone)]
-pub struct SchedulerHandle {
-    command_tx: mpsc::UnboundedSender<SchedulerCommand>,
+pub struct CoordinatorHandle {
+    command_tx: mpsc::UnboundedSender<CoordinatorCommand>,
 }
 
-impl SchedulerHandle {
-    /// Add a new polling job
-    pub fn add_job(&self, job: PollJob) -> Result<()> {
+impl CoordinatorHandle {
+    /// Register a component for refresh coordination
+    pub fn register(&self, id: String, interval: Duration) -> Result<()> {
         self.command_tx
-            .send(SchedulerCommand::AddJob(job))
-            .map_err(|e| anyhow::anyhow!("Failed to add job: {}", e))
+            .send(CoordinatorCommand::Register(id, interval))
+            .map_err(|e| anyhow::anyhow!("Failed to register: {}", e))
     }
 
-    /// Update the interval of an existing job
+    /// Update the refresh interval for a component
     pub fn update_interval(&self, id: String, interval: Duration) -> Result<()> {
         self.command_tx
-            .send(SchedulerCommand::UpdateInterval(id, interval))
+            .send(CoordinatorCommand::UpdateInterval(id, interval))
             .map_err(|e| anyhow::anyhow!("Failed to update interval: {}", e))
     }
 
-    /// Remove a job
-    pub fn remove_job(&self, id: String) -> Result<()> {
+    /// Unregister a component
+    pub fn unregister(&self, id: String) -> Result<()> {
         self.command_tx
-            .send(SchedulerCommand::RemoveJob(id))
-            .map_err(|e| anyhow::anyhow!("Failed to remove job: {}", e))
+            .send(CoordinatorCommand::Unregister(id))
+            .map_err(|e| anyhow::anyhow!("Failed to unregister: {}", e))
     }
 
-    /// Shutdown the scheduler
+    /// Shutdown the coordinator
     pub fn shutdown(&self) -> Result<()> {
         self.command_tx
-            .send(SchedulerCommand::Shutdown)
+            .send(CoordinatorCommand::Shutdown)
             .map_err(|e| anyhow::anyhow!("Failed to shutdown: {}", e))
     }
 }
