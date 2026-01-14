@@ -18,6 +18,9 @@ static PREVIOUS_NET_STATS: Lazy<Mutex<HashMap<String, NetStats>>> =
 static PREVIOUS_STORAGE_STATS: Lazy<Mutex<HashMap<String, StorageStats>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+const BITS_PER_BYTE: f64 = 8.0;
+const BITS_PER_MEGABIT: f64 = 1_000_000.0;
+
 #[derive(Debug, Clone)]
 struct CpuStats {
     user: u64,
@@ -965,6 +968,8 @@ fn get_intel_gpu_name(device_id: &str) -> Option<String> {
 use crate::hardware_control::get_nvml;
 use nvml_wrapper::enum_wrappers::device::{Clock, PerformanceState};
 
+// Sysfs PCI domain identifiers use four hex digits (e.g. 0000). NVML can return
+// longer domain strings, so we truncate to the last 4 characters to map to sysfs.
 const PCI_DOMAIN_LEN: usize = 4;
 
 fn read_nvidia_runtime_status(device: &nvml_wrapper::Device) -> Option<String> {
@@ -1451,12 +1456,12 @@ fn read_wifi_rates(interface: &str) -> (Option<f64>, Option<f64>) {
     let rates = if let Some(prev) = stats.get(interface) {
         let elapsed = now.duration_since(prev.timestamp).as_secs_f64();
         if elapsed > 0.0 {
-            let tx_rate = (tx_bytes.saturating_sub(prev.tx_bytes) as f64 * 8.0)
+            let tx_rate = (tx_bytes.saturating_sub(prev.tx_bytes) as f64 * BITS_PER_BYTE)
                 / elapsed
-                / 1_000_000.0;
-            let rx_rate = (rx_bytes.saturating_sub(prev.rx_bytes) as f64 * 8.0)
+                / BITS_PER_MEGABIT;
+            let rx_rate = (rx_bytes.saturating_sub(prev.rx_bytes) as f64 * BITS_PER_BYTE)
                 / elapsed
-                / 1_000_000.0;
+                / BITS_PER_MEGABIT;
             (Some(tx_rate), Some(rx_rate))
         } else {
             (None, None)

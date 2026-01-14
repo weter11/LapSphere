@@ -144,8 +144,10 @@ fn draw_cpu_tuning(
                     let pstate = current_pstate.clone();
                     tokio::spawn(async move {
                         let _ = client.set_amd_pstate_status(pstate).await;
-                        if let Ok(Ok(info)) = client.get_cpu_info().await {
-                            let _ = tx.send(crate::app::HardwareUpdate::CpuInfo(info));
+                        if let Ok(result) = client.get_cpu_info().await {
+                            if let Ok(info) = result {
+                                let _ = tx.send(crate::app::HardwareUpdate::CpuInfo(info));
+                            }
                         }
                     });
                 }
