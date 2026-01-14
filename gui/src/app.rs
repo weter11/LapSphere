@@ -8,6 +8,7 @@ use crate::dbus_client::DbusClient;
 use crate::theme::TuxedoTheme;
 use crate::pages::{statistics, profiles, tuning, settings};
 use crate::keyboard_shortcuts::KeyboardShortcuts;
+use crate::polling_scheduler::{PollingScheduler, SchedulerHandle, PollJob};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Page {
@@ -50,6 +51,9 @@ pub struct AppState {
     
     // Async state
     pub pending_battery_update: Option<oneshot::Receiver<Result<(), anyhow::Error>>>,
+    
+    // Polling scheduler handle
+    pub scheduler_handle: Option<SchedulerHandle>,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +89,7 @@ impl AppState {
             editing_profile_index: None,
             editing_profile_name: None,
             pending_battery_update: None,
+            scheduler_handle: None,
         }
     }
     
@@ -134,6 +139,9 @@ pub struct TuxedoApp {
     hw_update_tx: mpsc::UnboundedSender<HardwareUpdate>,
     hw_update_rx: mpsc::UnboundedReceiver<HardwareUpdate>,
     
+    // Polling scheduler handle
+    scheduler_handle: Option<SchedulerHandle>,
+    
     // Keyboard shortcuts
     shortcuts: KeyboardShortcuts,
 }
@@ -180,8 +188,22 @@ impl TuxedoApp {
         
         // Setup background polling
         let (hw_update_tx, hw_update_rx) = mpsc::unbounded_channel();
-        if let Some(ref client) = dbus_client {
-            start_background_polling(client.clone(), hw_update_tx.clone(), &state.config);
+        let scheduler_handle = if let Some(ref client) = dbus_client {
+            let scheduler = PollingScheduler::new();
+            let handle = scheduler.get_handle();
+            
+            // Start scheduler in background
+            tokio::spawn(async move {
+                scheduler.run().await;
+            });
+            
+            // Add polling jobs with configured intervals
+            setup_polling_jobs(
+                &handle,
+                client.clone(),
+                hw_update_tx.clone(),
+                &state.config
+            );
 
             // Initial system info load
             let client_clone = client.clone();
@@ -206,7 +228,14 @@ impl TuxedoApp {
                     _ => {}
                 }
             });
-        }
+            
+            Some(handle)
+        } else {
+            None
+        };
+        
+        // Set scheduler handle in state
+        state.scheduler_handle = scheduler_handle.clone();
         
         // Apply theme
         let theme = TuxedoTheme::new(&state.config.theme);
@@ -218,6 +247,7 @@ impl TuxedoApp {
             theme,
             hw_update_tx,
             hw_update_rx,
+            scheduler_handle,
             shortcuts: KeyboardShortcuts::new(),
         }
     }
@@ -305,6 +335,18 @@ impl TuxedoApp {
                 Err(oneshot::error::TryRecvError::Closed) => {
                     self.state.show_message("Battery update channel closed", true);
                 }
+            }
+        }
+    }
+    
+    /// Update polling interval for a specific component
+    pub fn update_polling_interval(&self, component: &str, interval_ms: u64) {
+        if let Some(ref handle) = self.scheduler_handle {
+            let interval = Duration::from_millis(interval_ms);
+            if let Err(e) = handle.update_interval(component.to_string(), interval) {
+                log::error!("Failed to update polling interval for {}: {}", component, e);
+            } else {
+                log::info!("Updated polling interval for {} to {}ms", component, interval_ms);
             }
         }
     }
@@ -446,6 +488,173 @@ fn start_background_polling(
             });
         }
     });
+}
+
+fn setup_polling_jobs(
+    handle: &SchedulerHandle,
+    client: DbusClient,
+    tx: mpsc::UnboundedSender<HardwareUpdate>,
+    config: &AppConfig,
+) {
+    // CPU polling job
+    {
+        let client = client.clone();
+        let tx = tx.clone();
+        let job = PollJob::new(
+            "cpu".to_string(),
+            Duration::from_millis(config.statistics_sections.cpu_poll_rate),
+            move || {
+                let client = client.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    if let Ok(Ok(info)) = client.get_cpu_info().await {
+                        let _ = tx.send(HardwareUpdate::CpuInfo(info));
+                    }
+                });
+            },
+        );
+        let _ = handle.add_job(job);
+    }
+
+    // GPU polling job
+    {
+        let client = client.clone();
+        let tx = tx.clone();
+        let job = PollJob::new(
+            "gpu".to_string(),
+            Duration::from_millis(config.statistics_sections.gpu_poll_rate),
+            move || {
+                let client = client.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    if let Ok(Ok(info)) = client.get_gpu_info().await {
+                        let _ = tx.send(HardwareUpdate::GpuInfo(info));
+                    }
+                });
+            },
+        );
+        let _ = handle.add_job(job);
+    }
+
+    // Memory polling job (use CPU rate since memory changes frequently)
+    {
+        let client = client.clone();
+        let tx = tx.clone();
+        let job = PollJob::new(
+            "memory".to_string(),
+            Duration::from_millis(config.statistics_sections.cpu_poll_rate),
+            move || {
+                let client = client.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    if let Ok(Ok(info)) = client.get_memory_info().await {
+                        let _ = tx.send(HardwareUpdate::MemoryInfo(info));
+                    }
+                });
+            },
+        );
+        let _ = handle.add_job(job);
+    }
+
+    // Fans polling job
+    {
+        let client = client.clone();
+        let tx = tx.clone();
+        let job = PollJob::new(
+            "fans".to_string(),
+            Duration::from_millis(config.statistics_sections.fans_poll_rate),
+            move || {
+                let client = client.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    if let Ok(Ok(info)) = client.get_fan_info().await {
+                        let _ = tx.send(HardwareUpdate::FanInfo(info));
+                    }
+                });
+            },
+        );
+        let _ = handle.add_job(job);
+    }
+
+    // Battery polling job
+    {
+        let client = client.clone();
+        let tx = tx.clone();
+        let job = PollJob::new(
+            "battery".to_string(),
+            Duration::from_millis(config.statistics_sections.battery_poll_rate),
+            move || {
+                let client = client.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    if let Ok(Ok(info)) = client.get_battery_info().await {
+                        let _ = tx.send(HardwareUpdate::BatteryInfo(info));
+                    }
+                });
+            },
+        );
+        let _ = handle.add_job(job);
+    }
+
+    // WiFi polling job
+    {
+        let client = client.clone();
+        let tx = tx.clone();
+        let job = PollJob::new(
+            "wifi".to_string(),
+            Duration::from_millis(config.statistics_sections.wifi_poll_rate),
+            move || {
+                let client = client.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    if let Ok(Ok(info)) = client.get_wifi_info().await {
+                        let _ = tx.send(HardwareUpdate::WifiInfo(info));
+                    }
+                });
+            },
+        );
+        let _ = handle.add_job(job);
+    }
+
+    // Storage polling job
+    {
+        let client = client.clone();
+        let tx = tx.clone();
+        let job = PollJob::new(
+            "storage".to_string(),
+            Duration::from_millis(config.statistics_sections.storage_poll_rate),
+            move || {
+                let client = client.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    if let Ok(Ok(info)) = client.get_storage_device_info().await {
+                        let _ = tx.send(HardwareUpdate::StorageDeviceInfo(info));
+                    }
+                });
+            },
+        );
+        let _ = handle.add_job(job);
+    }
+
+    // Mount info (use storage poll rate)
+    {
+        let client = client.clone();
+        let tx = tx.clone();
+        let job = PollJob::new(
+            "mount".to_string(),
+            Duration::from_millis(config.statistics_sections.storage_poll_rate),
+            move || {
+                let client = client.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    if let Ok(Ok(info)) = client.get_mount_info().await {
+                        let _ = tx.send(HardwareUpdate::MountInfo(info));
+                    }
+                });
+            },
+        );
+        let _ = handle.add_job(job);
+    }
 }
 
 fn load_config_from_disk() -> anyhow::Result<AppConfig> {

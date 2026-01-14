@@ -4,6 +4,7 @@ mod theme;
 mod pages;
 mod keyboard_shortcuts;
 mod widgets;
+mod polling_scheduler;
 
 use app::TuxedoApp;
 
