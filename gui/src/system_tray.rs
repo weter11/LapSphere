@@ -1,125 +1,166 @@
-use tray_icon::{
-    TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState,
-    menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu},
+use ksni::{
+    menu::{MenuItem, RadioGroup, RadioItem, StandardItem, SubMenu},
+    ToolTip,
 };
+use ksni::blocking::TrayMethods;
+use std::sync::mpsc;
 use tuxedo_common::types::Profile;
 
-const TRAY_ICON_SIZE: u32 = 32;
+const TRAY_ICON_SIZE: i32 = 32;
 const TRAY_ICON_BYTES_PER_PIXEL: usize = 4;
 const TRAY_ICON_BYTE_LEN: usize =
     (TRAY_ICON_SIZE as usize) * (TRAY_ICON_SIZE as usize) * TRAY_ICON_BYTES_PER_PIXEL;
 
+struct TrayState {
+    profiles: Vec<String>,
+    current_profile: usize,
+    tx: mpsc::Sender<TrayEvent>,
+}
+
+impl ksni::Tray for TrayState {
+    fn id(&self) -> String {
+        env!("CARGO_PKG_NAME").into()
+    }
+
+    fn title(&self) -> String {
+        "TUXEDO Control Center".into()
+    }
+
+    fn tool_tip(&self) -> ToolTip {
+        ToolTip {
+            title: "TUXEDO Control Center".into(),
+            ..Default::default()
+        }
+    }
+
+    fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+        load_tray_icon()
+    }
+
+    fn activate(&mut self, _x: i32, _y: i32) {
+        let _ = self.tx.send(TrayEvent::ShowWindow);
+    }
+
+    fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
+        let mut items = Vec::new();
+
+        if !self.profiles.is_empty() {
+            let selected = self.current_profile.min(self.profiles.len() - 1);
+            let options = self
+                .profiles
+                .iter()
+                .map(|name| RadioItem {
+                    label: name.clone(),
+                    ..Default::default()
+                })
+                .collect();
+
+            items.push(
+                SubMenu {
+                    label: "Profiles".into(),
+                    submenu: vec![RadioGroup {
+                        selected,
+                        select: Box::new(|tray: &mut Self, index| {
+                            tray.current_profile = index;
+                            let _ = tray.tx.send(TrayEvent::SwitchProfile(index));
+                        }),
+                        options,
+                    }
+                    .into()],
+                    ..Default::default()
+                }
+                .into(),
+            );
+            items.push(MenuItem::Separator);
+        }
+
+        items.push(
+            StandardItem {
+                label: "Show Window".into(),
+                activate: Box::new(|tray: &mut Self| {
+                    let _ = tray.tx.send(TrayEvent::ShowWindow);
+                }),
+                ..Default::default()
+            }
+            .into(),
+        );
+
+        items.push(
+            StandardItem {
+                label: "Statistics".into(),
+                activate: Box::new(|tray: &mut Self| {
+                    let _ = tray.tx.send(TrayEvent::ShowStatistics);
+                }),
+                ..Default::default()
+            }
+            .into(),
+        );
+
+        items.push(MenuItem::Separator);
+
+        items.push(
+            StandardItem {
+                label: "Quit".into(),
+                activate: Box::new(|tray: &mut Self| {
+                    let _ = tray.tx.send(TrayEvent::Quit);
+                }),
+                ..Default::default()
+            }
+            .into(),
+        );
+
+        items
+    }
+}
+
 pub struct SystemTray {
-    _tray_icon: tray_icon::TrayIcon,
-    menu_rx: std::sync::mpsc::Receiver<MenuEvent>,
-    profile_items: Vec<MenuItem>,
-    show_item: MenuItem,
-    statistics_item: MenuItem,
-    quit_item: MenuItem,
+    _tray_handle: ksni::blocking::Handle<TrayState>,
+    menu_rx: mpsc::Receiver<TrayEvent>,
 }
 
 impl SystemTray {
     pub fn new(profiles: &[Profile], current_profile: &str) -> anyhow::Result<Self> {
-        // Create menu
-        let menu = Menu::new();
+        let (tx, rx) = mpsc::channel();
+        let profile_names: Vec<String> = profiles.iter().map(|profile| profile.name.clone()).collect();
+        let current_index = profiles
+            .iter()
+            .position(|profile| profile.name == current_profile)
+            .unwrap_or(0);
 
-        // Add profile submenu
-        let profiles_menu = Menu::new();
-        let mut profile_items = Vec::new();
+        let tray = TrayState {
+            profiles: profile_names,
+            current_profile: current_index,
+            tx,
+        };
 
-        for profile in profiles {
-            let item = MenuItem::new(
-                &profile.name,
-                profile.name == current_profile,
-                None
-            );
-            profiles_menu.append(&item)?;
-            profile_items.push(item);
-        }
-
-        let profiles_submenu = Submenu::with_items(
-            "Profiles",
-            true,
-            &profile_items,
-        )?;
-        menu.append(&profiles_submenu)?;
-
-        menu.append(&PredefinedMenuItem::separator())?;
-
-        // Quick actions
-        let show_item = MenuItem::new("Show Window", true, None);
-        menu.append(&show_item)?;
-
-        let statistics_item = MenuItem::new("Statistics", true, None);
-        menu.append(&statistics_item)?;
-
-        menu.append(&PredefinedMenuItem::separator())?;
-
-        let quit_item = MenuItem::new("Quit", true, None);
-        menu.append(&quit_item)?;
-
-        // Build tray icon
-        let tray_icon = TrayIconBuilder::new()
-            .with_menu(Box::new(menu))
-            .with_tooltip("TUXEDO Control Center")
-            .with_icon(load_tray_icon())
-            .build()?;
-
-        let menu_rx = MenuEvent::receiver();
+        let tray_handle = tray.assume_sni_available(true).spawn()?;
 
         Ok(Self {
-            _tray_icon: tray_icon,
-            menu_rx: menu_rx.clone(),
-            profile_items,
-            show_item,
-            statistics_item,
-            quit_item,
+            _tray_handle: tray_handle,
+            menu_rx: rx,
         })
     }
 
     pub fn handle_events(&mut self) -> Option<TrayEvent> {
-        // Check for tray icon clicks
-        if let Ok(event) = TrayIconEvent::receiver().try_recv() {
-            match event {
-                TrayIconEvent::Click { button, button_state, .. } => {
-                    if button == MouseButton::Left && button_state == MouseButtonState::Up {
-                        return Some(TrayEvent::ShowWindow);
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        // Check for menu events
         if let Ok(event) = self.menu_rx.try_recv() {
-            let id = event.id();
-
-            // Check profile items
-            for (idx, item) in self.profile_items.iter().enumerate() {
-                if item.id() == id {
-                    return Some(TrayEvent::SwitchProfile(idx));
-                }
-            }
-
-            if self.show_item.id() == id {
-                return Some(TrayEvent::ShowWindow);
-            }
-
-            if self.statistics_item.id() == id {
-                return Some(TrayEvent::ShowStatistics);
-            }
-
-            if self.quit_item.id() == id {
-                return Some(TrayEvent::Quit);
-            }
+            return Some(event);
         }
 
         None
     }
 
     pub fn update_profiles(&mut self, profiles: &[Profile], current: &str) -> anyhow::Result<()> {
-        // Rebuild menu with new profiles
-        // This is a simplified version - full implementation would update existing menu
+        let profile_names: Vec<String> = profiles.iter().map(|profile| profile.name.clone()).collect();
+        let current_index = profiles
+            .iter()
+            .position(|profile| profile.name == current)
+            .unwrap_or(0);
+
+        self._tray_handle.update(|tray| {
+            tray.profiles = profile_names;
+            tray.current_profile = current_index;
+        });
+
         Ok(())
     }
 }
@@ -132,9 +173,15 @@ pub enum TrayEvent {
     Quit,
 }
 
-fn load_tray_icon() -> tray_icon::Icon {
-    // Load from embedded bytes or file
-    // For now, use a simple placeholder
-    let rgba = vec![255u8; TRAY_ICON_BYTE_LEN];
-    tray_icon::Icon::from_rgba(rgba, TRAY_ICON_SIZE, TRAY_ICON_SIZE).unwrap()
+fn load_tray_icon() -> Vec<ksni::Icon> {
+    let mut rgba = vec![255u8; TRAY_ICON_BYTE_LEN];
+    for pixel in rgba.chunks_exact_mut(TRAY_ICON_BYTES_PER_PIXEL) {
+        pixel.rotate_right(1);
+    }
+
+    vec![ksni::Icon {
+        width: TRAY_ICON_SIZE,
+        height: TRAY_ICON_SIZE,
+        data: rgba,
+    }]
 }
