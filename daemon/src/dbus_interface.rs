@@ -363,13 +363,13 @@ async fn set_tdp_profile(&self, profile: &str) -> Result<(), zbus::fdo::Error> {
     }
 }
 
-pub async fn start_service(_connection: Connection) -> Result<()> {
-    let _conn = ConnectionBuilder::system()?
+pub async fn start_service(connection: Connection) -> Result<()> {
+    let _conn = ConnectionBuilder::new(connection)
         .name("com.tuxedo.Control")?
         .serve_at("/com/tuxedo/Control", ControlInterface)?
         .build()
         .await?;
-    
+
     // Keep connection alive
     std::future::pending::<()>().await;
     Ok(())

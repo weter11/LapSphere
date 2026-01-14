@@ -5,6 +5,8 @@ use tokio::sync::{mpsc, oneshot};
 use tuxedo_common::types::*;
 
 use crate::dbus_client::DbusClient;
+use crate::scheduler::Scheduler;
+use crate::system_tray::{TrayCommand, TrayEvent};
 use crate::theme::TuxedoTheme;
 use crate::pages::{statistics, profiles, tuning, settings};
 use crate::keyboard_shortcuts::KeyboardShortcuts;
@@ -133,9 +135,15 @@ pub struct TuxedoApp {
     // Background update channel
     hw_update_tx: mpsc::UnboundedSender<HardwareUpdate>,
     hw_update_rx: mpsc::UnboundedReceiver<HardwareUpdate>,
+    tray_event_rx: mpsc::UnboundedReceiver<TrayEvent>,
+    tray_command_tx: mpsc::UnboundedSender<TrayCommand>,
+    scheduler_command_tx: mpsc::UnboundedSender<SchedulerCommand>,
     
     // Keyboard shortcuts
     shortcuts: KeyboardShortcuts,
+
+    // Performance
+    has_new_data: bool,
 }
 
 #[derive(Debug)]
@@ -158,10 +166,14 @@ pub enum HardwareUpdate {
 }
 
 impl TuxedoApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        tray_event_rx: mpsc::UnboundedReceiver<TrayEvent>,
+        tray_command_tx: mpsc::UnboundedSender<TrayCommand>,
+    ) -> Self {
         let mut state = AppState::new();
         state.load_config();
-        
+
         // Create DBus client
         let dbus_client = match DbusClient::new() {
             Ok(client) => {
@@ -170,18 +182,17 @@ impl TuxedoApp {
             }
             Err(e) => {
                 log::error!("❌ Failed to connect to daemon: {}", e);
-                state.show_message(
-                    format!("Failed to connect to daemon: {}", e),
-                    true
-                );
+                state.show_message(format!("Failed to connect to daemon: {}", e), true);
                 None
             }
         };
-        
+
         // Setup background polling
         let (hw_update_tx, hw_update_rx) = mpsc::unbounded_channel();
+        let (scheduler_command_tx, scheduler_command_rx) = mpsc::unbounded_channel();
         if let Some(ref client) = dbus_client {
-            start_background_polling(client.clone(), hw_update_tx.clone(), &state.config);
+            let scheduler = Scheduler::new(client.clone(), hw_update_tx.clone(), scheduler_command_rx, &state.config);
+            tokio::spawn(scheduler.run());
 
             // Initial system info load
             let client_clone = client.clone();
@@ -194,37 +205,47 @@ impl TuxedoApp {
 
             // Fetch available thresholds
             let client_clone = client.clone();
-            let tx_clone = hw_update_tx.clone();
             tokio::spawn(async move {
                 let start_rx = client_clone.get_battery_available_start_thresholds();
                 let end_rx = client_clone.get_battery_available_end_thresholds();
 
                 match (start_rx.await, end_rx.await) {
                     (Ok(Ok(start)), Ok(Ok(end))) => {
-                        let _ = tx_clone.send(HardwareUpdate::AvailableThresholds(start, end));
+                        let _ = hw_update_tx.send(HardwareUpdate::AvailableThresholds(start, end));
                     }
                     _ => {}
                 }
             });
         }
-        
+
         // Apply theme
         let theme = TuxedoTheme::new(&state.config.theme);
         theme.apply_with_font_size(&cc.egui_ctx, &state.config.font_size);
-        
+
+        // Update tray with initial profiles
+        let _ = tray_command_tx.send(TrayCommand::UpdateProfiles(
+            state.config.profiles.clone(),
+            state.config.current_profile.clone(),
+        ));
+
         Self {
             state,
             dbus_client,
             theme,
             hw_update_tx,
             hw_update_rx,
+            tray_event_rx,
+            tray_command_tx,
+            scheduler_command_tx,
             shortcuts: KeyboardShortcuts::new(),
+            has_new_data: true, // Request initial paint
         }
     }
     
     fn handle_hardware_updates(&mut self) {
         // Process all pending updates (non-blocking)
         while let Ok(update) = self.hw_update_rx.try_recv() {
+            self.has_new_data = true;
             match update {
                 HardwareUpdate::SystemInfo(info) => {
                     self.state.system_info = Some(info);
@@ -309,6 +330,29 @@ impl TuxedoApp {
         }
     }
     
+    fn handle_tray_events(&mut self, ctx: &Context) {
+        while let Ok(event) = self.tray_event_rx.try_recv() {
+            match event {
+                TrayEvent::ShowWindow => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                TrayEvent::Quit => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                TrayEvent::SwitchProfile(name) => {
+                    if let Some(client) = &self.dbus_client {
+                        if let Some(profile) = self.state.config.profiles.iter().find(|p| p.name == name) {
+                            let _ = client.apply_profile(profile.clone());
+                            self.state.config.current_profile = name;
+                            let _ = self.state.save_config();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn draw_top_bar(&mut self, ctx: &Context) {
         TopBottomPanel::top("top_bar").show(ctx, |ui| {
             ui.add_space(8.0);
@@ -365,6 +409,9 @@ impl eframe::App for TuxedoApp {
         
         // Handle background hardware updates
         self.handle_hardware_updates();
+
+        // Handle tray events
+        self.handle_tray_events(ctx);
         
         // Draw top bar
         self.draw_top_bar(ctx);
@@ -379,73 +426,23 @@ impl eframe::App for TuxedoApp {
                     profiles::draw(ui, &mut self.state, self.dbus_client.as_ref());
                 }
                 Page::Tuning => {
-                    let hw_update_tx = self.hw_update_tx.clone();
-                    tuning::draw(ui, &mut self.state, self.dbus_client.as_ref(), hw_update_tx);
+                    tuning::draw(ui, &mut self.state, self.dbus_client.as_ref(), self.hw_update_tx.clone());
                 }
                 Page::Settings => {
-                    settings::draw(ui, &mut self.state, &mut self.theme, ctx, self.dbus_client.as_ref());
+                    settings::draw(ui, &mut self.state, &mut self.theme, ctx, self.dbus_client.as_ref(), self.scheduler_command_tx.clone());
                 }
             }
         });
         
         // Request repaint if there are pending updates
-        ctx.request_repaint_after(Duration::from_millis(500));
-    }
-}
-
-fn start_background_polling(
-    client: DbusClient,
-    tx: mpsc::UnboundedSender<HardwareUpdate>,
-    _config: &AppConfig,
-) {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(1000));
-        
-        loop {
-            interval.tick().await;
-
-            let client = client.clone();
-            let tx = tx.clone();
-
-            tokio::spawn(async move {
-                let (cpu, gpu, memory, fans, battery, wifi, storage_device, mount) = tokio::join!(
-                    client.get_cpu_info(),
-                    client.get_gpu_info(),
-                    client.get_memory_info(),
-                    client.get_fan_info(),
-                    client.get_battery_info(),
-                    client.get_wifi_info(),
-                    client.get_storage_device_info(),
-                    client.get_mount_info()
-                );
-
-                if let Ok(Ok(info)) = cpu {
-                    let _ = tx.send(HardwareUpdate::CpuInfo(info));
-                }
-                if let Ok(Ok(info)) = gpu {
-                    let _ = tx.send(HardwareUpdate::GpuInfo(info));
-                }
-                if let Ok(Ok(info)) = memory {
-                    let _ = tx.send(HardwareUpdate::MemoryInfo(info));
-                }
-                if let Ok(Ok(info)) = fans {
-                    let _ = tx.send(HardwareUpdate::FanInfo(info));
-                }
-                if let Ok(Ok(info)) = battery {
-                    let _ = tx.send(HardwareUpdate::BatteryInfo(info));
-                }
-                if let Ok(Ok(info)) = wifi {
-                    let _ = tx.send(HardwareUpdate::WifiInfo(info));
-                }
-                if let Ok(Ok(info)) = storage_device {
-                    let _ = tx.send(HardwareUpdate::StorageDeviceInfo(info));
-                }
-                if let Ok(Ok(info)) = mount {
-                    let _ = tx.send(HardwareUpdate::MountInfo(info));
-                }
-            });
+        if self.has_new_data {
+            ctx.request_repaint();
+            self.has_new_data = false;
+        } else {
+            // Still repaint occasionally for clock
+            ctx.request_repaint_after(Duration::from_millis(500));
         }
-    });
+    }
 }
 
 fn load_config_from_disk() -> anyhow::Result<AppConfig> {

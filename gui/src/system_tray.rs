@@ -1,121 +1,119 @@
-use tray_icon::{
-    TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState,
-    menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu},
-};
+use anyhow::Result;
+use ksni::{menu, Tray, TrayService};
+use std::sync::Arc;
+use tokio::sync::{mpsc, Mutex};
 use tuxedo_common::types::Profile;
 
-pub struct SystemTray {
-    _tray_icon: tray_icon::TrayIcon,
-    menu_rx: std::sync::mpsc::Receiver<MenuEvent>,
-    profile_items: Vec<MenuItem>,
+// Communication from UI to tray
+pub enum TrayCommand {
+    UpdateProfiles(Vec<Profile>, String),
 }
 
-impl SystemTray {
-    pub fn new(profiles: &[Profile], current_profile: &str) -> anyhow::Result<Self> {
-        // Create menu
-        let menu = Menu::new();
-
-        // Add profile submenu
-        let profiles_menu = Menu::new();
-        let mut profile_items = Vec::new();
-
-        for profile in profiles {
-            let item = MenuItem::new(
-                &profile.name,
-                profile.name == current_profile,
-                None
-            );
-            profiles_menu.append(&item)?;
-            profile_items.push(item);
-        }
-
-        let profiles_submenu = Submenu::with_items(
-            "Profiles",
-            true,
-            &profile_items,
-        )?;
-        menu.append(&profiles_submenu)?;
-
-        menu.append(&PredefinedMenuItem::separator())?;
-
-        // Quick actions
-        let show_item = MenuItem::new("Show Window", true, None);
-        menu.append(&show_item)?;
-
-        let statistics_item = MenuItem::new("Statistics", true, None);
-        menu.append(&statistics_item)?;
-
-        menu.append(&PredefinedMenuItem::separator())?;
-
-        let quit_item = MenuItem::new("Quit", true, None);
-        menu.append(&quit_item)?;
-
-        // Build tray icon
-        let tray_icon = TrayIconBuilder::new()
-            .with_menu(Box::new(menu))
-            .with_tooltip("TUXEDO Control Center")
-            .with_icon(load_tray_icon())
-            .build()?;
-
-        let menu_rx = MenuEvent::receiver();
-
-        Ok(Self {
-            _tray_icon: tray_icon,
-            menu_rx: menu_rx.clone(),
-            profile_items,
-        })
-    }
-
-    pub fn handle_events(&mut self) -> Option<TrayEvent> {
-        // Check for tray icon clicks
-        if let Ok(event) = TrayIconEvent::receiver().try_recv() {
-            match event {
-                TrayIconEvent::Click { button, button_state, .. } => {
-                    if button == MouseButton::Left && button_state == MouseButtonState::Up {
-                        return Some(TrayEvent::ShowWindow);
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        // Check for menu events
-        if let Ok(event) = self.menu_rx.try_recv() {
-            let id = event.id();
-
-            // Check profile items
-            for (idx, item) in self.profile_items.iter().enumerate() {
-                if item.id() == id {
-                    return Some(TrayEvent::SwitchProfile(idx));
-                }
-            }
-
-            // Check other items by text
-            // (In production, you'd store item IDs)
-            // For now, use event order
-        }
-
-        None
-    }
-
-    pub fn update_profiles(&mut self, profiles: &[Profile], current: &str) -> anyhow::Result<()> {
-        // Rebuild menu with new profiles
-        // This is a simplified version - full implementation would update existing menu
-        Ok(())
-    }
-}
-
+// Communication from tray to UI
+#[derive(Debug, PartialEq, Eq)]
 pub enum TrayEvent {
     ShowWindow,
-    HideWindow,
-    SwitchProfile(usize),
-    ShowStatistics,
     Quit,
+    SwitchProfile(String),
 }
 
-fn load_tray_icon() -> tray_icon::Icon {
-    // Load from embedded bytes or file
-    // For now, use a simple placeholder
-    let rgba = vec![255u8; 32 * 32 * 4];  // White 32x32
-    tray_icon::Icon::from_rgba(rgba, 32, 32).unwrap()
+#[derive(Debug)]
+struct TuxedoTray {
+    event_tx: mpsc::UnboundedSender<TrayEvent>,
+    profiles: Arc<Mutex<Vec<Profile>>>,
+    current_profile: Arc<Mutex<String>>,
+}
+
+impl Tray for TuxedoTray {
+    fn icon_name(&self) -> String {
+        "tuxedo-control-center".into()
+    }
+
+    fn title(&self) -> String {
+        "TUXEDO Control Center".into()
+    }
+
+    fn menu(&self) -> Vec<menu::MenuItem> {
+        let profiles = self.profiles.blocking_lock();
+        let current_profile = self.current_profile.blocking_lock();
+
+        let mut profile_items: Vec<menu::MenuItem> = profiles
+            .iter()
+            .map(|p| {
+                let name = p.name.clone();
+                let current = current_profile.clone();
+                let tx = self.event_tx.clone();
+
+                menu::MenuItem::radio(
+                    &p.name,
+                    p.name == *current,
+                    Box::new(move |_| {
+                        let _ = tx.send(TrayEvent::SwitchProfile(name.clone()));
+                    }),
+                )
+            })
+            .collect();
+
+        if !profile_items.is_empty() {
+            profile_items.push(menu::MenuItem::separator());
+        }
+
+        let tx = self.event_tx.clone();
+        profile_items.extend(vec![
+            menu::MenuItem::new(
+                "Show",
+                Box::new(move |_| {
+                    let _ = tx.send(TrayEvent::ShowWindow);
+                }),
+            ),
+            menu::MenuItem::separator(),
+            menu::MenuItem::new(
+                "Quit",
+                Box::new({
+                    let tx = self.event_tx.clone();
+                    move |_| {
+                        let _ = tx.send(TrayEvent::Quit);
+                    }
+                }),
+            ),
+        ]);
+
+        profile_items
+    }
+
+    fn activate(&mut self, _x: i32, _y: i32) {
+        let _ = self.event_tx.send(TrayEvent::ShowWindow);
+    }
+}
+
+pub async fn run_tray_service(
+    mut command_rx: mpsc::UnboundedReceiver<TrayCommand>,
+    event_tx: mpsc::UnboundedSender<TrayEvent>,
+    initial_profiles: Vec<Profile>,
+    initial_profile_name: String,
+) -> Result<()> {
+    let profiles = Arc::new(Mutex::new(initial_profiles));
+    let current_profile = Arc::new(Mutex::new(initial_profile_name));
+
+    let tray = TuxedoTray {
+        event_tx: event_tx.clone(),
+        profiles: profiles.clone(),
+        current_profile: current_profile.clone(),
+    };
+
+    let service = TrayService::new(tray);
+    let handle = service.handle();
+    service.spawn();
+
+    while let Some(command) = command_rx.recv().await {
+        match command {
+            TrayCommand::UpdateProfiles(new_profiles, new_current) => {
+                *profiles.lock().await = new_profiles;
+                *current_profile.lock().await = new_current;
+                handle.update_menu();
+            }
+        }
+    }
+
+    Ok(())
 }
