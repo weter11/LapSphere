@@ -6,7 +6,7 @@ use ksni::blocking::TrayMethods;
 use std::sync::mpsc;
 use tuxedo_common::types::Profile;
 
-const TRAY_ICON_SIZE: i32 = 32;
+const TRAY_ICON_SIZE: i32 = 32; // ksni icon dimensions are i32.
 const TRAY_ICON_BYTES_PER_PIXEL: usize = 4;
 const TRAY_ICON_BYTE_LEN: usize =
     (TRAY_ICON_SIZE as usize) * (TRAY_ICON_SIZE as usize) * TRAY_ICON_BYTES_PER_PIXEL;
@@ -45,7 +45,8 @@ impl ksni::Tray for TrayState {
         let mut items = Vec::new();
 
         if !self.profiles.is_empty() {
-            let selected = self.current_profile.min(self.profiles.len() - 1);
+            let last_index = self.profiles.len().saturating_sub(1);
+            let selected = self.current_profile.min(last_index);
             let options = self
                 .profiles
                 .iter()
@@ -176,6 +177,7 @@ pub enum TrayEvent {
 fn load_tray_icon() -> Vec<ksni::Icon> {
     let mut rgba = vec![255u8; TRAY_ICON_BYTE_LEN];
     for pixel in rgba.chunks_exact_mut(TRAY_ICON_BYTES_PER_PIXEL) {
+        // Convert RGBA to ARGB for ksni.
         pixel.rotate_right(1);
     }
 
