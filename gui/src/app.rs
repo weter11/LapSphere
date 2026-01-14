@@ -339,18 +339,6 @@ impl TuxedoApp {
         }
     }
     
-    /// Update polling interval for a specific component
-    pub fn update_polling_interval(&self, component: &str, interval_ms: u64) {
-        if let Some(ref handle) = self.scheduler_handle {
-            let interval = Duration::from_millis(interval_ms);
-            if let Err(e) = handle.update_interval(component.to_string(), interval) {
-                log::error!("Failed to update polling interval for {}: {}", component, e);
-            } else {
-                log::info!("Updated polling interval for {} to {}ms", component, interval_ms);
-            }
-        }
-    }
-    
     fn draw_top_bar(&mut self, ctx: &Context) {
         TopBottomPanel::top("top_bar").show(ctx, |ui| {
             ui.add_space(8.0);

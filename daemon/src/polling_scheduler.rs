@@ -32,9 +32,10 @@ impl PollJob {
 
     /// Execute the poll function and update next_run
     pub fn execute(&mut self) -> Result<()> {
-        (self.poll_fn)()?;
+        let result = (self.poll_fn)();
+        // Always reschedule, even on error
         self.next_run = Instant::now() + self.interval;
-        Ok(())
+        result
     }
 }
 
@@ -173,8 +174,7 @@ impl PollingScheduler {
                 }
                 Err(e) => {
                     log::error!("Error executing poll job {}: {}", job.id, e);
-                    // Still reschedule even on error
-                    job.next_run = Instant::now() + job.interval;
+                    // Reschedule even on error (execute() already updated next_run)
                 }
             }
             jobs.push(job);
