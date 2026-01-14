@@ -1417,11 +1417,15 @@ fn parse_wifi_rate(line: &str) -> Option<f64> {
     let value = rate_index
         .and_then(|idx| parts.get(idx + 1))
         .and_then(|value| value.parse::<f64>().ok())?;
-    let unit = rate_index.and_then(|idx| parts.get(idx + 2)).copied().unwrap_or("MBit/s");
+    let unit = rate_index
+        .and_then(|idx| parts.get(idx + 2))
+        .copied()
+        .unwrap_or("MBit/s")
+        .trim_end_matches(',');
 
     Some(match unit {
-        "Gbit/s" | "Gbit/sec" | "GBit/s" | "Gbit/s," => value * 1000.0,
-        "Kbit/s" | "Kbit/sec" | "KBit/s" | "Kbit/s," => value / 1000.0,
+        "Gbit/s" | "Gbit/sec" | "GBit/s" => value * 1000.0,
+        "Kbit/s" | "Kbit/sec" | "KBit/s" => value / 1000.0,
         _ => value,
     })
 }

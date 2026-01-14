@@ -555,13 +555,13 @@ fn draw_storage_info(ui: &mut Ui, state: &AppState) {
 
                             if let Some(read_speed) = device.read_speed {
                                 ui.label("Read Speed:");
-                                ui.label(format!("{:.1} MB/s", read_speed));
+                                ui.label(RichText::new(format!("{:.1} MB/s", read_speed)).monospace());
                                 ui.end_row();
                             }
 
                             if let Some(write_speed) = device.write_speed {
                                 ui.label("Write Speed:");
-                                ui.label(format!("{:.1} MB/s", write_speed));
+                                ui.label(RichText::new(format!("{:.1} MB/s", write_speed)).monospace());
                                 ui.end_row();
                             }
                         });
