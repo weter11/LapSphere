@@ -57,7 +57,14 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>,
             let cpu_info_clone = state.cpu_info.clone();
             if let Some(cpu_info) = &cpu_info_clone {
                 let cpu_caps = Some(&cpu_info.capabilities);
-                draw_cpu_tuning(ui, &mut state.config.profiles[idx], cpu_caps, cpu_info);
+                draw_cpu_tuning(
+                    ui,
+                    &mut state.config.profiles[idx],
+                    cpu_caps,
+                    cpu_info,
+                    dbus_client,
+                    hw_update_tx.clone(),
+                );
             } else {
                 ui.heading("🖥️ CPU Tuning");
                 ui.add_space(8.0);
@@ -98,6 +105,8 @@ fn draw_cpu_tuning(
     profile: &mut Profile,
     cpu_caps: Option<&tuxedo_common::types::CpuCapabilities>,
     cpu_info: &tuxedo_common::types::CpuInfo,
+    dbus_client: Option<&DbusClient>,
+    hw_update_tx: tokio::sync::mpsc::UnboundedSender<crate::app::HardwareUpdate>,
 ) {
     ui.heading("🖥️ CPU Tuning");
     ui.add_space(8.0);
@@ -117,6 +126,7 @@ fn draw_cpu_tuning(
             let mut current_pstate = profile.cpu_settings.amd_pstate_status
                 .clone()
                 .unwrap_or_else(|| "active".to_string());
+            let previous_pstate = current_pstate.clone();
             
             ComboBox::from_id_source("amd_pstate_combo")
                 .selected_text(&current_pstate)
@@ -125,7 +135,21 @@ fn draw_cpu_tuning(
                     ui.selectable_value(&mut current_pstate, "passive".to_string(), "Passive");
                     ui.selectable_value(&mut current_pstate, "guided".to_string(), "Guided");
                 });
-            
+
+            if current_pstate != previous_pstate {
+                if let Some(client) = dbus_client {
+                    let client = client.clone();
+                    let tx = hw_update_tx.clone();
+                    let pstate = current_pstate.clone();
+                    tokio::spawn(async move {
+                        let _ = client.set_amd_pstate_status(pstate).await;
+                        if let Ok(Ok(info)) = client.get_cpu_info().await {
+                            let _ = tx.send(crate::app::HardwareUpdate::CpuInfo(info));
+                        }
+                    });
+                }
+            }
+
             profile.cpu_settings.amd_pstate_status = Some(current_pstate);
             
             ui.label(RichText::new("(Active = best performance, Passive = better efficiency)")
