@@ -29,6 +29,7 @@ pub enum DbusCommand {
     GetBatteryAvailableStartThresholds { reply: oneshot::Sender<Result<Vec<u8>>> },
     GetBatteryAvailableEndThresholds { reply: oneshot::Sender<Result<Vec<u8>>> },
     SetBatterySettings { settings: BatterySettings, reply: oneshot::Sender<Result<()>> },
+    SetFanAuto { fan_id: u32, reply: oneshot::Sender<Result<()>> },
     SetGpuLockedClocks { device_index: u32, min_clock: u32, max_clock: u32, reply: oneshot::Sender<Result<()>> },
     ResetGpuClocks { device_index: u32, reply: oneshot::Sender<Result<()>> },
     GetGpuClockRanges { device_index: u32, reply: oneshot::Sender<Result<(u32, u32)>> },
@@ -40,6 +41,7 @@ pub enum DbusCommand {
     GetGpuCoreOffsetLimits { device_index: u32, reply: oneshot::Sender<Result<(i32, i32)>> },
     GetGpuMemoryOffsetLimits { device_index: u32, reply: oneshot::Sender<Result<(i32, i32)>> },
     SetPrimeProfile { profile: String, reply: oneshot::Sender<Result<()>> },
+    ShutdownDaemon { reply: oneshot::Sender<Result<()>> },
 }
 
 impl DbusClient {
@@ -174,6 +176,12 @@ impl DbusClient {
         rx
     }
 
+    pub fn set_fan_auto(&self, fan_id: u32) -> oneshot::Receiver<Result<()>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::SetFanAuto { fan_id, reply: tx });
+        rx
+    }
+
     pub fn set_gpu_locked_clocks(&self, device_index: u32, min_clock: u32, max_clock: u32) -> oneshot::Receiver<Result<()>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.command_tx.send(DbusCommand::SetGpuLockedClocks { device_index, min_clock, max_clock, reply: tx });
@@ -237,6 +245,12 @@ impl DbusClient {
     pub fn set_prime_profile(&self, profile: &str) -> oneshot::Receiver<Result<()>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.command_tx.send(DbusCommand::SetPrimeProfile { profile: profile.to_string(), reply: tx });
+        rx
+    }
+
+    pub fn shutdown_daemon(&self) -> oneshot::Receiver<Result<()>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::ShutdownDaemon { reply: tx });
         rx
     }
 }
@@ -323,6 +337,10 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
                 let result = set_battery_settings_impl(&connection, settings).await;
                 let _ = reply.send(result);
             }
+            DbusCommand::SetFanAuto { fan_id, reply } => {
+                let result = set_fan_auto_impl(&connection, fan_id).await;
+                let _ = reply.send(result);
+            }
             DbusCommand::SetGpuLockedClocks { device_index, min_clock, max_clock, reply } => {
                 let result = set_gpu_locked_clocks_impl(&connection, device_index, min_clock, max_clock).await;
                 let _ = reply.send(result);
@@ -365,6 +383,10 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
             }
             DbusCommand::SetPrimeProfile { profile, reply } => {
                 let result = set_prime_profile_impl(&connection, &profile).await;
+                let _ = reply.send(result);
+            }
+            DbusCommand::ShutdownDaemon { reply } => {
+                let result = shutdown_daemon_impl(&connection).await;
                 let _ = reply.send(result);
             }
         }
@@ -607,6 +629,17 @@ async fn set_battery_settings_impl(conn: &Connection, settings: BatterySettings)
     Ok(())
 }
 
+async fn set_fan_auto_impl(conn: &Connection, fan_id: u32) -> Result<()> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "com.tuxedo.Control",
+        "/com/tuxedo/Control",
+        "com.tuxedo.Control",
+    ).await?;
+    proxy.call::<_, _, ()>("SetFanAuto", &(fan_id,)).await?;
+    Ok(())
+}
+
 async fn set_gpu_locked_clocks_impl(conn: &Connection, device_index: u32, min_clock: u32, max_clock: u32) -> Result<()> {
     let proxy = zbus::Proxy::new(
         conn,
@@ -725,5 +758,16 @@ async fn set_prime_profile_impl(conn: &Connection, profile: &str) -> Result<()> 
         "com.tuxedo.Control",
     ).await?;
     proxy.call::<_, _, ()>("SetPrimeProfile", &(profile,)).await?;
+    Ok(())
+}
+
+async fn shutdown_daemon_impl(conn: &Connection) -> Result<()> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "com.tuxedo.Control",
+        "/com/tuxedo/Control",
+        "com.tuxedo.Control",
+    ).await?;
+    proxy.call::<_, _, ()>("ShutdownDaemon", &()).await?;
     Ok(())
 }

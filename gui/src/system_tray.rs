@@ -8,6 +8,9 @@ pub struct SystemTray {
     _tray_icon: tray_icon::TrayIcon,
     menu_rx: std::sync::mpsc::Receiver<MenuEvent>,
     profile_items: Vec<MenuItem>,
+    show_item: MenuItem,
+    statistics_item: MenuItem,
+    quit_item: MenuItem,
 }
 
 impl SystemTray {
@@ -63,6 +66,9 @@ impl SystemTray {
             _tray_icon: tray_icon,
             menu_rx: menu_rx.clone(),
             profile_items,
+            show_item,
+            statistics_item,
+            quit_item,
         })
     }
 
@@ -90,9 +96,17 @@ impl SystemTray {
                 }
             }
 
-            // Check other items by text
-            // (In production, you'd store item IDs)
-            // For now, use event order
+            if self.show_item.id() == id {
+                return Some(TrayEvent::ShowWindow);
+            }
+
+            if self.statistics_item.id() == id {
+                return Some(TrayEvent::ShowStatistics);
+            }
+
+            if self.quit_item.id() == id {
+                return Some(TrayEvent::Quit);
+            }
         }
 
         None

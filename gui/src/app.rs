@@ -9,6 +9,7 @@ use crate::theme::TuxedoTheme;
 use crate::pages::{statistics, profiles, tuning, settings};
 use crate::keyboard_shortcuts::KeyboardShortcuts;
 use crate::polling_scheduler::{RefreshCoordinator, CoordinatorHandle};
+use crate::system_tray::{SystemTray, TrayEvent};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Page {
@@ -97,6 +98,7 @@ pub fn load_config(&mut self) {
     if let Ok(config) = load_config_from_disk() {
         self.config = config;
     }
+    self.config.autostart = false;
 }
     
     pub fn save_config(&mut self) -> anyhow::Result<()> {
@@ -134,6 +136,7 @@ pub struct TuxedoApp {
     state: AppState,
     dbus_client: Option<DbusClient>,
     theme: TuxedoTheme,
+    system_tray: Option<SystemTray>,
     
     // Background update channel
     hw_update_tx: mpsc::UnboundedSender<HardwareUpdate>,
@@ -292,11 +295,20 @@ impl TuxedoApp {
         // Apply theme
         let theme = TuxedoTheme::new(&state.config.theme);
         theme.apply_with_font_size(&cc.egui_ctx, &state.config.font_size);
+
+        let system_tray = match SystemTray::new(&state.config.profiles, &state.config.current_profile) {
+            Ok(tray) => Some(tray),
+            Err(e) => {
+                log::warn!("Failed to initialize system tray: {}", e);
+                None
+            }
+        };
         
         Self {
             state,
             dbus_client,
             theme,
+            system_tray,
             hw_update_tx,
             hw_update_rx,
             shortcuts: KeyboardShortcuts::new(),
@@ -437,6 +449,38 @@ impl TuxedoApp {
             }
         }
     }
+
+    fn handle_tray_events(&mut self, ctx: &Context) {
+        let Some(tray) = self.system_tray.as_mut() else {
+            return;
+        };
+
+        if let Some(event) = tray.handle_events() {
+            match event {
+                TrayEvent::ShowWindow => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                }
+                TrayEvent::ShowStatistics => {
+                    self.state.current_page = Page::Statistics;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                }
+                TrayEvent::SwitchProfile(idx) => {
+                    if let Some(profile) = self.state.config.profiles.get(idx).cloned() {
+                        self.state.config.current_profile = profile.name.clone();
+                        if let Some(client) = &self.dbus_client {
+                            let _ = client.apply_profile(profile);
+                        }
+                    }
+                }
+                TrayEvent::Quit => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                TrayEvent::HideWindow => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                }
+            }
+        }
+    }
 }
 
 impl eframe::App for TuxedoApp {
@@ -446,6 +490,8 @@ impl eframe::App for TuxedoApp {
         
         // Handle background hardware updates
         self.handle_hardware_updates();
+
+        self.handle_tray_events(ctx);
         
         // Draw top bar
         self.draw_top_bar(ctx);
@@ -471,6 +517,13 @@ impl eframe::App for TuxedoApp {
         
         // Request repaint if there are pending updates
         ctx.request_repaint_after(Duration::from_millis(500));
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Some(client) = &self.dbus_client {
+            let _ = client.set_fan_auto(0);
+            let _ = client.shutdown_daemon();
+        }
     }
 }
 
