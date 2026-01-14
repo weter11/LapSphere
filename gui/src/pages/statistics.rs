@@ -440,6 +440,12 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
                         .spacing([40.0, 6.0])
                         .striped(true)
                         .show(ui, |ui| {
+                            if let Some(ref ssid) = wifi.ssid {
+                                ui.label("SSID:");
+                                ui.label(ssid);
+                                ui.end_row();
+                            }
+
                             ui.label("Driver:");
                             ui.label(&wifi.driver);
                             ui.end_row();
@@ -478,16 +484,23 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
                                 });
                                 ui.end_row();
                             }
+
+                            if let Some(data_rate) = wifi.data_rate {
+                                ui.label("Link Speed:");
+                                ui.label(RichText::new(format!("{:.1} Mbps", data_rate))
+                                    .monospace());
+                                ui.end_row();
+                            }
                             
                             if let Some(tx_rate) = wifi.tx_rate {
-                                ui.label("TX Rate:");
+                                ui.label("TX Speed:");
                                 ui.label(RichText::new(format!("{:.1} Mbps", tx_rate))
                                     .monospace());
                                 ui.end_row();
                             }
                             
                             if let Some(rx_rate) = wifi.rx_rate {
-                                ui.label("RX Rate:");
+                                ui.label("RX Speed:");
                                 ui.label(RichText::new(format!("{:.1} Mbps", rx_rate))
                                     .monospace());
                                 ui.end_row();
@@ -537,6 +550,18 @@ fn draw_storage_info(ui: &mut Ui, state: &AppState) {
                                     temp_color(temp),
                                     format!("{:.1}°C", temp)
                                 );
+                                ui.end_row();
+                            }
+
+                            if let Some(read_speed) = device.read_speed {
+                                ui.label("Read Speed:");
+                                ui.label(format!("{:.1} MB/s", read_speed));
+                                ui.end_row();
+                            }
+
+                            if let Some(write_speed) = device.write_speed {
+                                ui.label("Write Speed:");
+                                ui.label(format!("{:.1} MB/s", write_speed));
                                 ui.end_row();
                             }
                         });
