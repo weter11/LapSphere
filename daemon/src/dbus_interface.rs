@@ -363,8 +363,8 @@ async fn set_tdp_profile(&self, profile: &str) -> Result<(), zbus::fdo::Error> {
     }
 }
 
-pub async fn start_service(connection: Connection) -> Result<()> {
-    let _conn = ConnectionBuilder::new(connection)
+pub async fn start_service() -> Result<()> {
+    let _conn = ConnectionBuilder::system()?
         .name("com.tuxedo.Control")?
         .serve_at("/com/tuxedo/Control", ControlInterface)?
         .build()

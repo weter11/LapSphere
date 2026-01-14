@@ -1005,16 +1005,30 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         };
         
         // Get performance state for status
-        let status = match device.performance_state() {
-            Ok(state) => format!("{:?}", state),
-            Err(_) => {
-                // Fall back to power state
-                match device.power_state() {
-                    Ok(state) => format!("{:?}", state),
-                    Err(_) => "Active".to_string(),
+        let perf_state = device.performance_state().ok();
+
+        // If the GPU is in a low power state, don't query for more info
+        if let Some(state) = perf_state {
+            match state {
+                PerformanceState::Eight | PerformanceState::Nine | PerformanceState::Ten | PerformanceState::Eleven | PerformanceState::Twelve => {
+                    gpus.push(GpuInfo {
+                        name,
+                    gpu_type,
+                    status: format!("{:?}", state),
+                    frequency: None,
+                    memory_frequency: None,
+                    temperature: None,
+                    load: None,
+                    power: None,
+                    voltage: None,
+                });
+                continue;
                 }
+                _ => {}
             }
-        };
+        }
+
+        let status = perf_state.map_or_else(|| "Unknown".to_string(), |s| format!("{:?}", s));
         
         let frequency = device.clock_info(nvml_wrapper::enum_wrappers::device::Clock::Graphics).ok().map(|c| c as u64);
         let memory_frequency = device.clock_info(nvml_wrapper::enum_wrappers::device::Clock::Memory).ok().map(|c| c as u64);

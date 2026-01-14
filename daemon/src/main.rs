@@ -64,8 +64,7 @@ async fn main() -> Result<()> {
     }
 
     // Start DBus service
-    let connection = zbus::Connection::system().await?;
-    let _service = dbus_interface::start_service(connection.clone()).await?;
+    dbus_interface::start_service().await?;
 
     log::info!("DBus service started");
 

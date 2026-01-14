@@ -24,7 +24,7 @@ fn main() -> Result<(), eframe::Error> {
 
     // Create channels for tray communication
     let (tray_command_tx, tray_command_rx) = mpsc::unbounded_channel::<TrayCommand>();
-    let (tray_event_tx, mut tray_event_rx) = mpsc::unbounded_channel::<TrayEvent>();
+    let (tray_event_tx, tray_event_rx) = mpsc::unbounded_channel::<TrayEvent>();
 
     // We need a separate sender for the tray service itself
     let tray_event_tx_for_service = tray_event_tx.clone();

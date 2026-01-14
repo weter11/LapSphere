@@ -5,7 +5,7 @@ use tokio::sync::{mpsc, oneshot};
 use tuxedo_common::types::*;
 
 use crate::dbus_client::DbusClient;
-use crate::scheduler::Scheduler;
+use crate::scheduler::{Scheduler, SchedulerCommand};
 use crate::system_tray::{TrayCommand, TrayEvent};
 use crate::theme::TuxedoTheme;
 use crate::pages::{statistics, profiles, tuning, settings};
@@ -182,7 +182,10 @@ impl TuxedoApp {
             }
             Err(e) => {
                 log::error!("❌ Failed to connect to daemon: {}", e);
-                state.show_message(format!("Failed to connect to daemon: {}", e), true);
+                state.show_message(
+                    format!("Failed to connect to daemon: {}", e),
+                    true
+                );
                 None
             }
         };
@@ -205,13 +208,14 @@ impl TuxedoApp {
 
             // Fetch available thresholds
             let client_clone = client.clone();
+            let tx_clone = hw_update_tx.clone();
             tokio::spawn(async move {
                 let start_rx = client_clone.get_battery_available_start_thresholds();
                 let end_rx = client_clone.get_battery_available_end_thresholds();
 
                 match (start_rx.await, end_rx.await) {
                     (Ok(Ok(start)), Ok(Ok(end))) => {
-                        let _ = hw_update_tx.send(HardwareUpdate::AvailableThresholds(start, end));
+                        let _ = tx_clone.send(HardwareUpdate::AvailableThresholds(start, end));
                     }
                     _ => {}
                 }
@@ -221,12 +225,6 @@ impl TuxedoApp {
         // Apply theme
         let theme = TuxedoTheme::new(&state.config.theme);
         theme.apply_with_font_size(&cc.egui_ctx, &state.config.font_size);
-
-        // Update tray with initial profiles
-        let _ = tray_command_tx.send(TrayCommand::UpdateProfiles(
-            state.config.profiles.clone(),
-            state.config.current_profile.clone(),
-        ));
 
         Self {
             state,
@@ -238,7 +236,7 @@ impl TuxedoApp {
             tray_command_tx,
             scheduler_command_tx,
             shortcuts: KeyboardShortcuts::new(),
-            has_new_data: true, // Request initial paint
+            has_new_data: true,
         }
     }
     
@@ -330,29 +328,6 @@ impl TuxedoApp {
         }
     }
     
-    fn handle_tray_events(&mut self, ctx: &Context) {
-        while let Ok(event) = self.tray_event_rx.try_recv() {
-            match event {
-                TrayEvent::ShowWindow => {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                }
-                TrayEvent::Quit => {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-                TrayEvent::SwitchProfile(name) => {
-                    if let Some(client) = &self.dbus_client {
-                        if let Some(profile) = self.state.config.profiles.iter().find(|p| p.name == name) {
-                            let _ = client.apply_profile(profile.clone());
-                            self.state.config.current_profile = name;
-                            let _ = self.state.save_config();
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     fn draw_top_bar(&mut self, ctx: &Context) {
         TopBottomPanel::top("top_bar").show(ctx, |ui| {
             ui.add_space(8.0);
@@ -409,9 +384,6 @@ impl eframe::App for TuxedoApp {
         
         // Handle background hardware updates
         self.handle_hardware_updates();
-
-        // Handle tray events
-        self.handle_tray_events(ctx);
         
         // Draw top bar
         self.draw_top_bar(ctx);
@@ -426,7 +398,8 @@ impl eframe::App for TuxedoApp {
                     profiles::draw(ui, &mut self.state, self.dbus_client.as_ref());
                 }
                 Page::Tuning => {
-                    tuning::draw(ui, &mut self.state, self.dbus_client.as_ref(), self.hw_update_tx.clone());
+                    let hw_update_tx = self.hw_update_tx.clone();
+                    tuning::draw(ui, &mut self.state, self.dbus_client.as_ref(), hw_update_tx);
                 }
                 Page::Settings => {
                     settings::draw(ui, &mut self.state, &mut self.theme, ctx, self.dbus_client.as_ref(), self.scheduler_command_tx.clone());
