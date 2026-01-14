@@ -14,31 +14,39 @@ pub struct RefreshCoordinator {
 /// Tracks refresh timing for a single component
 struct ComponentRefresh {
     interval: Duration,
-    last_refresh: Instant,
+    last_refresh: Option<Instant>,
 }
 
 impl ComponentRefresh {
     fn new(interval: Duration) -> Self {
         Self {
             interval,
-            last_refresh: Instant::now(),
+            last_refresh: None, // None = never refreshed, needs immediate refresh
         }
     }
 
     fn should_refresh(&self) -> bool {
-        self.last_refresh.elapsed() >= self.interval
+        match self.last_refresh {
+            None => true, // First refresh is immediate
+            Some(last) => last.elapsed() >= self.interval,
+        }
     }
 
     fn mark_refreshed(&mut self) {
-        self.last_refresh = Instant::now();
+        self.last_refresh = Some(Instant::now());
     }
 
     fn time_until_refresh(&self) -> Duration {
-        let elapsed = self.last_refresh.elapsed();
-        if elapsed >= self.interval {
-            Duration::from_millis(0)
-        } else {
-            self.interval - elapsed
+        match self.last_refresh {
+            None => Duration::from_millis(0), // Immediate refresh needed
+            Some(last) => {
+                let elapsed = last.elapsed();
+                if elapsed >= self.interval {
+                    Duration::from_millis(0)
+                } else {
+                    self.interval - elapsed
+                }
+            }
         }
     }
 }
