@@ -1385,28 +1385,7 @@ fn read_wifi_channel(interface: &str) -> (Option<u32>, Option<u32>) {
         {
             if output.status.success() {
                 let info = String::from_utf8_lossy(&output.stdout);
-                for line in info.lines() {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    for (i, part) in parts.iter().enumerate() {
-                        if part.contains("Channel") {
-                            if let Some(value) = parse_u32_from_token(part)
-                                .or_else(|| parts.get(i + 1).and_then(|token| parse_u32_from_token(token)))
-                            {
-                                channel = Some(value);
-                            }
-                        }
-
-                        if part.contains("Frequency") {
-                            if let Some(pos) = line.find("Frequency:") {
-                                let remainder = line[pos + "Frequency:".len()..].trim();
-                                let mut tokens = remainder.split_whitespace();
-                                let value_token = tokens.next().unwrap_or("");
-                                let unit_token = tokens.next();
-                                freq_mhz = parse_frequency_mhz(value_token, unit_token);
-                            }
-                        }
-                    }
-                }
+                update_channel_from_iwconfig(&info, &mut channel, &mut freq_mhz);
             }
         }
     }
@@ -1545,9 +1524,7 @@ fn update_channel_width_from_line(
             } else {
                 parse_u32_from_token(cleaned)
             };
-            if value.is_some() {
-                *width = value;
-            }
+            *width = value;
         }
 
         if lower == "freq:" || lower == "freq" || lower.starts_with("freq:") {
@@ -1556,9 +1533,7 @@ fn update_channel_width_from_line(
             } else {
                 parse_frequency_mhz(cleaned, parts.get(i + 1).copied())
             };
-            if value.is_some() {
-                *freq_mhz = value;
-            }
+            *freq_mhz = value;
         }
     }
 }
@@ -1592,6 +1567,31 @@ fn parse_u32_from_token(value: &str) -> Option<u32> {
         None
     } else {
         digits.parse().ok()
+    }
+}
+
+fn update_channel_from_iwconfig(info: &str, channel: &mut Option<u32>, freq_mhz: &mut Option<u32>) {
+    for line in info.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        for (i, part) in parts.iter().enumerate() {
+            if part.contains("Channel") {
+                if let Some(value) = parse_u32_from_token(part)
+                    .or_else(|| parts.get(i + 1).and_then(|token| parse_u32_from_token(token)))
+                {
+                    *channel = Some(value);
+                }
+            }
+
+            if part.contains("Frequency") {
+                if let Some(pos) = line.find("Frequency:") {
+                    let remainder = line[pos + "Frequency:".len()..].trim();
+                    let mut tokens = remainder.split_whitespace();
+                    let value_token = tokens.next().unwrap_or("");
+                    let unit_token = tokens.next();
+                    *freq_mhz = parse_frequency_mhz(value_token, unit_token);
+                }
+            }
+        }
     }
 }
 
