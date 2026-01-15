@@ -1346,6 +1346,10 @@ fn read_wifi_signal(interface: &str) -> Option<i32> {
 }
 
 fn read_wifi_channel(interface: &str) -> (Option<u32>, Option<u32>) {
+    let mut channel = None;
+    let mut width = None;
+    let mut freq_mhz = None;
+
     // Try to use iw command first (more modern)
     if let Ok(output) = std::process::Command::new("iw")
         .args(&["dev", interface, "info"])
@@ -1353,45 +1357,52 @@ fn read_wifi_channel(interface: &str) -> (Option<u32>, Option<u32>) {
     {
         if output.status.success() {
             let info = String::from_utf8_lossy(&output.stdout);
-            let mut channel = None;
-            let mut width = None;
-            
             for line in info.lines() {
-                if line.contains("channel") {
-                    // Parse: "channel 36 (5180 MHz), width: 80 MHz"
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    for (i, part) in parts.iter().enumerate() {
-                        if *part == "channel" && i + 1 < parts.len() {
-                            channel = parts[i + 1].parse().ok();
-                        }
-                        if *part == "width:" && i + 1 < parts.len() {
-                            width = parts[i + 1].trim_end_matches(',').parse().ok();
-                        }
-                    }
+                update_channel_width_from_line(line, &mut channel, &mut width, &mut freq_mhz);
+            }
+        }
+    }
+
+    if channel.is_none() || width.is_none() || freq_mhz.is_none() {
+        if let Ok(output) = std::process::Command::new("iw")
+            .args(&["dev", interface, "link"])
+            .output()
+        {
+            if output.status.success() {
+                let info = String::from_utf8_lossy(&output.stdout);
+                for line in info.lines() {
+                    update_channel_width_from_line(line, &mut channel, &mut width, &mut freq_mhz);
                 }
             }
-            
-            return (channel, width);
         }
     }
     
     // Fallback to iwconfig (older tool)
-    if let Ok(output) = std::process::Command::new("iwconfig")
-        .arg(interface)
-        .output()
-    {
-        if output.status.success() {
-            let info = String::from_utf8_lossy(&output.stdout);
-            for line in info.lines() {
-                if line.contains("Channel") || line.contains("Frequency") {
-                    // Parse various formats
+    if channel.is_none() || freq_mhz.is_none() {
+        if let Ok(output) = std::process::Command::new("iwconfig")
+            .arg(interface)
+            .output()
+        {
+            if output.status.success() {
+                let info = String::from_utf8_lossy(&output.stdout);
+                for line in info.lines() {
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     for (i, part) in parts.iter().enumerate() {
-                        if part.contains("Channel:") || part.contains("Channel=") {
-                            if let Some(ch_str) = part.split(&[':', '=']).nth(1) {
-                                if let Ok(ch) = ch_str.parse() {
-                                    return (Some(ch), None);
-                                }
+                        if part.contains("Channel") {
+                            if let Some(value) = parse_u32_from_token(part)
+                                .or_else(|| parts.get(i + 1).and_then(|token| parse_u32_from_token(token)))
+                            {
+                                channel = Some(value);
+                            }
+                        }
+
+                        if part.contains("Frequency") {
+                            if let Some(pos) = line.find("Frequency:") {
+                                let remainder = line[pos + "Frequency:".len()..].trim();
+                                let mut tokens = remainder.split_whitespace();
+                                let value_token = tokens.next().unwrap_or("");
+                                let unit_token = tokens.next();
+                                freq_mhz = parse_frequency_mhz(value_token, unit_token);
                             }
                         }
                     }
@@ -1399,8 +1410,14 @@ fn read_wifi_channel(interface: &str) -> (Option<u32>, Option<u32>) {
             }
         }
     }
+
+    if channel.is_none() {
+        if let Some(freq) = freq_mhz {
+            channel = channel_from_frequency_mhz(freq);
+        }
+    }
     
-    (None, None)
+    (channel, width)
 }
 
 fn read_wifi_link_info(interface: &str) -> (Option<String>, Option<f64>) {
@@ -1440,7 +1457,19 @@ fn read_wifi_ssid_from_iwgetid(interface: &str) -> Option<String> {
     {
         if output.status.success() {
             let ssid = String::from_utf8_lossy(&output.stdout);
-            return normalize_ssid(&ssid);
+            if let Some(parsed) = parse_iwgetid_ssid(&ssid) {
+                return Some(parsed);
+            }
+        }
+    }
+
+    if let Ok(output) = std::process::Command::new("iwgetid")
+        .arg(interface)
+        .output()
+    {
+        if output.status.success() {
+            let ssid = String::from_utf8_lossy(&output.stdout);
+            return parse_iwgetid_ssid(&ssid);
         }
     }
     None
@@ -1469,6 +1498,112 @@ fn read_wifi_ssid_from_iwconfig(interface: &str) -> Option<String> {
     None
 }
 
+fn parse_iwgetid_ssid(output: &str) -> Option<String> {
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(pos) = trimmed.find("ESSID:") {
+        let mut value = trimmed[pos + 6..].trim();
+        if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
+            value = &value[1..value.len() - 1];
+        }
+        return normalize_ssid(value);
+    }
+
+    normalize_ssid(trimmed)
+}
+
+fn update_channel_width_from_line(
+    line: &str,
+    channel: &mut Option<u32>,
+    width: &mut Option<u32>,
+    freq_mhz: &mut Option<u32>,
+) {
+    if !(line.contains("channel") || line.contains("width") || line.contains("freq")) {
+        return;
+    }
+
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    for (i, part) in parts.iter().enumerate() {
+        let cleaned = part.trim_end_matches(',');
+        let lower = cleaned.to_lowercase();
+        if lower == "channel" && channel.is_none() {
+            if let Some(value) = parts.get(i + 1).and_then(|token| parse_u32_from_token(token)) {
+                *channel = Some(value);
+            }
+        } else if lower.starts_with("channel") && channel.is_none() {
+            if let Some(value) = parse_u32_from_token(cleaned) {
+                *channel = Some(value);
+            }
+        }
+
+        if lower == "width:" || lower == "width" || lower.starts_with("width:") {
+            let value = if lower == "width" || lower == "width:" {
+                parts.get(i + 1).and_then(|token| parse_u32_from_token(token))
+            } else {
+                parse_u32_from_token(cleaned)
+            };
+            if value.is_some() {
+                *width = value;
+            }
+        }
+
+        if lower == "freq:" || lower == "freq" || lower.starts_with("freq:") {
+            let value = if lower == "freq" || lower == "freq:" {
+                parts.get(i + 1).and_then(|token| parse_frequency_mhz(token, parts.get(i + 2).copied()))
+            } else {
+                parse_frequency_mhz(cleaned, parts.get(i + 1).copied())
+            };
+            if value.is_some() {
+                *freq_mhz = value;
+            }
+        }
+    }
+}
+
+fn parse_frequency_mhz(value: &str, unit: Option<&str>) -> Option<u32> {
+    let numeric: String = value.chars()
+        .filter(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    if numeric.is_empty() {
+        return None;
+    }
+    let raw: f64 = numeric.parse().ok()?;
+    let unit_value = unit.unwrap_or("");
+    let unit_lower = format!("{} {}", value, unit_value).to_lowercase();
+    if unit_lower.contains("ghz") {
+        return Some((raw * 1000.0).round() as u32);
+    }
+    if unit_lower.contains("mhz") {
+        return Some(raw.round() as u32);
+    }
+    if raw < 100.0 {
+        Some((raw * 1000.0).round() as u32)
+    } else {
+        Some(raw.round() as u32)
+    }
+}
+
+fn parse_u32_from_token(value: &str) -> Option<u32> {
+    let digits: String = value.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse().ok()
+    }
+}
+
+fn channel_from_frequency_mhz(freq: u32) -> Option<u32> {
+    match freq {
+        2484 => Some(14),
+        2412..=2472 => Some((freq - 2407) / 5),
+        5000..=5900 => Some((freq - 5000) / 5),
+        5955..=7115 => Some((freq - 5950) / 5),
+        _ => None,
+    }
+}
 fn read_wifi_driver_info(interface: &str) -> (Option<String>, Option<String>) {
     if let Ok(output) = std::process::Command::new("ethtool")
         .args(["-i", interface])

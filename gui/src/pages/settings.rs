@@ -515,6 +515,12 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
                         });
                         ui.end_row();
                     }
+
+                    if let Some(temp) = wifi.temperature {
+                        ui.label("Temperature:");
+                        ui.label(format!("{:.1}°C", temp));
+                        ui.end_row();
+                    }
                 });
 
             if idx + 1 < state.wifi_info.len() {
