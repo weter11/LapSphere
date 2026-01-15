@@ -6,8 +6,6 @@ use crate::pages::statistics::{normalize_section_order, STATISTICS_SECTIONS};
 
 pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Context, dbus_client: Option<&DbusClient>) {
     ui.add_space(8.0);
-    ui.heading("⚙️ Settings");
-    ui.add_space(12.0);
 
     ui.horizontal(|ui| {
         ui.selectable_value(&mut state.settings_tab, SettingsTab::Main, "Main");
@@ -162,6 +160,9 @@ fn draw_stats_configuration(ui: &mut Ui, state: &mut AppState) {
     if ui.checkbox(&mut state.config.statistics_sections.show_cpu, "Show CPU").changed() {
         let _ = state.save_settings();
     }
+    if ui.checkbox(&mut state.config.statistics_sections.show_memory, "Show memory").changed() {
+        let _ = state.save_settings();
+    }
     if ui.checkbox(&mut state.config.statistics_sections.show_gpu, "Show GPU").changed() {
         let _ = state.save_settings();
     }
@@ -198,14 +199,8 @@ fn draw_stats_configuration(ui: &mut Ui, state: &mut AppState) {
             .find(|(key, _)| key == section)
             .map(|(_, label)| *label)
             .unwrap_or(section.as_str());
-        let display_label = if section == "Memory" {
-            "Memory (always on)"
-        } else {
-            label
-        };
-
         ui.horizontal(|ui| {
-            ui.label(display_label);
+            ui.label(label);
             if ui.add_enabled(index > 0, egui::Button::new("⬆")).clicked() {
                 move_request = Some((index, index - 1));
             }
@@ -303,7 +298,7 @@ fn draw_stats_configuration(ui: &mut Ui, state: &mut AppState) {
     let mut storage_poll = (state.config.statistics_sections.storage_poll_rate as f32) / 1000.0;
     ui.horizontal(|ui| {
         ui.label("Storage:");
-        if ui.add(Slider::new(&mut storage_poll, 5.0..=60.0).step_by(0.5).suffix(" s")).changed() {
+        if ui.add(Slider::new(&mut storage_poll, 0.5..=10.0).step_by(0.5).suffix(" s")).changed() {
             let new_rate = (storage_poll * 1000.0) as u64;
             state.config.statistics_sections.storage_poll_rate = new_rate;
             let _ = state.save_settings();
@@ -331,6 +326,20 @@ fn draw_stats_configuration(ui: &mut Ui, state: &mut AppState) {
 }
 
 fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
+    let interface_label = state
+        .hardware_interface
+        .as_deref()
+        .and_then(|info| {
+            if info.contains("Clevo") {
+                Some("Clevo")
+            } else if info.contains("Uniwill") {
+                Some("Uniwill")
+            } else {
+                None
+            }
+        })
+        .unwrap_or("Unknown");
+
     ui.label(RichText::new("System").strong().heading());
     ui.add_space(8.0);
     if let Some(info) = &state.system_info {
@@ -349,6 +358,10 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
 
                 ui.label("BIOS Version:");
                 ui.label(&info.bios_version);
+                ui.end_row();
+
+                ui.label("Laptop Type:");
+                ui.label(interface_label);
                 ui.end_row();
             });
     } else {
@@ -371,17 +384,21 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
                 ui.label(&cpu.name);
                 ui.end_row();
 
-                ui.label("Median Frequency:");
-                ui.label(format!("{} MHz", cpu.median_frequency / 1000));
+                ui.label("Cores:");
+                ui.label(cpu.cores.len().to_string());
                 ui.end_row();
 
-                ui.label("Median Load:");
-                ui.label(format!("{:.1}%", cpu.median_load));
-                ui.end_row();
+                if cpu.capabilities.has_scaling_driver {
+                    ui.label("Scaling Driver:");
+                    ui.label(&cpu.scaling_driver);
+                    ui.end_row();
+                }
 
-                ui.label("Package Temperature:");
-                ui.label(format!("{:.1}°C", cpu.package_temp));
-                ui.end_row();
+                if cpu.capabilities.has_scaling_governor {
+                    ui.label("Governor:");
+                    ui.label(&cpu.governor);
+                    ui.end_row();
+                }
             });
     } else {
         ui.label("CPU information unavailable.");
@@ -402,14 +419,6 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
                 ui.label("Total:");
                 ui.label(format!("{:.2} GiB", memory.total_gib));
                 ui.end_row();
-
-                ui.label("Used:");
-                ui.label(format!("{:.2} GiB", memory.used_gib));
-                ui.end_row();
-
-                ui.label("Available:");
-                ui.label(format!("{:.2} GiB", memory.available_gib));
-                ui.end_row();
             });
     } else {
         ui.label("Memory information unavailable.");
@@ -425,27 +434,15 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
         ui.label("GPU information unavailable.");
     } else {
         for (idx, gpu) in state.gpu_info.iter().enumerate() {
-            ui.label(RichText::new(format!("{} ({:?})", gpu.name, gpu.gpu_type)).strong());
+            ui.label(RichText::new(&gpu.name).strong());
             Grid::new(format!("hardware_gpu_grid_{}", idx))
                 .num_columns(2)
                 .spacing([40.0, 8.0])
                 .striped(true)
                 .show(ui, |ui| {
-                    ui.label("Status:");
-                    ui.label(&gpu.status);
+                    ui.label("Type:");
+                    ui.label(format!("{:?}", gpu.gpu_type));
                     ui.end_row();
-
-                    if let Some(temp) = gpu.temperature {
-                        ui.label("Temperature:");
-                        ui.label(format!("{:.1}°C", temp));
-                        ui.end_row();
-                    }
-
-                    if let Some(load) = gpu.load {
-                        ui.label("Load:");
-                        ui.label(format!("{:.1}%", load));
-                        ui.end_row();
-                    }
                 });
 
             if idx + 1 < state.gpu_info.len() {
@@ -470,19 +467,9 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
                 .spacing([40.0, 8.0])
                 .striped(true)
                 .show(ui, |ui| {
-                    ui.label("Device:");
-                    ui.label(&device.device);
-                    ui.end_row();
-
                     ui.label("Size:");
                     ui.label(format!("{} GB", device.size_gb));
                     ui.end_row();
-
-                    if let Some(temp) = device.temperature {
-                        ui.label("Temperature:");
-                        ui.label(format!("{:.1}°C", temp));
-                        ui.end_row();
-                    }
                 });
 
             if idx + 1 < state.storage_device_info.len() {
@@ -507,17 +494,30 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
                 .spacing([40.0, 8.0])
                 .striped(true)
                 .show(ui, |ui| {
-                    ui.label("SSID:");
-                    ui.label(wifi.ssid.as_deref().unwrap_or("—"));
-                    ui.end_row();
-
                     ui.label("Driver:");
                     ui.label(&wifi.driver);
                     ui.end_row();
 
-                    if let Some(signal) = wifi.signal_level {
-                        ui.label("Signal:");
-                        ui.label(format!("{} dBm", signal));
+                    if let Some(version) = wifi.driver_version.as_deref() {
+                        ui.label("Driver Version:");
+                        ui.label(version);
+                        ui.end_row();
+                    }
+
+                    if let Some(version) = wifi.firmware_version.as_deref() {
+                        ui.label("Firmware:");
+                        ui.label(version);
+                        ui.end_row();
+                    }
+
+                    if let Some(channel) = wifi.channel {
+                        ui.label("Channel:");
+                        ui.horizontal(|ui| {
+                            ui.label(channel.to_string());
+                            if let Some(width) = wifi.channel_width {
+                                ui.label(RichText::new(format!("({} MHz)", width)).small());
+                            }
+                        });
                         ui.end_row();
                     }
                 });
@@ -540,14 +540,6 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
             .spacing([40.0, 8.0])
             .striped(true)
             .show(ui, |ui| {
-                ui.label("Status:");
-                ui.label(&battery.status);
-                ui.end_row();
-
-                ui.label("Charge:");
-                ui.label(format!("{}%", battery.charge_percent));
-                ui.end_row();
-
                 ui.label("Capacity:");
                 ui.label(format!("{} mAh", battery.capacity_mah));
                 ui.end_row();
@@ -562,24 +554,23 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
 
     ui.label(RichText::new("Fans").strong().heading());
     ui.add_space(8.0);
-    if state.fan_info.is_empty() {
-        ui.label("Fan information unavailable.");
-    } else {
-        for (idx, fan) in state.fan_info.iter().enumerate() {
-            let value_label = if fan.is_rpm {
-                format!("{} RPM", fan.rpm_or_percent)
-            } else {
-                format!("{}%", fan.rpm_or_percent)
-            };
-            ui.label(RichText::new(format!("{}: {}", fan.name, value_label)).strong());
-            if let Some(temp) = fan.temperature {
-                ui.label(format!("Temperature: {:.1}°C", temp));
-            }
-            if idx + 1 < state.fan_info.len() {
-                ui.add_space(8.0);
-            }
-        }
-    }
+    let fan_mode = state
+        .current_profile()
+        .map(|profile| if profile.fan_settings.control_enabled { "Manual" } else { "Auto" })
+        .unwrap_or("Auto");
+    Grid::new("hardware_fans_grid")
+        .num_columns(2)
+        .spacing([40.0, 8.0])
+        .striped(true)
+        .show(ui, |ui| {
+            ui.label("Mode:");
+            ui.label(fan_mode);
+            ui.end_row();
+
+            ui.label("Fan Count:");
+            ui.label(state.fan_info.len().to_string());
+            ui.end_row();
+        });
 }
 
 fn draw_battery_settings(ui: &mut Ui, state: &mut AppState) {

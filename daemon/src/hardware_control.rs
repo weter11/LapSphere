@@ -633,73 +633,71 @@ impl RgbKeyboardControl {
                 self.set_brightness(*brightness)?;
             }
             KeyboardMode::Breathe { r, g, b, brightness, speed } => {
-                let mode_path = format!("{}/mode", self.base_path);
-                if Path::new(&mode_path).exists() {
-                    fs::write(&mode_path, "breathing")?;
-                }
+                self.write_effect_mode(1, "breathing")?;
+                self.write_effect_speed(*speed)?;
                 self.set_color(*r, *g, *b)?;
                 self.set_brightness(*brightness)?;
                 log::info!("Set breathing mode with speed {}", speed);
             }
             KeyboardMode::Wave { brightness, speed } => {
-                let mode_path = format!("{}/mode", self.base_path);
-                if Path::new(&mode_path).exists() {
-                    fs::write(&mode_path, "wave")?;
-                    self.set_brightness(*brightness)?;
-                    log::info!("Set wave mode with speed {}", speed);
-                } else {
-                    return Err(anyhow!("Wave mode not supported"));
-                }
+                self.write_effect_mode(7, "wave")?;
+                self.write_effect_speed(*speed)?;
+                self.set_brightness(*brightness)?;
+                log::info!("Set wave mode with speed {}", speed);
             }
             KeyboardMode::Cycle { brightness, speed } => {
-                let mode_path = format!("{}/mode", self.base_path);
-                if Path::new(&mode_path).exists() {
-                    fs::write(&mode_path, "cycle")?;
-                    self.set_brightness(*brightness)?;
-                    log::info!("Set cycle mode with speed {}", speed);
-                } else {
-                    return Err(anyhow!("Cycle mode not supported"));
-                }
+                self.write_effect_mode(2, "cycle")?;
+                self.write_effect_speed(*speed)?;
+                self.set_brightness(*brightness)?;
+                log::info!("Set cycle mode with speed {}", speed);
             }
             KeyboardMode::Dance { brightness, speed } => {
-                let mode_path = format!("{}/mode", self.base_path);
-                if Path::new(&mode_path).exists() {
-                    fs::write(&mode_path, "dance")?;
-                    self.set_brightness(*brightness)?;
-                    log::info!("Set dance mode with speed {}", speed);
-                } else {
-                    return Err(anyhow!("Dance mode not supported"));
-                }
+                self.write_effect_mode(3, "dance")?;
+                self.write_effect_speed(*speed)?;
+                self.set_brightness(*brightness)?;
+                log::info!("Set dance mode with speed {}", speed);
             }
             KeyboardMode::Flash { r, g, b, brightness, speed } => {
-                let mode_path = format!("{}/mode", self.base_path);
-                if Path::new(&mode_path).exists() {
-                    fs::write(&mode_path, "flash")?;
-                }
+                self.write_effect_mode(4, "flash")?;
+                self.write_effect_speed(*speed)?;
                 self.set_color(*r, *g, *b)?;
                 self.set_brightness(*brightness)?;
                 log::info!("Set flash mode with speed {}", speed);
             }
             KeyboardMode::RandomColor { brightness, speed } => {
-                let mode_path = format!("{}/mode", self.base_path);
-                if Path::new(&mode_path).exists() {
-                    fs::write(&mode_path, "random")?;
-                    self.set_brightness(*brightness)?;
-                    log::info!("Set random color mode with speed {}", speed);
-                } else {
-                    return Err(anyhow!("Random color mode not supported"));
-                }
+                self.write_effect_mode(5, "random")?;
+                self.write_effect_speed(*speed)?;
+                self.set_brightness(*brightness)?;
+                log::info!("Set random color mode with speed {}", speed);
             }
             KeyboardMode::Tempo { brightness, speed } => {
-                let mode_path = format!("{}/mode", self.base_path);
-                if Path::new(&mode_path).exists() {
-                    fs::write(&mode_path, "tempo")?;
-                    self.set_brightness(*brightness)?;
-                    log::info!("Set tempo mode with speed {}", speed);
-                } else {
-                    return Err(anyhow!("Tempo mode not supported"));
-                }
+                self.write_effect_mode(6, "tempo")?;
+                self.write_effect_speed(*speed)?;
+                self.set_brightness(*brightness)?;
+                log::info!("Set tempo mode with speed {}", speed);
             }
+        }
+        Ok(())
+    }
+
+    fn write_effect_mode(&self, mode_value: u8, fallback: &str) -> Result<()> {
+        let mode_path = format!("{}/mode", self.base_path);
+        if !Path::new(&mode_path).exists() {
+            return Err(anyhow!("Keyboard effect modes not supported"));
+        }
+
+        let value = mode_value.to_string();
+        if fs::write(&mode_path, &value).is_err() {
+            fs::write(&mode_path, fallback)?;
+        }
+
+        Ok(())
+    }
+
+    fn write_effect_speed(&self, speed: u8) -> Result<()> {
+        let speed_path = format!("{}/speed", self.base_path);
+        if Path::new(&speed_path).exists() {
+            fs::write(&speed_path, speed.to_string())?;
         }
         Ok(())
     }

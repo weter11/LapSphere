@@ -1266,6 +1266,8 @@ pub fn get_wifi_info() -> Result<Vec<WiFiInfo>> {
             "unknown".to_string()
         };
         
+        let (driver_version, firmware_version) = read_wifi_driver_info(&interface);
+
         // Read temperature if available
         let temp_path = format!("/sys/class/net/{}/device/hwmon", interface);
         let temperature = if let Ok(hwmon_entries) = fs::read_dir(&temp_path) {
@@ -1290,11 +1292,19 @@ pub fn get_wifi_info() -> Result<Vec<WiFiInfo>> {
         // Read channel and rates from iwconfig or iw
         let (channel, channel_width) = read_wifi_channel(&interface);
         let (ssid, data_rate) = read_wifi_link_info(&interface);
-        let (tx_rate, rx_rate) = read_wifi_rates(&interface);
+        let (tx_rate, rx_rate, tx_bytes, rx_bytes) = match read_wifi_bytes(&interface) {
+            Some((tx_bytes, rx_bytes)) => {
+                let (tx_rate, rx_rate) = read_wifi_rates(&interface, tx_bytes, rx_bytes);
+                (tx_rate, rx_rate, Some(tx_bytes), Some(rx_bytes))
+            }
+            None => (None, None, None, None),
+        };
         
         wifi_devices.push(WiFiInfo {
             interface,
             driver,
+            driver_version,
+            firmware_version,
             temperature,
             signal_level,
             channel,
@@ -1303,6 +1313,8 @@ pub fn get_wifi_info() -> Result<Vec<WiFiInfo>> {
             rx_rate,
             ssid,
             data_rate,
+            rx_bytes,
+            tx_bytes,
         });
     }
     
@@ -1392,7 +1404,8 @@ fn read_wifi_channel(interface: &str) -> (Option<u32>, Option<u32>) {
 }
 
 fn read_wifi_link_info(interface: &str) -> (Option<String>, Option<f64>) {
-    let mut ssid = None;
+    let mut ssid = read_wifi_ssid_from_iwgetid(interface)
+        .or_else(|| read_wifi_ssid_from_iwconfig(interface));
     let mut tx_rate = None;
     let mut rx_rate = None;
 
@@ -1405,7 +1418,7 @@ fn read_wifi_link_info(interface: &str) -> (Option<String>, Option<f64>) {
 
             for line in info.lines() {
                 let trimmed = line.trim();
-                if trimmed.starts_with("SSID:") {
+                if trimmed.starts_with("SSID:") && ssid.is_none() {
                     let value = trimmed.trim_start_matches("SSID:").trim();
                     ssid = normalize_ssid(value);
                 } else if trimmed.starts_with("tx bitrate:") {
@@ -1415,11 +1428,6 @@ fn read_wifi_link_info(interface: &str) -> (Option<String>, Option<f64>) {
                 }
             }
         }
-    }
-
-    if ssid.is_none() {
-        ssid = read_wifi_ssid_from_iwgetid(interface)
-            .or_else(|| read_wifi_ssid_from_iwconfig(interface));
     }
 
     (ssid, tx_rate.or(rx_rate))
@@ -1461,8 +1469,34 @@ fn read_wifi_ssid_from_iwconfig(interface: &str) -> Option<String> {
     None
 }
 
+fn read_wifi_driver_info(interface: &str) -> (Option<String>, Option<String>) {
+    if let Ok(output) = std::process::Command::new("ethtool")
+        .args(["-i", interface])
+        .output()
+    {
+        if output.status.success() {
+            let info = String::from_utf8_lossy(&output.stdout);
+            let mut driver_version = None;
+            let mut firmware_version = None;
+
+            for line in info.lines() {
+                let trimmed = line.trim();
+                if let Some(value) = trimmed.strip_prefix("version:") {
+                    driver_version = normalize_ssid(value);
+                } else if let Some(value) = trimmed.strip_prefix("firmware-version:") {
+                    firmware_version = normalize_ssid(value);
+                }
+            }
+
+            return (driver_version, firmware_version);
+        }
+    }
+
+    (None, None)
+}
+
 fn normalize_ssid(value: &str) -> Option<String> {
-    let trimmed = value.trim();
+    let trimmed = value.trim().trim_matches('"');
     if trimmed.is_empty() || trimmed == "off/any" {
         None
     } else {
@@ -1497,12 +1531,7 @@ fn read_wifi_bytes(interface: &str) -> Option<(u64, u64)> {
     Some((tx_bytes, rx_bytes))
 }
 
-fn read_wifi_rates(interface: &str) -> (Option<f64>, Option<f64>) {
-    let (tx_bytes, rx_bytes) = match read_wifi_bytes(interface) {
-        Some(bytes) => bytes,
-        None => return (None, None),
-    };
-
+fn read_wifi_rates(interface: &str, tx_bytes: u64, rx_bytes: u64) -> (Option<f64>, Option<f64>) {
     let now = Instant::now();
     let mut stats = PREVIOUS_NET_STATS.lock().unwrap();
     let rates = if let Some(prev) = stats.get(interface) {

@@ -52,7 +52,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState) {
                         draw_cpu_info(ui, state);
                         ui.add_space(12.0);
                     }
-                    "Memory" => {
+                    "Memory" if state.config.statistics_sections.show_memory => {
                         draw_memory_info(ui, state);
                         ui.add_space(12.0);
                     }
@@ -474,7 +474,7 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
                         .striped(true)
                         .show(ui, |ui| {
                             ui.label("SSID:");
-                            ui.label(wifi.ssid.as_deref().unwrap_or("—"));
+                            ui.label(wifi.ssid.as_deref().unwrap_or("Not connected"));
                             ui.end_row();
 
                             ui.label("Driver:");
@@ -534,6 +534,18 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
                                 ui.label("RX Speed:");
                                 ui.label(RichText::new(format!("{:.1} Mbps", rx_rate))
                                     .monospace());
+                                ui.end_row();
+                            }
+
+                            if let Some(rx_bytes) = wifi.rx_bytes {
+                                ui.label("Data Received:");
+                                ui.label(RichText::new(format_bytes(rx_bytes)).monospace());
+                                ui.end_row();
+                            }
+
+                            if let Some(tx_bytes) = wifi.tx_bytes {
+                                ui.label("Data Sent:");
+                                ui.label(RichText::new(format_bytes(tx_bytes)).monospace());
                                 ui.end_row();
                             }
                             
@@ -699,4 +711,21 @@ fn draw_fan_info(ui: &mut Ui, state: &AppState) {
                 ui.label("No fan information available");
             }
         });
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+
+    let bytes_f = bytes as f64;
+    if bytes_f >= GIB {
+        format!("{:.2} GiB", bytes_f / GIB)
+    } else if bytes_f >= MIB {
+        format!("{:.2} MiB", bytes_f / MIB)
+    } else if bytes_f >= KIB {
+        format!("{:.2} KiB", bytes_f / KIB)
+    } else {
+        format!("{} B", bytes)
+    }
 }

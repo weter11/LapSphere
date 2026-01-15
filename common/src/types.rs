@@ -118,6 +118,8 @@ pub struct FanInfo {
 pub struct WiFiInfo {
     pub interface: String,
     pub driver: String,
+    pub driver_version: Option<String>,
+    pub firmware_version: Option<String>,
     pub temperature: Option<f32>,
     pub signal_level: Option<i32>,      // Signal level in dBm
     pub channel: Option<u32>,           // Current channel
@@ -126,6 +128,8 @@ pub struct WiFiInfo {
     pub rx_rate: Option<f64>,           // Download rate in Mbps
     pub ssid: Option<String>,
     pub data_rate: Option<f64>,         // Link speed in Mbps
+    pub rx_bytes: Option<u64>,
+    pub tx_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -266,6 +270,8 @@ pub enum Theme {
 pub struct StatisticsSections {
     pub show_system_info: bool,
     pub show_cpu: bool,
+    #[serde(default = "default_show_memory")]
+    pub show_memory: bool,
     pub show_gpu: bool,
     pub show_battery: bool,
     pub show_wifi: bool,
@@ -285,6 +291,10 @@ pub struct StatisticsSections {
 
 fn default_memory_poll_rate() -> u64 {
     1000
+}
+
+fn default_show_memory() -> bool {
+    true
 }
 
 impl Default for AppConfig {
@@ -328,6 +338,7 @@ impl Default for StatisticsSections {
         Self {
             show_system_info: true,
             show_cpu: true,
+            show_memory: true,
             show_gpu: true,
             show_battery: true,
             show_wifi: true,
@@ -348,7 +359,7 @@ impl Default for StatisticsSections {
             gpu_poll_rate: 2000,            // 2 seconds
             battery_poll_rate: 5000,        // 5 seconds
             wifi_poll_rate: 5000,           // 5 seconds
-            storage_poll_rate: 30000,       // 30 seconds
+            storage_poll_rate: 5000,        // 5 seconds
             fans_poll_rate: 1000,           // 1 second
         }
     }

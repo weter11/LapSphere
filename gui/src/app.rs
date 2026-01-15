@@ -42,6 +42,7 @@ pub struct AppState {
     pub fan_info: Vec<FanInfo>,
     pub storage_device_info: Vec<StorageDevice>,
     pub mount_info: Vec<MountInfo>,
+    pub hardware_interface: Option<String>,
     pub gpu_clock_ranges: Option<(u32, u32)>,
     pub gpu_mem_clock_ranges: Option<(u32, u32)>,
     pub gpu_core_offset_limits: Option<(i32, i32)>,
@@ -88,6 +89,7 @@ impl AppState {
             fan_info: Vec::new(),
             storage_device_info: Vec::new(),
             mount_info: Vec::new(),
+            hardware_interface: None,
             gpu_clock_ranges: None,
             gpu_mem_clock_ranges: None,
             gpu_core_offset_limits: None,
@@ -186,6 +188,7 @@ pub enum HardwareUpdate {
     FanInfo(Vec<FanInfo>),
     StorageDeviceInfo(Vec<StorageDevice>),
     MountInfo(Vec<MountInfo>),
+    HardwareInterface(String),
     GpuClockRanges(Result<(u32, u32), String>),
     GpuMemClockRanges(Result<Vec<u32>, String>),
     GpuCoreOffsetLimits(Result<(i32, i32), String>),
@@ -321,6 +324,14 @@ impl TuxedoApp {
                     let _ = tx_clone.send(HardwareUpdate::TdpProfiles(profiles));
                 }
             });
+
+            let client_clone = client.clone();
+            let tx_clone = hw_update_tx.clone();
+            tokio::spawn(async move {
+                if let Ok(Ok(interface)) = client_clone.get_hardware_interface_info().await {
+                    let _ = tx_clone.send(HardwareUpdate::HardwareInterface(interface));
+                }
+            });
             
             Some(handle)
         } else {
@@ -384,6 +395,9 @@ impl TuxedoApp {
                 }
                 HardwareUpdate::MountInfo(info) => {
                     self.state.mount_info = info;
+                }
+                HardwareUpdate::HardwareInterface(info) => {
+                    self.state.hardware_interface = Some(info);
                 }
                 HardwareUpdate::GpuClockRanges(result) => {
                     match result {
