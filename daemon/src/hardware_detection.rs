@@ -41,7 +41,9 @@ struct NetStats {
 
 #[derive(Debug, Clone)]
 struct StorageStats {
+    read_ios: u64,
     read_sectors: u64,
+    write_ios: u64,
     write_sectors: u64,
     timestamp: Instant,
 }
@@ -1549,23 +1551,27 @@ fn read_sector_size(path: &Path) -> u64 {
         .unwrap_or(512)
 }
 
-fn read_storage_stats(path: &Path) -> Option<(u64, u64)> {
+fn read_storage_stats(path: &Path) -> Option<(u64, u64, u64, u64)> {
     let stats = fs::read_to_string(path.join("stat")).ok()?;
     let parts: Vec<&str> = stats.split_whitespace().collect();
     if parts.len() < 7 {
         return None;
     }
+    let read_ios = parts.first()?.parse::<u64>().ok()?;
     let read_sectors = parts.get(2)?.parse::<u64>().ok()?;
+    let write_ios = parts.get(4)?.parse::<u64>().ok()?;
     let write_sectors = parts.get(6)?.parse::<u64>().ok()?;
-    Some((read_sectors, write_sectors))
+    Some((read_ios, read_sectors, write_ios, write_sectors))
 }
 
 fn calculate_storage_rates(
     device: &str,
+    read_ios: u64,
     read_sectors: u64,
+    write_ios: u64,
     write_sectors: u64,
     sector_size: u64,
-) -> (Option<f64>, Option<f64>) {
+) -> (Option<f64>, Option<f64>, Option<f64>, Option<f64>) {
     let now = Instant::now();
     let mut stats = PREVIOUS_STORAGE_STATS.lock().unwrap();
     let rates = if let Some(prev) = stats.get(device) {
@@ -1575,18 +1581,22 @@ fn calculate_storage_rates(
             let write_bytes = write_sectors.saturating_sub(prev.write_sectors) as f64 * sector_size as f64;
             let read_speed = read_bytes / elapsed / 1_000_000.0;
             let write_speed = write_bytes / elapsed / 1_000_000.0;
-            (Some(read_speed), Some(write_speed))
+            let read_iops = read_ios.saturating_sub(prev.read_ios) as f64 / elapsed;
+            let write_iops = write_ios.saturating_sub(prev.write_ios) as f64 / elapsed;
+            (Some(read_speed), Some(write_speed), Some(read_iops), Some(write_iops))
         } else {
-            (None, None)
+            (None, None, None, None)
         }
     } else {
-        (None, None)
+        (None, None, None, None)
     };
 
     stats.insert(
         device.to_string(),
         StorageStats {
+            read_ios,
             read_sectors,
+            write_ios,
             write_sectors,
             timestamp: now,
         },
@@ -1623,11 +1633,11 @@ pub fn get_storage_device_info() -> Result<Vec<StorageDevice>> {
         };
 
         let sector_size = read_sector_size(&path);
-        let (read_speed, write_speed) = match read_storage_stats(&path) {
-            Some((read_sectors, write_sectors)) => {
-                calculate_storage_rates(&dev_name, read_sectors, write_sectors, sector_size)
+        let (read_speed, write_speed, read_iops, write_iops) = match read_storage_stats(&path) {
+            Some((read_ios, read_sectors, write_ios, write_sectors)) => {
+                calculate_storage_rates(&dev_name, read_ios, read_sectors, write_ios, write_sectors, sector_size)
             }
-            None => (None, None),
+            None => (None, None, None, None),
         };
 
         // Try to read temperature from hwmon
@@ -1651,6 +1661,8 @@ pub fn get_storage_device_info() -> Result<Vec<StorageDevice>> {
             temperature,
             read_speed,
             write_speed,
+            read_iops,
+            write_iops,
         });
     }
 

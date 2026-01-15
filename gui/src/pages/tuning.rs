@@ -58,11 +58,13 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>,
             let cpu_info_clone = state.cpu_info.clone();
             if let Some(cpu_info) = &cpu_info_clone {
                 let cpu_caps = Some(&cpu_info.capabilities);
+                let tdp_profiles = state.available_tdp_profiles.clone();
                 draw_cpu_tuning(
                     ui,
                     &mut state.config.profiles[idx],
                     cpu_caps,
                     cpu_info,
+                    &tdp_profiles,
                     dbus_client,
                     hw_update_tx.clone(),
                 );
@@ -106,6 +108,7 @@ fn draw_cpu_tuning(
     profile: &mut Profile,
     cpu_caps: Option<&tuxedo_common::types::CpuCapabilities>,
     cpu_info: &tuxedo_common::types::CpuInfo,
+    tdp_profiles: &[String],
     dbus_client: Option<&DbusClient>,
     hw_update_tx: tokio::sync::mpsc::UnboundedSender<crate::app::HardwareUpdate>,
 ) {
@@ -205,6 +208,35 @@ fn draw_cpu_tuning(
                 });
             
             profile.cpu_settings.energy_performance_preference = Some(current_epp);
+        });
+        ui.add_space(6.0);
+    }
+
+    if !tdp_profiles.is_empty() {
+        ui.label(RichText::new("Performance Profile:").strong());
+        ui.horizontal(|ui| {
+            let mut current_profile = profile.cpu_settings.tdp_profile.clone();
+            let selected_label = current_profile
+                .clone()
+                .unwrap_or_else(|| "System default".to_string());
+
+            ComboBox::from_id_source("performance_profile_combo")
+                .selected_text(&selected_label)
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(current_profile.is_none(), "System default").clicked() {
+                        current_profile = None;
+                    }
+                    for profile_name in tdp_profiles {
+                        if ui.selectable_label(
+                            current_profile.as_deref() == Some(profile_name.as_str()),
+                            profile_name,
+                        ).clicked() {
+                            current_profile = Some(profile_name.clone());
+                        }
+                    }
+                });
+
+            profile.cpu_settings.tdp_profile = current_profile;
         });
         ui.add_space(6.0);
     }
@@ -496,8 +528,11 @@ fn draw_keyboard_tuning(
                 KeyboardMode::SingleColor { .. } => "Single Color",
                 KeyboardMode::Breathe { .. } => "Breathe",
                 KeyboardMode::Cycle { .. } => "Cycle",
+                KeyboardMode::Dance { .. } => "Dance",
+                KeyboardMode::Flash { .. } => "Flash",
+                KeyboardMode::RandomColor { .. } => "Random Color",
+                KeyboardMode::Tempo { .. } => "Tempo",
                 KeyboardMode::Wave { .. } => "Wave",
-                _ => "Other",
             };
             
             ComboBox::from_id_source("keyboard_mode")
@@ -512,6 +547,18 @@ fn draw_keyboard_tuning(
                         }
                         if ui.selectable_label(current_mode_name == "Cycle", "Cycle").clicked() {
                             profile.keyboard_settings.mode = KeyboardMode::Cycle { brightness: 50, speed: 50 };
+                        }
+                        if ui.selectable_label(current_mode_name == "Dance", "Dance").clicked() {
+                            profile.keyboard_settings.mode = KeyboardMode::Dance { brightness: 50, speed: 50 };
+                        }
+                        if ui.selectable_label(current_mode_name == "Flash", "Flash").clicked() {
+                            profile.keyboard_settings.mode = KeyboardMode::Flash { r: 255, g: 255, b: 255, brightness: 50, speed: 50 };
+                        }
+                        if ui.selectable_label(current_mode_name == "Random Color", "Random Color").clicked() {
+                            profile.keyboard_settings.mode = KeyboardMode::RandomColor { brightness: 50, speed: 50 };
+                        }
+                        if ui.selectable_label(current_mode_name == "Tempo", "Tempo").clicked() {
+                            profile.keyboard_settings.mode = KeyboardMode::Tempo { brightness: 50, speed: 50 };
                         }
                         if ui.selectable_label(current_mode_name == "Wave", "Wave").clicked() {
                             profile.keyboard_settings.mode = KeyboardMode::Wave { brightness: 50, speed: 50 };
@@ -548,7 +595,64 @@ fn draw_keyboard_tuning(
                     ui.colored_label(color, "■■■■■");
                 });
             }
-            _ => {}
+            KeyboardMode::Breathe { r, g, b, brightness, speed } => {
+                ui.horizontal(|ui| {
+                    ui.label("Red:");
+                    ui.add(Slider::new(r, 0..=255));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Green:");
+                    ui.add(Slider::new(g, 0..=255));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Blue:");
+                    ui.add(Slider::new(b, 0..=255));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Brightness:");
+                    ui.add(Slider::new(brightness, 0..=100).suffix("%"));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Speed:");
+                    ui.add(Slider::new(speed, 0..=100).suffix("%"));
+                });
+            }
+            KeyboardMode::Flash { r, g, b, brightness, speed } => {
+                ui.horizontal(|ui| {
+                    ui.label("Red:");
+                    ui.add(Slider::new(r, 0..=255));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Green:");
+                    ui.add(Slider::new(g, 0..=255));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Blue:");
+                    ui.add(Slider::new(b, 0..=255));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Brightness:");
+                    ui.add(Slider::new(brightness, 0..=100).suffix("%"));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Speed:");
+                    ui.add(Slider::new(speed, 0..=100).suffix("%"));
+                });
+            }
+            KeyboardMode::Cycle { brightness, speed }
+            | KeyboardMode::Dance { brightness, speed }
+            | KeyboardMode::RandomColor { brightness, speed }
+            | KeyboardMode::Tempo { brightness, speed }
+            | KeyboardMode::Wave { brightness, speed } => {
+                ui.horizontal(|ui| {
+                    ui.label("Brightness:");
+                    ui.add(Slider::new(brightness, 0..=100).suffix("%"));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Speed:");
+                    ui.add(Slider::new(speed, 0..=100).suffix("%"));
+                });
+            }
         }
         
         // Preview button

@@ -136,6 +136,8 @@ pub struct StorageDevice {
     pub temperature: Option<f32>,
     pub read_speed: Option<f64>,
     pub write_speed: Option<f64>,
+    pub read_iops: Option<f64>,
+    pub write_iops: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -232,6 +234,8 @@ pub struct FanCurve {
 pub struct AppConfig {
     pub theme: Theme,
     pub start_minimized: bool,
+    #[serde(default)]
+    pub tray_enabled: bool,
     pub autostart: bool,
     pub fan_daemon_enabled: bool,
     pub app_monitoring_enabled: bool,
@@ -270,6 +274,8 @@ pub struct StatisticsSections {
     pub section_order: Vec<String>,
     // Polling rates in milliseconds
     pub cpu_poll_rate: u64,
+    #[serde(default = "default_memory_poll_rate")]
+    pub memory_poll_rate: u64,
     pub gpu_poll_rate: u64,
     pub battery_poll_rate: u64,
     pub wifi_poll_rate: u64,
@@ -277,11 +283,16 @@ pub struct StatisticsSections {
     pub fans_poll_rate: u64,
 }
 
+fn default_memory_poll_rate() -> u64 {
+    1000
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             theme: Theme::Auto,
             start_minimized: false,
+            tray_enabled: false,
             autostart: false,
             fan_daemon_enabled: true,
             app_monitoring_enabled: true,
@@ -332,6 +343,7 @@ impl Default for StatisticsSections {
                 "Fans".to_string(),
             ],
             cpu_poll_rate: 1000,            // 1 second
+            memory_poll_rate: default_memory_poll_rate(),
             gpu_poll_rate: 2000,            // 2 seconds
             battery_poll_rate: 5000,        // 5 seconds
             wifi_poll_rate: 5000,           // 5 seconds

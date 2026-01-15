@@ -440,11 +440,9 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
                         .spacing([40.0, 6.0])
                         .striped(true)
                         .show(ui, |ui| {
-                            if let Some(ref ssid) = wifi.ssid {
-                                ui.label("SSID:");
-                                ui.label(ssid);
-                                ui.end_row();
-                            }
+                            ui.label("SSID:");
+                            ui.label(wifi.ssid.as_deref().unwrap_or("—"));
+                            ui.end_row();
 
                             ui.label("Driver:");
                             ui.label(&wifi.driver);
@@ -562,6 +560,18 @@ fn draw_storage_info(ui: &mut Ui, state: &AppState) {
                             if let Some(write_speed) = device.write_speed {
                                 ui.label("Write Speed:");
                                 ui.label(RichText::new(format!("{:.1} MB/s", write_speed)).monospace());
+                                ui.end_row();
+                            }
+
+                            if let Some(read_iops) = device.read_iops {
+                                ui.label("Read IOPS:");
+                                ui.label(RichText::new(format!("{:.0} IOPS", read_iops)).monospace());
+                                ui.end_row();
+                            }
+
+                            if let Some(write_iops) = device.write_iops {
+                                ui.label("Write IOPS:");
+                                ui.label(RichText::new(format!("{:.0} IOPS", write_iops)).monospace());
                                 ui.end_row();
                             }
                         });

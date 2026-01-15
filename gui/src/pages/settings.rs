@@ -87,6 +87,10 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Co
             if ui.checkbox(&mut state.config.start_minimized, "Start minimized").changed() {
                 let _ = state.save_config();
             }
+
+            if ui.checkbox(&mut state.config.tray_enabled, "Tray (minimize on close)").changed() {
+                let _ = state.save_config();
+            }
             
             if ui.checkbox(&mut state.config.autostart, "Enable autostart").changed() {
                 let _ = state.save_config();
@@ -176,6 +180,19 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Co
                     // Update coordinator interval
                     if let Some(ref handle) = state.coordinator_handle {
                         let _ = handle.update_interval("cpu".to_string(), std::time::Duration::from_millis(new_rate));
+                    }
+                }
+            });
+
+            let mut memory_poll = (state.config.statistics_sections.memory_poll_rate as f32) / 1000.0;
+            ui.horizontal(|ui| {
+                ui.label("Memory:");
+                if ui.add(Slider::new(&mut memory_poll, 0.5..=10.0).step_by(0.5).suffix(" s")).changed() {
+                    let new_rate = (memory_poll * 1000.0) as u64;
+                    state.config.statistics_sections.memory_poll_rate = new_rate;
+                    let _ = state.save_config();
+                    // Update coordinator interval
+                    if let Some(ref handle) = state.coordinator_handle {
                         let _ = handle.update_interval("memory".to_string(), std::time::Duration::from_millis(new_rate));
                     }
                 }

@@ -39,6 +39,7 @@ pub struct AppState {
     pub gpu_mem_offset_limits: Option<(i32, i32)>,
     pub available_start_thresholds: Vec<u8>,
     pub available_end_thresholds: Vec<u8>,
+    pub available_tdp_profiles: Vec<String>,
     
     // UI state
     pub current_page: Page,
@@ -83,6 +84,7 @@ impl AppState {
             gpu_mem_offset_limits: None,
             available_start_thresholds: Vec::new(),
             available_end_thresholds: Vec::new(),
+            available_tdp_profiles: Vec::new(),
             current_page: Page::Statistics,
             status_message: None,
             restart_confirmation_pending: false,
@@ -137,6 +139,7 @@ pub struct TuxedoApp {
     dbus_client: Option<DbusClient>,
     theme: TuxedoTheme,
     system_tray: Option<SystemTray>,
+    force_quit: bool,
     
     // Background update channel
     hw_update_tx: mpsc::UnboundedSender<HardwareUpdate>,
@@ -162,6 +165,7 @@ pub enum HardwareUpdate {
     GpuCoreOffsetLimits(Result<(i32, i32), String>),
     GpuMemOffsetLimits(Result<(i32, i32), String>),
     AvailableThresholds(Vec<u8>, Vec<u8>),
+    TdpProfiles(Vec<String>),
     Error(String),
 }
 
@@ -253,7 +257,7 @@ impl TuxedoApp {
             // Register components with their refresh intervals
             let _ = handle.register("cpu".to_string(), Duration::from_millis(state.config.statistics_sections.cpu_poll_rate));
             let _ = handle.register("gpu".to_string(), Duration::from_millis(state.config.statistics_sections.gpu_poll_rate));
-            let _ = handle.register("memory".to_string(), Duration::from_millis(state.config.statistics_sections.cpu_poll_rate));
+            let _ = handle.register("memory".to_string(), Duration::from_millis(state.config.statistics_sections.memory_poll_rate));
             let _ = handle.register("fans".to_string(), Duration::from_millis(state.config.statistics_sections.fans_poll_rate));
             let _ = handle.register("battery".to_string(), Duration::from_millis(state.config.statistics_sections.battery_poll_rate));
             let _ = handle.register("wifi".to_string(), Duration::from_millis(state.config.statistics_sections.wifi_poll_rate));
@@ -283,6 +287,14 @@ impl TuxedoApp {
                     _ => {}
                 }
             });
+
+            let client_clone = client.clone();
+            let tx_clone = hw_update_tx.clone();
+            tokio::spawn(async move {
+                if let Ok(Ok(profiles)) = client_clone.get_tdp_profiles().await {
+                    let _ = tx_clone.send(HardwareUpdate::TdpProfiles(profiles));
+                }
+            });
             
             Some(handle)
         } else {
@@ -309,6 +321,7 @@ impl TuxedoApp {
             dbus_client,
             theme,
             system_tray,
+            force_quit: false,
             hw_update_tx,
             hw_update_rx,
             shortcuts: KeyboardShortcuts::new(),
@@ -378,6 +391,9 @@ impl TuxedoApp {
                 HardwareUpdate::AvailableThresholds(start, end) => {
                     self.state.available_start_thresholds = start;
                     self.state.available_end_thresholds = end;
+                }
+                HardwareUpdate::TdpProfiles(profiles) => {
+                    self.state.available_tdp_profiles = profiles;
                 }
                 HardwareUpdate::Error(err) => {
                     log::error!("Hardware update error: {}", err);
@@ -473,6 +489,7 @@ impl TuxedoApp {
                     }
                 }
                 TrayEvent::Quit => {
+                    self.force_quit = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }
@@ -490,6 +507,14 @@ impl eframe::App for TuxedoApp {
 
         self.handle_tray_events(ctx);
         
+        if ctx.input(|input| input.viewport().close_requested())
+            && self.state.config.tray_enabled
+            && !self.force_quit
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+
         // Draw top bar
         self.draw_top_bar(ctx);
         
