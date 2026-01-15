@@ -1539,6 +1539,8 @@ fn update_channel_width_from_line(
 }
 
 fn parse_frequency_mhz(value: &str, unit: Option<&str>) -> Option<u32> {
+    const FREQUENCY_GHZ_THRESHOLD: f64 = 100.0;
+
     let numeric: String = value.chars()
         .filter(|c| c.is_ascii_digit() || *c == '.')
         .collect();
@@ -1554,7 +1556,7 @@ fn parse_frequency_mhz(value: &str, unit: Option<&str>) -> Option<u32> {
     if unit_lower.contains("mhz") {
         return Some(raw.round() as u32);
     }
-    if raw < 100.0 {
+    if raw < FREQUENCY_GHZ_THRESHOLD {
         Some((raw * 1000.0).round() as u32)
     } else {
         Some(raw.round() as u32)
@@ -1596,11 +1598,16 @@ fn update_channel_from_iwconfig(info: &str, channel: &mut Option<u32>, freq_mhz:
 }
 
 fn channel_from_frequency_mhz(freq: u32) -> Option<u32> {
+    const FREQ_24_GHZ_BASE: u32 = 2407;
+    const FREQ_24_GHZ_SPECIAL: u32 = 2484;
+    const FREQ_5_GHZ_BASE: u32 = 5000;
+    const FREQ_6_GHZ_BASE: u32 = 5950;
+
     match freq {
-        2484 => Some(14),
-        2412..=2472 => Some((freq - 2407) / 5),
-        5000..=5900 => Some((freq - 5000) / 5),
-        5955..=7115 => Some((freq - 5950) / 5),
+        FREQ_24_GHZ_SPECIAL => Some(14),
+        2412..=2472 => Some((freq - FREQ_24_GHZ_BASE) / 5),
+        5000..=5900 => Some((freq - FREQ_5_GHZ_BASE) / 5),
+        5955..=7115 => Some((freq - FREQ_6_GHZ_BASE) / 5),
         _ => None,
     }
 }
