@@ -182,41 +182,41 @@ impl TuxedoTheme {
 
             widgets: egui::style::Widgets {
                 noninteractive: egui::style::WidgetVisuals {
-                    bg_fill: Color32::from_gray(248),
-                    weak_bg_fill: Color32::from_gray(248),
-                    bg_stroke: Stroke::new(1.0, Color32::from_gray(205)),
+                    bg_fill: Color32::from_gray(252),
+                    weak_bg_fill: Color32::from_gray(252),
+                    bg_stroke: Stroke::new(1.0, Color32::from_gray(210)),
                     rounding: Rounding::same(6.0),
                     fg_stroke: Stroke::new(1.0, Color32::from_gray(20)),
                     expansion: 0.0,
                 },
                 inactive: egui::style::WidgetVisuals {
-                    bg_fill: Color32::from_gray(230),
-                    weak_bg_fill: Color32::from_gray(230),
-                    bg_stroke: Stroke::new(1.0, Color32::from_gray(190)),
+                    bg_fill: Color32::from_gray(236),
+                    weak_bg_fill: Color32::from_gray(236),
+                    bg_stroke: Stroke::new(1.0, Color32::from_gray(195)),
                     rounding: Rounding::same(6.0),
-                    fg_stroke: Stroke::new(1.0, Color32::from_gray(40)),
+                    fg_stroke: Stroke::new(1.0, Color32::from_gray(30)),
                     expansion: 0.0,
                 },
                 hovered: egui::style::WidgetVisuals {
-                    bg_fill: Color32::from_gray(220),
-                    weak_bg_fill: Color32::from_gray(220),
-                    bg_stroke: Stroke::new(1.0, Color32::from_gray(160)),
+                    bg_fill: Color32::from_gray(226),
+                    weak_bg_fill: Color32::from_gray(226),
+                    bg_stroke: Stroke::new(1.0, Color32::from_gray(175)),
                     rounding: Rounding::same(6.0),
                     fg_stroke: Stroke::new(1.5, Color32::BLACK),
                     expansion: 1.0,
                 },
                 active: egui::style::WidgetVisuals {
-                    bg_fill: Color32::from_rgb(60, 120, 200),
-                    weak_bg_fill: Color32::from_rgb(60, 120, 200),
-                    bg_stroke: Stroke::new(1.0, Color32::from_rgb(40, 100, 180)),
+                    bg_fill: Color32::from_rgb(90, 150, 220),
+                    weak_bg_fill: Color32::from_rgb(90, 150, 220),
+                    bg_stroke: Stroke::new(1.0, Color32::from_rgb(60, 120, 190)),
                     rounding: Rounding::same(6.0),
-                    fg_stroke: Stroke::new(2.0, Color32::WHITE),
+                    fg_stroke: Stroke::new(2.0, Color32::from_gray(20)),
                     expansion: 1.0,
                 },
                 open: egui::style::WidgetVisuals {
-                    bg_fill: Color32::from_gray(225),
-                    weak_bg_fill: Color32::from_gray(225),
-                    bg_stroke: Stroke::new(1.0, Color32::from_gray(180)),
+                    bg_fill: Color32::from_gray(238),
+                    weak_bg_fill: Color32::from_gray(238),
+                    bg_stroke: Stroke::new(1.0, Color32::from_gray(190)),
                     rounding: Rounding::same(6.0),
                     fg_stroke: Stroke::new(1.0, Color32::from_gray(20)),
                     expansion: 0.0,
@@ -224,13 +224,13 @@ impl TuxedoTheme {
             },
 
             selection: egui::style::Selection {
-                bg_fill: Color32::from_rgb(60, 120, 200),
-                stroke: Stroke::new(1.0, Color32::from_rgb(40, 100, 180)),
+                bg_fill: Color32::from_rgb(90, 150, 220),
+                stroke: Stroke::new(1.0, Color32::from_rgb(60, 120, 190)),
             },
 
             hyperlink_color: Color32::from_rgb(40, 100, 200),
 
-            window_fill: Color32::from_gray(238),
+            window_fill: Color32::from_gray(245),
             window_stroke: Stroke::new(1.0, Color32::from_gray(210)),
             window_shadow: egui::epaint::Shadow {
                 offset: egui::vec2(0.0, 8.0),
@@ -240,15 +240,15 @@ impl TuxedoTheme {
             },
             window_rounding: Rounding::same(8.0),
 
-            panel_fill: Color32::from_gray(248),
+            panel_fill: Color32::from_gray(252),
 
-            override_text_color: Some(Color32::from_gray(10)),
+            override_text_color: Some(Color32::from_gray(20)),
             warn_fg_color: Color32::from_rgb(180, 100, 0),
             error_fg_color: Color32::from_rgb(180, 20, 20),
 
-            faint_bg_color: Color32::from_gray(241),
-            extreme_bg_color: Color32::from_gray(224),
-            code_bg_color: Color32::from_gray(234),
+            faint_bg_color: Color32::from_gray(236),
+            extreme_bg_color: Color32::from_gray(220),
+            code_bg_color: Color32::from_gray(230),
 
             ..Visuals::light()
         }

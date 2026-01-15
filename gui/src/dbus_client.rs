@@ -22,12 +22,14 @@ pub enum DbusCommand {
     ApplyProfile { profile: Profile, reply: oneshot::Sender<Result<()>> },
     SetCpuGovernor { governor: String, reply: oneshot::Sender<Result<()>> },
     SetCpuBoost { enabled: bool, reply: oneshot::Sender<Result<()>> },
+    SetAmdPstateStatus { status: String, reply: oneshot::Sender<Result<()>> },
     PreviewKeyboard { settings: KeyboardSettings, reply: oneshot::Sender<Result<()>> },
     GetBatteryChargeThresholds { reply: oneshot::Sender<Result<(u8, u8)>> },
     SetBatteryChargeThresholds { start: u8, end: u8, reply: oneshot::Sender<Result<()>> },
     GetBatteryAvailableStartThresholds { reply: oneshot::Sender<Result<Vec<u8>>> },
     GetBatteryAvailableEndThresholds { reply: oneshot::Sender<Result<Vec<u8>>> },
     SetBatterySettings { settings: BatterySettings, reply: oneshot::Sender<Result<()>> },
+    SetFanAuto { fan_id: u32, reply: oneshot::Sender<Result<()>> },
     SetGpuLockedClocks { device_index: u32, min_clock: u32, max_clock: u32, reply: oneshot::Sender<Result<()>> },
     ResetGpuClocks { device_index: u32, reply: oneshot::Sender<Result<()>> },
     GetGpuClockRanges { device_index: u32, reply: oneshot::Sender<Result<(u32, u32)>> },
@@ -39,6 +41,7 @@ pub enum DbusCommand {
     GetGpuCoreOffsetLimits { device_index: u32, reply: oneshot::Sender<Result<(i32, i32)>> },
     GetGpuMemoryOffsetLimits { device_index: u32, reply: oneshot::Sender<Result<(i32, i32)>> },
     SetPrimeProfile { profile: String, reply: oneshot::Sender<Result<()>> },
+    ShutdownDaemon { reply: oneshot::Sender<Result<()>> },
 }
 
 impl DbusClient {
@@ -125,7 +128,13 @@ impl DbusClient {
         let _ = self.command_tx.send(DbusCommand::SetCpuGovernor { governor, reply: tx });
         rx
     }
-    
+
+    pub fn set_amd_pstate_status(&self, status: String) -> oneshot::Receiver<Result<()>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::SetAmdPstateStatus { status, reply: tx });
+        rx
+    }
+
     pub fn preview_keyboard_settings(&self, settings: KeyboardSettings) -> oneshot::Receiver<Result<()>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.command_tx.send(DbusCommand::PreviewKeyboard { 
@@ -164,6 +173,12 @@ impl DbusClient {
     pub fn set_battery_settings(&self, settings: BatterySettings) -> oneshot::Receiver<Result<()>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.command_tx.send(DbusCommand::SetBatterySettings { settings, reply: tx });
+        rx
+    }
+
+    pub fn set_fan_auto(&self, fan_id: u32) -> oneshot::Receiver<Result<()>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::SetFanAuto { fan_id, reply: tx });
         rx
     }
 
@@ -232,6 +247,12 @@ impl DbusClient {
         let _ = self.command_tx.send(DbusCommand::SetPrimeProfile { profile: profile.to_string(), reply: tx });
         rx
     }
+
+    pub fn shutdown_daemon(&self) -> oneshot::Receiver<Result<()>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::ShutdownDaemon { reply: tx });
+        rx
+    }
 }
 
 // Background worker - handles all DBus calls asynchronously
@@ -288,6 +309,10 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
                 let result = set_cpu_boost_impl(&connection, enabled).await;
                 let _ = reply.send(result);
             }
+            DbusCommand::SetAmdPstateStatus { status, reply } => {
+                let result = set_amd_pstate_status_impl(&connection, &status).await;
+                let _ = reply.send(result);
+            }
             DbusCommand::PreviewKeyboard { settings, reply } => {
                 let result = preview_keyboard_impl(&connection, &settings).await;
                 let _ = reply.send(result);
@@ -310,6 +335,10 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
             }
             DbusCommand::SetBatterySettings { settings, reply } => {
                 let result = set_battery_settings_impl(&connection, settings).await;
+                let _ = reply.send(result);
+            }
+            DbusCommand::SetFanAuto { fan_id, reply } => {
+                let result = set_fan_auto_impl(&connection, fan_id).await;
                 let _ = reply.send(result);
             }
             DbusCommand::SetGpuLockedClocks { device_index, min_clock, max_clock, reply } => {
@@ -354,6 +383,10 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
             }
             DbusCommand::SetPrimeProfile { profile, reply } => {
                 let result = set_prime_profile_impl(&connection, &profile).await;
+                let _ = reply.send(result);
+            }
+            DbusCommand::ShutdownDaemon { reply } => {
+                let result = shutdown_daemon_impl(&connection).await;
                 let _ = reply.send(result);
             }
         }
@@ -521,6 +554,18 @@ async fn set_cpu_boost_impl(conn: &Connection, enabled: bool) -> Result<()> {
     Ok(())
 }
 
+async fn set_amd_pstate_status_impl(conn: &Connection, status: &str) -> Result<()> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "com.tuxedo.Control",
+        "/com/tuxedo/Control",
+        "com.tuxedo.Control",
+    ).await?;
+
+    proxy.call::<_, _, ()>("SetAmdPstateStatus", &(status,)).await?;
+    Ok(())
+}
+
 async fn get_battery_thresholds_impl(conn: &Connection) -> Result<(u8, u8)> {
     let proxy = zbus::Proxy::new(
         conn,
@@ -581,6 +626,17 @@ async fn set_battery_settings_impl(conn: &Connection, settings: BatterySettings)
 
     let json = serde_json::to_string(&settings)?;
     proxy.call::<_, _, ()>("SetBatterySettings", &(json.as_str(),)).await?;
+    Ok(())
+}
+
+async fn set_fan_auto_impl(conn: &Connection, fan_id: u32) -> Result<()> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "com.tuxedo.Control",
+        "/com/tuxedo/Control",
+        "com.tuxedo.Control",
+    ).await?;
+    proxy.call::<_, _, ()>("SetFanAuto", &(fan_id,)).await?;
     Ok(())
 }
 
@@ -702,5 +758,16 @@ async fn set_prime_profile_impl(conn: &Connection, profile: &str) -> Result<()> 
         "com.tuxedo.Control",
     ).await?;
     proxy.call::<_, _, ()>("SetPrimeProfile", &(profile,)).await?;
+    Ok(())
+}
+
+async fn shutdown_daemon_impl(conn: &Connection) -> Result<()> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "com.tuxedo.Control",
+        "/com/tuxedo/Control",
+        "com.tuxedo.Control",
+    ).await?;
+    proxy.call::<_, _, ()>("ShutdownDaemon", &()).await?;
     Ok(())
 }

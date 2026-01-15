@@ -1,6 +1,10 @@
 use anyhow::Result;
 use tuxedo_common::types::*;
 use zbus::{interface, Connection, ConnectionBuilder};
+use std::time::Duration;
+use nix::sys::signal::{raise, Signal};
+
+const SHUTDOWN_SIGNAL_DELAY_MS: u64 = 200;
 
 pub struct ControlInterface;
 
@@ -372,6 +376,26 @@ async fn set_tdp_profile(&self, profile: &str) -> Result<(), zbus::fdo::Error> {
             Err(zbus::fdo::Error::Failed("Scheduler not initialized".to_string()))
         }
     }
+
+    async fn shutdown_daemon(&self) -> Result<(), zbus::fdo::Error> {
+        if is_systemd_managed() {
+            return Ok(());
+        }
+
+        std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(SHUTDOWN_SIGNAL_DELAY_MS));
+            if let Err(err) = raise(Signal::SIGINT) {
+                log::error!("Failed to signal daemon shutdown: {}", err);
+            }
+        });
+
+        Ok(())
+    }
+}
+
+fn is_systemd_managed() -> bool {
+    std::env::var_os("INVOCATION_ID").is_some()
+        || std::env::var_os("SYSTEMD_EXEC_PID").is_some()
 }
 
 pub async fn start_service(_connection: Connection) -> Result<()> {

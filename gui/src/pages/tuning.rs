@@ -1,4 +1,5 @@
 use egui::{Ui, ScrollArea, RichText, Slider, ComboBox, TopBottomPanel};
+use std::path::Path;
 use crate::app::AppState;
 use crate::dbus_client::DbusClient;
 use tuxedo_common::types::{KeyboardMode, Profile, FanCurve};
@@ -57,7 +58,14 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>,
             let cpu_info_clone = state.cpu_info.clone();
             if let Some(cpu_info) = &cpu_info_clone {
                 let cpu_caps = Some(&cpu_info.capabilities);
-                draw_cpu_tuning(ui, &mut state.config.profiles[idx], cpu_caps, cpu_info);
+                draw_cpu_tuning(
+                    ui,
+                    &mut state.config.profiles[idx],
+                    cpu_caps,
+                    cpu_info,
+                    dbus_client,
+                    hw_update_tx.clone(),
+                );
             } else {
                 ui.heading("🖥️ CPU Tuning");
                 ui.add_space(8.0);
@@ -98,6 +106,8 @@ fn draw_cpu_tuning(
     profile: &mut Profile,
     cpu_caps: Option<&tuxedo_common::types::CpuCapabilities>,
     cpu_info: &tuxedo_common::types::CpuInfo,
+    dbus_client: Option<&DbusClient>,
+    hw_update_tx: tokio::sync::mpsc::UnboundedSender<crate::app::HardwareUpdate>,
 ) {
     ui.heading("🖥️ CPU Tuning");
     ui.add_space(8.0);
@@ -117,6 +127,7 @@ fn draw_cpu_tuning(
             let mut current_pstate = profile.cpu_settings.amd_pstate_status
                 .clone()
                 .unwrap_or_else(|| "active".to_string());
+            let previous_pstate = current_pstate.clone();
             
             ComboBox::from_id_source("amd_pstate_combo")
                 .selected_text(&current_pstate)
@@ -125,7 +136,23 @@ fn draw_cpu_tuning(
                     ui.selectable_value(&mut current_pstate, "passive".to_string(), "Passive");
                     ui.selectable_value(&mut current_pstate, "guided".to_string(), "Guided");
                 });
-            
+
+            if current_pstate != previous_pstate {
+                if let Some(client) = dbus_client {
+                    let client = client.clone();
+                    let tx = hw_update_tx.clone();
+                    let pstate = current_pstate.clone();
+                    tokio::spawn(async move {
+                        let _ = client.set_amd_pstate_status(pstate).await;
+                        if let Ok(result) = client.get_cpu_info().await {
+                            if let Ok(info) = result {
+                                let _ = tx.send(crate::app::HardwareUpdate::CpuInfo(info));
+                            }
+                        }
+                    });
+                }
+            }
+
             profile.cpu_settings.amd_pstate_status = Some(current_pstate);
             
             ui.label(RichText::new("(Active = best performance, Passive = better efficiency)")
@@ -441,10 +468,26 @@ fn draw_keyboard_tuning(
     ui.heading("⌨️ Keyboard Backlight");
     ui.add_space(8.0);
     
+    let keyboard_caps = detect_keyboard_capabilities();
     ui.checkbox(&mut profile.keyboard_settings.control_enabled, "Control keyboard backlight");
     ui.add_space(6.0);
     
     if profile.keyboard_settings.control_enabled {
+        if !keyboard_caps.supports_effects {
+            if !matches!(profile.keyboard_settings.mode, KeyboardMode::SingleColor { .. }) {
+                profile.keyboard_settings.mode = KeyboardMode::SingleColor {
+                    r: 255,
+                    g: 255,
+                    b: 255,
+                    brightness: 50,
+                };
+            }
+            ui.label(RichText::new("Effect modes are not supported by this keyboard.").small());
+        }
+        if !keyboard_caps.supports_color {
+            ui.label(RichText::new("RGB color control is not available on this keyboard.").small());
+        }
+
         // Mode selector
         ui.horizontal(|ui| {
             ui.label("Mode:");
@@ -463,14 +506,16 @@ fn draw_keyboard_tuning(
                     if ui.selectable_label(current_mode_name == "Single Color", "Single Color").clicked() {
                         profile.keyboard_settings.mode = KeyboardMode::SingleColor { r: 255, g: 255, b: 255, brightness: 50 };
                     }
-                    if ui.selectable_label(current_mode_name == "Breathe", "Breathe").clicked() {
-                        profile.keyboard_settings.mode = KeyboardMode::Breathe { r: 255, g: 255, b: 255, brightness: 50, speed: 50 };
-                    }
-                    if ui.selectable_label(current_mode_name == "Cycle", "Cycle").clicked() {
-                        profile.keyboard_settings.mode = KeyboardMode::Cycle { brightness: 50, speed: 50 };
-                    }
-                    if ui.selectable_label(current_mode_name == "Wave", "Wave").clicked() {
-                        profile.keyboard_settings.mode = KeyboardMode::Wave { brightness: 50, speed: 50 };
+                    if keyboard_caps.supports_effects {
+                        if ui.selectable_label(current_mode_name == "Breathe", "Breathe").clicked() {
+                            profile.keyboard_settings.mode = KeyboardMode::Breathe { r: 255, g: 255, b: 255, brightness: 50, speed: 50 };
+                        }
+                        if ui.selectable_label(current_mode_name == "Cycle", "Cycle").clicked() {
+                            profile.keyboard_settings.mode = KeyboardMode::Cycle { brightness: 50, speed: 50 };
+                        }
+                        if ui.selectable_label(current_mode_name == "Wave", "Wave").clicked() {
+                            profile.keyboard_settings.mode = KeyboardMode::Wave { brightness: 50, speed: 50 };
+                        }
                     }
                 });
         });
@@ -512,6 +557,37 @@ fn draw_keyboard_tuning(
                 let _ = client.preview_keyboard_settings(profile.keyboard_settings.clone());
             }
         }
+    }
+}
+
+struct KeyboardCapabilities {
+    supports_color: bool,
+    supports_effects: bool,
+}
+
+fn detect_keyboard_capabilities() -> KeyboardCapabilities {
+    let possible_paths = [
+        "/sys/class/leds/rgb:kbd_backlight",
+        "/sys/class/leds/tuxedo::kbd_backlight",
+        "/sys/devices/platform/tuxedo_keyboard/leds/rgb:kbd_backlight",
+        "/sys/class/leds/asus::kbd_backlight",
+    ];
+
+    for path in possible_paths {
+        let brightness_path = format!("{}/brightness", path);
+        if Path::new(&brightness_path).exists() {
+            let color_path = format!("{}/multi_intensity", path);
+            let mode_path = format!("{}/mode", path);
+            return KeyboardCapabilities {
+                supports_color: Path::new(&color_path).exists(),
+                supports_effects: Path::new(&mode_path).exists(),
+            };
+        }
+    }
+
+    KeyboardCapabilities {
+        supports_color: false,
+        supports_effects: false,
     }
 }
 

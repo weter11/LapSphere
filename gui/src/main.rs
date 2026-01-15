@@ -5,6 +5,7 @@ mod pages;
 mod keyboard_shortcuts;
 mod widgets;
 mod polling_scheduler;
+mod system_tray;
 
 use app::TuxedoApp;
 

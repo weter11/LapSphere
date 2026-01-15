@@ -4,6 +4,8 @@ use std::fs;
 use std::path::Path;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::Instant;
+use once_cell::sync::Lazy;
 use crate::tuxedo_io::TuxedoIo;
 use systemstat::{System, Platform, saturating_sub_bytes};
 // use tuxedo_io::TuxedoIo;
@@ -11,6 +13,13 @@ use tuxedo_common::types::*;
 
 // Thread-safe storage for previous CPU stats
 static PREVIOUS_CPU_STATS: Mutex<Option<HashMap<u32, CpuStats>>> = Mutex::new(None);
+static PREVIOUS_NET_STATS: Lazy<Mutex<HashMap<String, NetStats>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+static PREVIOUS_STORAGE_STATS: Lazy<Mutex<HashMap<String, StorageStats>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+const BITS_PER_BYTE: f64 = 8.0;
+const BITS_PER_MEGABIT: f64 = 1_000_000.0;
 
 #[derive(Debug, Clone)]
 struct CpuStats {
@@ -21,6 +30,20 @@ struct CpuStats {
     iowait: u64,
     irq: u64,
     softirq: u64,
+}
+
+#[derive(Debug, Clone)]
+struct NetStats {
+    rx_bytes: u64,
+    tx_bytes: u64,
+    timestamp: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct StorageStats {
+    read_sectors: u64,
+    write_sectors: u64,
+    timestamp: Instant,
 }
 
 impl CpuStats {
@@ -945,6 +968,28 @@ fn get_intel_gpu_name(device_id: &str) -> Option<String> {
 use crate::hardware_control::get_nvml;
 use nvml_wrapper::enum_wrappers::device::{Clock, PerformanceState};
 
+// Sysfs PCI domain identifiers use four hex digits (e.g. 0000). NVML can return
+// longer domain strings, so we truncate to the last 4 characters to map to sysfs.
+const PCI_DOMAIN_LEN: usize = 4;
+
+fn read_nvidia_runtime_status(device: &nvml_wrapper::Device) -> Option<String> {
+    let pci_info = device.pci_info().ok()?;
+    let bus_id = pci_info.bus_id.trim().to_string();
+    let sysfs_id = if let Some((domain, rest)) = bus_id.split_once(':') {
+        let domain = if domain.len() > PCI_DOMAIN_LEN {
+            &domain[domain.len() - PCI_DOMAIN_LEN..]
+        } else {
+            domain
+        };
+        format!("{}:{}", domain, rest)
+    } else {
+        bus_id
+    };
+
+    let status_path = format!("/sys/bus/pci/devices/{}/power/runtime_status", sysfs_id);
+    fs::read_to_string(status_path).ok().map(|s| s.trim().to_string())
+}
+
 pub fn get_gpu_clock_ranges(device_index: u32) -> Result<(u32, u32)> {
     let nvml = get_nvml()?;
     let device = nvml.device_by_index(device_index)?;
@@ -1004,23 +1049,43 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             GpuType::Discrete
         };
         
+        let runtime_status = read_nvidia_runtime_status(&device);
+        let is_suspended = runtime_status
+            .as_deref()
+            .map(|status| status.eq_ignore_ascii_case("suspended"))
+            .unwrap_or(false);
+
         // Get performance state for status
-        let status = match device.performance_state() {
-            Ok(state) => format!("{:?}", state),
-            Err(_) => {
-                // Fall back to power state
-                match device.power_state() {
-                    Ok(state) => format!("{:?}", state),
-                    Err(_) => "Active".to_string(),
+        let status = runtime_status.unwrap_or_else(|| {
+            match device.performance_state() {
+                Ok(state) => format!("{:?}", state),
+                Err(_) => {
+                    // Fall back to power state
+                    match device.power_state() {
+                        Ok(state) => format!("{:?}", state),
+                        Err(_) => "Active".to_string(),
+                    }
                 }
             }
+        });
+
+        let (frequency, memory_frequency, temperature, load, power) = if is_suspended {
+            (None, None, None, None, None)
+        } else {
+            (
+                device.clock_info(nvml_wrapper::enum_wrappers::device::Clock::Graphics)
+                    .ok()
+                    .map(|c| c as u64),
+                device.clock_info(nvml_wrapper::enum_wrappers::device::Clock::Memory)
+                    .ok()
+                    .map(|c| c as u64),
+                device.temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu)
+                    .ok()
+                    .map(|t| t as f32),
+                device.utilization_rates().ok().map(|u| u.gpu as f32),
+                device.power_usage().ok().map(|p| p as f32 / 1000.0),
+            )
         };
-        
-        let frequency = device.clock_info(nvml_wrapper::enum_wrappers::device::Clock::Graphics).ok().map(|c| c as u64);
-        let memory_frequency = device.clock_info(nvml_wrapper::enum_wrappers::device::Clock::Memory).ok().map(|c| c as u64);
-        let temperature = device.temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu).ok().map(|t| t as f32);
-        let load = device.utilization_rates().ok().map(|u| u.gpu as f32);
-        let power = device.power_usage().ok().map(|p| p as f32 / 1000.0);
         let voltage = None;
 
         gpus.push(GpuInfo {
@@ -1222,6 +1287,7 @@ pub fn get_wifi_info() -> Result<Vec<WiFiInfo>> {
         
         // Read channel and rates from iwconfig or iw
         let (channel, channel_width) = read_wifi_channel(&interface);
+        let (ssid, data_rate) = read_wifi_link_info(&interface);
         let (tx_rate, rx_rate) = read_wifi_rates(&interface);
         
         wifi_devices.push(WiFiInfo {
@@ -1233,6 +1299,8 @@ pub fn get_wifi_info() -> Result<Vec<WiFiInfo>> {
             channel_width,
             tx_rate,
             rx_rate,
+            ssid,
+            data_rate,
         });
     }
     
@@ -1321,39 +1389,97 @@ fn read_wifi_channel(interface: &str) -> (Option<u32>, Option<u32>) {
     (None, None)
 }
 
-fn read_wifi_rates(interface: &str) -> (Option<f64>, Option<f64>) {
-    // Try to read from /sys/class/net/{interface}/statistics/
-    let tx_bytes_path = format!("/sys/class/net/{}/statistics/tx_bytes", interface);
-    let rx_bytes_path = format!("/sys/class/net/{}/statistics/rx_bytes", interface);
-    
-    // Note: This gives total bytes, not rates. Actual rate calculation would require
-    // storing previous values and time, similar to CPU load calculation.
-    // For now, we'll try to use iw to get link speed
-    
+fn read_wifi_link_info(interface: &str) -> (Option<String>, Option<f64>) {
     if let Ok(output) = std::process::Command::new("iw")
         .args(&["dev", interface, "link"])
         .output()
     {
         if output.status.success() {
             let info = String::from_utf8_lossy(&output.stdout);
+            let mut ssid = None;
+            let mut tx_rate = None;
+            let mut rx_rate = None;
+
             for line in info.lines() {
-                if line.contains("tx bitrate:") {
-                    // Parse: "tx bitrate: 866.7 MBit/s"
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    for (i, part) in parts.iter().enumerate() {
-                        if (*part == "bitrate:" || *part == "tx" || *part == "rx") && i + 1 < parts.len() {
-                            if let Ok(rate) = parts[i + 1].parse::<f64>() {
-                                // Assume both tx and rx are similar for now
-                                return (Some(rate), Some(rate));
-                            }
-                        }
-                    }
+                let trimmed = line.trim();
+                if trimmed.starts_with("SSID:") {
+                    ssid = Some(trimmed.trim_start_matches("SSID:").trim().to_string());
+                } else if trimmed.starts_with("tx bitrate:") {
+                    tx_rate = parse_wifi_rate(trimmed);
+                } else if trimmed.starts_with("rx bitrate:") {
+                    rx_rate = parse_wifi_rate(trimmed);
                 }
             }
+
+            return (ssid, tx_rate.or(rx_rate));
         }
     }
-    
+
     (None, None)
+}
+
+fn parse_wifi_rate(line: &str) -> Option<f64> {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    let rate_index = parts.iter().position(|part| *part == "bitrate:");
+    let value = rate_index
+        .and_then(|idx| parts.get(idx + 1))
+        .and_then(|value| value.parse::<f64>().ok())?;
+    let unit = rate_index
+        .and_then(|idx| parts.get(idx + 2))
+        .copied()
+        .unwrap_or("MBit/s")
+        .trim_end_matches(',');
+
+    Some(match unit {
+        "Gbit/s" | "Gbit/sec" | "GBit/s" => value * 1000.0,
+        "Kbit/s" | "Kbit/sec" | "KBit/s" => value / 1000.0,
+        _ => value,
+    })
+}
+
+fn read_wifi_bytes(interface: &str) -> Option<(u64, u64)> {
+    let tx_bytes_path = format!("/sys/class/net/{}/statistics/tx_bytes", interface);
+    let rx_bytes_path = format!("/sys/class/net/{}/statistics/rx_bytes", interface);
+    let tx_bytes = fs::read_to_string(tx_bytes_path).ok()?.trim().parse().ok()?;
+    let rx_bytes = fs::read_to_string(rx_bytes_path).ok()?.trim().parse().ok()?;
+    Some((tx_bytes, rx_bytes))
+}
+
+fn read_wifi_rates(interface: &str) -> (Option<f64>, Option<f64>) {
+    let (tx_bytes, rx_bytes) = match read_wifi_bytes(interface) {
+        Some(bytes) => bytes,
+        None => return (None, None),
+    };
+
+    let now = Instant::now();
+    let mut stats = PREVIOUS_NET_STATS.lock().unwrap();
+    let rates = if let Some(prev) = stats.get(interface) {
+        let elapsed = now.duration_since(prev.timestamp).as_secs_f64();
+        if elapsed > 0.0 {
+            let tx_rate = (tx_bytes.saturating_sub(prev.tx_bytes) as f64 * BITS_PER_BYTE)
+                / elapsed
+                / BITS_PER_MEGABIT;
+            let rx_rate = (rx_bytes.saturating_sub(prev.rx_bytes) as f64 * BITS_PER_BYTE)
+                / elapsed
+                / BITS_PER_MEGABIT;
+            (Some(tx_rate), Some(rx_rate))
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+
+    stats.insert(
+        interface.to_string(),
+        NetStats {
+            rx_bytes,
+            tx_bytes,
+            timestamp: now,
+        },
+    );
+
+    rates
 }
 
 pub fn get_battery_info() -> Result<BatteryInfo> {
@@ -1416,6 +1542,59 @@ fn read_sysfs_string(path: &str) -> Result<String> {
     Ok(fs::read_to_string(path)?.trim().to_string())
 }
 
+fn read_sector_size(path: &Path) -> u64 {
+    fs::read_to_string(path.join("queue/hw_sector_size"))
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(512)
+}
+
+fn read_storage_stats(path: &Path) -> Option<(u64, u64)> {
+    let stats = fs::read_to_string(path.join("stat")).ok()?;
+    let parts: Vec<&str> = stats.split_whitespace().collect();
+    if parts.len() < 7 {
+        return None;
+    }
+    let read_sectors = parts.get(2)?.parse::<u64>().ok()?;
+    let write_sectors = parts.get(6)?.parse::<u64>().ok()?;
+    Some((read_sectors, write_sectors))
+}
+
+fn calculate_storage_rates(
+    device: &str,
+    read_sectors: u64,
+    write_sectors: u64,
+    sector_size: u64,
+) -> (Option<f64>, Option<f64>) {
+    let now = Instant::now();
+    let mut stats = PREVIOUS_STORAGE_STATS.lock().unwrap();
+    let rates = if let Some(prev) = stats.get(device) {
+        let elapsed = now.duration_since(prev.timestamp).as_secs_f64();
+        if elapsed > 0.0 {
+            let read_bytes = read_sectors.saturating_sub(prev.read_sectors) as f64 * sector_size as f64;
+            let write_bytes = write_sectors.saturating_sub(prev.write_sectors) as f64 * sector_size as f64;
+            let read_speed = read_bytes / elapsed / 1_000_000.0;
+            let write_speed = write_bytes / elapsed / 1_000_000.0;
+            (Some(read_speed), Some(write_speed))
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+
+    stats.insert(
+        device.to_string(),
+        StorageStats {
+            read_sectors,
+            write_sectors,
+            timestamp: now,
+        },
+    );
+
+    rates
+}
+
 pub fn get_storage_device_info() -> Result<Vec<StorageDevice>> {
     let mut storage_devices = Vec::new();
 
@@ -1443,6 +1622,14 @@ pub fn get_storage_device_info() -> Result<Vec<StorageDevice>> {
             0
         };
 
+        let sector_size = read_sector_size(&path);
+        let (read_speed, write_speed) = match read_storage_stats(&path) {
+            Some((read_sectors, write_sectors)) => {
+                calculate_storage_rates(&dev_name, read_sectors, write_sectors, sector_size)
+            }
+            None => (None, None),
+        };
+
         // Try to read temperature from hwmon
         let mut temperature = None;
         if let Ok(hwmon_entries) = std::fs::read_dir(path.join("device/hwmon")) {
@@ -1462,6 +1649,8 @@ pub fn get_storage_device_info() -> Result<Vec<StorageDevice>> {
             model,
             size_gb,
             temperature,
+            read_speed,
+            write_speed,
         });
     }
 
