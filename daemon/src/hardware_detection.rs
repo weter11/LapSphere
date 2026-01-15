@@ -1542,6 +1542,9 @@ fn update_channel_width_from_line(
 
 fn parse_frequency_mhz(value: &str, unit: Option<&str>) -> Option<u32> {
     // Values below this threshold are treated as GHz and converted to MHz.
+    // Common sources provide frequencies like "2.437 GHz" or "2412 MHz".
+    // Anything >= 100 is treated as MHz to avoid mis-converting explicit MHz values.
+    // Malformed or unsupported inputs return None and fall back to other sources.
     const FREQUENCY_GHZ_THRESHOLD: f64 = 100.0;
     const MHZ_PER_GHZ: f64 = 1000.0;
 
@@ -1562,7 +1565,9 @@ fn parse_frequency_mhz(value: &str, unit: Option<&str>) -> Option<u32> {
     if value_lower.contains("mhz") || unit_lower.contains("mhz") {
         return Some(raw.round() as u32);
     }
-    // Frequencies below 100 are almost certainly GHz (e.g., 2.4, 5.2).
+    // Frequencies below 100 are almost certainly GHz (e.g., 2.4, 5.2). If the
+    // input is malformed but still parses to a low number, it will be treated
+    // as GHz to avoid 2.4 MHz edge cases.
     if raw < FREQUENCY_GHZ_THRESHOLD {
         Some((raw * MHZ_PER_GHZ).round() as u32)
     } else {
@@ -1604,6 +1609,9 @@ fn update_channel_from_iwconfig(info: &str, channel: &mut Option<u32>, freq_mhz:
     }
 }
 
+/// Map WiFi center frequency in MHz to a channel number using common IEEE 802.11
+/// band formulas. These ranges intentionally cover 2.4/5/6 GHz bands and return
+/// None for anything outside the supported ranges.
 fn channel_from_frequency_mhz(freq: u32) -> Option<u32> {
     const FREQ_24_GHZ_BASE: u32 = 2407;
     const FREQ_24_GHZ_SPECIAL: u32 = 2484;
