@@ -1518,22 +1518,24 @@ fn update_channel_width_from_line(
             }
         }
 
-        if lower == "width:" || lower == "width" || lower.starts_with("width:") {
-            let value = if lower == "width" || lower == "width:" {
-                parts.get(i + 1).and_then(|token| parse_u32_from_token(token))
-            } else {
-                parse_u32_from_token(cleaned)
-            };
-            *width = value;
+        if lower == "width:" {
+            *width = parts.get(i + 1).and_then(|token| parse_u32_from_token(token));
+        } else if lower == "width" {
+            *width = parts.get(i + 1).and_then(|token| parse_u32_from_token(token));
+        } else if lower.starts_with("width:") {
+            *width = parse_u32_from_token(cleaned);
         }
 
-        if lower == "freq:" || lower == "freq" || lower.starts_with("freq:") {
-            let value = if lower == "freq" || lower == "freq:" {
-                parts.get(i + 1).and_then(|token| parse_frequency_mhz(token, parts.get(i + 2).copied()))
-            } else {
-                parse_frequency_mhz(cleaned, parts.get(i + 1).copied())
-            };
-            *freq_mhz = value;
+        if lower == "freq:" {
+            *freq_mhz = parts
+                .get(i + 1)
+                .and_then(|token| parse_frequency_mhz(token, parts.get(i + 2).copied()));
+        } else if lower == "freq" {
+            *freq_mhz = parts
+                .get(i + 1)
+                .and_then(|token| parse_frequency_mhz(token, parts.get(i + 2).copied()));
+        } else if lower.starts_with("freq:") {
+            *freq_mhz = parse_frequency_mhz(cleaned, parts.get(i + 1).copied());
         }
     }
 }
@@ -1551,11 +1553,12 @@ fn parse_frequency_mhz(value: &str, unit: Option<&str>) -> Option<u32> {
     }
     let raw: f64 = numeric.parse().ok()?;
     let unit_value = unit.unwrap_or("");
-    let unit_lower = format!("{} {}", value, unit_value).to_lowercase();
-    if unit_lower.contains("ghz") {
+    let value_lower = value.to_lowercase();
+    let unit_lower = unit_value.to_lowercase();
+    if value_lower.contains("ghz") || unit_lower.contains("ghz") {
         return Some((raw * MHZ_PER_GHZ).round() as u32);
     }
-    if unit_lower.contains("mhz") {
+    if value_lower.contains("mhz") || unit_lower.contains("mhz") {
         return Some(raw.round() as u32);
     }
     if raw < FREQUENCY_GHZ_THRESHOLD {
@@ -1606,10 +1609,10 @@ fn channel_from_frequency_mhz(freq: u32) -> Option<u32> {
     const FREQ_6_GHZ_BASE: u32 = 5950;
 
     match freq {
-        FREQ_24_GHZ_SPECIAL => Some(14),
+        FREQ_24_GHZ_SPECIAL => Some(14), // 2.4 GHz band (802.11b/g/n)
         2412..=2472 => Some((freq - FREQ_24_GHZ_BASE) / 5),
-        5000..=5900 => Some((freq - FREQ_5_GHZ_BASE) / 5),
-        5955..=7115 => Some((freq - FREQ_6_GHZ_BASE) / 5),
+        5000..=5900 => Some((freq - FREQ_5_GHZ_BASE) / 5), // 5 GHz band (802.11a/n/ac)
+        5955..=7115 => Some((freq - FREQ_6_GHZ_BASE) / 5), // 6 GHz band (802.11ax)
         _ => None,
     }
 }
