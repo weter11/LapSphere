@@ -1539,7 +1539,9 @@ fn update_channel_width_from_line(
 }
 
 fn parse_frequency_mhz(value: &str, unit: Option<&str>) -> Option<u32> {
+    // Values below this threshold are treated as GHz and converted to MHz.
     const FREQUENCY_GHZ_THRESHOLD: f64 = 100.0;
+    const MHZ_PER_GHZ: f64 = 1000.0;
 
     let numeric: String = value.chars()
         .filter(|c| c.is_ascii_digit() || *c == '.')
@@ -1551,13 +1553,13 @@ fn parse_frequency_mhz(value: &str, unit: Option<&str>) -> Option<u32> {
     let unit_value = unit.unwrap_or("");
     let unit_lower = format!("{} {}", value, unit_value).to_lowercase();
     if unit_lower.contains("ghz") {
-        return Some((raw * 1000.0).round() as u32);
+        return Some((raw * MHZ_PER_GHZ).round() as u32);
     }
     if unit_lower.contains("mhz") {
         return Some(raw.round() as u32);
     }
     if raw < FREQUENCY_GHZ_THRESHOLD {
-        Some((raw * 1000.0).round() as u32)
+        Some((raw * MHZ_PER_GHZ).round() as u32)
     } else {
         Some(raw.round() as u32)
     }
