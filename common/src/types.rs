@@ -359,7 +359,7 @@ impl Default for StatisticsSections {
             gpu_poll_rate: 2000,            // 2 seconds
             battery_poll_rate: 5000,        // 5 seconds
             wifi_poll_rate: 5000,           // 5 seconds
-            storage_poll_rate: 5000,        // 5 seconds
+            storage_poll_rate: 5 * 1000,    // 5 seconds
             fans_poll_rate: 1000,           // 1 second
         }
     }

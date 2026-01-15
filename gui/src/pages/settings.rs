@@ -4,6 +4,9 @@ use crate::dbus_client::DbusClient;
 use crate::theme::TuxedoTheme;
 use crate::pages::statistics::{normalize_section_order, STATISTICS_SECTIONS};
 
+const STORAGE_POLL_MIN_SECONDS: f32 = 0.5;
+const STORAGE_POLL_MAX_SECONDS: f32 = 10.0;
+
 pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Context, dbus_client: Option<&DbusClient>) {
     ui.add_space(8.0);
 
@@ -298,7 +301,11 @@ fn draw_stats_configuration(ui: &mut Ui, state: &mut AppState) {
     let mut storage_poll = (state.config.statistics_sections.storage_poll_rate as f32) / 1000.0;
     ui.horizontal(|ui| {
         ui.label("Storage:");
-        if ui.add(Slider::new(&mut storage_poll, 0.5..=10.0).step_by(0.5).suffix(" s")).changed() {
+        if ui.add(Slider::new(&mut storage_poll, STORAGE_POLL_MIN_SECONDS..=STORAGE_POLL_MAX_SECONDS)
+            .step_by(0.5)
+            .suffix(" s"))
+            .changed()
+        {
             let new_rate = (storage_poll * 1000.0) as u64;
             state.config.statistics_sections.storage_poll_rate = new_rate;
             let _ = state.save_settings();
@@ -326,19 +333,7 @@ fn draw_stats_configuration(ui: &mut Ui, state: &mut AppState) {
 }
 
 fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
-    let interface_label = state
-        .hardware_interface
-        .as_deref()
-        .and_then(|info| {
-            if info.contains("Clevo") {
-                Some("Clevo")
-            } else if info.contains("Uniwill") {
-                Some("Uniwill")
-            } else {
-                None
-            }
-        })
-        .unwrap_or("Unknown");
+    let interface_label = hardware_interface_label(state.hardware_interface.as_deref());
 
     ui.label(RichText::new("System").strong().heading());
     ui.add_space(8.0);
@@ -571,6 +566,14 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
             ui.label(state.fan_info.len().to_string());
             ui.end_row();
         });
+}
+
+fn hardware_interface_label(interface: Option<&str>) -> &'static str {
+    match interface {
+        Some(info) if info.contains("Clevo") => "Clevo",
+        Some(info) if info.contains("Uniwill") => "Uniwill",
+        _ => "Unknown",
+    }
 }
 
 fn draw_battery_settings(ui: &mut Ui, state: &mut AppState) {

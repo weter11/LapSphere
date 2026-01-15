@@ -14,6 +14,8 @@ pub const STATISTICS_SECTIONS: [(&str, &str); 8] = [
     ("Fans", "Fans"),
 ];
 
+const WIFI_NOT_CONNECTED: &str = "Not connected";
+
 pub fn normalize_section_order(order: &[String]) -> Vec<String> {
     let mut normalized = Vec::new();
     for section in order {
@@ -474,7 +476,7 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
                         .striped(true)
                         .show(ui, |ui| {
                             ui.label("SSID:");
-                            ui.label(wifi.ssid.as_deref().unwrap_or("Not connected"));
+                            ui.label(wifi.ssid.as_deref().unwrap_or(WIFI_NOT_CONNECTED));
                             ui.end_row();
 
                             ui.label("Driver:");
