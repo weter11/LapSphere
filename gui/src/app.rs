@@ -1,5 +1,7 @@
 use chrono::Local;
 use egui::{Context, CentralPanel, TopBottomPanel, RichText};
+use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 use tuxedo_common::types::*;
@@ -17,6 +19,13 @@ pub enum Page {
     Profiles,
     Tuning,
     Settings,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SettingsTab {
+    Main,
+    StatsConfiguration,
+    Hardware,
 }
 
 pub struct AppState {
@@ -43,6 +52,7 @@ pub struct AppState {
     
     // UI state
     pub current_page: Page,
+    pub settings_tab: SettingsTab,
     pub status_message: Option<StatusMessage>,
     pub restart_confirmation_pending: bool,
     pub pending_prime_profile: Option<String>,
@@ -86,6 +96,7 @@ impl AppState {
             available_end_thresholds: Vec::new(),
             available_tdp_profiles: Vec::new(),
             current_page: Page::Statistics,
+            settings_tab: SettingsTab::Main,
             status_message: None,
             restart_confirmation_pending: false,
             pending_prime_profile: None,
@@ -99,12 +110,27 @@ impl AppState {
 pub fn load_config(&mut self) {
     if let Ok(config) = load_config_from_disk() {
         self.config = config;
+        self.config.statistics_sections.section_order =
+            statistics::normalize_section_order(&self.config.statistics_sections.section_order);
     }
     self.config.autostart = false;
 }
     
+    pub fn save_settings(&mut self) -> anyhow::Result<()> {
+        save_settings_to_disk(&self.config)?;
+        self.show_message("Settings saved", false);
+        Ok(())
+    }
+
+    pub fn save_profiles(&mut self) -> anyhow::Result<()> {
+        save_profiles_to_disk(&self.config)?;
+        self.show_message("Profiles saved", false);
+        Ok(())
+    }
+
     pub fn save_config(&mut self) -> anyhow::Result<()> {
-        save_config_to_disk(&self.config)?;
+        save_settings_to_disk(&self.config)?;
+        save_profiles_to_disk(&self.config)?;
         self.show_message("Configuration saved", false);
         Ok(())
     }
@@ -552,18 +578,182 @@ impl eframe::App for TuxedoApp {
     }
 }
 
-fn load_config_from_disk() -> anyhow::Result<AppConfig> {
-    let config_dir = std::env::var("HOME")? + "/.config/tuxedo-control-center";
-    let config_path = format!("{}/config.json", config_dir);
-    let json = std::fs::read_to_string(config_path)?;
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct SettingsConfig {
+    theme: Theme,
+    start_minimized: bool,
+    tray_enabled: bool,
+    autostart: bool,
+    fan_daemon_enabled: bool,
+    app_monitoring_enabled: bool,
+    cpu_scheduler: String,
+    font_size: FontSize,
+    statistics_sections: StatisticsSections,
+    tuning_section_order: Vec<String>,
+    battery_settings: BatterySettings,
+}
+
+impl Default for SettingsConfig {
+    fn default() -> Self {
+        let config = AppConfig::default();
+        Self {
+            theme: config.theme,
+            start_minimized: config.start_minimized,
+            tray_enabled: config.tray_enabled,
+            autostart: config.autostart,
+            fan_daemon_enabled: config.fan_daemon_enabled,
+            app_monitoring_enabled: config.app_monitoring_enabled,
+            cpu_scheduler: config.cpu_scheduler,
+            font_size: config.font_size,
+            statistics_sections: config.statistics_sections,
+            tuning_section_order: config.tuning_section_order,
+            battery_settings: config.battery_settings,
+        }
+    }
+}
+
+impl From<&AppConfig> for SettingsConfig {
+    fn from(config: &AppConfig) -> Self {
+        Self {
+            theme: config.theme.clone(),
+            start_minimized: config.start_minimized,
+            tray_enabled: config.tray_enabled,
+            autostart: config.autostart,
+            fan_daemon_enabled: config.fan_daemon_enabled,
+            app_monitoring_enabled: config.app_monitoring_enabled,
+            cpu_scheduler: config.cpu_scheduler.clone(),
+            font_size: config.font_size.clone(),
+            statistics_sections: config.statistics_sections.clone(),
+            tuning_section_order: config.tuning_section_order.clone(),
+            battery_settings: config.battery_settings.clone(),
+        }
+    }
+}
+
+impl SettingsConfig {
+    fn apply_to(&self, config: &mut AppConfig) {
+        config.theme = self.theme.clone();
+        config.start_minimized = self.start_minimized;
+        config.tray_enabled = self.tray_enabled;
+        config.autostart = self.autostart;
+        config.fan_daemon_enabled = self.fan_daemon_enabled;
+        config.app_monitoring_enabled = self.app_monitoring_enabled;
+        config.cpu_scheduler = self.cpu_scheduler.clone();
+        config.font_size = self.font_size.clone();
+        config.statistics_sections = self.statistics_sections.clone();
+        config.tuning_section_order = self.tuning_section_order.clone();
+        config.battery_settings = self.battery_settings.clone();
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct ProfilesConfig {
+    profiles: Vec<Profile>,
+    current_profile: String,
+}
+
+impl Default for ProfilesConfig {
+    fn default() -> Self {
+        let config = AppConfig::default();
+        Self {
+            profiles: config.profiles,
+            current_profile: config.current_profile,
+        }
+    }
+}
+
+impl From<&AppConfig> for ProfilesConfig {
+    fn from(config: &AppConfig) -> Self {
+        Self {
+            profiles: config.profiles.clone(),
+            current_profile: config.current_profile.clone(),
+        }
+    }
+}
+
+impl ProfilesConfig {
+    fn apply_to(&self, config: &mut AppConfig) {
+        config.profiles = self.profiles.clone();
+        config.current_profile = self.current_profile.clone();
+    }
+}
+
+fn load_settings_from_disk(path: &str) -> anyhow::Result<SettingsConfig> {
+    let json = std::fs::read_to_string(path)?;
     Ok(serde_json::from_str(&json)?)
 }
 
-fn save_config_to_disk(config: &AppConfig) -> anyhow::Result<()> {
+fn load_profiles_from_disk(path: &str) -> anyhow::Result<ProfilesConfig> {
+    let json = std::fs::read_to_string(path)?;
+    Ok(serde_json::from_str(&json)?)
+}
+
+fn load_config_from_disk() -> anyhow::Result<AppConfig> {
+    let config_dir = std::env::var("HOME")? + "/.config/tuxedo-control-center";
+    let settings_path = format!("{}/settings.json", config_dir);
+    let profiles_path = format!("{}/profiles.json", config_dir);
+    let legacy_path = format!("{}/config.json", config_dir);
+
+    let legacy_config = if Path::new(&legacy_path).exists() {
+        let json = std::fs::read_to_string(&legacy_path)?;
+        Some(serde_json::from_str::<AppConfig>(&json)?)
+    } else {
+        None
+    };
+
+    let settings = if Path::new(&settings_path).exists() {
+        Some(load_settings_from_disk(&settings_path)?)
+    } else {
+        legacy_config.as_ref().map(SettingsConfig::from)
+    };
+
+    let profiles = if Path::new(&profiles_path).exists() {
+        Some(load_profiles_from_disk(&profiles_path)?)
+    } else {
+        legacy_config.as_ref().map(ProfilesConfig::from)
+    };
+
+    let mut config = AppConfig::default();
+    if let Some(settings) = settings {
+        settings.apply_to(&mut config);
+    }
+    if let Some(profiles) = profiles {
+        profiles.apply_to(&mut config);
+    }
+
+    config.statistics_sections.section_order =
+        statistics::normalize_section_order(&config.statistics_sections.section_order);
+
+    if legacy_config.is_some()
+        && (!Path::new(&settings_path).exists() || !Path::new(&profiles_path).exists())
+    {
+        if let Err(err) = save_settings_to_disk(&config) {
+            log::warn!("Failed to migrate settings config: {}", err);
+        }
+        if let Err(err) = save_profiles_to_disk(&config) {
+            log::warn!("Failed to migrate profiles config: {}", err);
+        }
+    }
+
+    Ok(config)
+}
+
+fn save_settings_to_disk(config: &AppConfig) -> anyhow::Result<()> {
     let config_dir = std::env::var("HOME")? + "/.config/tuxedo-control-center";
     std::fs::create_dir_all(&config_dir)?;
-    let config_path = format!("{}/config.json", config_dir);
-    let json = serde_json::to_string_pretty(config)?;
-    std::fs::write(config_path, json)?;
+    let settings_path = format!("{}/settings.json", config_dir);
+    let json = serde_json::to_string_pretty(&SettingsConfig::from(config))?;
+    std::fs::write(settings_path, json)?;
+    Ok(())
+}
+
+fn save_profiles_to_disk(config: &AppConfig) -> anyhow::Result<()> {
+    let config_dir = std::env::var("HOME")? + "/.config/tuxedo-control-center";
+    std::fs::create_dir_all(&config_dir)?;
+    let profiles_path = format!("{}/profiles.json", config_dir);
+    let json = serde_json::to_string_pretty(&ProfilesConfig::from(config))?;
+    std::fs::write(profiles_path, json)?;
     Ok(())
 }

@@ -115,7 +115,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>)
             // Handle profile switch
             if let Some(idx) = profile_to_switch {
                 state.config.current_profile = state.config.profiles[idx].name.clone();
-                let _ = state.save_config();
+                let _ = state.save_profiles();
                 
                 // Apply to hardware
                 if let Some(client) = dbus_client {
@@ -128,7 +128,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>)
             // Handle profile reset
             if let Some(idx) = profile_to_reset {
                 state.config.profiles[idx] = create_standard_profile();
-                let _ = state.save_config();
+                let _ = state.save_profiles();
                 
                 // Apply if it's the current profile
                 if state.config.profiles[idx].name == state.config.current_profile {
@@ -155,7 +155,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>)
                 }
                 
                 state.config.profiles.remove(idx);
-                let _ = state.save_config();
+                let _ = state.save_profiles();
                 state.show_message(format!("Profile '{}' deleted", name), false);
             }
             
@@ -187,7 +187,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>)
                         
                         state.config.profiles.push(new_profile);
                         state.editing_profile_name = None;
-                        let _ = state.save_config();
+                        let _ = state.save_profiles();
                         state.show_message(format!("Profile '{}' created", new_name), false);
                     }
                 }

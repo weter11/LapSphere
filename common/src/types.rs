@@ -336,6 +336,7 @@ impl Default for StatisticsSections {
             section_order: vec![
                 "SystemInfo".to_string(),
                 "CPU".to_string(),
+                "Memory".to_string(),
                 "GPU".to_string(),
                 "Battery".to_string(),
                 "WiFi".to_string(),

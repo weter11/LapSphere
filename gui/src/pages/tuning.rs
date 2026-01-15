@@ -26,7 +26,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>,
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Save button - always visible
                 if ui.button("💾 Save").clicked() {
-                    let _ = state.save_config();
+                    let _ = state.save_profiles();
                     
                     // Also apply to hardware
                     if let Some(client) = dbus_client {
@@ -501,24 +501,21 @@ fn draw_keyboard_tuning(
     ui.add_space(8.0);
     
     let keyboard_caps = detect_keyboard_capabilities();
+    let keyboard_detected = keyboard_caps.supports_color || keyboard_caps.supports_effects;
     ui.checkbox(&mut profile.keyboard_settings.control_enabled, "Control keyboard backlight");
     ui.add_space(6.0);
     
     if profile.keyboard_settings.control_enabled {
-        if !keyboard_caps.supports_effects {
-            if !matches!(profile.keyboard_settings.mode, KeyboardMode::SingleColor { .. }) {
-                profile.keyboard_settings.mode = KeyboardMode::SingleColor {
-                    r: 255,
-                    g: 255,
-                    b: 255,
-                    brightness: 50,
-                };
-            }
-            ui.label(RichText::new("Effect modes are not supported by this keyboard.").small());
+        if !keyboard_detected {
+            ui.label(RichText::new("Keyboard backlight device not detected.").small());
+        } else if !keyboard_caps.supports_effects {
+            ui.label(RichText::new("Effect support was not detected; some modes may not apply.").small());
         }
         if !keyboard_caps.supports_color {
             ui.label(RichText::new("RGB color control is not available on this keyboard.").small());
         }
+
+        let mut preview_needed = false;
 
         // Mode selector
         ui.horizontal(|ui| {
@@ -540,29 +537,35 @@ fn draw_keyboard_tuning(
                 .show_ui(ui, |ui| {
                     if ui.selectable_label(current_mode_name == "Single Color", "Single Color").clicked() {
                         profile.keyboard_settings.mode = KeyboardMode::SingleColor { r: 255, g: 255, b: 255, brightness: 50 };
+                        preview_needed = true;
                     }
-                    if keyboard_caps.supports_effects {
-                        if ui.selectable_label(current_mode_name == "Breathe", "Breathe").clicked() {
-                            profile.keyboard_settings.mode = KeyboardMode::Breathe { r: 255, g: 255, b: 255, brightness: 50, speed: 50 };
-                        }
-                        if ui.selectable_label(current_mode_name == "Cycle", "Cycle").clicked() {
-                            profile.keyboard_settings.mode = KeyboardMode::Cycle { brightness: 50, speed: 50 };
-                        }
-                        if ui.selectable_label(current_mode_name == "Dance", "Dance").clicked() {
-                            profile.keyboard_settings.mode = KeyboardMode::Dance { brightness: 50, speed: 50 };
-                        }
-                        if ui.selectable_label(current_mode_name == "Flash", "Flash").clicked() {
-                            profile.keyboard_settings.mode = KeyboardMode::Flash { r: 255, g: 255, b: 255, brightness: 50, speed: 50 };
-                        }
-                        if ui.selectable_label(current_mode_name == "Random Color", "Random Color").clicked() {
-                            profile.keyboard_settings.mode = KeyboardMode::RandomColor { brightness: 50, speed: 50 };
-                        }
-                        if ui.selectable_label(current_mode_name == "Tempo", "Tempo").clicked() {
-                            profile.keyboard_settings.mode = KeyboardMode::Tempo { brightness: 50, speed: 50 };
-                        }
-                        if ui.selectable_label(current_mode_name == "Wave", "Wave").clicked() {
-                            profile.keyboard_settings.mode = KeyboardMode::Wave { brightness: 50, speed: 50 };
-                        }
+                    if ui.selectable_label(current_mode_name == "Breathe", "Breathe").clicked() {
+                        profile.keyboard_settings.mode = KeyboardMode::Breathe { r: 255, g: 255, b: 255, brightness: 50, speed: 50 };
+                        preview_needed = true;
+                    }
+                    if ui.selectable_label(current_mode_name == "Cycle", "Cycle").clicked() {
+                        profile.keyboard_settings.mode = KeyboardMode::Cycle { brightness: 50, speed: 50 };
+                        preview_needed = true;
+                    }
+                    if ui.selectable_label(current_mode_name == "Dance", "Dance").clicked() {
+                        profile.keyboard_settings.mode = KeyboardMode::Dance { brightness: 50, speed: 50 };
+                        preview_needed = true;
+                    }
+                    if ui.selectable_label(current_mode_name == "Flash", "Flash").clicked() {
+                        profile.keyboard_settings.mode = KeyboardMode::Flash { r: 255, g: 255, b: 255, brightness: 50, speed: 50 };
+                        preview_needed = true;
+                    }
+                    if ui.selectable_label(current_mode_name == "Random Color", "Random Color").clicked() {
+                        profile.keyboard_settings.mode = KeyboardMode::RandomColor { brightness: 50, speed: 50 };
+                        preview_needed = true;
+                    }
+                    if ui.selectable_label(current_mode_name == "Tempo", "Tempo").clicked() {
+                        profile.keyboard_settings.mode = KeyboardMode::Tempo { brightness: 50, speed: 50 };
+                        preview_needed = true;
+                    }
+                    if ui.selectable_label(current_mode_name == "Wave", "Wave").clicked() {
+                        profile.keyboard_settings.mode = KeyboardMode::Wave { brightness: 50, speed: 50 };
+                        preview_needed = true;
                     }
                 });
         });
@@ -573,19 +576,27 @@ fn draw_keyboard_tuning(
             KeyboardMode::SingleColor { r, g, b, brightness } => {
                 ui.horizontal(|ui| {
                     ui.label("Red:");
-                    ui.add(Slider::new(r, 0..=255));
+                    if ui.add(Slider::new(r, 0..=255)).changed() {
+                        preview_needed = true;
+                    }
                 });
                 ui.horizontal(|ui| {
                     ui.label("Green:");
-                    ui.add(Slider::new(g, 0..=255));
+                    if ui.add(Slider::new(g, 0..=255)).changed() {
+                        preview_needed = true;
+                    }
                 });
                 ui.horizontal(|ui| {
                     ui.label("Blue:");
-                    ui.add(Slider::new(b, 0..=255));
+                    if ui.add(Slider::new(b, 0..=255)).changed() {
+                        preview_needed = true;
+                    }
                 });
                 ui.horizontal(|ui| {
                     ui.label("Brightness:");
-                    ui.add(Slider::new(brightness, 0..=100).suffix("%"));
+                    if ui.add(Slider::new(brightness, 0..=100).suffix("%")).changed() {
+                        preview_needed = true;
+                    }
                 });
                 
                 // Color preview
@@ -598,45 +609,65 @@ fn draw_keyboard_tuning(
             KeyboardMode::Breathe { r, g, b, brightness, speed } => {
                 ui.horizontal(|ui| {
                     ui.label("Red:");
-                    ui.add(Slider::new(r, 0..=255));
+                    if ui.add(Slider::new(r, 0..=255)).changed() {
+                        preview_needed = true;
+                    }
                 });
                 ui.horizontal(|ui| {
                     ui.label("Green:");
-                    ui.add(Slider::new(g, 0..=255));
+                    if ui.add(Slider::new(g, 0..=255)).changed() {
+                        preview_needed = true;
+                    }
                 });
                 ui.horizontal(|ui| {
                     ui.label("Blue:");
-                    ui.add(Slider::new(b, 0..=255));
+                    if ui.add(Slider::new(b, 0..=255)).changed() {
+                        preview_needed = true;
+                    }
                 });
                 ui.horizontal(|ui| {
                     ui.label("Brightness:");
-                    ui.add(Slider::new(brightness, 0..=100).suffix("%"));
+                    if ui.add(Slider::new(brightness, 0..=100).suffix("%")).changed() {
+                        preview_needed = true;
+                    }
                 });
                 ui.horizontal(|ui| {
                     ui.label("Speed:");
-                    ui.add(Slider::new(speed, 0..=100).suffix("%"));
+                    if ui.add(Slider::new(speed, 0..=100).suffix("%")).changed() {
+                        preview_needed = true;
+                    }
                 });
             }
             KeyboardMode::Flash { r, g, b, brightness, speed } => {
                 ui.horizontal(|ui| {
                     ui.label("Red:");
-                    ui.add(Slider::new(r, 0..=255));
+                    if ui.add(Slider::new(r, 0..=255)).changed() {
+                        preview_needed = true;
+                    }
                 });
                 ui.horizontal(|ui| {
                     ui.label("Green:");
-                    ui.add(Slider::new(g, 0..=255));
+                    if ui.add(Slider::new(g, 0..=255)).changed() {
+                        preview_needed = true;
+                    }
                 });
                 ui.horizontal(|ui| {
                     ui.label("Blue:");
-                    ui.add(Slider::new(b, 0..=255));
+                    if ui.add(Slider::new(b, 0..=255)).changed() {
+                        preview_needed = true;
+                    }
                 });
                 ui.horizontal(|ui| {
                     ui.label("Brightness:");
-                    ui.add(Slider::new(brightness, 0..=100).suffix("%"));
+                    if ui.add(Slider::new(brightness, 0..=100).suffix("%")).changed() {
+                        preview_needed = true;
+                    }
                 });
                 ui.horizontal(|ui| {
                     ui.label("Speed:");
-                    ui.add(Slider::new(speed, 0..=100).suffix("%"));
+                    if ui.add(Slider::new(speed, 0..=100).suffix("%")).changed() {
+                        preview_needed = true;
+                    }
                 });
             }
             KeyboardMode::Cycle { brightness, speed }
@@ -646,17 +677,25 @@ fn draw_keyboard_tuning(
             | KeyboardMode::Wave { brightness, speed } => {
                 ui.horizontal(|ui| {
                     ui.label("Brightness:");
-                    ui.add(Slider::new(brightness, 0..=100).suffix("%"));
+                    if ui.add(Slider::new(brightness, 0..=100).suffix("%")).changed() {
+                        preview_needed = true;
+                    }
                 });
                 ui.horizontal(|ui| {
                     ui.label("Speed:");
-                    ui.add(Slider::new(speed, 0..=100).suffix("%"));
+                    if ui.add(Slider::new(speed, 0..=100).suffix("%")).changed() {
+                        preview_needed = true;
+                    }
                 });
             }
         }
         
         // Preview button
         if ui.button("👁️ Preview").clicked() {
+            preview_needed = true;
+        }
+
+        if preview_needed {
             if let Some(client) = dbus_client {
                 let _ = client.preview_keyboard_settings(profile.keyboard_settings.clone());
             }

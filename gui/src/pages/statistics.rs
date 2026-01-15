@@ -3,48 +3,81 @@ use egui::Color32;
 use crate::app::AppState;
 use crate::theme::{temp_color, load_color, power_color};
 
+pub const STATISTICS_SECTIONS: [(&str, &str); 8] = [
+    ("SystemInfo", "System Info"),
+    ("CPU", "CPU"),
+    ("Memory", "Memory"),
+    ("GPU", "GPU"),
+    ("Battery", "Battery"),
+    ("WiFi", "WiFi"),
+    ("Storage", "Storage"),
+    ("Fans", "Fans"),
+];
+
+pub fn normalize_section_order(order: &[String]) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for section in order {
+        if STATISTICS_SECTIONS.iter().any(|(key, _)| key == section)
+            && !normalized.iter().any(|item| item == section)
+        {
+            normalized.push(section.clone());
+        }
+    }
+    for (key, _) in STATISTICS_SECTIONS {
+        if !normalized.iter().any(|item| item == key) {
+            normalized.push(key.to_string());
+        }
+    }
+    normalized
+}
+
 pub fn draw(ui: &mut Ui, state: &mut AppState) {
     ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.add_space(8.0);
-            
-            if state.config.statistics_sections.show_system_info {
-                draw_system_info(ui, state);
-                ui.add_space(12.0);
-            }
-            
-            if state.config.statistics_sections.show_cpu {
-                draw_cpu_info(ui, state);
-                ui.add_space(12.0);
-            }
-            
-            draw_memory_info(ui, state);
-            ui.add_space(12.0);
 
-            if state.config.statistics_sections.show_gpu {
-                draw_gpu_info(ui, state);
-                ui.add_space(12.0);
-            }
-            
-            if state.config.statistics_sections.show_battery {
-                draw_battery_info(ui, state);
-                ui.add_space(12.0);
+            let order = normalize_section_order(&state.config.statistics_sections.section_order);
+            if order != state.config.statistics_sections.section_order {
+                state.config.statistics_sections.section_order = order.clone();
             }
 
-            if state.config.statistics_sections.show_wifi {
-                draw_wifi_info(ui, state);
-                ui.add_space(12.0);
-            }
-
-            if state.config.statistics_sections.show_storage {
-                draw_storage_info(ui, state);
-                ui.add_space(12.0);
-            }
-            
-            if state.config.statistics_sections.show_fans {
-                draw_fan_info(ui, state);
-                ui.add_space(12.0);
+            for section in order {
+                match section.as_str() {
+                    "SystemInfo" if state.config.statistics_sections.show_system_info => {
+                        draw_system_info(ui, state);
+                        ui.add_space(12.0);
+                    }
+                    "CPU" if state.config.statistics_sections.show_cpu => {
+                        draw_cpu_info(ui, state);
+                        ui.add_space(12.0);
+                    }
+                    "Memory" => {
+                        draw_memory_info(ui, state);
+                        ui.add_space(12.0);
+                    }
+                    "GPU" if state.config.statistics_sections.show_gpu => {
+                        draw_gpu_info(ui, state);
+                        ui.add_space(12.0);
+                    }
+                    "Battery" if state.config.statistics_sections.show_battery => {
+                        draw_battery_info(ui, state);
+                        ui.add_space(12.0);
+                    }
+                    "WiFi" if state.config.statistics_sections.show_wifi => {
+                        draw_wifi_info(ui, state);
+                        ui.add_space(12.0);
+                    }
+                    "Storage" if state.config.statistics_sections.show_storage => {
+                        draw_storage_info(ui, state);
+                        ui.add_space(12.0);
+                    }
+                    "Fans" if state.config.statistics_sections.show_fans => {
+                        draw_fan_info(ui, state);
+                        ui.add_space(12.0);
+                    }
+                    _ => {}
+                }
             }
         });
 }

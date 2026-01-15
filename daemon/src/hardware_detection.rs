@@ -1392,32 +1392,82 @@ fn read_wifi_channel(interface: &str) -> (Option<u32>, Option<u32>) {
 }
 
 fn read_wifi_link_info(interface: &str) -> (Option<String>, Option<f64>) {
+    let mut ssid = None;
+    let mut tx_rate = None;
+    let mut rx_rate = None;
+
     if let Ok(output) = std::process::Command::new("iw")
         .args(&["dev", interface, "link"])
         .output()
     {
         if output.status.success() {
             let info = String::from_utf8_lossy(&output.stdout);
-            let mut ssid = None;
-            let mut tx_rate = None;
-            let mut rx_rate = None;
 
             for line in info.lines() {
                 let trimmed = line.trim();
                 if trimmed.starts_with("SSID:") {
-                    ssid = Some(trimmed.trim_start_matches("SSID:").trim().to_string());
+                    let value = trimmed.trim_start_matches("SSID:").trim();
+                    ssid = normalize_ssid(value);
                 } else if trimmed.starts_with("tx bitrate:") {
                     tx_rate = parse_wifi_rate(trimmed);
                 } else if trimmed.starts_with("rx bitrate:") {
                     rx_rate = parse_wifi_rate(trimmed);
                 }
             }
-
-            return (ssid, tx_rate.or(rx_rate));
         }
     }
 
-    (None, None)
+    if ssid.is_none() {
+        ssid = read_wifi_ssid_from_iwgetid(interface)
+            .or_else(|| read_wifi_ssid_from_iwconfig(interface));
+    }
+
+    (ssid, tx_rate.or(rx_rate))
+}
+
+fn read_wifi_ssid_from_iwgetid(interface: &str) -> Option<String> {
+    if let Ok(output) = std::process::Command::new("iwgetid")
+        .args(["-r", interface])
+        .output()
+    {
+        if output.status.success() {
+            let ssid = String::from_utf8_lossy(&output.stdout);
+            return normalize_ssid(&ssid);
+        }
+    }
+    None
+}
+
+fn read_wifi_ssid_from_iwconfig(interface: &str) -> Option<String> {
+    if let Ok(output) = std::process::Command::new("iwconfig")
+        .arg(interface)
+        .output()
+    {
+        if output.status.success() {
+            let info = String::from_utf8_lossy(&output.stdout);
+            for line in info.lines() {
+                if let Some(pos) = line.find("ESSID:") {
+                    let mut value = line[pos + 6..].trim();
+                    if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
+                        value = &value[1..value.len() - 1];
+                    }
+                    if let Some(ssid) = normalize_ssid(value) {
+                        return Some(ssid);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn normalize_ssid(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed == "off/any" {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn parse_wifi_rate(line: &str) -> Option<f64> {
