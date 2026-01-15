@@ -1552,6 +1552,7 @@ fn parse_frequency_mhz(value: &str, unit: Option<&str>) -> Option<u32> {
         return None;
     }
     let raw: f64 = numeric.parse().ok()?;
+    // Some outputs omit the unit token; treat missing unit as empty and rely on numeric heuristics.
     let unit_value = unit.unwrap_or("");
     let value_lower = value.to_lowercase();
     let unit_lower = unit_value.to_lowercase();
@@ -1561,6 +1562,7 @@ fn parse_frequency_mhz(value: &str, unit: Option<&str>) -> Option<u32> {
     if value_lower.contains("mhz") || unit_lower.contains("mhz") {
         return Some(raw.round() as u32);
     }
+    // Frequencies below 100 are almost certainly GHz (e.g., 2.4, 5.2).
     if raw < FREQUENCY_GHZ_THRESHOLD {
         Some((raw * MHZ_PER_GHZ).round() as u32)
     } else {
@@ -1610,7 +1612,7 @@ fn channel_from_frequency_mhz(freq: u32) -> Option<u32> {
 
     match freq {
         FREQ_24_GHZ_SPECIAL => Some(14), // 2.4 GHz band (802.11b/g/n)
-        2412..=2472 => Some((freq - FREQ_24_GHZ_BASE) / 5),
+        2412..=2472 => Some((freq - FREQ_24_GHZ_BASE) / 5), // 2.4 GHz band (802.11b/g/n)
         5000..=5900 => Some((freq - FREQ_5_GHZ_BASE) / 5), // 5 GHz band (802.11a/n/ac)
         5955..=7115 => Some((freq - FREQ_6_GHZ_BASE) / 5), // 6 GHz band (802.11ax)
         _ => None,
