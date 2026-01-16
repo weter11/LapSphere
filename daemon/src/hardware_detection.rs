@@ -816,6 +816,23 @@ pub fn get_memory_info() -> Result<MemoryInfo> {
     })
 }
 
+fn get_tuxedo_kernel_modules() -> String {
+    if let Ok(modules) = fs::read_to_string("/proc/modules") {
+        let module_names: Vec<String> = modules
+            .lines()
+            .filter(|line| line.contains("tuxedo"))
+            .map(|line| line.split_whitespace().next().unwrap_or("").to_string())
+            .collect();
+        if module_names.is_empty() {
+            "Not available".to_string()
+        } else {
+            module_names.join(", ")
+        }
+    } else {
+        "Not available".to_string()
+    }
+}
+
 pub fn get_system_info() -> Result<SystemInfo> {
     let product_name = fs::read_to_string("/sys/class/dmi/id/product_name")
         .unwrap_or_else(|_| "Unknown".to_string())
@@ -841,6 +858,8 @@ pub fn get_system_info() -> Result<SystemInfo> {
         .unwrap_or_else(|_| "Unknown".to_string())
         .trim()
         .to_string();
+
+    let tuxedo_kernel_modules = get_tuxedo_kernel_modules();
     
     Ok(SystemInfo {
         product_name,
@@ -848,6 +867,7 @@ pub fn get_system_info() -> Result<SystemInfo> {
         manufacturer,
         board_name,
         bios_version,
+        tuxedo_kernel_modules,
     })
 }
 

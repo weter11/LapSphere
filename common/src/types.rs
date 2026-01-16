@@ -7,6 +7,7 @@ pub struct SystemInfo {
     pub manufacturer: String,
     pub board_name: String,
     pub bios_version: String,
+    pub tuxedo_kernel_modules: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

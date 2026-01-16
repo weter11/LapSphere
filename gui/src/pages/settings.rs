@@ -366,6 +366,10 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
                 ui.label("Laptop Type:");
                 ui.label(interface_label);
                 ui.end_row();
+
+                ui.label("TUXEDO Kernel Modules:");
+                ui.label(&info.tuxedo_kernel_modules);
+                ui.end_row();
             });
     } else {
         ui.label("System information unavailable.");
