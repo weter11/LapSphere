@@ -1281,9 +1281,16 @@ pub fn get_wifi_info() -> Result<Vec<WiFiInfo>> {
         let entry = entry?;
         let interface = entry.file_name().to_string_lossy().to_string();
         
-        // Check if it's a wireless interface
+        // Check if it's a wireless interface using multiple detection methods
         let wireless_path = format!("/sys/class/net/{}/wireless", interface);
-        if !Path::new(&wireless_path).exists() {
+        let phy80211_path = format!("/sys/class/net/{}/phy80211", interface);
+        let ieee80211_path = format!("/sys/class/net/{}/device/ieee80211", interface);
+        
+        let is_wireless = Path::new(&wireless_path).exists() 
+            || Path::new(&phy80211_path).exists()
+            || Path::new(&ieee80211_path).exists();
+        
+        if !is_wireless {
             continue;
         }
         
@@ -1355,8 +1362,8 @@ fn get_wifi_details(interface: &str) -> (Option<String>, Option<u32>, Option<u32
             let info = String::from_utf8_lossy(&output.stdout);
             for line in info.lines() {
                 let trimmed = line.trim();
-                if trimmed.starts_with("SSID:") {
-                    ssid = normalize_ssid(trimmed.strip_prefix("SSID: ").unwrap_or(""));
+                if let Some(value) = trimmed.strip_prefix("SSID:") {
+                    ssid = normalize_ssid(value.trim());
                 } else if trimmed.starts_with("freq:") {
                     if let Some(freq_str) = trimmed.split_whitespace().nth(1) {
                         if let Ok(f) = freq_str.parse::<u32>() {
@@ -1391,6 +1398,13 @@ fn get_wifi_details(interface: &str) -> (Option<String>, Option<u32>, Option<u32
                                 width = Some(w);
                             }
                         }
+                    }
+                }
+                // Also try to get SSID from iw info as fallback (format: "ssid MyNetwork")
+                // Only check if SSID not already found from `iw link`
+                if ssid.is_none() {
+                    if let Some(value) = trimmed.strip_prefix("ssid ") {
+                        ssid = normalize_ssid(value);
                     }
                 }
             }
