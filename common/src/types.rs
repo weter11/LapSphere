@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemInfo {
     pub product_name: String,
+    pub product_sku: String,
     pub manufacturer: String,
+    pub board_name: String,
     pub bios_version: String,
 }
 
