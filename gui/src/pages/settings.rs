@@ -347,6 +347,14 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
                 ui.label(&info.product_name);
                 ui.end_row();
 
+                ui.label("SKU:");
+                ui.label(&info.product_sku);
+                ui.end_row();
+
+                ui.label("Board:");
+                ui.label(&info.board_name);
+                ui.end_row();
+
                 ui.label("Manufacturer:");
                 ui.label(&info.manufacturer);
                 ui.end_row();
@@ -357,6 +365,10 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
 
                 ui.label("Laptop Type:");
                 ui.label(interface_label);
+                ui.end_row();
+
+                ui.label("TUXEDO Kernel Modules:");
+                ui.label(&info.tuxedo_kernel_modules);
                 ui.end_row();
             });
     } else {
