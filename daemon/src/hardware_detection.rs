@@ -1281,9 +1281,16 @@ pub fn get_wifi_info() -> Result<Vec<WiFiInfo>> {
         let entry = entry?;
         let interface = entry.file_name().to_string_lossy().to_string();
         
-        // Check if it's a wireless interface
+        // Check if it's a wireless interface using multiple detection methods
         let wireless_path = format!("/sys/class/net/{}/wireless", interface);
-        if !Path::new(&wireless_path).exists() {
+        let phy80211_path = format!("/sys/class/net/{}/phy80211", interface);
+        let ieee80211_path = format!("/sys/class/net/{}/device/ieee80211", interface);
+        
+        let is_wireless = Path::new(&wireless_path).exists() 
+            || Path::new(&phy80211_path).exists()
+            || Path::new(&ieee80211_path).exists();
+        
+        if !is_wireless {
             continue;
         }
         
