@@ -19,6 +19,8 @@ pub enum DbusCommand {
     GetStorageDeviceInfo { reply: oneshot::Sender<Result<Vec<StorageDevice>>> },
     GetMountInfo { reply: oneshot::Sender<Result<Vec<MountInfo>>> },
     GetWifiInfo { reply: oneshot::Sender<Result<Vec<WiFiInfo>>> },
+    GetTdpProfiles { reply: oneshot::Sender<Result<Vec<String>>> },
+    GetHardwareInterfaceInfo { reply: oneshot::Sender<Result<String>> },
     ApplyProfile { profile: Profile, reply: oneshot::Sender<Result<()>> },
     SetCpuGovernor { governor: String, reply: oneshot::Sender<Result<()>> },
     SetCpuBoost { enabled: bool, reply: oneshot::Sender<Result<()>> },
@@ -111,6 +113,18 @@ impl DbusClient {
     pub fn get_wifi_info(&self) -> oneshot::Receiver<Result<Vec<WiFiInfo>>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.command_tx.send(DbusCommand::GetWifiInfo { reply: tx });
+        rx
+    }
+
+    pub fn get_tdp_profiles(&self) -> oneshot::Receiver<Result<Vec<String>>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::GetTdpProfiles { reply: tx });
+        rx
+    }
+
+    pub fn get_hardware_interface_info(&self) -> oneshot::Receiver<Result<String>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::GetHardwareInterfaceInfo { reply: tx });
         rx
     }
     
@@ -295,6 +309,14 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
             }
             DbusCommand::GetWifiInfo { reply } => {
                 let result = get_wifi_info_impl(&connection).await;
+                let _ = reply.send(result);
+            }
+            DbusCommand::GetTdpProfiles { reply } => {
+                let result = get_tdp_profiles_impl(&connection).await;
+                let _ = reply.send(result);
+            }
+            DbusCommand::GetHardwareInterfaceInfo { reply } => {
+                let result = get_hardware_interface_info_impl(&connection).await;
                 let _ = reply.send(result);
             }
             DbusCommand::ApplyProfile { profile, reply } => {
@@ -502,6 +524,30 @@ async fn get_wifi_info_impl(conn: &Connection) -> Result<Vec<WiFiInfo>> {
 
     let json: String = proxy.call("GetWifiInfo", &()).await?;
     Ok(serde_json::from_str(&json)?)
+}
+
+async fn get_tdp_profiles_impl(conn: &Connection) -> Result<Vec<String>> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "com.tuxedo.Control",
+        "/com/tuxedo/Control",
+        "com.tuxedo.Control",
+    ).await?;
+
+    let json: String = proxy.call("GetTdpProfiles", &()).await?;
+    Ok(serde_json::from_str(&json)?)
+}
+
+async fn get_hardware_interface_info_impl(conn: &Connection) -> Result<String> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "com.tuxedo.Control",
+        "/com/tuxedo/Control",
+        "com.tuxedo.Control",
+    ).await?;
+
+    let info: String = proxy.call("GetHardwareInterfaceInfo", &()).await?;
+    Ok(info)
 }
 
 async fn apply_profile_impl(conn: &Connection, profile: &Profile) -> Result<()> {

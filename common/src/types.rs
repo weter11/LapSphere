@@ -118,6 +118,8 @@ pub struct FanInfo {
 pub struct WiFiInfo {
     pub interface: String,
     pub driver: String,
+    pub driver_version: Option<String>,
+    pub firmware_version: Option<String>,
     pub temperature: Option<f32>,
     pub signal_level: Option<i32>,      // Signal level in dBm
     pub channel: Option<u32>,           // Current channel
@@ -126,6 +128,8 @@ pub struct WiFiInfo {
     pub rx_rate: Option<f64>,           // Download rate in Mbps
     pub ssid: Option<String>,
     pub data_rate: Option<f64>,         // Link speed in Mbps
+    pub rx_bytes: Option<u64>,
+    pub tx_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +140,8 @@ pub struct StorageDevice {
     pub temperature: Option<f32>,
     pub read_speed: Option<f64>,
     pub write_speed: Option<f64>,
+    pub read_iops: Option<f64>,
+    pub write_iops: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -232,6 +238,8 @@ pub struct FanCurve {
 pub struct AppConfig {
     pub theme: Theme,
     pub start_minimized: bool,
+    #[serde(default)]
+    pub tray_enabled: bool,
     pub autostart: bool,
     pub fan_daemon_enabled: bool,
     pub app_monitoring_enabled: bool,
@@ -262,6 +270,8 @@ pub enum Theme {
 pub struct StatisticsSections {
     pub show_system_info: bool,
     pub show_cpu: bool,
+    #[serde(default = "default_show_memory")]
+    pub show_memory: bool,
     pub show_gpu: bool,
     pub show_battery: bool,
     pub show_wifi: bool,
@@ -270,6 +280,8 @@ pub struct StatisticsSections {
     pub section_order: Vec<String>,
     // Polling rates in milliseconds
     pub cpu_poll_rate: u64,
+    #[serde(default = "default_memory_poll_rate")]
+    pub memory_poll_rate: u64,
     pub gpu_poll_rate: u64,
     pub battery_poll_rate: u64,
     pub wifi_poll_rate: u64,
@@ -277,11 +289,20 @@ pub struct StatisticsSections {
     pub fans_poll_rate: u64,
 }
 
+fn default_memory_poll_rate() -> u64 {
+    1000
+}
+
+fn default_show_memory() -> bool {
+    true
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             theme: Theme::Auto,
             start_minimized: false,
+            tray_enabled: false,
             autostart: false,
             fan_daemon_enabled: true,
             app_monitoring_enabled: true,
@@ -317,6 +338,7 @@ impl Default for StatisticsSections {
         Self {
             show_system_info: true,
             show_cpu: true,
+            show_memory: true,
             show_gpu: true,
             show_battery: true,
             show_wifi: true,
@@ -325,6 +347,7 @@ impl Default for StatisticsSections {
             section_order: vec![
                 "SystemInfo".to_string(),
                 "CPU".to_string(),
+                "Memory".to_string(),
                 "GPU".to_string(),
                 "Battery".to_string(),
                 "WiFi".to_string(),
@@ -332,10 +355,11 @@ impl Default for StatisticsSections {
                 "Fans".to_string(),
             ],
             cpu_poll_rate: 1000,            // 1 second
+            memory_poll_rate: default_memory_poll_rate(),
             gpu_poll_rate: 2000,            // 2 seconds
             battery_poll_rate: 5000,        // 5 seconds
             wifi_poll_rate: 5000,           // 5 seconds
-            storage_poll_rate: 30000,       // 30 seconds
+            storage_poll_rate: 5 * 1000,    // 5 seconds
             fans_poll_rate: 1000,           // 1 second
         }
     }

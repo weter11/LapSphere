@@ -41,7 +41,9 @@ struct NetStats {
 
 #[derive(Debug, Clone)]
 struct StorageStats {
+    read_ios: u64,
     read_sectors: u64,
+    write_ios: u64,
     write_sectors: u64,
     timestamp: Instant,
 }
@@ -1264,6 +1266,8 @@ pub fn get_wifi_info() -> Result<Vec<WiFiInfo>> {
             "unknown".to_string()
         };
         
+        let (driver_version, firmware_version) = read_wifi_driver_info(&interface);
+
         // Read temperature if available
         let temp_path = format!("/sys/class/net/{}/device/hwmon", interface);
         let temperature = if let Ok(hwmon_entries) = fs::read_dir(&temp_path) {
@@ -1288,11 +1292,19 @@ pub fn get_wifi_info() -> Result<Vec<WiFiInfo>> {
         // Read channel and rates from iwconfig or iw
         let (channel, channel_width) = read_wifi_channel(&interface);
         let (ssid, data_rate) = read_wifi_link_info(&interface);
-        let (tx_rate, rx_rate) = read_wifi_rates(&interface);
+        let (tx_rate, rx_rate, tx_bytes, rx_bytes) = match read_wifi_bytes(&interface) {
+            Some((tx_bytes, rx_bytes)) => {
+                let (tx_rate, rx_rate) = read_wifi_rates(&interface, tx_bytes, rx_bytes);
+                (tx_rate, rx_rate, Some(tx_bytes), Some(rx_bytes))
+            }
+            None => (None, None, None, None),
+        };
         
         wifi_devices.push(WiFiInfo {
             interface,
             driver,
+            driver_version,
+            firmware_version,
             temperature,
             signal_level,
             channel,
@@ -1301,6 +1313,8 @@ pub fn get_wifi_info() -> Result<Vec<WiFiInfo>> {
             rx_rate,
             ssid,
             data_rate,
+            rx_bytes,
+            tx_bytes,
         });
     }
     
@@ -1332,6 +1346,10 @@ fn read_wifi_signal(interface: &str) -> Option<i32> {
 }
 
 fn read_wifi_channel(interface: &str) -> (Option<u32>, Option<u32>) {
+    let mut channel = None;
+    let mut width = None;
+    let mut freq_mhz = None;
+
     // Try to use iw command first (more modern)
     if let Ok(output) = std::process::Command::new("iw")
         .args(&["dev", interface, "info"])
@@ -1339,29 +1357,104 @@ fn read_wifi_channel(interface: &str) -> (Option<u32>, Option<u32>) {
     {
         if output.status.success() {
             let info = String::from_utf8_lossy(&output.stdout);
-            let mut channel = None;
-            let mut width = None;
-            
             for line in info.lines() {
-                if line.contains("channel") {
-                    // Parse: "channel 36 (5180 MHz), width: 80 MHz"
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    for (i, part) in parts.iter().enumerate() {
-                        if *part == "channel" && i + 1 < parts.len() {
-                            channel = parts[i + 1].parse().ok();
-                        }
-                        if *part == "width:" && i + 1 < parts.len() {
-                            width = parts[i + 1].trim_end_matches(',').parse().ok();
-                        }
-                    }
+                update_channel_width_from_line(line, &mut channel, &mut width, &mut freq_mhz);
+            }
+        }
+    }
+
+    if channel.is_none() || width.is_none() || freq_mhz.is_none() {
+        if let Ok(output) = std::process::Command::new("iw")
+            .args(&["dev", interface, "link"])
+            .output()
+        {
+            if output.status.success() {
+                let info = String::from_utf8_lossy(&output.stdout);
+                for line in info.lines() {
+                    update_channel_width_from_line(line, &mut channel, &mut width, &mut freq_mhz);
                 }
             }
-            
-            return (channel, width);
         }
     }
     
     // Fallback to iwconfig (older tool)
+    if channel.is_none() || freq_mhz.is_none() {
+        if let Ok(output) = std::process::Command::new("iwconfig")
+            .arg(interface)
+            .output()
+        {
+            if output.status.success() {
+                let info = String::from_utf8_lossy(&output.stdout);
+                update_channel_from_iwconfig(&info, &mut channel, &mut freq_mhz);
+            }
+        }
+    }
+
+    if channel.is_none() {
+        if let Some(freq) = freq_mhz {
+            channel = channel_from_frequency_mhz(freq);
+        }
+    }
+    
+    (channel, width)
+}
+
+fn read_wifi_link_info(interface: &str) -> (Option<String>, Option<f64>) {
+    let mut ssid = read_wifi_ssid_from_iwgetid(interface)
+        .or_else(|| read_wifi_ssid_from_iwconfig(interface));
+    let mut tx_rate = None;
+    let mut rx_rate = None;
+
+    if let Ok(output) = std::process::Command::new("iw")
+        .args(&["dev", interface, "link"])
+        .output()
+    {
+        if output.status.success() {
+            let info = String::from_utf8_lossy(&output.stdout);
+
+            for line in info.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("SSID:") && ssid.is_none() {
+                    let value = trimmed.trim_start_matches("SSID:").trim();
+                    ssid = normalize_ssid(value);
+                } else if trimmed.starts_with("tx bitrate:") {
+                    tx_rate = parse_wifi_rate(trimmed);
+                } else if trimmed.starts_with("rx bitrate:") {
+                    rx_rate = parse_wifi_rate(trimmed);
+                }
+            }
+        }
+    }
+
+    (ssid, tx_rate.or(rx_rate))
+}
+
+fn read_wifi_ssid_from_iwgetid(interface: &str) -> Option<String> {
+    if let Ok(output) = std::process::Command::new("iwgetid")
+        .args(["-r", interface])
+        .output()
+    {
+        if output.status.success() {
+            let ssid = String::from_utf8_lossy(&output.stdout);
+            if let Some(parsed) = parse_iwgetid_ssid(&ssid) {
+                return Some(parsed);
+            }
+        }
+    }
+
+    if let Ok(output) = std::process::Command::new("iwgetid")
+        .arg(interface)
+        .output()
+    {
+        if output.status.success() {
+            let ssid = String::from_utf8_lossy(&output.stdout);
+            return parse_iwgetid_ssid(&ssid);
+        }
+    }
+    None
+}
+
+fn read_wifi_ssid_from_iwconfig(interface: &str) -> Option<String> {
     if let Ok(output) = std::process::Command::new("iwconfig")
         .arg(interface)
         .output()
@@ -1369,53 +1462,203 @@ fn read_wifi_channel(interface: &str) -> (Option<u32>, Option<u32>) {
         if output.status.success() {
             let info = String::from_utf8_lossy(&output.stdout);
             for line in info.lines() {
-                if line.contains("Channel") || line.contains("Frequency") {
-                    // Parse various formats
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    for (i, part) in parts.iter().enumerate() {
-                        if part.contains("Channel:") || part.contains("Channel=") {
-                            if let Some(ch_str) = part.split(&[':', '=']).nth(1) {
-                                if let Ok(ch) = ch_str.parse() {
-                                    return (Some(ch), None);
-                                }
-                            }
-                        }
+                if let Some(pos) = line.find("ESSID:") {
+                    let mut value = line[pos + 6..].trim();
+                    if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
+                        value = &value[1..value.len() - 1];
+                    }
+                    if let Some(ssid) = normalize_ssid(value) {
+                        return Some(ssid);
                     }
                 }
             }
         }
     }
-    
-    (None, None)
+    None
 }
 
-fn read_wifi_link_info(interface: &str) -> (Option<String>, Option<f64>) {
-    if let Ok(output) = std::process::Command::new("iw")
-        .args(&["dev", interface, "link"])
+fn parse_iwgetid_ssid(output: &str) -> Option<String> {
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(pos) = trimmed.find("ESSID:") {
+        let mut value = trimmed[pos + 6..].trim();
+        if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
+            value = &value[1..value.len() - 1];
+        }
+        return normalize_ssid(value);
+    }
+
+    normalize_ssid(trimmed)
+}
+
+fn update_channel_width_from_line(
+    line: &str,
+    channel: &mut Option<u32>,
+    width: &mut Option<u32>,
+    freq_mhz: &mut Option<u32>,
+) {
+    if !(line.contains("channel") || line.contains("width") || line.contains("freq")) {
+        return;
+    }
+
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    for (i, part) in parts.iter().enumerate() {
+        let cleaned = part.trim_end_matches(',');
+        let lower = cleaned.to_lowercase();
+        if lower == "channel" && channel.is_none() {
+            if let Some(value) = parts.get(i + 1).and_then(|token| parse_u32_from_token(token)) {
+                *channel = Some(value);
+            }
+        } else if lower.starts_with("channel") && channel.is_none() {
+            if let Some(value) = parse_u32_from_token(cleaned) {
+                *channel = Some(value);
+            }
+        }
+
+        if lower == "width:" {
+            *width = parts.get(i + 1).and_then(|token| parse_u32_from_token(token));
+        } else if lower == "width" {
+            *width = parts.get(i + 1).and_then(|token| parse_u32_from_token(token));
+        } else if lower.starts_with("width:") {
+            *width = parse_u32_from_token(cleaned);
+        }
+
+        if lower == "freq:" {
+            *freq_mhz = parts
+                .get(i + 1)
+                .and_then(|token| parse_frequency_mhz(token, parts.get(i + 2).copied()));
+        } else if lower == "freq" {
+            *freq_mhz = parts
+                .get(i + 1)
+                .and_then(|token| parse_frequency_mhz(token, parts.get(i + 2).copied()));
+        } else if lower.starts_with("freq:") {
+            *freq_mhz = parse_frequency_mhz(cleaned, parts.get(i + 1).copied());
+        }
+    }
+}
+
+fn parse_frequency_mhz(value: &str, unit: Option<&str>) -> Option<u32> {
+    // Values below this threshold are treated as GHz and converted to MHz.
+    // Common sources provide frequencies like "2.437 GHz" or "2412 MHz".
+    // Anything >= 100 is treated as MHz to avoid mis-converting explicit MHz values.
+    // Malformed or unsupported inputs return None and fall back to other sources.
+    const FREQUENCY_GHZ_THRESHOLD: f64 = 100.0;
+    const MHZ_PER_GHZ: f64 = 1000.0;
+
+    let numeric: String = value.chars()
+        .filter(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    if numeric.is_empty() {
+        return None;
+    }
+    let raw: f64 = numeric.parse().ok()?;
+    // Some outputs omit the unit token; treat missing unit as empty and rely on numeric heuristics.
+    let unit_value = unit.unwrap_or("");
+    let value_lower = value.to_lowercase();
+    let unit_lower = unit_value.to_lowercase();
+    if value_lower.contains("ghz") || unit_lower.contains("ghz") {
+        return Some((raw * MHZ_PER_GHZ).round() as u32);
+    }
+    if value_lower.contains("mhz") || unit_lower.contains("mhz") {
+        return Some(raw.round() as u32);
+    }
+    // Frequencies below 100 are almost certainly GHz (e.g., 2.4, 5.2). If the
+    // input is malformed but still parses to a low number, it will be treated
+    // as GHz to avoid 2.4 MHz edge cases.
+    if raw < FREQUENCY_GHZ_THRESHOLD {
+        Some((raw * MHZ_PER_GHZ).round() as u32)
+    } else {
+        Some(raw.round() as u32)
+    }
+}
+
+fn parse_u32_from_token(value: &str) -> Option<u32> {
+    let digits: String = value.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse().ok()
+    }
+}
+
+fn update_channel_from_iwconfig(info: &str, channel: &mut Option<u32>, freq_mhz: &mut Option<u32>) {
+    for line in info.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        for (i, part) in parts.iter().enumerate() {
+            if part.contains("Channel") {
+                if let Some(value) = parse_u32_from_token(part)
+                    .or_else(|| parts.get(i + 1).and_then(|token| parse_u32_from_token(token)))
+                {
+                    *channel = Some(value);
+                }
+            }
+
+            if part.contains("Frequency") {
+                if let Some(pos) = line.find("Frequency:") {
+                    let remainder = line[pos + "Frequency:".len()..].trim();
+                    let mut tokens = remainder.split_whitespace();
+                    let value_token = tokens.next().unwrap_or("");
+                    let unit_token = tokens.next();
+                    *freq_mhz = parse_frequency_mhz(value_token, unit_token);
+                }
+            }
+        }
+    }
+}
+
+/// Map WiFi center frequency in MHz to a channel number using common IEEE 802.11
+/// band formulas. These ranges intentionally cover 2.4/5/6 GHz bands and return
+/// None for anything outside the supported ranges.
+fn channel_from_frequency_mhz(freq: u32) -> Option<u32> {
+    const FREQ_24_GHZ_BASE: u32 = 2407;
+    const FREQ_24_GHZ_SPECIAL: u32 = 2484;
+    const FREQ_5_GHZ_BASE: u32 = 5000;
+    const FREQ_6_GHZ_BASE: u32 = 5950;
+
+    match freq {
+        FREQ_24_GHZ_SPECIAL => Some(14), // 2.4 GHz band (802.11b/g/n)
+        2412..=2472 => Some((freq - FREQ_24_GHZ_BASE) / 5), // 2.4 GHz band (802.11b/g/n)
+        5000..=5900 => Some((freq - FREQ_5_GHZ_BASE) / 5), // 5 GHz band (802.11a/n/ac)
+        5955..=7115 => Some((freq - FREQ_6_GHZ_BASE) / 5), // 6 GHz band (802.11ax)
+        _ => None,
+    }
+}
+fn read_wifi_driver_info(interface: &str) -> (Option<String>, Option<String>) {
+    if let Ok(output) = std::process::Command::new("ethtool")
+        .args(["-i", interface])
         .output()
     {
         if output.status.success() {
             let info = String::from_utf8_lossy(&output.stdout);
-            let mut ssid = None;
-            let mut tx_rate = None;
-            let mut rx_rate = None;
+            let mut driver_version = None;
+            let mut firmware_version = None;
 
             for line in info.lines() {
                 let trimmed = line.trim();
-                if trimmed.starts_with("SSID:") {
-                    ssid = Some(trimmed.trim_start_matches("SSID:").trim().to_string());
-                } else if trimmed.starts_with("tx bitrate:") {
-                    tx_rate = parse_wifi_rate(trimmed);
-                } else if trimmed.starts_with("rx bitrate:") {
-                    rx_rate = parse_wifi_rate(trimmed);
+                if let Some(value) = trimmed.strip_prefix("version:") {
+                    driver_version = normalize_ssid(value);
+                } else if let Some(value) = trimmed.strip_prefix("firmware-version:") {
+                    firmware_version = normalize_ssid(value);
                 }
             }
 
-            return (ssid, tx_rate.or(rx_rate));
+            return (driver_version, firmware_version);
         }
     }
 
     (None, None)
+}
+
+fn normalize_ssid(value: &str) -> Option<String> {
+    let trimmed = value.trim().trim_matches('"');
+    if trimmed.is_empty() || trimmed == "off/any" {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn parse_wifi_rate(line: &str) -> Option<f64> {
@@ -1445,12 +1688,7 @@ fn read_wifi_bytes(interface: &str) -> Option<(u64, u64)> {
     Some((tx_bytes, rx_bytes))
 }
 
-fn read_wifi_rates(interface: &str) -> (Option<f64>, Option<f64>) {
-    let (tx_bytes, rx_bytes) = match read_wifi_bytes(interface) {
-        Some(bytes) => bytes,
-        None => return (None, None),
-    };
-
+fn read_wifi_rates(interface: &str, tx_bytes: u64, rx_bytes: u64) -> (Option<f64>, Option<f64>) {
     let now = Instant::now();
     let mut stats = PREVIOUS_NET_STATS.lock().unwrap();
     let rates = if let Some(prev) = stats.get(interface) {
@@ -1549,23 +1787,27 @@ fn read_sector_size(path: &Path) -> u64 {
         .unwrap_or(512)
 }
 
-fn read_storage_stats(path: &Path) -> Option<(u64, u64)> {
+fn read_storage_stats(path: &Path) -> Option<(u64, u64, u64, u64)> {
     let stats = fs::read_to_string(path.join("stat")).ok()?;
     let parts: Vec<&str> = stats.split_whitespace().collect();
     if parts.len() < 7 {
         return None;
     }
+    let read_ios = parts.first()?.parse::<u64>().ok()?;
     let read_sectors = parts.get(2)?.parse::<u64>().ok()?;
+    let write_ios = parts.get(4)?.parse::<u64>().ok()?;
     let write_sectors = parts.get(6)?.parse::<u64>().ok()?;
-    Some((read_sectors, write_sectors))
+    Some((read_ios, read_sectors, write_ios, write_sectors))
 }
 
 fn calculate_storage_rates(
     device: &str,
+    read_ios: u64,
     read_sectors: u64,
+    write_ios: u64,
     write_sectors: u64,
     sector_size: u64,
-) -> (Option<f64>, Option<f64>) {
+) -> (Option<f64>, Option<f64>, Option<f64>, Option<f64>) {
     let now = Instant::now();
     let mut stats = PREVIOUS_STORAGE_STATS.lock().unwrap();
     let rates = if let Some(prev) = stats.get(device) {
@@ -1575,18 +1817,22 @@ fn calculate_storage_rates(
             let write_bytes = write_sectors.saturating_sub(prev.write_sectors) as f64 * sector_size as f64;
             let read_speed = read_bytes / elapsed / 1_000_000.0;
             let write_speed = write_bytes / elapsed / 1_000_000.0;
-            (Some(read_speed), Some(write_speed))
+            let read_iops = read_ios.saturating_sub(prev.read_ios) as f64 / elapsed;
+            let write_iops = write_ios.saturating_sub(prev.write_ios) as f64 / elapsed;
+            (Some(read_speed), Some(write_speed), Some(read_iops), Some(write_iops))
         } else {
-            (None, None)
+            (None, None, None, None)
         }
     } else {
-        (None, None)
+        (None, None, None, None)
     };
 
     stats.insert(
         device.to_string(),
         StorageStats {
+            read_ios,
             read_sectors,
+            write_ios,
             write_sectors,
             timestamp: now,
         },
@@ -1623,11 +1869,11 @@ pub fn get_storage_device_info() -> Result<Vec<StorageDevice>> {
         };
 
         let sector_size = read_sector_size(&path);
-        let (read_speed, write_speed) = match read_storage_stats(&path) {
-            Some((read_sectors, write_sectors)) => {
-                calculate_storage_rates(&dev_name, read_sectors, write_sectors, sector_size)
+        let (read_speed, write_speed, read_iops, write_iops) = match read_storage_stats(&path) {
+            Some((read_ios, read_sectors, write_ios, write_sectors)) => {
+                calculate_storage_rates(&dev_name, read_ios, read_sectors, write_ios, write_sectors, sector_size)
             }
-            None => (None, None),
+            None => (None, None, None, None),
         };
 
         // Try to read temperature from hwmon
@@ -1651,6 +1897,8 @@ pub fn get_storage_device_info() -> Result<Vec<StorageDevice>> {
             temperature,
             read_speed,
             write_speed,
+            read_iops,
+            write_iops,
         });
     }
 
