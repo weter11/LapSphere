@@ -1395,7 +1395,6 @@ fn get_wifi_details(interface: &str) -> (Option<String>, Option<u32>, Option<u32
                 }
                 // Also try to get SSID from iw info as fallback (format: "ssid MyNetwork")
                 // Only check if SSID not already found from `iw link`
-                // Note: Don't break here as we still need to parse channel from subsequent lines
                 if ssid.is_none() {
                     if let Some(value) = trimmed.strip_prefix("ssid ") {
                         ssid = normalize_ssid(value);
