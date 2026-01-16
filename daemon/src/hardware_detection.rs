@@ -1355,8 +1355,8 @@ fn get_wifi_details(interface: &str) -> (Option<String>, Option<u32>, Option<u32
             let info = String::from_utf8_lossy(&output.stdout);
             for line in info.lines() {
                 let trimmed = line.trim();
-                if trimmed.starts_with("SSID:") {
-                    ssid = normalize_ssid(trimmed.strip_prefix("SSID: ").unwrap_or(""));
+                if let Some(value) = trimmed.strip_prefix("SSID:") {
+                    ssid = normalize_ssid(value.trim());
                 } else if trimmed.starts_with("freq:") {
                     if let Some(freq_str) = trimmed.split_whitespace().nth(1) {
                         if let Ok(f) = freq_str.parse::<u32>() {
@@ -1391,6 +1391,12 @@ fn get_wifi_details(interface: &str) -> (Option<String>, Option<u32>, Option<u32
                                 width = Some(w);
                             }
                         }
+                    }
+                }
+                // Also try to get SSID from iw info as fallback (format: "ssid MyNetwork")
+                if ssid.is_none() {
+                    if let Some(value) = trimmed.strip_prefix("ssid ") {
+                        ssid = normalize_ssid(value);
                     }
                 }
             }
