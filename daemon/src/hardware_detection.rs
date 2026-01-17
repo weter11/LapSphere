@@ -1247,6 +1247,9 @@ fn read_gpu_power(device_path: &str) -> Option<f32> {
             }
         }
     }
+
+
+
     
     None
 }
@@ -1263,16 +1266,28 @@ fn read_gpu_voltage(device_path: &str) -> Option<f32> {
             }
         }
     }
-    
     None
 }
 
 // WiFi information detection
+fn find_binary(cmd: &str) -> Option<String> {
+    let paths = ["/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin", "/sbin", "/bin"];
+    for path in paths {
+        let full_path = format!("{}/{}", path, cmd);
+        if Path::new(&full_path).exists() {
+            return Some(full_path);
+        }
+    }
+    // Try default path (hope it is in PATH)
+    Some(cmd.to_string())
+}
+
 fn get_pci_info(interface: &str) -> (Option<String>, Option<String>) {
     let device_path = format!("/sys/class/net/{}/device", interface);
     if let Ok(link) = fs::read_link(&device_path) {
         if let Some(pci_addr) = link.file_name().and_then(|n| n.to_str()) {
-            if let Ok(output) = std::process::Command::new("lspci")
+            let cmd = find_binary("lspci").unwrap_or_else(|| "lspci".to_string());
+            if let Ok(output) = std::process::Command::new(cmd)
                 .args(["-s", pci_addr, "-k"])
                 .output()
             {
@@ -1310,8 +1325,10 @@ pub fn get_wifi_info() -> Result<Vec<WiFiInfo>> {
         let interface = entry.file_name().to_string_lossy().to_string();
         
         // Check if it's a wireless interface
+        // Check /wireless (old) or /phy80211 (new)
         let wireless_path = format!("/sys/class/net/{}/wireless", interface);
-        if !Path::new(&wireless_path).exists() {
+        let phy_path = format!("/sys/class/net/{}/phy80211", interface);
+        if !Path::new(&wireless_path).exists() && !Path::new(&phy_path).exists() {
             continue;
         }
         
@@ -1347,6 +1364,9 @@ pub fn get_wifi_info() -> Result<Vec<WiFiInfo>> {
         // Calculate actual throughput
         let (tx_rate, rx_rate) = read_wifi_rates(&interface, final_tx_bytes, final_rx_bytes);
         
+        log::info!("WiFi {} details: SSID={:?}, Signal={:?}, Channel={:?}, Rates={:?}/{:?}",
+                   interface, ssid, signal_level, channel, tx_rate, rx_rate);
+
         wifi_devices.push(WiFiInfo {
             interface,
             driver,
@@ -1395,7 +1415,8 @@ fn get_wifi_details(interface: &str) -> (
     let mut signal = None;
 
     // Try to get connection info from iw dev <interface> link
-    if let Ok(output) = std::process::Command::new("iw")
+    let iw_cmd = find_binary("iw").unwrap_or_else(|| "iw".to_string());
+    if let Ok(output) = std::process::Command::new(&iw_cmd)
         .args(["dev", interface, "link"])
         .output()
     {
@@ -1405,38 +1426,40 @@ fn get_wifi_details(interface: &str) -> (
             
             for line in info.lines() {
                 let trimmed = line.trim();
+                let lower = trimmed.to_lowercase();
                 
-                // Parse SSID
-                if trimmed.starts_with("SSID:") {
-                    if let Some(ssid_value) = trimmed.strip_prefix("SSID:") {
-                        ssid = normalize_ssid(ssid_value.trim());
-                    }
+                // Parse SSID (case-insensitive and handle no space)
+                if lower.starts_with("ssid:") {
+                    ssid = normalize_ssid(trimmed[5..].trim());
                 }
                 // Parse RX bytes
-                else if trimmed.starts_with("RX:") {
-                    let parts: Vec<&str> = trimmed.split_whitespace().collect();
+                else if lower.starts_with("rx:") {
+                    let sanitized = trimmed.replace("RX:", "RX: ").replace("rx:", "rx: ");
+                    let parts: Vec<&str> = sanitized.split_whitespace().collect();
                     if let Some(bytes_str) = parts.get(1) {
                         rx_bytes = bytes_str.parse().ok();
                     }
                 }
                 // Parse TX bytes
-                else if trimmed.starts_with("TX:") {
-                    let parts: Vec<&str> = trimmed.split_whitespace().collect();
+                else if lower.starts_with("tx:") {
+                    let sanitized = trimmed.replace("TX:", "TX: ").replace("tx:", "tx: ");
+                    let parts: Vec<&str> = sanitized.split_whitespace().collect();
                     if let Some(bytes_str) = parts.get(1) {
                         tx_bytes = bytes_str.parse().ok();
                     }
                 }
                 // Parse signal
-                else if trimmed.starts_with("signal:") {
-                    let parts: Vec<&str> = trimmed.split_whitespace().collect();
+                else if lower.starts_with("signal:") {
+                    let sanitized = trimmed.replace("signal:", "signal: ");
+                    let parts: Vec<&str> = sanitized.split_whitespace().collect();
                     if let Some(sig_str) = parts.get(1) {
                         signal = sig_str.parse().ok();
                     }
                 }
                 // Parse bitrates
-                else if trimmed.starts_with("rx bitrate:") {
+                else if lower.starts_with("rx bitrate:") {
                     rx_bitrate = parse_wifi_rate(trimmed);
-                } else if trimmed.starts_with("tx bitrate:") {
+                } else if lower.starts_with("tx bitrate:") {
                     tx_bitrate = parse_wifi_rate(trimmed);
                 }
             }
@@ -1444,7 +1467,7 @@ fn get_wifi_details(interface: &str) -> (
     }
 
     // Get channel and width from iw dev <interface> info
-    if let Ok(output) = std::process::Command::new("iw")
+    if let Ok(output) = std::process::Command::new(&iw_cmd)
         .args(["dev", interface, "info"])
         .output()
     {
@@ -1477,10 +1500,48 @@ fn get_wifi_details(interface: &str) -> (
         }
     }
 
+    // Fallback: try iwgetid for SSID if not found
+    if ssid.is_none() {
+        if let Some(cmd) = find_binary("iwgetid") {
+            if let Ok(output) = std::process::Command::new(cmd)
+                .arg("-r")
+                .arg(interface)
+                .output()
+            {
+                if output.status.success() {
+                    let value = String::from_utf8_lossy(&output.stdout);
+                    ssid = normalize_ssid(&value);
+                }
+            }
+        }
+    }
+
+    // Last resort: try iwconfig for SSID
+    if ssid.is_none() {
+        if let Some(cmd) = find_binary("iwconfig") {
+            if let Ok(output) = std::process::Command::new(cmd)
+                .arg(interface)
+                .output()
+            {
+                if output.status.success() {
+                    let info = String::from_utf8_lossy(&output.stdout);
+                    for line in info.lines() {
+                        if let Some(pos) = line.find("ESSID:") {
+                            let value = line[pos + 6..].trim().trim_matches('"');
+                            ssid = normalize_ssid(value);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     (ssid, channel, width, tx_bitrate, rx_bitrate, rx_bytes, tx_bytes, signal)
 }
 
 fn read_wifi_temperature(interface: &str) -> Option<f32> {
+    // Try device-specific hwmon first
     let temp_path = format!("/sys/class/net/{}/device/hwmon", interface);
     if let Ok(hwmon_entries) = fs::read_dir(&temp_path) {
         for hwmon_entry in hwmon_entries.flatten() {
@@ -1492,14 +1553,50 @@ fn read_wifi_temperature(interface: &str) -> Option<f32> {
             }
         }
     }
+
+    // Fallback: search all hwmons for one associated with this device
+    let device_path = format!("/sys/class/net/{}/device", interface);
+    if let Ok(net_dev_path) = fs::canonicalize(&device_path) {
+        if let Ok(hwmon_dir) = fs::read_dir("/sys/class/hwmon") {
+            for entry in hwmon_dir.flatten() {
+                if let Ok(hwmon_dev_path) = fs::canonicalize(entry.path().join("device")) {
+                    if hwmon_dev_path == net_dev_path {
+                        if let Ok(temp_str) = fs::read_to_string(entry.path().join("temp1_input")) {
+                            if let Ok(temp_millidegrees) = temp_str.trim().parse::<i32>() {
+                                return Some(temp_millidegrees as f32 / 1000.0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback 2: thermal zones
+    if let Ok(thermal_dir) = fs::read_dir("/sys/class/thermal") {
+        for entry in thermal_dir.flatten() {
+            if let Ok(type_str) = fs::read_to_string(entry.path().join("type")) {
+                let type_lower = type_str.to_lowercase();
+                if type_lower.contains("wifi") || type_lower.contains("iwlwifi") {
+                    if let Ok(temp_str) = fs::read_to_string(entry.path().join("temp")) {
+                        if let Ok(temp_millidegrees) = temp_str.trim().parse::<i32>() {
+                            return Some(temp_millidegrees as f32 / 1000.0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     None
 }
 
 fn read_wifi_signal(interface: &str) -> Option<i32> {
     if let Ok(wireless) = fs::read_to_string("/proc/net/wireless") {
         for line in wireless.lines().skip(2) {
-            if line.contains(interface) {
-                let parts: Vec<&str> = line.split_whitespace().collect();
+            let trimmed = line.trim();
+            if trimmed.starts_with(interface) {
+                let parts: Vec<&str> = trimmed.split_whitespace().collect();
                 if parts.len() >= 4 {
                     if let Ok(signal) = parts[3].trim_end_matches('.').parse::<i32>() {
                         return Some(signal);
@@ -1564,7 +1661,9 @@ fn normalize_ssid(value: &str) -> Option<String> {
 }
 
 fn parse_wifi_rate(line: &str) -> Option<f64> {
-    let parts: Vec<&str> = line.split_whitespace().collect();
+    // Make sure there is a space after bitrate:
+    let sanitized = line.replace("bitrate:", "bitrate: ");
+    let parts: Vec<&str> = sanitized.split_whitespace().collect();
     let rate_index = parts.iter().position(|part| *part == "bitrate:");
     let value = rate_index
         .and_then(|idx| parts.get(idx + 1))
@@ -1805,4 +1904,25 @@ pub fn get_storage_device_info() -> Result<Vec<StorageDevice>> {
     }
 
     Ok(storage_devices)
+}
+
+#[cfg(test)]
+mod wifi_tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_wifi_rate() {
+        assert_eq!(parse_wifi_rate("rx bitrate: 72.2 MBit/s"), Some(72.2));
+        assert_eq!(parse_wifi_rate("tx bitrate: 144.4 MBit/s"), Some(144.4));
+        assert_eq!(parse_wifi_rate("tx bitrate:144.4 MBit/s"), Some(144.4));
+        assert_eq!(parse_wifi_rate("rx bitrate: 1.2 GBit/s"), Some(1200.0));
+    }
+
+    #[test]
+    fn test_normalize_ssid() {
+        assert_eq!(normalize_ssid(" \"Kostal Wi-Fi\" "), Some("Kostal Wi-Fi".to_string()));
+        assert_eq!(normalize_ssid(" Kostal Wi-Fi "), Some("Kostal Wi-Fi".to_string()));
+        assert_eq!(normalize_ssid(" off/any "), None);
+        assert_eq!(normalize_ssid(""), None);
+    }
 }

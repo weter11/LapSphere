@@ -485,8 +485,8 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
                             ui.end_row();
 
                             // Signal level
+                            ui.label("Signal Level:");
                             if let Some(signal) = wifi.signal_level {
-                                ui.label("Signal Level:");
                                 ui.horizontal(|ui| {
                                     let signal_percent = ((signal + 90) as f32 / 60.0).clamp(0.0, 1.0);
 
@@ -503,26 +503,32 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
                                         .fill(color);
                                     ui.add(progress_bar);
                                 });
-                                ui.end_row();
+                            } else {
+                                ui.label(RichText::new("—").weak());
                             }
+                            ui.end_row();
 
                             // Received Data
+                            ui.label("Received Data:");
                             if let Some(rx_bytes) = wifi.rx_bytes {
-                                ui.label("Received Data:");
                                 ui.label(RichText::new(format_bytes(rx_bytes)).monospace());
-                                ui.end_row();
+                            } else {
+                                ui.label(RichText::new("—").weak());
                             }
+                            ui.end_row();
 
                             // Sent Data
+                            ui.label("Sent Data:");
                             if let Some(tx_bytes) = wifi.tx_bytes {
-                                ui.label("Sent Data:");
                                 ui.label(RichText::new(format_bytes(tx_bytes)).monospace());
-                                ui.end_row();
+                            } else {
+                                ui.label(RichText::new("—").weak());
                             }
+                            ui.end_row();
 
                             // Channel and Width
+                            ui.label("Channel:");
                             if let Some(channel) = wifi.channel {
-                                ui.label("Channel:");
                                 ui.horizontal(|ui| {
                                     ui.label(format!("{}", channel));
 
@@ -532,12 +538,14 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
                                             .italics());
                                     }
                                 });
-                                ui.end_row();
+                            } else {
+                                ui.label(RichText::new("—").weak());
                             }
+                            ui.end_row();
 
                             // PHY Rate
+                            ui.label("PHY Rate:");
                             if wifi.rx_bitrate.is_some() || wifi.tx_bitrate.is_some() {
-                                ui.label("PHY Rate:");
                                 ui.horizontal(|ui| {
                                     if let Some(rx) = wifi.rx_bitrate {
                                         ui.label(RichText::new(format!("RX: {:.1} Mbps", rx)).small().monospace());
@@ -546,12 +554,14 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
                                         ui.label(RichText::new(format!(" TX: {:.1} Mbps", tx)).small().monospace());
                                     }
                                 });
-                                ui.end_row();
+                            } else {
+                                ui.label(RichText::new("—").weak());
                             }
+                            ui.end_row();
 
                             // Actual Throughput
+                            ui.label("Actual Throughput:");
                             if wifi.rx_rate.is_some() || wifi.tx_rate.is_some() {
-                                ui.label("Actual Throughput:");
                                 ui.horizontal(|ui| {
                                     if let Some(rx) = wifi.rx_rate {
                                         ui.label(RichText::new(format!("↓ {:.2} Mbps", rx))
@@ -564,18 +574,22 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
                                             .color(Color32::from_rgb(255, 150, 100)));
                                     }
                                 });
-                                ui.end_row();
+                            } else {
+                                ui.label(RichText::new("—").weak());
                             }
+                            ui.end_row();
                             
                             // Temperature
+                            ui.label("Temperature:");
                             if let Some(temp) = wifi.temperature {
-                                ui.label("Temperature:");
                                 ui.colored_label(
                                     temp_color(temp),
                                     RichText::new(format!("{:.1}°C", temp)).monospace()
                                 );
-                                ui.end_row();
+                            } else {
+                                ui.label(RichText::new("—").weak());
                             }
+                            ui.end_row();
                         });
                     
                     ui.add_space(8.0);
