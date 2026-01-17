@@ -1440,7 +1440,7 @@ fn get_wifi_details(interface: &str) -> (Option<String>, Option<u32>, Option<u32
         data_rate = tx_bitrate
             .zip(rx_bitrate)
             .map(|(tx, rx)| tx.max(rx))
-            // Use max of both rates if available, otherwise use whichever single rate is present.
+            // Use max of both rates if both are available, otherwise fall back to whichever single rate is present.
             .or(tx_bitrate)
             .or(rx_bitrate);
     }
