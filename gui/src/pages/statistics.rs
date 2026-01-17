@@ -526,25 +526,26 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
                             }
                             ui.end_row();
 
-                            // Channel and Width
-                            ui.label("Channel:");
+                            // Channel Number
+                            ui.label("Channel Number:");
                             if let Some(channel) = wifi.channel {
-                                ui.horizontal(|ui| {
-                                    ui.label(format!("{}", channel));
+                                ui.label(format!("{}", channel));
+                            } else {
+                                ui.label(RichText::new("—").weak());
+                            }
+                            ui.end_row();
 
-                                    if let Some(width) = wifi.channel_width {
-                                        ui.label(RichText::new(format!("({} MHz)", width))
-                                            .small()
-                                            .italics());
-                                    }
-                                });
+                            // Channel Width
+                            ui.label("Channel Width:");
+                            if let Some(width) = wifi.channel_width {
+                                ui.label(format!("{} MHz", width));
                             } else {
                                 ui.label(RichText::new("—").weak());
                             }
                             ui.end_row();
 
                             // PHY Rate
-                            ui.label("PHY Rate:");
+                            ui.label("PHY Rate (RX/TX link bitrates):");
                             if wifi.rx_bitrate.is_some() || wifi.tx_bitrate.is_some() {
                                 ui.horizontal(|ui| {
                                     if let Some(rx) = wifi.rx_bitrate {
@@ -580,7 +581,7 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
                             ui.end_row();
                             
                             // Temperature
-                            ui.label("Temperature:");
+                            ui.label("Network Adapter Temperature:");
                             if let Some(temp) = wifi.temperature {
                                 ui.colored_label(
                                     temp_color(temp),

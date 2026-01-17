@@ -1428,39 +1428,21 @@ fn get_wifi_details(interface: &str) -> (
                 let trimmed = line.trim();
                 let lower = trimmed.to_lowercase();
                 
-                // Parse SSID (case-insensitive and handle no space)
-                if lower.starts_with("ssid:") {
-                    ssid = normalize_ssid(trimmed[5..].trim());
-                }
-                // Parse RX bytes
-                else if lower.starts_with("rx:") {
-                    let sanitized = trimmed.replace("RX:", "RX: ").replace("rx:", "rx: ");
-                    let parts: Vec<&str> = sanitized.split_whitespace().collect();
-                    if let Some(bytes_str) = parts.get(1) {
-                        rx_bytes = bytes_str.parse().ok();
-                    }
-                }
-                // Parse TX bytes
-                else if lower.starts_with("tx:") {
-                    let sanitized = trimmed.replace("TX:", "TX: ").replace("tx:", "tx: ");
-                    let parts: Vec<&str> = sanitized.split_whitespace().collect();
-                    if let Some(bytes_str) = parts.get(1) {
-                        tx_bytes = bytes_str.parse().ok();
-                    }
-                }
-                // Parse signal
-                else if lower.starts_with("signal:") {
-                    let sanitized = trimmed.replace("signal:", "signal: ");
-                    let parts: Vec<&str> = sanitized.split_whitespace().collect();
-                    if let Some(sig_str) = parts.get(1) {
-                        signal = sig_str.parse().ok();
-                    }
-                }
-                // Parse bitrates
-                else if lower.starts_with("rx bitrate:") {
+                if let Some(pos) = lower.find("ssid:") {
+                    ssid = normalize_ssid(trimmed[pos + 5..].trim());
+                } else if lower.contains("rx bitrate:") {
                     rx_bitrate = parse_wifi_rate(trimmed);
-                } else if lower.starts_with("tx bitrate:") {
+                } else if lower.contains("tx bitrate:") {
                     tx_bitrate = parse_wifi_rate(trimmed);
+                } else if let Some(pos) = lower.find("rx:") {
+                    let part = trimmed[pos + 3..].trim();
+                    rx_bytes = part.split_whitespace().next().and_then(|s| s.parse().ok());
+                } else if let Some(pos) = lower.find("tx:") {
+                    let part = trimmed[pos + 3..].trim();
+                    tx_bytes = part.split_whitespace().next().and_then(|s| s.parse().ok());
+                } else if let Some(pos) = lower.find("signal:") {
+                    let part = trimmed[pos + 7..].trim();
+                    signal = part.split_whitespace().next().and_then(|s| s.parse().ok());
                 }
             }
         }
@@ -1912,16 +1894,16 @@ mod wifi_tests {
 
     #[test]
     fn test_parse_wifi_rate() {
-        assert_eq!(parse_wifi_rate("rx bitrate: 72.2 MBit/s"), Some(72.2));
-        assert_eq!(parse_wifi_rate("tx bitrate: 144.4 MBit/s"), Some(144.4));
-        assert_eq!(parse_wifi_rate("tx bitrate:144.4 MBit/s"), Some(144.4));
-        assert_eq!(parse_wifi_rate("rx bitrate: 1.2 GBit/s"), Some(1200.0));
+        assert_eq!(parse_wifi_rate("rx bitrate: 1.1 MBit/s"), Some(1.1));
+        assert_eq!(parse_wifi_rate("tx bitrate: 2.2 MBit/s"), Some(2.2));
+        assert_eq!(parse_wifi_rate("tx bitrate:3.3 MBit/s"), Some(3.3));
+        assert_eq!(parse_wifi_rate("rx bitrate: 4.4 GBit/s"), Some(4400.0));
     }
 
     #[test]
     fn test_normalize_ssid() {
-        assert_eq!(normalize_ssid(" \"Kostal Wi-Fi\" "), Some("Kostal Wi-Fi".to_string()));
-        assert_eq!(normalize_ssid(" Kostal Wi-Fi "), Some("Kostal Wi-Fi".to_string()));
+        assert_eq!(normalize_ssid(" \"Generic-SSID\" "), Some("Generic-SSID".to_string()));
+        assert_eq!(normalize_ssid(" Random SSID "), Some("Random SSID".to_string()));
         assert_eq!(normalize_ssid(" off/any "), None);
         assert_eq!(normalize_ssid(""), None);
     }
