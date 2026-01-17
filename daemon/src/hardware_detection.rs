@@ -1469,22 +1469,6 @@ fn get_wifi_details(interface: &str) -> (Option<String>, Option<u32>, Option<u32
     (ssid, channel, width, data_rate)
 }
 
-fn normalize_ssid(value: &str) -> Option<String> {
-    let trimmed = value.trim().trim_matches('"');
-    
-    // Check for various "not connected" indicators
-    if trimmed.is_empty() 
-        || trimmed == "off/any" 
-        || trimmed == "off"
-        || trimmed == "any"
-        || trimmed.to_lowercase() == "not associated"
-    {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
-}
-
 fn read_wifi_temperature(interface: &str) -> Option<f32> {
     let temp_path = format!("/sys/class/net/{}/device/hwmon", interface);
     if let Ok(hwmon_entries) = fs::read_dir(&temp_path) {
