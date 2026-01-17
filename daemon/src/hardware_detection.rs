@@ -1404,7 +1404,6 @@ fn get_wifi_details(interface: &str) -> (Option<String>, Option<u32>, Option<u32
                 let trimmed = line.trim();
                 if trimmed.starts_with("channel") {
                     let parts: Vec<&str> = trimmed.split_whitespace().collect();
-
                     // Parse channel number
                     if let Some(ch_str) = parts.get(1) {
                         if let Some(ch) = parse_leading_u32(ch_str) {
@@ -1414,6 +1413,7 @@ fn get_wifi_details(interface: &str) -> (Option<String>, Option<u32>, Option<u32
                     }
                 }
 
+                // Parse channel width
                 if width.is_none() {
                     if let Some(pos) = trimmed.find("width:") {
                         if let Some(width_str) = trimmed[pos + 6..].split_whitespace().next() {
@@ -1437,10 +1437,10 @@ fn get_wifi_details(interface: &str) -> (Option<String>, Option<u32>, Option<u32
     }
 
     if data_rate.is_none() {
+        // Use max of both rates if both are available, otherwise fall back to whichever single rate is present.
         data_rate = tx_bitrate
             .zip(rx_bitrate)
             .map(|(tx, rx)| tx.max(rx))
-            // Use max of both rates if both are available, otherwise fall back to whichever single rate is present.
             .or(tx_bitrate)
             .or(rx_bitrate);
     }
