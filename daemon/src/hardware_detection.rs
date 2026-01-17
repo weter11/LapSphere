@@ -1375,6 +1375,7 @@ fn get_wifi_details(interface: &str) -> (Option<String>, Option<u32>, Option<u32
                 else if let Some(freq_str) = trimmed.strip_prefix("freq:") {
                     if let Some(freq_value) = freq_str
                         .trim()
+                        // iw reports decimal MHz (e.g., 2412.0); use integer MHz for channel lookup.
                         .split('.')
                         .next()
                         .and_then(|value| value.parse::<u32>().ok())
@@ -1444,6 +1445,7 @@ fn get_wifi_details(interface: &str) -> (Option<String>, Option<u32>, Option<u32
         data_rate = tx_bitrate
             .zip(rx_bitrate)
             .map(|(tx, rx)| tx.max(rx))
+            // Prefer the larger bitrate when both are available; fall back to the one present.
             .or(tx_bitrate)
             .or(rx_bitrate);
     }
@@ -1591,16 +1593,16 @@ fn read_wifi_pci_info() -> (Option<String>, Option<String>) {
         if is_device_line {
             in_network_controller = false;
             if let Some(value) = line.splitn(2, "Network controller:").nth(1) {
-                network_controller = normalize_pci_value(value);
+                network_controller = normalize_non_empty(value);
                 in_network_controller = true;
             } else if let Some(value) = line.splitn(2, "Wireless controller:").nth(1) {
-                network_controller = normalize_pci_value(value);
+                network_controller = normalize_non_empty(value);
                 in_network_controller = true;
             }
         } else if in_network_controller {
             let trimmed = line.trim();
             if let Some(value) = trimmed.strip_prefix("Subsystem:") {
-                subsystem = normalize_pci_value(value);
+                subsystem = normalize_non_empty(value);
                 if subsystem.is_some() {
                     break;
                 }
@@ -1641,11 +1643,11 @@ fn normalize_ssid(value: &str) -> Option<String> {
     if trimmed.is_empty() || trimmed == "off/any" {
         None
     } else {
-        Some(trimmed.to_string())
+        normalize_non_empty(trimmed)
     }
 }
 
-fn normalize_pci_value(value: &str) -> Option<String> {
+fn normalize_non_empty(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         None

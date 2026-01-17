@@ -18,6 +18,11 @@ const WIFI_NOT_CONNECTED: &str = "Not connected";
 const SIGNAL_MIN_DBM: f32 = -90.0;
 const SIGNAL_MAX_DBM: f32 = -30.0;
 
+fn signal_strength_percent(signal: i32) -> f32 {
+    ((signal as f32 - SIGNAL_MIN_DBM) / (SIGNAL_MAX_DBM - SIGNAL_MIN_DBM))
+        .clamp(0.0, 1.0)
+}
+
 pub fn normalize_section_order(order: &[String]) -> Vec<String> {
     let mut normalized = Vec::new();
     for section in order {
@@ -488,9 +493,7 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
                             ui.label("Signal Level:");
                             if let Some(signal) = wifi.signal_level {
                                 ui.horizontal(|ui| {
-                                    let signal_percent = ((signal as f32 - SIGNAL_MIN_DBM)
-                                        / (SIGNAL_MAX_DBM - SIGNAL_MIN_DBM))
-                                        .clamp(0.0, 1.0);
+                                    let signal_percent = signal_strength_percent(signal);
 
                                     let color = if signal_percent > 0.7 {
                                         Color32::from_rgb(100, 200, 120)
