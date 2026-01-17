@@ -1347,48 +1347,71 @@ fn get_wifi_details(interface: &str) -> (Option<String>, Option<u32>, Option<u32
     let mut data_rate = None;
     let mut freq_mhz = None;
 
+    // Try to get connection info from iw dev <interface> link
     if let Ok(output) = std::process::Command::new("iw")
         .args(["dev", interface, "link"])
         .output()
     {
         if output.status.success() {
             let info = String::from_utf8_lossy(&output.stdout);
+            log::debug!("iw link output for {}: {}", interface, info);
+            
             for line in info.lines() {
                 let trimmed = line.trim();
+                
+                // Parse SSID
                 if trimmed.starts_with("SSID:") {
-                    ssid = normalize_ssid(trimmed.strip_prefix("SSID: ").unwrap_or(""));
-                } else if trimmed.starts_with("freq:") {
+                    if let Some(ssid_value) = trimmed.strip_prefix("SSID:") {
+                        ssid = normalize_ssid(ssid_value.trim());
+                        log::debug!("Found SSID: {:?}", ssid);
+                    }
+                }
+                // Parse frequency
+                else if trimmed.starts_with("freq:") {
                     if let Some(freq_str) = trimmed.split_whitespace().nth(1) {
                         if let Ok(f) = freq_str.parse::<u32>() {
                             freq_mhz = Some(f);
+                            log::debug!("Found frequency: {} MHz", f);
                         }
                     }
-                } else if trimmed.starts_with("tx bitrate:") {
+                }
+                // Parse data rate
+                else if trimmed.starts_with("tx bitrate:") {
                     data_rate = parse_wifi_rate(trimmed);
+                    log::debug!("Found data rate: {:?}", data_rate);
                 }
             }
         }
     }
 
+    // Get channel and width from iw dev <interface> info
     if let Ok(output) = std::process::Command::new("iw")
         .args(["dev", interface, "info"])
         .output()
     {
         if output.status.success() {
             let info = String::from_utf8_lossy(&output.stdout);
+            log::debug!("iw info output for {}: {}", interface, info);
+            
             for line in info.lines() {
                 let trimmed = line.trim();
                 if trimmed.starts_with("channel") {
                     let parts: Vec<&str> = trimmed.split_whitespace().collect();
+                    
+                    // Parse channel number
                     if let Some(ch_str) = parts.get(1) {
                         if let Ok(ch) = ch_str.parse::<u32>() {
                             channel = Some(ch);
+                            log::debug!("Found channel from info: {}", ch);
                         }
                     }
-                    if let Some(pos) = trimmed.find("width: ") {
-                        if let Some(width_str) = trimmed[pos + 7..].split_whitespace().next() {
+                    
+                    // Parse channel width
+                    if let Some(pos) = trimmed.find("width:") {
+                        if let Some(width_str) = trimmed[pos + 6..].split_whitespace().next() {
                             if let Ok(w) = width_str.parse::<u32>() {
                                 width = Some(w);
+                                log::debug!("Found channel width: {} MHz", w);
                             }
                         }
                     }
@@ -1397,12 +1420,15 @@ fn get_wifi_details(interface: &str) -> (Option<String>, Option<u32>, Option<u32
         }
     }
 
+    // If channel not found but we have frequency, calculate it
     if channel.is_none() {
         if let Some(f) = freq_mhz {
             channel = channel_from_frequency_mhz(f);
+            log::debug!("Calculated channel from frequency: {:?}", channel);
         }
     }
 
+    // Fallback: try iwgetid for SSID if not found
     if ssid.is_none() {
         if let Ok(output) = std::process::Command::new("iwgetid")
             .arg("-r")
@@ -1412,10 +1438,12 @@ fn get_wifi_details(interface: &str) -> (Option<String>, Option<u32>, Option<u32
             if output.status.success() {
                 let value = String::from_utf8_lossy(&output.stdout);
                 ssid = normalize_ssid(&value);
+                log::debug!("Found SSID from iwgetid: {:?}", ssid);
             }
         }
     }
 
+    // Last resort: try iwconfig for SSID
     if ssid.is_none() {
         if let Ok(output) = std::process::Command::new("iwconfig")
             .arg(interface)
@@ -1427,6 +1455,7 @@ fn get_wifi_details(interface: &str) -> (Option<String>, Option<u32>, Option<u32
                     if let Some(pos) = line.find("ESSID:") {
                         let value = line[pos + 6..].trim().trim_matches('"');
                         ssid = normalize_ssid(value);
+                        log::debug!("Found SSID from iwconfig: {:?}", ssid);
                         break;
                     }
                 }
@@ -1434,7 +1463,26 @@ fn get_wifi_details(interface: &str) -> (Option<String>, Option<u32>, Option<u32
         }
     }
 
+    log::info!("WiFi details for {}: SSID={:?}, Channel={:?}, Width={:?}, Rate={:?}", 
+               interface, ssid, channel, width, data_rate);
+
     (ssid, channel, width, data_rate)
+}
+
+fn normalize_ssid(value: &str) -> Option<String> {
+    let trimmed = value.trim().trim_matches('"');
+    
+    // Check for various "not connected" indicators
+    if trimmed.is_empty() 
+        || trimmed == "off/any" 
+        || trimmed == "off"
+        || trimmed == "any"
+        || trimmed.to_lowercase() == "not associated"
+    {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn read_wifi_temperature(interface: &str) -> Option<f32> {
