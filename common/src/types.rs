@@ -127,12 +127,15 @@ pub struct WiFiInfo {
     pub signal_level: Option<i32>,      // Signal level in dBm
     pub channel: Option<u32>,           // Current channel
     pub channel_width: Option<u32>,     // Channel width in MHz (20/40/80/160)
-    pub tx_rate: Option<f64>,           // Upload rate in Mbps
-    pub rx_rate: Option<f64>,           // Download rate in Mbps
+    pub tx_rate: Option<f64>,           // Upload rate in Mbps (Actual throughput)
+    pub rx_rate: Option<f64>,           // Download rate in Mbps (Actual throughput)
     pub ssid: Option<String>,
-    pub data_rate: Option<f64>,         // Link speed in Mbps
+    pub tx_bitrate: Option<f64>,        // Link speed in Mbps (PHY rate)
+    pub rx_bitrate: Option<f64>,        // Link speed in Mbps (PHY rate)
     pub rx_bytes: Option<u64>,
     pub tx_bytes: Option<u64>,
+    pub network_controller: Option<String>,
+    pub subsystem: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
