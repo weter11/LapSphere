@@ -468,8 +468,11 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
             if !state.wifi_info.is_empty() {
                 for wifi in &state.wifi_info {
                     let actual_throughput = match (wifi.tx_rate, wifi.rx_rate) {
-                        (Some(tx_rate), Some(rx_rate)) => Some(tx_rate + rx_rate),
-                        (Some(rate), None) | (None, Some(rate)) => Some(rate),
+                        (Some(tx_rate), Some(rx_rate)) => {
+                            Some(format!("TX {:.1} Mbps / RX {:.1} Mbps", tx_rate, rx_rate))
+                        }
+                        (Some(tx_rate), None) => Some(format!("TX {:.1} Mbps", tx_rate)),
+                        (None, Some(rx_rate)) => Some(format!("RX {:.1} Mbps", rx_rate)),
                         (None, None) => None,
                     };
 
@@ -537,8 +540,8 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
                             ui.end_row();
 
                             ui.label("Actual Throughput:");
-                            if let Some(rate) = actual_throughput {
-                                ui.label(RichText::new(format!("{:.1} Mbps", rate)).monospace());
+                            if let Some(rate) = actual_throughput.as_deref() {
+                                ui.label(RichText::new(rate).monospace());
                             } else {
                                 ui.label("—");
                             }
