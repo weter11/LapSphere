@@ -501,38 +501,42 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
                 .spacing([40.0, 8.0])
                 .striped(true)
                 .show(ui, |ui| {
+                    ui.label("Network controller:");
+                    if let Some(ctrl) = wifi.network_controller.as_deref() {
+                        ui.label(ctrl);
+                    } else {
+                        ui.label(RichText::new("—").weak());
+                    }
+                    ui.end_row();
+
+                    ui.label("Subsystem:");
+                    if let Some(sub) = wifi.subsystem.as_deref() {
+                        ui.label(sub);
+                    } else {
+                        ui.label(RichText::new("—").weak());
+                    }
+                    ui.end_row();
+
                     ui.label("Driver:");
                     ui.label(&wifi.driver);
                     ui.end_row();
 
+                    ui.label("Driver Version:");
                     if let Some(version) = wifi.driver_version.as_deref() {
-                        ui.label("Driver Version:");
                         ui.label(version);
-                        ui.end_row();
+                    } else {
+                        ui.label(RichText::new("—").weak());
                     }
+                    ui.end_row();
 
+                    ui.label("Firmware:");
                     if let Some(version) = wifi.firmware_version.as_deref() {
-                        ui.label("Firmware:");
                         ui.label(version);
-                        ui.end_row();
+                    } else {
+                        ui.label(RichText::new("—").weak());
                     }
+                    ui.end_row();
 
-                    if let Some(channel) = wifi.channel {
-                        ui.label("Channel:");
-                        ui.horizontal(|ui| {
-                            ui.label(channel.to_string());
-                            if let Some(width) = wifi.channel_width {
-                                ui.label(RichText::new(format!("({} MHz)", width)).small());
-                            }
-                        });
-                        ui.end_row();
-                    }
-
-                    if let Some(temp) = wifi.temperature {
-                        ui.label("Temperature:");
-                        ui.label(format!("{:.1}°C", temp));
-                        ui.end_row();
-                    }
                 });
 
             if idx + 1 < state.wifi_info.len() {

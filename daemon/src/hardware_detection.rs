@@ -1247,6 +1247,9 @@ fn read_gpu_power(device_path: &str) -> Option<f32> {
             }
         }
     }
+
+
+
     
     None
 }
@@ -1263,11 +1266,51 @@ fn read_gpu_voltage(device_path: &str) -> Option<f32> {
             }
         }
     }
-    
     None
 }
 
 // WiFi information detection
+fn find_binary(cmd: &str) -> Option<String> {
+    let paths = ["/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin", "/sbin", "/bin"];
+    for path in paths {
+        let full_path = format!("{}/{}", path, cmd);
+        if Path::new(&full_path).exists() {
+            return Some(full_path);
+        }
+    }
+    // Try default path (hope it is in PATH)
+    Some(cmd.to_string())
+}
+
+fn get_pci_info(interface: &str) -> (Option<String>, Option<String>) {
+    let device_path = format!("/sys/class/net/{}/device", interface);
+    if let Ok(link) = fs::read_link(&device_path) {
+        if let Some(pci_addr) = link.file_name().and_then(|n| n.to_str()) {
+            let cmd = find_binary("lspci").unwrap_or_else(|| "lspci".to_string());
+            if let Ok(output) = std::process::Command::new(cmd)
+                .args(["-s", pci_addr, "-k"])
+                .output()
+            {
+                if output.status.success() {
+                    let info = String::from_utf8_lossy(&output.stdout);
+                    let mut controller = None;
+                    let mut subsystem = None;
+                    for line in info.lines() {
+                        let trimmed = line.trim();
+                        if line.contains("Network controller:") {
+                            controller = line.split("Network controller:").nth(1).map(|s| s.trim().to_string());
+                        } else if trimmed.starts_with("Subsystem:") {
+                            subsystem = trimmed.split("Subsystem:").nth(1).map(|s| s.trim().to_string());
+                        }
+                    }
+                    return (controller, subsystem);
+                }
+            }
+        }
+    }
+    (None, None)
+}
+
 pub fn get_wifi_info() -> Result<Vec<WiFiInfo>> {
     let mut wifi_devices = Vec::new();
     
@@ -1282,8 +1325,10 @@ pub fn get_wifi_info() -> Result<Vec<WiFiInfo>> {
         let interface = entry.file_name().to_string_lossy().to_string();
         
         // Check if it's a wireless interface
+        // Check /wireless (old) or /phy80211 (new)
         let wireless_path = format!("/sys/class/net/{}/wireless", interface);
-        if !Path::new(&wireless_path).exists() {
+        let phy_path = format!("/sys/class/net/{}/phy80211", interface);
+        if !Path::new(&wireless_path).exists() && !Path::new(&phy_path).exists() {
             continue;
         }
         
@@ -1299,22 +1344,29 @@ pub fn get_wifi_info() -> Result<Vec<WiFiInfo>> {
         };
         
         let (driver_version, firmware_version) = read_wifi_driver_info(&interface);
-
         let temperature = read_wifi_temperature(&interface);
         
-        // Read signal level from /proc/net/wireless
-        let signal_level = read_wifi_signal(&interface);
+        // Get PCI info (Network controller and Subsystem)
+        let (network_controller, subsystem) = get_pci_info(&interface);
         
-        // Read channel and rates from iwconfig or iw
-        let (ssid, channel, channel_width, data_rate) = get_wifi_details(&interface);
-        let (tx_rate, rx_rate, tx_bytes, rx_bytes) = match read_wifi_bytes(&interface) {
-            Some((tx_bytes, rx_bytes)) => {
-                let (tx_rate, rx_rate) = read_wifi_rates(&interface, tx_bytes, rx_bytes);
-                (tx_rate, rx_rate, Some(tx_bytes), Some(rx_bytes))
-            }
-            None => (None, None, None, None),
+        // Get all details from iw
+        let (ssid, channel, channel_width, tx_bitrate, rx_bitrate, iw_rx_bytes, iw_tx_bytes, iw_signal) = get_wifi_details(&interface);
+
+        // Signal level priority: iw > /proc/net/wireless
+        let signal_level = iw_signal.or_else(|| read_wifi_signal(&interface));
+
+        // RX/TX bytes priority: iw > /sys/class/net
+        let (final_tx_bytes, final_rx_bytes) = match (iw_tx_bytes, iw_rx_bytes) {
+            (Some(tx), Some(rx)) => (tx, rx),
+            _ => read_wifi_bytes(&interface).unwrap_or((0, 0)),
         };
+
+        // Calculate actual throughput
+        let (tx_rate, rx_rate) = read_wifi_rates(&interface, final_tx_bytes, final_rx_bytes);
         
+        log::info!("WiFi {} details: SSID={:?}, Signal={:?}, Channel={:?}, Rates={:?}/{:?}",
+                   interface, ssid, signal_level, channel, tx_rate, rx_rate);
+
         wifi_devices.push(WiFiInfo {
             interface,
             driver,
@@ -1327,9 +1379,12 @@ pub fn get_wifi_info() -> Result<Vec<WiFiInfo>> {
             tx_rate,
             rx_rate,
             ssid,
-            data_rate,
-            rx_bytes,
-            tx_bytes,
+            tx_bitrate,
+            rx_bitrate,
+            rx_bytes: Some(final_rx_bytes),
+            tx_bytes: Some(final_tx_bytes),
+            network_controller,
+            subsystem,
         });
     }
     
@@ -1340,15 +1395,28 @@ pub fn get_wifi_info() -> Result<Vec<WiFiInfo>> {
     Ok(wifi_devices)
 }
 
-fn get_wifi_details(interface: &str) -> (Option<String>, Option<u32>, Option<u32>, Option<f64>) {
+fn get_wifi_details(interface: &str) -> (
+    Option<String>,
+    Option<u32>,
+    Option<u32>,
+    Option<f64>,
+    Option<f64>,
+    Option<u64>,
+    Option<u64>,
+    Option<i32>
+) {
     let mut ssid = None;
     let mut channel = None;
     let mut width = None;
-    let mut data_rate = None;
-    let mut freq_mhz = None;
+    let mut tx_bitrate = None;
+    let mut rx_bitrate = None;
+    let mut rx_bytes = None;
+    let mut tx_bytes = None;
+    let mut signal = None;
 
     // Try to get connection info from iw dev <interface> link
-    if let Ok(output) = std::process::Command::new("iw")
+    let iw_cmd = find_binary("iw").unwrap_or_else(|| "iw".to_string());
+    if let Ok(output) = std::process::Command::new(&iw_cmd)
         .args(["dev", interface, "link"])
         .output()
     {
@@ -1358,34 +1426,30 @@ fn get_wifi_details(interface: &str) -> (Option<String>, Option<u32>, Option<u32
             
             for line in info.lines() {
                 let trimmed = line.trim();
+                let lower = trimmed.to_lowercase();
                 
-                // Parse SSID
-                if trimmed.starts_with("SSID:") {
-                    if let Some(ssid_value) = trimmed.strip_prefix("SSID:") {
-                        ssid = normalize_ssid(ssid_value.trim());
-                        log::debug!("Found SSID: {:?}", ssid);
-                    }
-                }
-                // Parse frequency
-                else if trimmed.starts_with("freq:") {
-                    if let Some(freq_str) = trimmed.split_whitespace().nth(1) {
-                        if let Ok(f) = freq_str.parse::<u32>() {
-                            freq_mhz = Some(f);
-                            log::debug!("Found frequency: {} MHz", f);
-                        }
-                    }
-                }
-                // Parse data rate
-                else if trimmed.starts_with("tx bitrate:") {
-                    data_rate = parse_wifi_rate(trimmed);
-                    log::debug!("Found data rate: {:?}", data_rate);
+                if let Some(pos) = lower.find("ssid:") {
+                    ssid = normalize_ssid(trimmed[pos + 5..].trim());
+                } else if lower.contains("rx bitrate:") {
+                    rx_bitrate = parse_wifi_rate(trimmed);
+                } else if lower.contains("tx bitrate:") {
+                    tx_bitrate = parse_wifi_rate(trimmed);
+                } else if let Some(pos) = lower.find("rx:") {
+                    let part = trimmed[pos + 3..].trim();
+                    rx_bytes = part.split_whitespace().next().and_then(|s| s.parse().ok());
+                } else if let Some(pos) = lower.find("tx:") {
+                    let part = trimmed[pos + 3..].trim();
+                    tx_bytes = part.split_whitespace().next().and_then(|s| s.parse().ok());
+                } else if let Some(pos) = lower.find("signal:") {
+                    let part = trimmed[pos + 7..].trim();
+                    signal = part.split_whitespace().next().and_then(|s| s.parse().ok());
                 }
             }
         }
     }
 
     // Get channel and width from iw dev <interface> info
-    if let Ok(output) = std::process::Command::new("iw")
+    if let Ok(output) = std::process::Command::new(&iw_cmd)
         .args(["dev", interface, "info"])
         .output()
     {
@@ -1402,7 +1466,6 @@ fn get_wifi_details(interface: &str) -> (Option<String>, Option<u32>, Option<u32
                     if let Some(ch_str) = parts.get(1) {
                         if let Ok(ch) = ch_str.parse::<u32>() {
                             channel = Some(ch);
-                            log::debug!("Found channel from info: {}", ch);
                         }
                     }
                     
@@ -1411,7 +1474,6 @@ fn get_wifi_details(interface: &str) -> (Option<String>, Option<u32>, Option<u32
                         if let Some(width_str) = trimmed[pos + 6..].split_whitespace().next() {
                             if let Ok(w) = width_str.parse::<u32>() {
                                 width = Some(w);
-                                log::debug!("Found channel width: {} MHz", w);
                             }
                         }
                     }
@@ -1420,56 +1482,48 @@ fn get_wifi_details(interface: &str) -> (Option<String>, Option<u32>, Option<u32
         }
     }
 
-    // If channel not found but we have frequency, calculate it
-    if channel.is_none() {
-        if let Some(f) = freq_mhz {
-            channel = channel_from_frequency_mhz(f);
-            log::debug!("Calculated channel from frequency: {:?}", channel);
-        }
-    }
-
     // Fallback: try iwgetid for SSID if not found
     if ssid.is_none() {
-        if let Ok(output) = std::process::Command::new("iwgetid")
-            .arg("-r")
-            .arg(interface)
-            .output()
-        {
-            if output.status.success() {
-                let value = String::from_utf8_lossy(&output.stdout);
-                ssid = normalize_ssid(&value);
-                log::debug!("Found SSID from iwgetid: {:?}", ssid);
+        if let Some(cmd) = find_binary("iwgetid") {
+            if let Ok(output) = std::process::Command::new(cmd)
+                .arg("-r")
+                .arg(interface)
+                .output()
+            {
+                if output.status.success() {
+                    let value = String::from_utf8_lossy(&output.stdout);
+                    ssid = normalize_ssid(&value);
+                }
             }
         }
     }
 
     // Last resort: try iwconfig for SSID
     if ssid.is_none() {
-        if let Ok(output) = std::process::Command::new("iwconfig")
-            .arg(interface)
-            .output()
-        {
-            if output.status.success() {
-                let info = String::from_utf8_lossy(&output.stdout);
-                for line in info.lines() {
-                    if let Some(pos) = line.find("ESSID:") {
-                        let value = line[pos + 6..].trim().trim_matches('"');
-                        ssid = normalize_ssid(value);
-                        log::debug!("Found SSID from iwconfig: {:?}", ssid);
-                        break;
+        if let Some(cmd) = find_binary("iwconfig") {
+            if let Ok(output) = std::process::Command::new(cmd)
+                .arg(interface)
+                .output()
+            {
+                if output.status.success() {
+                    let info = String::from_utf8_lossy(&output.stdout);
+                    for line in info.lines() {
+                        if let Some(pos) = line.find("ESSID:") {
+                            let value = line[pos + 6..].trim().trim_matches('"');
+                            ssid = normalize_ssid(value);
+                            break;
+                        }
                     }
                 }
             }
         }
     }
 
-    log::info!("WiFi details for {}: SSID={:?}, Channel={:?}, Width={:?}, Rate={:?}", 
-               interface, ssid, channel, width, data_rate);
-
-    (ssid, channel, width, data_rate)
+    (ssid, channel, width, tx_bitrate, rx_bitrate, rx_bytes, tx_bytes, signal)
 }
 
 fn read_wifi_temperature(interface: &str) -> Option<f32> {
+    // Try device-specific hwmon first
     let temp_path = format!("/sys/class/net/{}/device/hwmon", interface);
     if let Ok(hwmon_entries) = fs::read_dir(&temp_path) {
         for hwmon_entry in hwmon_entries.flatten() {
@@ -1481,14 +1535,50 @@ fn read_wifi_temperature(interface: &str) -> Option<f32> {
             }
         }
     }
+
+    // Fallback: search all hwmons for one associated with this device
+    let device_path = format!("/sys/class/net/{}/device", interface);
+    if let Ok(net_dev_path) = fs::canonicalize(&device_path) {
+        if let Ok(hwmon_dir) = fs::read_dir("/sys/class/hwmon") {
+            for entry in hwmon_dir.flatten() {
+                if let Ok(hwmon_dev_path) = fs::canonicalize(entry.path().join("device")) {
+                    if hwmon_dev_path == net_dev_path {
+                        if let Ok(temp_str) = fs::read_to_string(entry.path().join("temp1_input")) {
+                            if let Ok(temp_millidegrees) = temp_str.trim().parse::<i32>() {
+                                return Some(temp_millidegrees as f32 / 1000.0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback 2: thermal zones
+    if let Ok(thermal_dir) = fs::read_dir("/sys/class/thermal") {
+        for entry in thermal_dir.flatten() {
+            if let Ok(type_str) = fs::read_to_string(entry.path().join("type")) {
+                let type_lower = type_str.to_lowercase();
+                if type_lower.contains("wifi") || type_lower.contains("iwlwifi") {
+                    if let Ok(temp_str) = fs::read_to_string(entry.path().join("temp")) {
+                        if let Ok(temp_millidegrees) = temp_str.trim().parse::<i32>() {
+                            return Some(temp_millidegrees as f32 / 1000.0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     None
 }
 
 fn read_wifi_signal(interface: &str) -> Option<i32> {
     if let Ok(wireless) = fs::read_to_string("/proc/net/wireless") {
         for line in wireless.lines().skip(2) {
-            if line.contains(interface) {
-                let parts: Vec<&str> = line.split_whitespace().collect();
+            let trimmed = line.trim();
+            if trimmed.starts_with(interface) {
+                let parts: Vec<&str> = trimmed.split_whitespace().collect();
                 if parts.len() >= 4 {
                     if let Ok(signal) = parts[3].trim_end_matches('.').parse::<i32>() {
                         return Some(signal);
@@ -1518,7 +1608,8 @@ fn channel_from_frequency_mhz(freq: u32) -> Option<u32> {
     }
 }
 fn read_wifi_driver_info(interface: &str) -> (Option<String>, Option<String>) {
-    if let Ok(output) = std::process::Command::new("ethtool")
+    let ethtool_cmd = find_binary("ethtool").unwrap_or_else(|| "ethtool".to_string());
+    if let Ok(output) = std::process::Command::new(ethtool_cmd)
         .args(["-i", interface])
         .output()
     {
@@ -1529,10 +1620,15 @@ fn read_wifi_driver_info(interface: &str) -> (Option<String>, Option<String>) {
 
             for line in info.lines() {
                 let trimmed = line.trim();
-                if let Some(value) = trimmed.strip_prefix("version:") {
-                    driver_version = normalize_ssid(value);
-                } else if let Some(value) = trimmed.strip_prefix("firmware-version:") {
-                    firmware_version = normalize_ssid(value);
+                let parts: Vec<&str> = trimmed.splitn(2, ':').collect();
+                if parts.len() == 2 {
+                    let key = parts[0].trim().to_lowercase();
+                    let value = parts[1].trim();
+                    if key == "version" {
+                        driver_version = normalize_ssid(value);
+                    } else if key == "firmware-version" {
+                        firmware_version = normalize_ssid(value);
+                    }
                 }
             }
 
@@ -1553,7 +1649,9 @@ fn normalize_ssid(value: &str) -> Option<String> {
 }
 
 fn parse_wifi_rate(line: &str) -> Option<f64> {
-    let parts: Vec<&str> = line.split_whitespace().collect();
+    // Make sure there is a space after bitrate:
+    let sanitized = line.replace("bitrate:", "bitrate: ");
+    let parts: Vec<&str> = sanitized.split_whitespace().collect();
     let rate_index = parts.iter().position(|part| *part == "bitrate:");
     let value = rate_index
         .and_then(|idx| parts.get(idx + 1))
@@ -1794,4 +1892,50 @@ pub fn get_storage_device_info() -> Result<Vec<StorageDevice>> {
     }
 
     Ok(storage_devices)
+}
+
+#[cfg(test)]
+mod wifi_tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_wifi_rate() {
+        assert_eq!(parse_wifi_rate("rx bitrate: 1.1 MBit/s"), Some(1.1));
+        assert_eq!(parse_wifi_rate("tx bitrate: 2.2 MBit/s"), Some(2.2));
+        assert_eq!(parse_wifi_rate("tx bitrate:3.3 MBit/s"), Some(3.3));
+        assert_eq!(parse_wifi_rate("rx bitrate: 4.4 GBit/s"), Some(4400.0));
+    }
+
+    #[test]
+    fn test_normalize_ssid() {
+        assert_eq!(normalize_ssid(" \"Generic-SSID\" "), Some("Generic-SSID".to_string()));
+        assert_eq!(normalize_ssid(" Random SSID "), Some("Random SSID".to_string()));
+        assert_eq!(normalize_ssid(" off/any "), None);
+        assert_eq!(normalize_ssid(""), None);
+    }
+
+    #[test]
+    fn test_ethtool_parsing() {
+        let output = "driver: iwlwifi\nversion: 6.8.0-90-generic\nfirmware-version: 77.b405f9d4.0 cc-a0-77.ucode\nbus-info: 0000:02:00.0\nsupports-statistics: yes\nsupports-test: yes\nsupports-eeprom-access: no\nsupports-register-dump: yes\nsupports-priv-flags: no";
+
+        let mut driver_version = None;
+        let mut firmware_version = None;
+
+        for line in output.lines() {
+            let trimmed = line.trim();
+            let parts: Vec<&str> = trimmed.splitn(2, ':').collect();
+            if parts.len() == 2 {
+                let key = parts[0].trim().to_lowercase();
+                let value = parts[1].trim();
+                if key == "version" {
+                    driver_version = normalize_ssid(value);
+                } else if key == "firmware-version" {
+                    firmware_version = normalize_ssid(value);
+                }
+            }
+        }
+
+        assert_eq!(driver_version, Some("6.8.0-90-generic".to_string()));
+        assert_eq!(firmware_version, Some("77.b405f9d4.0 cc-a0-77.ucode".to_string()));
+    }
 }
