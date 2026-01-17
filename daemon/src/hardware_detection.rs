@@ -1373,13 +1373,8 @@ fn get_wifi_details(interface: &str) -> (Option<String>, Option<u32>, Option<u32
                 }
                 // Parse frequency
                 else if let Some(freq_str) = trimmed.strip_prefix("freq:") {
-                    if let Some(freq_value) = freq_str
-                        .trim()
-                        // iw reports decimal MHz (e.g., 2412.0); use integer MHz for channel lookup.
-                        .split('.')
-                        .next()
-                        .and_then(|value| value.parse::<u32>().ok())
-                    {
+                    if let Ok(freq_value) = freq_str.trim().parse::<f32>() {
+                        let freq_value = freq_value as u32;
                         freq_mhz = Some(freq_value);
                         log::debug!("Found frequency: {} MHz", freq_value);
                     }
@@ -1445,7 +1440,7 @@ fn get_wifi_details(interface: &str) -> (Option<String>, Option<u32>, Option<u32
         data_rate = tx_bitrate
             .zip(rx_bitrate)
             .map(|(tx, rx)| tx.max(rx))
-            // Prefer the larger bitrate when both are available; fall back to the one present.
+            // Use max of both rates if available, otherwise use whichever single rate is present.
             .or(tx_bitrate)
             .or(rx_bitrate);
     }
@@ -1592,12 +1587,16 @@ fn read_wifi_pci_info() -> (Option<String>, Option<String>) {
 
         if is_device_line {
             in_network_controller = false;
-            if let Some(value) = line.splitn(2, "Network controller:").nth(1) {
-                network_controller = normalize_non_empty(value);
-                in_network_controller = true;
-            } else if let Some(value) = line.splitn(2, "Wireless controller:").nth(1) {
-                network_controller = normalize_non_empty(value);
-                in_network_controller = true;
+            if line.contains("Network controller:") {
+                if let Some(value) = line.splitn(2, "Network controller:").nth(1) {
+                    network_controller = normalize_non_empty(value);
+                    in_network_controller = true;
+                }
+            } else if line.contains("Wireless controller:") {
+                if let Some(value) = line.splitn(2, "Wireless controller:").nth(1) {
+                    network_controller = normalize_non_empty(value);
+                    in_network_controller = true;
+                }
             }
         } else if in_network_controller {
             let trimmed = line.trim();

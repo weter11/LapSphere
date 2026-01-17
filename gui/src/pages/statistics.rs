@@ -19,9 +19,9 @@ const SIGNAL_MIN_DBM: f32 = -90.0;
 const SIGNAL_MAX_DBM: f32 = -30.0;
 const SIGNAL_GOOD_THRESHOLD: f32 = 0.7;
 const SIGNAL_WARN_THRESHOLD: f32 = 0.4;
-const SIGNAL_GOOD_COLOR: [u8; 3] = [100, 200, 120];
-const SIGNAL_WARN_COLOR: [u8; 3] = [255, 200, 60];
-const SIGNAL_BAD_COLOR: [u8; 3] = [255, 100, 80];
+const SIGNAL_GOOD_COLOR: Color32 = Color32::from_rgb(100, 200, 120);
+const SIGNAL_WARN_COLOR: Color32 = Color32::from_rgb(255, 200, 60);
+const SIGNAL_BAD_COLOR: Color32 = Color32::from_rgb(255, 100, 80);
 
 fn signal_strength_percent(signal: i32) -> f32 {
     ((signal as f32 - SIGNAL_MIN_DBM) / (SIGNAL_MAX_DBM - SIGNAL_MIN_DBM))
@@ -30,11 +30,11 @@ fn signal_strength_percent(signal: i32) -> f32 {
 
 fn signal_strength_color(signal_percent: f32) -> Color32 {
     if signal_percent > SIGNAL_GOOD_THRESHOLD {
-        Color32::from_rgb(SIGNAL_GOOD_COLOR[0], SIGNAL_GOOD_COLOR[1], SIGNAL_GOOD_COLOR[2])
+        SIGNAL_GOOD_COLOR
     } else if signal_percent > SIGNAL_WARN_THRESHOLD {
-        Color32::from_rgb(SIGNAL_WARN_COLOR[0], SIGNAL_WARN_COLOR[1], SIGNAL_WARN_COLOR[2])
+        SIGNAL_WARN_COLOR
     } else {
-        Color32::from_rgb(SIGNAL_BAD_COLOR[0], SIGNAL_BAD_COLOR[1], SIGNAL_BAD_COLOR[2])
+        SIGNAL_BAD_COLOR
     }
 }
 
