@@ -1374,7 +1374,7 @@ fn get_wifi_details(interface: &str) -> (Option<String>, Option<u32>, Option<u32
                 // Parse frequency
                 else if let Some(freq_str) = trimmed.strip_prefix("freq:") {
                     if let Ok(f) = freq_str.trim().parse::<f64>() {
-                        let freq_value = f.round() as u32;
+                        let freq_value = f as u32;
                         freq_mhz = Some(freq_value);
                         log::debug!("Found frequency: {} MHz", freq_value);
                     }
@@ -1407,8 +1407,7 @@ fn get_wifi_details(interface: &str) -> (Option<String>, Option<u32>, Option<u32
 
                     // Parse channel number
                     if let Some(ch_str) = parts.get(1) {
-                        let numeric = ch_str.trim_matches(|c: char| !c.is_ascii_digit());
-                        if let Ok(ch) = numeric.parse::<u32>() {
+                        if let Some(ch) = parse_leading_u32(ch_str) {
                             channel = Some(ch);
                             log::debug!("Found channel from info: {}", ch);
                         }
@@ -1418,8 +1417,7 @@ fn get_wifi_details(interface: &str) -> (Option<String>, Option<u32>, Option<u32
                 if width.is_none() {
                     if let Some(pos) = trimmed.find("width:") {
                         if let Some(width_str) = trimmed[pos + 6..].split_whitespace().next() {
-                            let numeric = width_str.trim_matches(|c: char| !c.is_ascii_digit());
-                            if let Ok(w) = numeric.parse::<u32>() {
+                            if let Some(w) = parse_leading_u32(width_str) {
                                 width = Some(w);
                                 log::debug!("Found channel width: {} MHz", w);
                             }
@@ -1439,7 +1437,12 @@ fn get_wifi_details(interface: &str) -> (Option<String>, Option<u32>, Option<u32
     }
 
     if data_rate.is_none() {
-        data_rate = tx_bitrate.or(rx_bitrate);
+        data_rate = match (tx_bitrate, rx_bitrate) {
+            (Some(tx), Some(rx)) => Some(tx.max(rx)),
+            (Some(tx), None) => Some(tx),
+            (None, Some(rx)) => Some(rx),
+            (None, None) => None,
+        };
     }
 
     // Fallback: try iwgetid for SSID if not found
@@ -1645,6 +1648,15 @@ fn normalize_pci_value(value: &str) -> Option<String> {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+fn parse_leading_u32(value: &str) -> Option<u32> {
+    let digits: String = value.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse::<u32>().ok()
     }
 }
 
