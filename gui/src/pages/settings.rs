@@ -501,6 +501,18 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
                 .spacing([40.0, 8.0])
                 .striped(true)
                 .show(ui, |ui| {
+                    if let Some(controller) = wifi.network_controller.as_deref() {
+                        ui.label("Network Controller:");
+                        ui.label(controller);
+                        ui.end_row();
+                    }
+
+                    if let Some(subsystem) = wifi.subsystem.as_deref() {
+                        ui.label("Subsystem:");
+                        ui.label(subsystem);
+                        ui.end_row();
+                    }
+
                     ui.label("Driver:");
                     ui.label(&wifi.driver);
                     ui.end_row();

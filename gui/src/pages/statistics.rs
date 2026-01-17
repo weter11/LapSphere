@@ -1,4 +1,5 @@
 use egui::{Ui, ScrollArea, CollapsingHeader, Grid, ProgressBar, RichText};
+use egui::Color32;
 use crate::app::AppState;
 use crate::theme::{temp_color, load_color, power_color};
 
@@ -484,7 +485,22 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
 
                             ui.label("Signal Level:");
                             if let Some(signal) = wifi.signal_level {
-                                ui.label(RichText::new(format!("{} dBm", signal)).monospace());
+                                ui.horizontal(|ui| {
+                                    let signal_percent = ((signal + 90) as f32 / 60.0).clamp(0.0, 1.0);
+
+                                    let color = if signal_percent > 0.7 {
+                                        Color32::from_rgb(100, 200, 120)
+                                    } else if signal_percent > 0.4 {
+                                        Color32::from_rgb(255, 200, 60)
+                                    } else {
+                                        Color32::from_rgb(255, 100, 80)
+                                    };
+
+                                    let progress_bar = ProgressBar::new(signal_percent)
+                                        .text(RichText::new(format!("{} dBm", signal)).color(Color32::BLACK))
+                                        .fill(color);
+                                    ui.add(progress_bar);
+                                });
                             } else {
                                 ui.label("—");
                             }
