@@ -547,12 +547,18 @@ pub fn set_energy_performance_preference(epp: &str) -> Result<()> {
 #[derive(Debug, Clone)]
 pub struct RgbKeyboardControl {
     base_path: String,
+    io: Option<std::sync::Arc<TuxedoIo>>,
 }
 
 impl RgbKeyboardControl {
     pub fn new() -> Result<Self> {
         let base_path = Self::find_keyboard_backlight_path()?;
-        Ok(Self { base_path })
+        let io = if TuxedoIo::is_available() {
+            TuxedoIo::new().ok().map(std::sync::Arc::new)
+        } else {
+            None
+        };
+        Ok(Self { base_path, io })
     }
     
     pub fn is_available() -> bool {
@@ -625,8 +631,42 @@ impl RgbKeyboardControl {
         Ok(percent)
     }
     
+    fn get_clevo_effect_value(&self, mode: &tuxedo_common::types::KeyboardMode) -> Option<u32> {
+        use tuxedo_common::types::KeyboardMode;
+        match mode {
+            KeyboardMode::SingleColor { .. } => Some(0x00000000),
+            KeyboardMode::Breathe { .. } => Some(0x1002a000),
+            KeyboardMode::Cycle { .. } => Some(0x33010000),
+            KeyboardMode::Dance { .. } => Some(0x80000000),
+            KeyboardMode::Flash { .. } => Some(0xA0000000),
+            KeyboardMode::RandomColor { .. } => Some(0x70000000),
+            KeyboardMode::Tempo { .. } => Some(0x90000000),
+            KeyboardMode::Wave { .. } => Some(0xB0000000),
+        }
+    }
+
     pub fn set_mode(&self, mode: &tuxedo_common::types::KeyboardMode) -> Result<()> {
         use tuxedo_common::types::KeyboardMode;
+        use crate::tuxedo_io::HardwareInterface;
+
+        // Try Clevo-specific ACPI keyboard effects via tuxedo-io if available
+        if let Some(io) = &self.io {
+            if io.get_interface() == HardwareInterface::Clevo {
+                if let Some(val) = self.get_clevo_effect_value(mode) {
+                    if let Err(e) = io.set_keyboard_effect(val) {
+                        log::warn!("Failed to set Clevo ACPI keyboard effect: {}. Falling back to sysfs.", e);
+                    } else {
+                        log::info!("Successfully set Clevo ACPI keyboard effect: {:#010x}", val);
+                        // For SingleColor (Custom), we still need to apply the specific color via sysfs.
+                        // For other modes, we trust the ACPI effect and return early.
+                        if !matches!(mode, KeyboardMode::SingleColor { .. }) {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+
         match mode {
             KeyboardMode::SingleColor { r, g, b, brightness } => {
                 self.set_color(*r, *g, *b)?;
