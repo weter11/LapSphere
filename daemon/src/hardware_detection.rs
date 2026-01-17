@@ -1608,7 +1608,8 @@ fn channel_from_frequency_mhz(freq: u32) -> Option<u32> {
     }
 }
 fn read_wifi_driver_info(interface: &str) -> (Option<String>, Option<String>) {
-    if let Ok(output) = std::process::Command::new("ethtool")
+    let ethtool_cmd = find_binary("ethtool").unwrap_or_else(|| "ethtool".to_string());
+    if let Ok(output) = std::process::Command::new(ethtool_cmd)
         .args(["-i", interface])
         .output()
     {
@@ -1619,10 +1620,15 @@ fn read_wifi_driver_info(interface: &str) -> (Option<String>, Option<String>) {
 
             for line in info.lines() {
                 let trimmed = line.trim();
-                if let Some(value) = trimmed.strip_prefix("version:") {
-                    driver_version = normalize_ssid(value);
-                } else if let Some(value) = trimmed.strip_prefix("firmware-version:") {
-                    firmware_version = normalize_ssid(value);
+                let parts: Vec<&str> = trimmed.splitn(2, ':').collect();
+                if parts.len() == 2 {
+                    let key = parts[0].trim().to_lowercase();
+                    let value = parts[1].trim();
+                    if key == "version" {
+                        driver_version = normalize_ssid(value);
+                    } else if key == "firmware-version" {
+                        firmware_version = normalize_ssid(value);
+                    }
                 }
             }
 
@@ -1906,5 +1912,30 @@ mod wifi_tests {
         assert_eq!(normalize_ssid(" Random SSID "), Some("Random SSID".to_string()));
         assert_eq!(normalize_ssid(" off/any "), None);
         assert_eq!(normalize_ssid(""), None);
+    }
+
+    #[test]
+    fn test_ethtool_parsing() {
+        let output = "driver: iwlwifi\nversion: 6.8.0-90-generic\nfirmware-version: 77.b405f9d4.0 cc-a0-77.ucode\nbus-info: 0000:02:00.0\nsupports-statistics: yes\nsupports-test: yes\nsupports-eeprom-access: no\nsupports-register-dump: yes\nsupports-priv-flags: no";
+
+        let mut driver_version = None;
+        let mut firmware_version = None;
+
+        for line in output.lines() {
+            let trimmed = line.trim();
+            let parts: Vec<&str> = trimmed.splitn(2, ':').collect();
+            if parts.len() == 2 {
+                let key = parts[0].trim().to_lowercase();
+                let value = parts[1].trim();
+                if key == "version" {
+                    driver_version = normalize_ssid(value);
+                } else if key == "firmware-version" {
+                    firmware_version = normalize_ssid(value);
+                }
+            }
+        }
+
+        assert_eq!(driver_version, Some("6.8.0-90-generic".to_string()));
+        assert_eq!(firmware_version, Some("77.b405f9d4.0 cc-a0-77.ucode".to_string()));
     }
 }

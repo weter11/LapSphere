@@ -537,26 +537,6 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
                     }
                     ui.end_row();
 
-                    ui.label("Channel:");
-                    if let Some(channel) = wifi.channel {
-                        ui.horizontal(|ui| {
-                            ui.label(channel.to_string());
-                            if let Some(width) = wifi.channel_width {
-                                ui.label(RichText::new(format!("({} MHz)", width)).small());
-                            }
-                        });
-                    } else {
-                        ui.label(RichText::new("—").weak());
-                    }
-                    ui.end_row();
-
-                    ui.label("Temperature:");
-                    if let Some(temp) = wifi.temperature {
-                        ui.label(format!("{:.1}°C", temp));
-                    } else {
-                        ui.label(RichText::new("—").weak());
-                    }
-                    ui.end_row();
                 });
 
             if idx + 1 < state.wifi_info.len() {
