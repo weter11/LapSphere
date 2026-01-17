@@ -17,10 +17,25 @@ pub const STATISTICS_SECTIONS: [(&str, &str); 8] = [
 const WIFI_NOT_CONNECTED: &str = "Not connected";
 const SIGNAL_MIN_DBM: f32 = -90.0;
 const SIGNAL_MAX_DBM: f32 = -30.0;
+const SIGNAL_GOOD_THRESHOLD: f32 = 0.7;
+const SIGNAL_WARN_THRESHOLD: f32 = 0.4;
+const SIGNAL_GOOD_COLOR: [u8; 3] = [100, 200, 120];
+const SIGNAL_WARN_COLOR: [u8; 3] = [255, 200, 60];
+const SIGNAL_BAD_COLOR: [u8; 3] = [255, 100, 80];
 
 fn signal_strength_percent(signal: i32) -> f32 {
     ((signal as f32 - SIGNAL_MIN_DBM) / (SIGNAL_MAX_DBM - SIGNAL_MIN_DBM))
         .clamp(0.0, 1.0)
+}
+
+fn signal_strength_color(signal_percent: f32) -> Color32 {
+    if signal_percent > SIGNAL_GOOD_THRESHOLD {
+        Color32::from_rgb(SIGNAL_GOOD_COLOR[0], SIGNAL_GOOD_COLOR[1], SIGNAL_GOOD_COLOR[2])
+    } else if signal_percent > SIGNAL_WARN_THRESHOLD {
+        Color32::from_rgb(SIGNAL_WARN_COLOR[0], SIGNAL_WARN_COLOR[1], SIGNAL_WARN_COLOR[2])
+    } else {
+        Color32::from_rgb(SIGNAL_BAD_COLOR[0], SIGNAL_BAD_COLOR[1], SIGNAL_BAD_COLOR[2])
+    }
 }
 
 pub fn normalize_section_order(order: &[String]) -> Vec<String> {
@@ -495,13 +510,7 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
                                 ui.horizontal(|ui| {
                                     let signal_percent = signal_strength_percent(signal);
 
-                                    let color = if signal_percent > 0.7 {
-                                        Color32::from_rgb(100, 200, 120)
-                                    } else if signal_percent > 0.4 {
-                                        Color32::from_rgb(255, 200, 60)
-                                    } else {
-                                        Color32::from_rgb(255, 100, 80)
-                                    };
+                                    let color = signal_strength_color(signal_percent);
 
                                     let progress_bar = ProgressBar::new(signal_percent)
                                         .text(RichText::new(format!("{} dBm", signal)).color(Color32::BLACK))
