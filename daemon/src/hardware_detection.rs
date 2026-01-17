@@ -1373,8 +1373,12 @@ fn get_wifi_details(interface: &str) -> (Option<String>, Option<u32>, Option<u32
                 }
                 // Parse frequency
                 else if let Some(freq_str) = trimmed.strip_prefix("freq:") {
-                    if let Ok(f) = freq_str.trim().parse::<f64>() {
-                        let freq_value = f as u32;
+                    if let Some(freq_value) = freq_str
+                        .trim()
+                        .split('.')
+                        .next()
+                        .and_then(|value| value.parse::<u32>().ok())
+                    {
                         freq_mhz = Some(freq_value);
                         log::debug!("Found frequency: {} MHz", freq_value);
                     }
@@ -1437,12 +1441,11 @@ fn get_wifi_details(interface: &str) -> (Option<String>, Option<u32>, Option<u32
     }
 
     if data_rate.is_none() {
-        data_rate = match (tx_bitrate, rx_bitrate) {
-            (Some(tx), Some(rx)) => Some(tx.max(rx)),
-            (Some(tx), None) => Some(tx),
-            (None, Some(rx)) => Some(rx),
-            (None, None) => None,
-        };
+        data_rate = tx_bitrate
+            .zip(rx_bitrate)
+            .map(|(tx, rx)| tx.max(rx))
+            .or(tx_bitrate)
+            .or(rx_bitrate);
     }
 
     // Fallback: try iwgetid for SSID if not found
