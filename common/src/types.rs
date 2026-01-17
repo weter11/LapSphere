@@ -121,6 +121,8 @@ pub struct FanInfo {
 pub struct WiFiInfo {
     pub interface: String,
     pub driver: String,
+    pub network_controller: Option<String>,
+    pub subsystem: Option<String>,
     pub driver_version: Option<String>,
     pub firmware_version: Option<String>,
     pub temperature: Option<f32>,

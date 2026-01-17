@@ -15,6 +15,28 @@ pub const STATISTICS_SECTIONS: [(&str, &str); 8] = [
 ];
 
 const WIFI_NOT_CONNECTED: &str = "Not connected";
+const SIGNAL_MIN_DBM: f32 = -90.0;
+const SIGNAL_MAX_DBM: f32 = -30.0;
+const SIGNAL_GOOD_THRESHOLD: f32 = 0.7;
+const SIGNAL_WARN_THRESHOLD: f32 = 0.4;
+const SIGNAL_GOOD_COLOR: Color32 = Color32::from_rgb(100, 200, 120);
+const SIGNAL_WARN_COLOR: Color32 = Color32::from_rgb(255, 200, 60);
+const SIGNAL_BAD_COLOR: Color32 = Color32::from_rgb(255, 100, 80);
+
+fn signal_strength_percent(signal: i32) -> f32 {
+    ((signal as f32 - SIGNAL_MIN_DBM) / (SIGNAL_MAX_DBM - SIGNAL_MIN_DBM))
+        .clamp(0.0, 1.0)
+}
+
+fn signal_strength_color(signal_percent: f32) -> Color32 {
+    if signal_percent > SIGNAL_GOOD_THRESHOLD {
+        SIGNAL_GOOD_COLOR
+    } else if signal_percent > SIGNAL_WARN_THRESHOLD {
+        SIGNAL_WARN_COLOR
+    } else {
+        SIGNAL_BAD_COLOR
+    }
+}
 
 pub fn normalize_section_order(order: &[String]) -> Vec<String> {
     let mut normalized = Vec::new();
@@ -469,13 +491,12 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
             if !state.wifi_info.is_empty() {
                 for wifi in &state.wifi_info {
                     ui.label(RichText::new(format!("Interface: {}", wifi.interface)).strong());
-                    
+
                     Grid::new(format!("wifi_grid_{}", wifi.interface))
                         .num_columns(2)
                         .spacing([40.0, 6.0])
                         .striped(true)
                         .show(ui, |ui| {
-                            // SSID - show connection status
                             ui.label("SSID:");
                             if let Some(ref ssid) = wifi.ssid {
                                 ui.label(RichText::new(ssid).strong());
@@ -484,114 +505,80 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
                             }
                             ui.end_row();
 
-                            ui.label("Driver:");
-                            ui.label(&wifi.driver);
+                            ui.label("Signal Level:");
+                            if let Some(signal) = wifi.signal_level {
+                                ui.horizontal(|ui| {
+                                    let signal_percent = signal_strength_percent(signal);
+
+                                    let color = signal_strength_color(signal_percent);
+
+                                    let progress_bar = ProgressBar::new(signal_percent)
+                                        .text(RichText::new(format!("{} dBm", signal)).color(Color32::BLACK))
+                                        .fill(color);
+                                    ui.add(progress_bar);
+                                });
+                            } else {
+                                ui.label("—");
+                            }
                             ui.end_row();
-                            
-                            // Driver version
-                            if let Some(ref version) = wifi.driver_version {
-                                ui.label("Driver Version:");
-                                ui.label(version);
-                                ui.end_row();
-                            }
-                            
-                            // Firmware version
-                            if let Some(ref version) = wifi.firmware_version {
-                                ui.label("Firmware:");
-                                ui.label(version);
-                                ui.end_row();
-                            }
-                            
-                            // Signal level - only show when connected
-                            if wifi.ssid.is_some() {
-                                if let Some(signal) = wifi.signal_level {
-                                    ui.label("Signal Level:");
-                                    ui.horizontal(|ui| {
-                                        let signal_percent = ((signal + 90) as f32 / 60.0).clamp(0.0, 1.0);
-                                        
-                                        let color = if signal_percent > 0.7 {
-                                            Color32::from_rgb(100, 200, 120)
-                                        } else if signal_percent > 0.4 {
-                                            Color32::from_rgb(255, 200, 60)
-                                        } else {
-                                            Color32::from_rgb(255, 100, 80)
-                                        };
-                                        
-                                        let progress_bar = ProgressBar::new(signal_percent)
-                                            .text(RichText::new(format!("{} dBm", signal)).color(Color32::BLACK))
-                                            .fill(color);
-                                        ui.add(progress_bar);
-                                    });
-                                    ui.end_row();
-                                }
-                            }
-                            
-                            // Channel - only show when connected
-                            if wifi.ssid.is_some() {
-                                if let Some(channel) = wifi.channel {
-                                    ui.label("Channel:");
-                                    ui.horizontal(|ui| {
-                                        ui.label(format!("{}", channel));
-                                        
-                                        if let Some(width) = wifi.channel_width {
-                                            ui.label(RichText::new(format!("({} MHz)", width))
-                                                .small()
-                                                .italics());
-                                        }
-                                    });
-                                    ui.end_row();
-                                }
-                            }
 
-                            // Link speed (data rate)
-                            if let Some(data_rate) = wifi.data_rate {
-                                ui.label("Link Speed:");
-                                ui.label(RichText::new(format!("{:.1} Mbps", data_rate))
-                                    .monospace());
-                                ui.end_row();
-                            }
-                            
-                            // TX/RX rates - only show when connected and data is available
-                            if wifi.ssid.is_some() {
-                                if let Some(tx_rate) = wifi.tx_rate {
-                                    ui.label("TX Speed:");
-                                    ui.label(RichText::new(format!("{:.1} Mbps", tx_rate))
-                                        .monospace());
-                                    ui.end_row();
-                                }
-                                
-                                if let Some(rx_rate) = wifi.rx_rate {
-                                    ui.label("RX Speed:");
-                                    ui.label(RichText::new(format!("{:.1} Mbps", rx_rate))
-                                        .monospace());
-                                    ui.end_row();
-                                }
-                            }
-
-                            // Data transferred
+                            ui.label("Received Data:");
                             if let Some(rx_bytes) = wifi.rx_bytes {
-                                ui.label("Data Received:");
                                 ui.label(RichText::new(format_bytes(rx_bytes)).monospace());
-                                ui.end_row();
+                            } else {
+                                ui.label("—");
                             }
+                            ui.end_row();
 
+                            ui.label("Sent Data:");
                             if let Some(tx_bytes) = wifi.tx_bytes {
-                                ui.label("Data Sent:");
                                 ui.label(RichText::new(format_bytes(tx_bytes)).monospace());
-                                ui.end_row();
+                            } else {
+                                ui.label("—");
                             }
-                            
-                            // Temperature - show regardless of connection status
-                            if let Some(temp) = wifi.temperature {
-                                ui.label("Temperature:");
-                                ui.colored_label(
-                                    temp_color(temp),
-                                    RichText::new(format!("{:.1}°C", temp)).monospace()
-                                );
-                                ui.end_row();
+                            ui.end_row();
+
+                            ui.label("Channel:");
+                            if let Some(channel) = wifi.channel {
+                                ui.label(channel.to_string());
+                            } else {
+                                ui.label("—");
                             }
+                            ui.end_row();
+
+                            ui.label("Channel Width:");
+                            if let Some(width) = wifi.channel_width {
+                                ui.label(format!("{} MHz", width));
+                            } else {
+                                ui.label("—");
+                            }
+                            ui.end_row();
+
+                            ui.label("PHY Rate:");
+                            if let Some(data_rate) = wifi.data_rate {
+                                ui.label(RichText::new(format!("{:.1} Mbps", data_rate)).monospace());
+                            } else {
+                                ui.label("—");
+                            }
+                            ui.end_row();
+
+                            ui.label("Actual Throughput:");
+                            let actual_throughput = match (wifi.tx_rate, wifi.rx_rate) {
+                                (Some(tx_rate), Some(rx_rate)) => {
+                                    Some(format!("TX {:.1} Mbps / RX {:.1} Mbps", tx_rate, rx_rate))
+                                }
+                                (Some(tx_rate), None) => Some(format!("TX {:.1} Mbps", tx_rate)),
+                                (None, Some(rx_rate)) => Some(format!("RX {:.1} Mbps", rx_rate)),
+                                (None, None) => None,
+                            };
+                            if let Some(rate) = actual_throughput.as_ref() {
+                                ui.label(RichText::new(rate).monospace());
+                            } else {
+                                ui.label("—");
+                            }
+                            ui.end_row();
                         });
-                    
+
                     ui.add_space(8.0);
                 }
             } else {
