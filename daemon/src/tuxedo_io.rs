@@ -26,6 +26,7 @@ const MAGIC_WRITE_UW: u8 = IOCTL_MAGIC + 4;
 // nix::ioctl_write_ptr!(ioctl_cl_fanspeed, MAGIC_WRITE_CL, 0x10, i32);
 // nix::ioctl_write_ptr!(ioctl_cl_fanauto, MAGIC_WRITE_CL, 0x11, i32);
 // nix::ioctl_write_ptr!(ioctl_cl_webcam_sw_w, MAGIC_WRITE_CL, 0x12, i32);
+// nix::ioctl_write_ptr!(ioctl_cl_kb_leds, MAGIC_WRITE_CL, 0x67, i32);
 // nix::ioctl_write_ptr!(ioctl_cl_perf_profile, MAGIC_WRITE_CL, 0x15, i32);
 
 // Uniwill read ioctls
@@ -64,6 +65,15 @@ pub struct TuxedoIo {
     device: std::fs::File,
     interface: HardwareInterface,
     fan_count: u32,
+}
+
+impl std::fmt::Debug for TuxedoIo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TuxedoIo")
+            .field("interface", &self.interface)
+            .field("fan_count", &self.fan_count)
+            .finish()
+    }
 }
 
 impl TuxedoIo {
@@ -582,5 +592,17 @@ impl TuxedoIo {
         
         let request = Self::iow(MAGIC_WRITE_CL, 0x12, Self::PTR_SIZE);
         Self::ioctl_write_i32(fd, request, value)
+    }
+
+    pub fn set_keyboard_effect(&self, effect_value: u32) -> Result<()> {
+        if self.interface != HardwareInterface::Clevo {
+            return Err(anyhow!("Keyboard effects only available on Clevo interface"));
+        }
+
+        let fd = self.device.as_raw_fd();
+        let request = Self::iow(MAGIC_WRITE_CL, 0x67, Self::PTR_SIZE);
+
+        log::debug!("Setting Clevo keyboard effect to {:#010x}", effect_value);
+        Self::ioctl_write_i32(fd, request, effect_value as i32)
     }
 }
