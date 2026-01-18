@@ -76,6 +76,7 @@ impl TuxedoIo {
     const _IOC_NONE: u64 = 0;
     const _IOC_WRITE: u64 = 1;
     const _IOC_READ: u64 = 2;
+    const _IOC_RW: u64 = 3;
     
     // For 64-bit systems, use 8-byte size for pointer types
     const PTR_SIZE: u64 = 8;
@@ -86,6 +87,10 @@ impl TuxedoIo {
     
     fn iow(type_: u8, nr: u8, size: u64) -> libc::c_ulong {
         ((Self::_IOC_WRITE << 30) | (size << 16) | ((type_ as u64) << 8) | (nr as u64)) as libc::c_ulong
+    }
+
+    fn iowr(type_: u8, nr: u8, size: u64) -> libc::c_ulong {
+        ((Self::_IOC_RW << 30) | (size << 16) | ((type_ as u64) << 8) | (nr as u64)) as libc::c_ulong
     }
     
     fn io(type_: u8, nr: u8) -> libc::c_ulong {
@@ -202,20 +207,21 @@ impl TuxedoIo {
                 let mut count = 0;
                 for fan_id in 0..3u32 {
                     let seq = 0x10 + fan_id as u8;
-                    let request = Self::ior(MAGIC_READ_CL, seq, Self::PTR_SIZE);
+                    // Try iowr for fans as it's common for Clevo
+                    let request = Self::iowr(MAGIC_READ_CL, seq, Self::PTR_SIZE);
                     
                     if let Ok(raw) = Self::ioctl_read_i32(fd, request) {
                         // Use temp2 field (bits 16-23) to check if fan exists
                         let temp2 = ((raw >> 16) & 0xFF) as u32;
-                        if temp2 <= 1 {
-                            break;
+                        // Some systems might not have sensors but fan still exists
+                        // or vice-versa. We'll be more inclusive here.
+                        if temp2 > 0 {
+                            count = fan_id + 1;
                         }
-                        count += 1;
-                    } else {
-                        break;
                     }
                 }
-                Ok(count)
+                // If we didn't find any fans via sensors, assume at least 1 or 2 if Clevo
+                Ok(count.max(1))
             }
 
             HardwareInterface::Uniwill => {
@@ -242,7 +248,7 @@ impl TuxedoIo {
                 }
                 
                 let seq = 0x10 + fan_id as u8;
-                let request = Self::ior(MAGIC_READ_CL, seq, Self::PTR_SIZE);
+                let request = Self::iowr(MAGIC_READ_CL, seq, Self::PTR_SIZE);
                 let raw = Self::ioctl_read_i32(fd, request)?;
 
                 Ok(Self::clevo_raw_to_percent((raw & 0xFF) as u8))
@@ -273,14 +279,14 @@ impl TuxedoIo {
                 // Step 1: Disable auto mode (critical for Clevo!)
                 log::debug!("Disabling Clevo auto mode for manual fan control");
                 let manual_val: i32 = 0;
-                let auto_request = Self::iow(MAGIC_WRITE_CL, 0x11, Self::PTR_SIZE);
+                let auto_request = Self::iowr(MAGIC_WRITE_CL, 0x11, Self::PTR_SIZE);
                 Self::ioctl_write_i32(fd, auto_request, manual_val)?;
                 
                 // Step 2: Read current speeds for all fans
                 let mut current_raw = [0u8; 3];
-                for i in 0..self.fan_count.min(3) {
+                for i in 0..3 {
                     let seq = 0x10 + i as u8;
-                    let request = Self::ior(MAGIC_READ_CL, seq, Self::PTR_SIZE);
+                    let request = Self::iowr(MAGIC_READ_CL, seq, Self::PTR_SIZE);
                     
                     if let Ok(raw) = Self::ioctl_read_i32(fd, request) {
                         current_raw[i as usize] = (raw & 0xFF) as u8;
@@ -304,7 +310,7 @@ impl TuxedoIo {
                 );
 
                 // Step 5: Write the packed value
-                let speed_request = Self::iow(MAGIC_WRITE_CL, 0x10, Self::PTR_SIZE);
+                let speed_request = Self::iowr(MAGIC_WRITE_CL, 0x10, Self::PTR_SIZE);
                 Self::ioctl_write_i32(fd, speed_request, packed)?;
 
                 log::info!("Successfully set Clevo fan {} to {}%", fan_id, speed_percent);
@@ -340,7 +346,7 @@ impl TuxedoIo {
                 let auto_val: i32 = 0xF;
                 log::debug!("Setting Clevo fans to auto mode");
                 
-                let request = Self::iow(MAGIC_WRITE_CL, 0x11, Self::PTR_SIZE);
+                let request = Self::iowr(MAGIC_WRITE_CL, 0x11, Self::PTR_SIZE);
                 Self::ioctl_write_i32(fd, request, auto_val)?;
                 
                 log::info!("Successfully set Clevo fans to auto mode");
@@ -372,7 +378,7 @@ impl TuxedoIo {
                 }
                 
                 let seq = 0x10 + fan_id as u8;
-                let request = Self::ior(MAGIC_READ_CL, seq, Self::PTR_SIZE);
+                let request = Self::iowr(MAGIC_READ_CL, seq, Self::PTR_SIZE);
                 let raw = Self::ioctl_read_i32(fd, request)?;
 
                 // Use temp2 field (bits 16-23) - more reliable on Clevo
@@ -592,7 +598,7 @@ impl TuxedoIo {
         }
 
         let fd = self.device.as_raw_fd();
-        let request = Self::iow(MAGIC_WRITE_CL, seq, Self::PTR_SIZE);
+        let request = Self::iowr(MAGIC_WRITE_CL, seq, Self::PTR_SIZE);
 
         log::debug!("Clevo ioctl: seq=0x{:02X}, arg=0x{:08X}, request=0x{:08X}", seq, arg, request);
         Self::ioctl_write_i32(fd, request, arg as i32)

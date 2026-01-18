@@ -611,11 +611,9 @@ pub fn get_fan_speeds() -> Result<Vec<(u32, u32)>> {
     for fan_id in 0..io.get_fan_count() {
         match io.get_fan_speed(fan_id) {
             Ok(speed) => {
-                if speed > 0 {
-                    fans.push((fan_id, speed));
-                }
+                fans.push((fan_id, speed));
             }
-            Err(_) => break,
+            Err(_) => continue,
         }
     }
     
@@ -637,7 +635,7 @@ pub fn get_fan_temperatures() -> Result<Vec<(u32, u32)>> {
                     temps.push((fan_id, temp));
                 }
             }
-            Err(_) => break,
+            Err(_) => continue,
         }
     }
     
