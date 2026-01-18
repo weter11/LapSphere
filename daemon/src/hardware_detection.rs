@@ -1731,6 +1731,23 @@ pub fn get_battery_info() -> Result<BatteryInfo> {
     })
 }
 
+pub fn get_keyboard_type() -> Result<Option<u32>> {
+    if !TuxedoIo::is_available() {
+        return Ok(None);
+    }
+
+    match TuxedoIo::new() {
+        Ok(io) => {
+            if io.get_interface() == crate::tuxedo_io::HardwareInterface::Clevo {
+                Ok(io.get_clevo_keyboard_type().ok())
+            } else {
+                Ok(None)
+            }
+        }
+        Err(_) => Ok(None),
+    }
+}
+
 pub fn get_mount_info() -> Result<Vec<MountInfo>> {
     let sys = System::new();
     let mut mounts_info = Vec::new();

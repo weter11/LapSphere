@@ -285,7 +285,17 @@ async fn set_tdp_profile(&self, profile: &str) -> Result<(), zbus::fdo::Error> {
                     crate::tuxedo_io::HardwareInterface::None => "None",
                 };
                 let fan_count = io.get_fan_count();
-                Ok(format!("Interface: {}, Fans: {}", interface, fan_count))
+                let kbd_type = if io.get_interface() == crate::tuxedo_io::HardwareInterface::Clevo {
+                    io.get_clevo_keyboard_type().ok()
+                } else {
+                    None
+                };
+
+                let mut info = format!("Interface: {}, Fans: {}", interface, fan_count);
+                if let Some(t) = kbd_type {
+                    info.push_str(&format!(", KbdType: 0x{:02X}", t));
+                }
+                Ok(info)
             }
             Err(e) => Err(zbus::fdo::Error::Failed(e.to_string())),
         }

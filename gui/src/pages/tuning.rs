@@ -713,10 +713,26 @@ fn detect_keyboard_capabilities(hardware_interface: Option<&str>) -> KeyboardCap
     // If we have Clevo hardware detected by the daemon, we know it supports color and effects
     if let Some(interface) = hardware_interface {
         if interface.contains("Clevo") {
-            return KeyboardCapabilities {
+            let mut caps = KeyboardCapabilities {
                 supports_color: true,
                 supports_effects: true,
             };
+
+            // Refine based on detected keyboard type if present
+            if let Some(pos) = interface.find("KbdType: 0x") {
+                if let Ok(kbd_type) = u32::from_str_radix(&interface[pos + 12..pos + 14], 16) {
+                    match kbd_type {
+                        0x02 | 0x04 => {
+                            // Single color / White only
+                            caps.supports_color = false;
+                            caps.supports_effects = true; // Still might support effects like breathe
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            return caps;
         }
     }
 
