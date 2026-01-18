@@ -627,6 +627,15 @@ impl RgbKeyboardControl {
     
     pub fn set_mode(&self, mode: &tuxedo_common::types::KeyboardMode) -> Result<()> {
         use tuxedo_common::types::KeyboardMode;
+        
+        // Try to use TuxedoIo for hardware-level control first
+        if TuxedoIo::is_available() {
+            if let Ok(io) = TuxedoIo::new() {
+                return self.set_mode_via_tuxedo_io(&io, mode);
+            }
+        }
+        
+        // Fallback to sysfs-based control
         match mode {
             KeyboardMode::SingleColor { r, g, b, brightness } => {
                 self.set_color(*r, *g, *b)?;
@@ -675,6 +684,143 @@ impl RgbKeyboardControl {
                 self.write_effect_speed(*speed)?;
                 self.set_brightness(*brightness)?;
                 log::info!("Set tempo mode with speed {}", speed);
+            }
+        }
+        Ok(())
+    }
+    
+    fn set_mode_via_tuxedo_io(&self, io: &TuxedoIo, mode: &tuxedo_common::types::KeyboardMode) -> Result<()> {
+        use tuxedo_common::types::KeyboardMode;
+        use crate::tuxedo_io::{ClevoKeyboardMode, UniwillKeyboardMode, HardwareInterface};
+        
+        let interface = io.get_interface();
+        
+        match mode {
+            KeyboardMode::SingleColor { r, g, b, brightness } => {
+                match interface {
+                    HardwareInterface::Clevo => {
+                        io.set_clevo_keyboard_color(*r, *g, *b)?;
+                        io.set_clevo_keyboard_brightness(*brightness, false)?;
+                        io.set_clevo_keyboard_mode(ClevoKeyboardMode::Custom)?;
+                    }
+                    HardwareInterface::Uniwill => {
+                        io.set_uniwill_keyboard_color(*r, *g, *b)?;
+                        io.set_uniwill_keyboard_brightness(*brightness, false)?;
+                        io.set_uniwill_keyboard_mode(UniwillKeyboardMode::Custom)?;
+                    }
+                    HardwareInterface::None => {
+                        return Err(anyhow!("No hardware interface available"));
+                    }
+                }
+            }
+            KeyboardMode::Breathe { r, g, b, brightness, speed: _ } => {
+                match interface {
+                    HardwareInterface::Clevo => {
+                        io.set_clevo_keyboard_color(*r, *g, *b)?;
+                        io.set_clevo_keyboard_brightness(*brightness, false)?;
+                        io.set_clevo_keyboard_mode(ClevoKeyboardMode::Breathe)?;
+                    }
+                    HardwareInterface::Uniwill => {
+                        io.set_uniwill_keyboard_color(*r, *g, *b)?;
+                        io.set_uniwill_keyboard_brightness(*brightness, false)?;
+                        io.set_uniwill_keyboard_mode(UniwillKeyboardMode::Breathe)?;
+                    }
+                    HardwareInterface::None => {
+                        return Err(anyhow!("No hardware interface available"));
+                    }
+                }
+            }
+            KeyboardMode::Cycle { brightness, speed: _ } => {
+                match interface {
+                    HardwareInterface::Clevo => {
+                        io.set_clevo_keyboard_brightness(*brightness, false)?;
+                        io.set_clevo_keyboard_mode(ClevoKeyboardMode::Cycle)?;
+                    }
+                    HardwareInterface::Uniwill => {
+                        io.set_uniwill_keyboard_brightness(*brightness, false)?;
+                        io.set_uniwill_keyboard_mode(UniwillKeyboardMode::Cycle)?;
+                    }
+                    HardwareInterface::None => {
+                        return Err(anyhow!("No hardware interface available"));
+                    }
+                }
+            }
+            KeyboardMode::Dance { brightness, speed: _ } => {
+                match interface {
+                    HardwareInterface::Clevo => {
+                        io.set_clevo_keyboard_brightness(*brightness, false)?;
+                        io.set_clevo_keyboard_mode(ClevoKeyboardMode::Dance)?;
+                    }
+                    HardwareInterface::Uniwill => {
+                        io.set_uniwill_keyboard_brightness(*brightness, false)?;
+                        io.set_uniwill_keyboard_mode(UniwillKeyboardMode::Dance)?;
+                    }
+                    HardwareInterface::None => {
+                        return Err(anyhow!("No hardware interface available"));
+                    }
+                }
+            }
+            KeyboardMode::Flash { r, g, b, brightness, speed: _ } => {
+                match interface {
+                    HardwareInterface::Clevo => {
+                        io.set_clevo_keyboard_color(*r, *g, *b)?;
+                        io.set_clevo_keyboard_brightness(*brightness, false)?;
+                        io.set_clevo_keyboard_mode(ClevoKeyboardMode::Flash)?;
+                    }
+                    HardwareInterface::Uniwill => {
+                        io.set_uniwill_keyboard_color(*r, *g, *b)?;
+                        io.set_uniwill_keyboard_brightness(*brightness, false)?;
+                        io.set_uniwill_keyboard_mode(UniwillKeyboardMode::Flash)?;
+                    }
+                    HardwareInterface::None => {
+                        return Err(anyhow!("No hardware interface available"));
+                    }
+                }
+            }
+            KeyboardMode::RandomColor { brightness, speed: _ } => {
+                match interface {
+                    HardwareInterface::Clevo => {
+                        io.set_clevo_keyboard_brightness(*brightness, false)?;
+                        io.set_clevo_keyboard_mode(ClevoKeyboardMode::Random)?;
+                    }
+                    HardwareInterface::Uniwill => {
+                        io.set_uniwill_keyboard_brightness(*brightness, false)?;
+                        io.set_uniwill_keyboard_mode(UniwillKeyboardMode::Random)?;
+                    }
+                    HardwareInterface::None => {
+                        return Err(anyhow!("No hardware interface available"));
+                    }
+                }
+            }
+            KeyboardMode::Tempo { brightness, speed: _ } => {
+                match interface {
+                    HardwareInterface::Clevo => {
+                        io.set_clevo_keyboard_brightness(*brightness, false)?;
+                        io.set_clevo_keyboard_mode(ClevoKeyboardMode::Tempo)?;
+                    }
+                    HardwareInterface::Uniwill => {
+                        io.set_uniwill_keyboard_brightness(*brightness, false)?;
+                        io.set_uniwill_keyboard_mode(UniwillKeyboardMode::Tempo)?;
+                    }
+                    HardwareInterface::None => {
+                        return Err(anyhow!("No hardware interface available"));
+                    }
+                }
+            }
+            KeyboardMode::Wave { brightness, speed: _ } => {
+                match interface {
+                    HardwareInterface::Clevo => {
+                        io.set_clevo_keyboard_brightness(*brightness, false)?;
+                        io.set_clevo_keyboard_mode(ClevoKeyboardMode::Wave)?;
+                    }
+                    HardwareInterface::Uniwill => {
+                        io.set_uniwill_keyboard_brightness(*brightness, false)?;
+                        io.set_uniwill_keyboard_mode(UniwillKeyboardMode::Wave)?;
+                    }
+                    HardwareInterface::None => {
+                        return Err(anyhow!("No hardware interface available"));
+                    }
+                }
             }
         }
         Ok(())

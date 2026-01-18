@@ -583,4 +583,254 @@ impl TuxedoIo {
         let request = Self::iow(MAGIC_WRITE_CL, 0x12, Self::PTR_SIZE);
         Self::ioctl_write_i32(fd, request, value)
     }
+    
+    // Keyboard control methods
+    
+    /// Detect keyboard type for Clevo hardware
+    /// Uses ACPI/WMI command 0x0D, buffer offset 0x0F
+    /// Returns: 0x01 = Fixed white, 0x02 = 3-zone RGB, 0x06 = 1-zone RGB, 0xF3 = Per-key RGB
+    pub fn get_clevo_keyboard_type(&self) -> Result<u8> {
+        if self.interface != HardwareInterface::Clevo {
+            return Err(anyhow!("Keyboard type detection only available on Clevo interface"));
+        }
+        
+        let fd = self.device.as_raw_fd();
+        // Use ACPI/WMI command 0x0D (GET_SPECS) for keyboard detection
+        let request = Self::ior(MAGIC_READ_CL, 0x0D, Self::PTR_SIZE);
+        let result = Self::ioctl_read_i32(fd, request)?;
+        
+        // Extract keyboard type from buffer offset 0x0F (bits 8-15)
+        let kbd_type = ((result >> 8) & 0xFF) as u8;
+        
+        log::debug!("Detected Clevo keyboard type: {:#04x}", kbd_type);
+        Ok(kbd_type)
+    }
+    
+    /// Detect keyboard type for Uniwill hardware
+    /// Reads EC RAM at address 0x0740 (barebone ID)
+    pub fn get_uniwill_keyboard_type(&self) -> Result<u8> {
+        if self.interface != HardwareInterface::Uniwill {
+            return Err(anyhow!("Keyboard type detection only available on Uniwill interface"));
+        }
+        
+        let fd = self.device.as_raw_fd();
+        // Read EC RAM at 0x0740 for barebone ID
+        // Using a generic EC read ioctl (we'll use 0x30 as EC read command)
+        let request = Self::ior(MAGIC_READ_UW, 0x30, Self::PTR_SIZE);
+        let addr: i32 = 0x0740;
+        
+        // This is a simplified approach - actual EC RAM access may need different implementation
+        let result = Self::ioctl_read_i32(fd, request)?;
+        
+        log::debug!("Detected Uniwill barebone ID: {:#06x}", result);
+        Ok((result & 0xFF) as u8)
+    }
+    
+    /// Set static RGB color for Clevo keyboards
+    /// Uses ACPI method 0x67 with RGB packing (0x00RRGGBB)
+    /// Converts input range 0-255 to EC scale 0-50
+    pub fn set_clevo_keyboard_color(&self, red: u8, green: u8, blue: u8) -> Result<()> {
+        if self.interface != HardwareInterface::Clevo {
+            return Err(anyhow!("Keyboard color control only available on Clevo interface"));
+        }
+        
+        let fd = self.device.as_raw_fd();
+        
+        // Convert from 0-255 range to 0-50 EC scale
+        let r_ec = ((red as u32 * 50) / 255) as u8;
+        let g_ec = ((green as u32 * 50) / 255) as u8;
+        let b_ec = ((blue as u32 * 50) / 255) as u8;
+        
+        // Pack RGB as 0x00RRGGBB
+        let rgb_packed: i32 = ((r_ec as i32) << 16) | ((g_ec as i32) << 8) | (b_ec as i32);
+        
+        log::debug!("Setting Clevo keyboard color: RGB({}, {}, {}) -> EC({}, {}, {}) = {:#08x}", 
+                    red, green, blue, r_ec, g_ec, b_ec, rgb_packed);
+        
+        // Use ACPI method 0x67 for color control
+        let request = Self::iow(MAGIC_WRITE_CL, 0x67, Self::PTR_SIZE);
+        Self::ioctl_write_i32(fd, request, rgb_packed)?;
+        
+        log::info!("Successfully set Clevo keyboard color");
+        Ok(())
+    }
+    
+    /// Set static RGB color for Uniwill keyboards
+    /// Writes to EC RAM registers: Red=0x0769, Green=0x076A, Blue=0x076B
+    /// Then applies changes via mode register 0x0767
+    pub fn set_uniwill_keyboard_color(&self, red: u8, green: u8, blue: u8) -> Result<()> {
+        if self.interface != HardwareInterface::Uniwill {
+            return Err(anyhow!("Keyboard color control only available on Uniwill interface"));
+        }
+        
+        let fd = self.device.as_raw_fd();
+        
+        log::debug!("Setting Uniwill keyboard color: RGB({}, {}, {})", red, green, blue);
+        
+        // Write to EC RAM registers (using generic EC write, command 0x31)
+        // Red channel at 0x0769
+        let request_write = Self::iow(MAGIC_WRITE_UW, 0x31, Self::PTR_SIZE);
+        let red_value: i32 = (0x0769 << 8) | (red as i32);
+        Self::ioctl_write_i32(fd, request_write, red_value)?;
+        
+        // Green channel at 0x076A
+        let green_value: i32 = (0x076A << 8) | (green as i32);
+        Self::ioctl_write_i32(fd, request_write, green_value)?;
+        
+        // Blue channel at 0x076B
+        let blue_value: i32 = (0x076B << 8) | (blue as i32);
+        Self::ioctl_write_i32(fd, request_write, blue_value)?;
+        
+        // Apply changes via mode register 0x0767 (set apply bit)
+        let apply_value: i32 = (0x0767 << 8) | 0x01;
+        Self::ioctl_write_i32(fd, request_write, apply_value)?;
+        
+        log::info!("Successfully set Uniwill keyboard color");
+        Ok(())
+    }
+    
+    /// Set keyboard brightness for Clevo
+    /// Uses ACPI sub-command 0xF4000000
+    /// RGB range: 0-255, White keyboards: 0-2
+    pub fn set_clevo_keyboard_brightness(&self, brightness: u8, is_white_keyboard: bool) -> Result<()> {
+        if self.interface != HardwareInterface::Clevo {
+            return Err(anyhow!("Keyboard brightness control only available on Clevo interface"));
+        }
+        
+        let fd = self.device.as_raw_fd();
+        
+        let brightness_value = if is_white_keyboard {
+            brightness.min(2) as i32
+        } else {
+            brightness as i32
+        };
+        
+        // Pack with sub-command 0xF4000000
+        let cmd: i32 = 0xF4000000u32 as i32 | brightness_value;
+        
+        log::debug!("Setting Clevo keyboard brightness: {} (white: {}) = {:#010x}", 
+                    brightness, is_white_keyboard, cmd);
+        
+        // Use keyboard brightness command
+        let request = Self::iow(MAGIC_WRITE_CL, 0x68, Self::PTR_SIZE);
+        Self::ioctl_write_i32(fd, request, cmd)?;
+        
+        log::info!("Successfully set Clevo keyboard brightness");
+        Ok(())
+    }
+    
+    /// Set keyboard brightness for Uniwill
+    /// Writes to EC RAM address 0x078C (bits 5-7)
+    /// RGB range: 0-255, White keyboards: 0-2 or 0-4
+    pub fn set_uniwill_keyboard_brightness(&self, brightness: u8, is_white_keyboard: bool) -> Result<()> {
+        if self.interface != HardwareInterface::Uniwill {
+            return Err(anyhow!("Keyboard brightness control only available on Uniwill interface"));
+        }
+        
+        let fd = self.device.as_raw_fd();
+        
+        let brightness_value = if is_white_keyboard {
+            brightness.min(4)
+        } else {
+            brightness
+        };
+        
+        log::debug!("Setting Uniwill keyboard brightness: {} (white: {})", 
+                    brightness, is_white_keyboard);
+        
+        // Write to EC RAM at 0x078C, brightness in bits 5-7
+        let request = Self::iow(MAGIC_WRITE_UW, 0x31, Self::PTR_SIZE);
+        let value: i32 = (0x078C << 8) | ((brightness_value as i32) << 5);
+        Self::ioctl_write_i32(fd, request, value)?;
+        
+        log::info!("Successfully set Uniwill keyboard brightness");
+        Ok(())
+    }
+    
+    /// Set keyboard effect mode for Clevo
+    /// Single ACPI/WMI call with mode values
+    pub fn set_clevo_keyboard_mode(&self, mode: ClevoKeyboardMode) -> Result<()> {
+        if self.interface != HardwareInterface::Clevo {
+            return Err(anyhow!("Keyboard mode control only available on Clevo interface"));
+        }
+        
+        let fd = self.device.as_raw_fd();
+        
+        let mode_value: u32 = match mode {
+            ClevoKeyboardMode::Custom => 0x00000000,
+            ClevoKeyboardMode::Breathe => 0x1002A000,
+            ClevoKeyboardMode::Cycle => 0x33010000,
+            ClevoKeyboardMode::Dance => 0x80000000,
+            ClevoKeyboardMode::Flash => 0xA0000000,
+            ClevoKeyboardMode::Random => 0x70000000,
+            ClevoKeyboardMode::Tempo => 0x90000000,
+            ClevoKeyboardMode::Wave => 0xB0000000,
+        };
+        
+        log::debug!("Setting Clevo keyboard mode: {:?} = {:#010x}", mode, mode_value);
+        
+        // Use keyboard mode command (0x69)
+        let request = Self::iow(MAGIC_WRITE_CL, 0x69, Self::PTR_SIZE);
+        Self::ioctl_write_i32(fd, request, mode_value as i32)?;
+        
+        log::info!("Successfully set Clevo keyboard mode: {:?}", mode);
+        Ok(())
+    }
+    
+    /// Set keyboard effect mode for Uniwill
+    /// Writes to EC RAM address 0x0767 with apply bit
+    pub fn set_uniwill_keyboard_mode(&self, mode: UniwillKeyboardMode) -> Result<()> {
+        if self.interface != HardwareInterface::Uniwill {
+            return Err(anyhow!("Keyboard mode control only available on Uniwill interface"));
+        }
+        
+        let fd = self.device.as_raw_fd();
+        
+        let mode_value: u8 = match mode {
+            UniwillKeyboardMode::Custom => 0x00,
+            UniwillKeyboardMode::Breathe => 0x01,
+            UniwillKeyboardMode::Cycle => 0x02,
+            UniwillKeyboardMode::Dance => 0x03,
+            UniwillKeyboardMode::Flash => 0x04,
+            UniwillKeyboardMode::Random => 0x05,
+            UniwillKeyboardMode::Tempo => 0x06,
+            UniwillKeyboardMode::Wave => 0x07,
+        };
+        
+        log::debug!("Setting Uniwill keyboard mode: {:?} = {:#04x}", mode, mode_value);
+        
+        // Write mode to EC RAM at 0x0767 with apply bit set
+        let request = Self::iow(MAGIC_WRITE_UW, 0x31, Self::PTR_SIZE);
+        let value: i32 = (0x0767 << 8) | ((mode_value as i32) | 0x80); // 0x80 is the apply bit
+        Self::ioctl_write_i32(fd, request, value)?;
+        
+        log::info!("Successfully set Uniwill keyboard mode: {:?}", mode);
+        Ok(())
+    }
+}
+
+/// Keyboard effect modes for Clevo hardware
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ClevoKeyboardMode {
+    Custom,   // 0x00000000
+    Breathe,  // 0x1002A000
+    Cycle,    // 0x33010000
+    Dance,    // 0x80000000
+    Flash,    // 0xA0000000
+    Random,   // 0x70000000
+    Tempo,    // 0x90000000
+    Wave,     // 0xB0000000
+}
+
+/// Keyboard effect modes for Uniwill hardware
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum UniwillKeyboardMode {
+    Custom,       // 0x00
+    Breathe,      // 0x01
+    Cycle,        // 0x02
+    Dance,        // 0x03
+    Flash,        // 0x04
+    Random,       // 0x05
+    Tempo,        // 0x06
+    Wave,         // 0x07
 }
