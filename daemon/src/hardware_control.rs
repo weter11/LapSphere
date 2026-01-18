@@ -260,6 +260,9 @@ fn apply_clevo_keyboard_settings(settings: &KeyboardSettings) -> Result<()> {
             // Apply color
             apply_clevo_static_color(*r, *g, *b)?;
 
+            // Set mode to Custom/Static
+            apply_clevo_effect_mode(ClevoEffectMode::Custom, None)?;
+
             // Apply brightness
             apply_clevo_brightness(*brightness)?;
         }

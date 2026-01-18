@@ -85,7 +85,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>,
             ui.add_space(16.0);
 
             // Keyboard tuning
-            draw_keyboard_tuning(ui, &mut state.config.profiles[idx], dbus_client);
+            draw_keyboard_tuning(ui, &mut state.config.profiles[idx], dbus_client, state.hardware_interface.as_deref());
             ui.add_space(16.0);
             ui.separator();
             ui.add_space(16.0);
@@ -496,11 +496,12 @@ fn draw_keyboard_tuning(
     ui: &mut Ui,
     profile: &mut Profile,
     dbus_client: Option<&DbusClient>,
+    hardware_interface: Option<&str>,
 ) {
     ui.heading("⌨️ Keyboard Backlight");
     ui.add_space(8.0);
     
-    let keyboard_caps = detect_keyboard_capabilities();
+    let keyboard_caps = detect_keyboard_capabilities(hardware_interface);
     let keyboard_detected = keyboard_caps.supports_color || keyboard_caps.supports_effects;
     ui.checkbox(&mut profile.keyboard_settings.control_enabled, "Control keyboard backlight");
     ui.add_space(6.0);
@@ -708,7 +709,17 @@ struct KeyboardCapabilities {
     supports_effects: bool,
 }
 
-fn detect_keyboard_capabilities() -> KeyboardCapabilities {
+fn detect_keyboard_capabilities(hardware_interface: Option<&str>) -> KeyboardCapabilities {
+    // If we have Clevo hardware detected by the daemon, we know it supports color and effects
+    if let Some(interface) = hardware_interface {
+        if interface.contains("Clevo") {
+            return KeyboardCapabilities {
+                supports_color: true,
+                supports_effects: true,
+            };
+        }
+    }
+
     let possible_paths = [
         "/sys/class/leds/rgb:kbd_backlight",
         "/sys/class/leds/tuxedo::kbd_backlight",
