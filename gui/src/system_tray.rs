@@ -1,8 +1,8 @@
+use ksni::blocking::TrayMethods;
 use ksni::{
     menu::{MenuItem, RadioGroup, RadioItem, StandardItem, SubMenu},
     ToolTip,
 };
-use ksni::blocking::TrayMethods;
 use std::sync::mpsc;
 use tuxedo_common::types::Profile;
 
@@ -130,7 +130,10 @@ pub struct SystemTray {
 impl SystemTray {
     pub fn new(profiles: &[Profile], current_profile: &str) -> anyhow::Result<Self> {
         let (tx, rx) = mpsc::channel();
-        let profile_names: Vec<String> = profiles.iter().map(|profile| profile.name.clone()).collect();
+        let profile_names: Vec<String> = profiles
+            .iter()
+            .map(|profile| profile.name.clone())
+            .collect();
         let current_index = profiles
             .iter()
             .position(|profile| profile.name == current_profile)
@@ -159,7 +162,10 @@ impl SystemTray {
     }
 
     pub fn update_profiles(&mut self, profiles: &[Profile], current: &str) -> anyhow::Result<()> {
-        let profile_names: Vec<String> = profiles.iter().map(|profile| profile.name.clone()).collect();
+        let profile_names: Vec<String> = profiles
+            .iter()
+            .map(|profile| profile.name.clone())
+            .collect();
         let current_index = profiles
             .iter()
             .position(|profile| profile.name == current)

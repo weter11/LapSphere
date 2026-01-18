@@ -1,9 +1,9 @@
-use std::collections::BinaryHeap;
+use anyhow::Result;
 use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use anyhow::Result;
 
 /// A single polling job with its schedule and action
 pub struct PollJob {
@@ -84,7 +84,7 @@ impl PollingScheduler {
     /// Create a new polling scheduler
     pub fn new() -> Self {
         let (command_tx, command_rx) = mpsc::unbounded_channel();
-        
+
         Self {
             jobs: Arc::new(RwLock::new(BinaryHeap::new())),
             command_rx,
@@ -102,7 +102,7 @@ impl PollingScheduler {
     /// Run the scheduler loop
     pub async fn run(mut self) {
         log::info!("Starting polling scheduler");
-        
+
         loop {
             // Calculate sleep duration until next job
             let sleep_duration = {
@@ -185,7 +185,7 @@ impl PollingScheduler {
     fn update_job_interval(&self, id: &str, new_interval: Duration) {
         let mut jobs = self.jobs.write().unwrap();
         let mut temp_jobs: Vec<PollJob> = jobs.drain().collect();
-        
+
         for job in &mut temp_jobs {
             if job.id == id {
                 job.interval = new_interval;
@@ -204,7 +204,7 @@ impl PollingScheduler {
     fn remove_job(&self, id: &str) {
         let mut jobs = self.jobs.write().unwrap();
         let temp_jobs: Vec<PollJob> = jobs.drain().filter(|j| j.id != id).collect();
-        
+
         for job in temp_jobs {
             jobs.push(job);
         }

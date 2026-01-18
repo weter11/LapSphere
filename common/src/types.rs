@@ -17,8 +17,8 @@ pub struct CpuInfo {
     pub median_load: f32,
     pub package_temp: f32,
     pub package_power: Option<f32>,
-    pub power_source: Option<String>,  // NEW: Shows source of power reading
-    pub all_power_sources: Vec<PowerSource>,  // NEW: All available power sources
+    pub power_source: Option<String>, // NEW: Shows source of power reading
+    pub all_power_sources: Vec<PowerSource>, // NEW: All available power sources
     pub cores: Vec<CoreInfo>,
     pub governor: String,
     pub available_governors: Vec<String>,
@@ -54,9 +54,9 @@ pub struct CpuCapabilities {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PowerSource {
-    pub name: String,      // e.g., "RAPL", "amdgpu", "zenpower"
-    pub value: f32,        // Power in watts
-    pub description: String,  // e.g., "Intel RAPL", "AMD APU (CPU+iGPU)", "Zenpower driver"
+    pub name: String,        // e.g., "RAPL", "amdgpu", "zenpower"
+    pub value: f32,          // Power in watts
+    pub description: String, // e.g., "Intel RAPL", "AMD APU (CPU+iGPU)", "Zenpower driver"
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,8 +113,8 @@ pub struct FanInfo {
     pub id: u32,
     pub name: String,
     pub rpm_or_percent: u32,
-    pub temperature: Option<f32>,  // Temperature sensor for this fan
-    pub is_rpm: bool,              // true if rpm_or_percent is RPM, false if it's percentage
+    pub temperature: Option<f32>, // Temperature sensor for this fan
+    pub is_rpm: bool,             // true if rpm_or_percent is RPM, false if it's percentage
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,14 +124,14 @@ pub struct WiFiInfo {
     pub driver_version: Option<String>,
     pub firmware_version: Option<String>,
     pub temperature: Option<f32>,
-    pub signal_level: Option<i32>,      // Signal level in dBm
-    pub channel: Option<u32>,           // Current channel
-    pub channel_width: Option<u32>,     // Channel width in MHz (20/40/80/160)
-    pub tx_rate: Option<f64>,           // Upload rate in Mbps (Actual throughput)
-    pub rx_rate: Option<f64>,           // Download rate in Mbps (Actual throughput)
+    pub signal_level: Option<i32>,  // Signal level in dBm
+    pub channel: Option<u32>,       // Current channel
+    pub channel_width: Option<u32>, // Channel width in MHz (20/40/80/160)
+    pub tx_rate: Option<f64>,       // Upload rate in Mbps (Actual throughput)
+    pub rx_rate: Option<f64>,       // Download rate in Mbps (Actual throughput)
     pub ssid: Option<String>,
-    pub tx_bitrate: Option<f64>,        // Link speed in Mbps (PHY rate)
-    pub rx_bitrate: Option<f64>,        // Link speed in Mbps (PHY rate)
+    pub tx_bitrate: Option<f64>, // Link speed in Mbps (PHY rate)
+    pub rx_bitrate: Option<f64>, // Link speed in Mbps (PHY rate)
     pub rx_bytes: Option<u64>,
     pub tx_bytes: Option<u64>,
     pub network_controller: Option<String>,
@@ -178,8 +178,8 @@ pub struct CpuSettings {
     pub boost: Option<bool>,
     pub smt: Option<bool>,
     pub performance_profile: Option<String>,
-    pub tdp_profile: Option<String>,              // ADD
-    pub energy_performance_preference: Option<String>,  // ADD
+    pub tdp_profile: Option<String>,                   // ADD
+    pub energy_performance_preference: Option<String>, // ADD
     pub tdp: Option<u32>,
     pub amd_pstate_status: Option<String>,
 }
@@ -205,14 +205,46 @@ pub struct KeyboardSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum KeyboardMode {
-    SingleColor { r: u8, g: u8, b: u8, brightness: u8 },  // CUSTOM (0) - Static color
-    Breathe { r: u8, g: u8, b: u8, brightness: u8, speed: u8 },  // BREATHE (1)
-    Cycle { brightness: u8, speed: u8 },  // CYCLE (2) - Color cycle through spectrum
-    Dance { brightness: u8, speed: u8 },  // DANCE (3)
-    Flash { r: u8, g: u8, b: u8, brightness: u8, speed: u8 },  // FLASH (4)
-    RandomColor { brightness: u8, speed: u8 },  // RANDOM_COLOR (5)
-    Tempo { brightness: u8, speed: u8 },  // TEMPO (6)
-    Wave { brightness: u8, speed: u8 },  // WAVE (7)
+    SingleColor {
+        r: u8,
+        g: u8,
+        b: u8,
+        brightness: u8,
+    }, // CUSTOM (0) - Static color
+    Breathe {
+        r: u8,
+        g: u8,
+        b: u8,
+        brightness: u8,
+        speed: u8,
+    }, // BREATHE (1)
+    Cycle {
+        brightness: u8,
+        speed: u8,
+    }, // CYCLE (2) - Color cycle through spectrum
+    Dance {
+        brightness: u8,
+        speed: u8,
+    }, // DANCE (3)
+    Flash {
+        r: u8,
+        g: u8,
+        b: u8,
+        brightness: u8,
+        speed: u8,
+    }, // FLASH (4)
+    RandomColor {
+        brightness: u8,
+        speed: u8,
+    }, // RANDOM_COLOR (5)
+    Tempo {
+        brightness: u8,
+        speed: u8,
+    }, // TEMPO (6)
+    Wave {
+        brightness: u8,
+        speed: u8,
+    }, // WAVE (7)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -360,13 +392,13 @@ impl Default for StatisticsSections {
                 "Storage".to_string(),
                 "Fans".to_string(),
             ],
-            cpu_poll_rate: 1000,            // 1 second
+            cpu_poll_rate: 1000, // 1 second
             memory_poll_rate: default_memory_poll_rate(),
-            gpu_poll_rate: 2000,            // 2 seconds
-            battery_poll_rate: 5000,        // 5 seconds
-            wifi_poll_rate: 5000,           // 5 seconds
-            storage_poll_rate: 5 * 1000,    // 5 seconds
-            fans_poll_rate: 1000,           // 1 second
+            gpu_poll_rate: 2000,         // 2 seconds
+            battery_poll_rate: 5000,     // 5 seconds
+            wifi_poll_rate: 5000,        // 5 seconds
+            storage_poll_rate: 5 * 1000, // 5 seconds
+            fans_poll_rate: 1000,        // 1 second
         }
     }
 }
@@ -396,8 +428,8 @@ impl Default for CpuSettings {
             performance_profile: None,
             tdp: None,
             amd_pstate_status: None,
-            tdp_profile: None,                          // ADD
-            energy_performance_preference: None,        // ADD
+            tdp_profile: None,                   // ADD
+            energy_performance_preference: None, // ADD
         }
     }
 }
