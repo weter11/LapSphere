@@ -147,17 +147,18 @@ async fn set_tdp_profile(&self, profile: &str) -> Result<(), zbus::fdo::Error> {
             Ok(io) => {
                 let mut fans_info = Vec::new();
                 for fan_id in 0..io.get_fan_count() {
-                    let speed = io.get_fan_speed(fan_id).ok();
-                    let temperature = io.get_fan_temperature(fan_id).ok().map(|t| t as f32);
-                    
-                    let info = FanInfo {
-                        id: fan_id,
-                        name: format!("Fan {}", fan_id),
-                        rpm_or_percent: speed.unwrap_or(0),
-                        temperature,
-                        is_rpm: false,  // Currently returning percentage
-                    };
-                    fans_info.push(info);
+                    if let Ok(speed) = io.get_fan_speed(fan_id) {
+                        let temperature = io.get_fan_temperature(fan_id).ok().map(|t| t as f32);
+
+                        let info = FanInfo {
+                            id: fan_id,
+                            name: format!("Fan {}", fan_id),
+                            rpm_or_percent: speed,
+                            temperature,
+                            is_rpm: false,  // Currently returning percentage
+                        };
+                        fans_info.push(info);
+                    }
                 }
                 serde_json::to_string(&fans_info)
                     .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))

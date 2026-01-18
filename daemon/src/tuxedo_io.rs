@@ -64,10 +64,11 @@ pub struct TuxedoIo {
     device: std::fs::File,
     interface: HardwareInterface,
     fan_count: u32,
+    data_size: u64,
 }
 
 impl TuxedoIo {
-    // Linux ioctl macros equivalent - manually constructed for 64-bit systems
+    // Linux ioctl macros equivalent - manually constructed
     // _IOR(type, nr, size)  = _IOC(_IOC_READ, type, nr, size)
     // _IOW(type, nr, size)  = _IOC(_IOC_WRITE, type, nr, size)
     // _IO(type, nr)         = _IOC(_IOC_NONE, type, nr, 0)
@@ -78,19 +79,16 @@ impl TuxedoIo {
     const _IOC_READ: u64 = 2;
     const _IOC_RW: u64 = 3;
     
-    // For 64-bit systems, use 8-byte size for pointer types
-    const PTR_SIZE: u64 = 8;
-    
     fn ior(type_: u8, nr: u8, size: u64) -> libc::c_ulong {
-        ((Self::_IOC_READ << 30) | (size << 16) | ((type_ as u64) << 8) | (nr as u64)) as libc::c_ulong
+        ((Self::_IOC_READ << 30) | ((size & 0x3FFF) << 16) | ((type_ as u64) << 8) | (nr as u64)) as libc::c_ulong
     }
     
     fn iow(type_: u8, nr: u8, size: u64) -> libc::c_ulong {
-        ((Self::_IOC_WRITE << 30) | (size << 16) | ((type_ as u64) << 8) | (nr as u64)) as libc::c_ulong
+        ((Self::_IOC_WRITE << 30) | ((size & 0x3FFF) << 16) | ((type_ as u64) << 8) | (nr as u64)) as libc::c_ulong
     }
 
     fn iowr(type_: u8, nr: u8, size: u64) -> libc::c_ulong {
-        ((Self::_IOC_RW << 30) | (size << 16) | ((type_ as u64) << 8) | (nr as u64)) as libc::c_ulong
+        ((Self::_IOC_RW << 30) | ((size & 0x3FFF) << 16) | ((type_ as u64) << 8) | (nr as u64)) as libc::c_ulong
     }
     
     fn io(type_: u8, nr: u8) -> libc::c_ulong {
@@ -126,15 +124,16 @@ impl TuxedoIo {
             .write(true)
             .open(TUXEDO_IO_DEVICE)?;
 
-        let interface = Self::detect_interface(&device)?;
-        let fan_count = Self::detect_fan_count(&device, interface)?;
+        let (interface, data_size) = Self::detect_interface_and_size(&device)?;
+        let fan_count = Self::detect_fan_count(&device, interface, data_size)?;
 
-        log::info!("Detected interface: {:?}, fan count: {}", interface, fan_count);
+        log::info!("Detected interface: {:?}, data size: {}, fan count: {}", interface, data_size, fan_count);
 
         Ok(TuxedoIo {
             device,
             interface,
             fan_count,
+            data_size,
         })
     }
 
@@ -160,76 +159,63 @@ impl TuxedoIo {
         (((p * 255) + 50) / 100) as u8
     }
 
-    fn detect_interface(device: &std::fs::File) -> Result<HardwareInterface> {
+    fn detect_interface_and_size(device: &std::fs::File) -> Result<(HardwareInterface, u64)> {
         let fd = device.as_raw_fd();
 
-        // Try hardware check ioctls first (0x05 for Clevo, 0x06 for Uniwill)
-        let cl_check = Self::ior(IOCTL_MAGIC, 0x05, Self::PTR_SIZE);
-        let uw_check = Self::ior(IOCTL_MAGIC, 0x06, Self::PTR_SIZE);
+        // Try hardware check ioctls with both 8-byte and 4-byte sizes
+        for &size in &[8, 4] {
+            let cl_check = Self::ior(IOCTL_MAGIC, 0x05, size);
+            let uw_check = Self::ior(IOCTL_MAGIC, 0x06, size);
 
-        let cl_res = Self::ioctl_read_i32(fd, cl_check);
-        let uw_res = Self::ioctl_read_i32(fd, uw_check);
-
-        if matches!(cl_res, Ok(1)) {
-            log::debug!("Detected Clevo interface via hardware check");
-            return Ok(HardwareInterface::Clevo);
-        }
-        if matches!(uw_res, Ok(1)) {
-            log::debug!("Detected Uniwill interface via hardware check");
-            return Ok(HardwareInterface::Uniwill);
+            if matches!(Self::ioctl_read_i32(fd, cl_check), Ok(1)) {
+                log::debug!("Detected Clevo interface via hardware check (size={})", size);
+                return Ok((HardwareInterface::Clevo, size));
+            }
+            if matches!(Self::ioctl_read_i32(fd, uw_check), Ok(1)) {
+                log::debug!("Detected Uniwill interface via hardware check (size={})", size);
+                return Ok((HardwareInterface::Uniwill, size));
+            }
         }
 
         // Fallback: try to read faninfo to detect interface
-        let probe_cl = Self::ioctl_read_i32(fd, Self::ior(MAGIC_READ_CL, 0x10, Self::PTR_SIZE));
-        if probe_cl.is_ok() {
-            log::debug!("Detected Clevo interface via faninfo probe");
-            return Ok(HardwareInterface::Clevo);
-        }
+        for &size in &[8, 4] {
+            let probe_cl = Self::ioctl_read_i32(fd, Self::ior(MAGIC_READ_CL, 0x10, size));
+            if probe_cl.is_ok() {
+                log::debug!("Detected Clevo interface via faninfo probe (size={})", size);
+                return Ok((HardwareInterface::Clevo, size));
+            }
 
-        let probe_uw = Self::ioctl_read_i32(fd, Self::ior(MAGIC_READ_UW, 0x10, Self::PTR_SIZE));
-        if probe_uw.is_ok() {
-            log::debug!("Detected Uniwill interface via fanspeed probe");
-            return Ok(HardwareInterface::Uniwill);
+            let probe_uw = Self::ioctl_read_i32(fd, Self::ior(MAGIC_READ_UW, 0x10, size));
+            if probe_uw.is_ok() {
+                log::debug!("Detected Uniwill interface via fanspeed probe (size={})", size);
+                return Ok((HardwareInterface::Uniwill, size));
+            }
         }
 
         log::warn!("No hardware interface detected");
-        Ok(HardwareInterface::None)
+        Ok((HardwareInterface::None, 8))
     }
 
     fn detect_fan_count(
         device: &std::fs::File,
         interface: HardwareInterface,
+        data_size: u64,
     ) -> Result<u32> {
         let fd = device.as_raw_fd();
 
         match interface {
             HardwareInterface::Clevo => {
-                let mut count = 0;
-                for fan_id in 0..3u32 {
-                    let seq = 0x10 + fan_id as u8;
-                    // Try iowr for fans as it's common for Clevo
-                    let request = Self::iowr(MAGIC_READ_CL, seq, Self::PTR_SIZE);
-                    
-                    if let Ok(raw) = Self::ioctl_read_i32(fd, request) {
-                        // Use temp2 field (bits 16-23) to check if fan exists
-                        let temp2 = ((raw >> 16) & 0xFF) as u32;
-                        // Some systems might not have sensors but fan still exists
-                        // or vice-versa. We'll be more inclusive here.
-                        if temp2 > 0 {
-                            count = fan_id + 1;
-                        }
-                    }
-                }
-                // If we didn't find any fans via sensors, assume at least 1 or 2 if Clevo
-                Ok(count.max(1))
+                // For Clevo, we'll try to detect up to 3 fans.
+                // We return 3 to allow hardware_detection to probe all of them.
+                Ok(3)
             }
 
             HardwareInterface::Uniwill => {
-                let r0 = Self::ioctl_read_i32(fd, Self::ior(MAGIC_READ_UW, 0x10, Self::PTR_SIZE));
+                let r0 = Self::ioctl_read_i32(fd, Self::ior(MAGIC_READ_UW, 0x10, data_size));
                 if r0.is_err() {
                     return Ok(0);
                 }
-                let r1 = Self::ioctl_read_i32(fd, Self::ior(MAGIC_READ_UW, 0x11, Self::PTR_SIZE));
+                let r1 = Self::ioctl_read_i32(fd, Self::ior(MAGIC_READ_UW, 0x11, data_size));
                 Ok(if r1.is_ok() { 2 } else { 1 })
             }
 
@@ -248,7 +234,7 @@ impl TuxedoIo {
                 }
                 
                 let seq = 0x10 + fan_id as u8;
-                let request = Self::iowr(MAGIC_READ_CL, seq, Self::PTR_SIZE);
+                let request = Self::ior(MAGIC_READ_CL, seq, self.data_size);
                 let raw = Self::ioctl_read_i32(fd, request)?;
 
                 Ok(Self::clevo_raw_to_percent((raw & 0xFF) as u8))
@@ -260,7 +246,7 @@ impl TuxedoIo {
                 }
                 
                 let seq = 0x10 + fan_id as u8;
-                let request = Self::ior(MAGIC_READ_UW, seq, Self::PTR_SIZE);
+                let request = Self::ior(MAGIC_READ_UW, seq, self.data_size);
                 let val = Self::ioctl_read_i32(fd, request)?;
                 Ok(val as u32)
             }
@@ -279,14 +265,14 @@ impl TuxedoIo {
                 // Step 1: Disable auto mode (critical for Clevo!)
                 log::debug!("Disabling Clevo auto mode for manual fan control");
                 let manual_val: i32 = 0;
-                let auto_request = Self::iowr(MAGIC_WRITE_CL, 0x11, Self::PTR_SIZE);
+                let auto_request = Self::iow(MAGIC_WRITE_CL, 0x11, self.data_size);
                 Self::ioctl_write_i32(fd, auto_request, manual_val)?;
                 
                 // Step 2: Read current speeds for all fans
                 let mut current_raw = [0u8; 3];
                 for i in 0..3 {
                     let seq = 0x10 + i as u8;
-                    let request = Self::iowr(MAGIC_READ_CL, seq, Self::PTR_SIZE);
+                    let request = Self::ior(MAGIC_READ_CL, seq, self.data_size);
                     
                     if let Ok(raw) = Self::ioctl_read_i32(fd, request) {
                         current_raw[i as usize] = (raw & 0xFF) as u8;
@@ -310,7 +296,7 @@ impl TuxedoIo {
                 );
 
                 // Step 5: Write the packed value
-                let speed_request = Self::iowr(MAGIC_WRITE_CL, 0x10, Self::PTR_SIZE);
+                let speed_request = Self::iow(MAGIC_WRITE_CL, 0x10, self.data_size);
                 Self::ioctl_write_i32(fd, speed_request, packed)?;
 
                 log::info!("Successfully set Clevo fan {} to {}%", fan_id, speed_percent);
@@ -327,7 +313,7 @@ impl TuxedoIo {
 
                 log::debug!("Setting Uniwill fan {} to {}%", fan_id, speed_percent);
 
-                let request = Self::iow(MAGIC_WRITE_UW, seq, Self::PTR_SIZE);
+                let request = Self::iow(MAGIC_WRITE_UW, seq, self.data_size);
                 Self::ioctl_write_i32(fd, request, val)?;
 
                 log::info!("Successfully set Uniwill fan {} to {}%", fan_id, speed_percent);
@@ -346,7 +332,7 @@ impl TuxedoIo {
                 let auto_val: i32 = 0xF;
                 log::debug!("Setting Clevo fans to auto mode");
                 
-                let request = Self::iowr(MAGIC_WRITE_CL, 0x11, Self::PTR_SIZE);
+                let request = Self::iow(MAGIC_WRITE_CL, 0x11, self.data_size);
                 Self::ioctl_write_i32(fd, request, auto_val)?;
                 
                 log::info!("Successfully set Clevo fans to auto mode");
@@ -378,7 +364,7 @@ impl TuxedoIo {
                 }
                 
                 let seq = 0x10 + fan_id as u8;
-                let request = Self::iowr(MAGIC_READ_CL, seq, Self::PTR_SIZE);
+                let request = Self::ior(MAGIC_READ_CL, seq, self.data_size);
                 let raw = Self::ioctl_read_i32(fd, request)?;
 
                 // Use temp2 field (bits 16-23) - more reliable on Clevo
@@ -395,7 +381,7 @@ impl TuxedoIo {
                 }
                 
                 let seq = 0x12 + fan_id as u8;
-                let request = Self::ior(MAGIC_READ_UW, seq, Self::PTR_SIZE);
+                let request = Self::ior(MAGIC_READ_UW, seq, self.data_size);
                 let val = Self::ioctl_read_i32(fd, request)?;
                 
                 if val <= 0 {
@@ -421,7 +407,7 @@ impl TuxedoIo {
             }
             HardwareInterface::Uniwill => {
                 let fd = self.device.as_raw_fd();
-                let request = Self::ior(MAGIC_READ_UW, 0x21, Self::PTR_SIZE);
+                let request = Self::ior(MAGIC_READ_UW, 0x21, self.data_size);
                 let result = Self::ioctl_read_i32(fd, request)?;
                 
                 let mut profiles = vec![];
@@ -449,7 +435,7 @@ impl TuxedoIo {
                 
                 log::debug!("Setting Clevo performance profile to {}", profile_id);
                 
-                let request = Self::iow(MAGIC_WRITE_CL, 0x15, Self::PTR_SIZE);
+                let request = Self::iow(MAGIC_WRITE_CL, 0x15, self.data_size);
                 Self::ioctl_write_i32(fd, request, profile_id as i32)?;
                 
                 log::info!("Successfully set Clevo performance profile to {}", profile_id);
@@ -462,7 +448,7 @@ impl TuxedoIo {
                 
                 log::debug!("Setting Uniwill performance profile to {}", profile_id);
                 
-                let request = Self::iow(MAGIC_WRITE_UW, 0x18, Self::PTR_SIZE);
+                let request = Self::iow(MAGIC_WRITE_UW, 0x18, self.data_size);
                 Self::ioctl_write_i32(fd, request, profile_id as i32)?;
                 
                 log::info!("Successfully set Uniwill performance profile to {}", profile_id);
@@ -511,7 +497,7 @@ impl TuxedoIo {
             _ => return Err(anyhow!("Invalid TDP index")),
         };
         
-        let request = Self::ior(MAGIC_READ_UW, seq, Self::PTR_SIZE);
+        let request = Self::ior(MAGIC_READ_UW, seq, self.data_size);
         Self::ioctl_read_i32(fd, request)
     }
     
@@ -528,7 +514,7 @@ impl TuxedoIo {
             _ => return Err(anyhow!("Invalid TDP index")),
         };
         
-        let request = Self::ior(MAGIC_READ_UW, seq, Self::PTR_SIZE);
+        let request = Self::ior(MAGIC_READ_UW, seq, self.data_size);
         Self::ioctl_read_i32(fd, request)
     }
     
@@ -545,7 +531,7 @@ impl TuxedoIo {
             _ => return Err(anyhow!("Invalid TDP index")),
         };
         
-        let request = Self::ior(MAGIC_READ_UW, seq, Self::PTR_SIZE);
+        let request = Self::ior(MAGIC_READ_UW, seq, self.data_size);
         Self::ioctl_read_i32(fd, request)
     }
     
@@ -562,7 +548,7 @@ impl TuxedoIo {
             _ => return Err(anyhow!("Invalid TDP index")),
         };
         
-        let request = Self::iow(MAGIC_WRITE_UW, seq, Self::PTR_SIZE);
+        let request = Self::iow(MAGIC_WRITE_UW, seq, self.data_size);
         Self::ioctl_write_i32(fd, request, value)
     }
     
@@ -573,7 +559,7 @@ impl TuxedoIo {
         }
         
         let fd = self.device.as_raw_fd();
-        let request = Self::ior(MAGIC_READ_CL, 0x13, Self::PTR_SIZE);
+        let request = Self::ior(MAGIC_READ_CL, 0x13, self.data_size);
         let result = Self::ioctl_read_i32(fd, request)?;
         
         Ok(result != 0)
@@ -587,7 +573,7 @@ impl TuxedoIo {
         let fd = self.device.as_raw_fd();
         let value: i32 = if enabled { 1 } else { 0 };
         
-        let request = Self::iow(MAGIC_WRITE_CL, 0x12, Self::PTR_SIZE);
+        let request = Self::iow(MAGIC_WRITE_CL, 0x12, self.data_size);
         Self::ioctl_write_i32(fd, request, value)
     }
 
@@ -598,7 +584,8 @@ impl TuxedoIo {
         }
 
         let fd = self.device.as_raw_fd();
-        let request = Self::iowr(MAGIC_WRITE_CL, seq, Self::PTR_SIZE);
+        // Clevo methods are usually Read/Write
+        let request = Self::iowr(MAGIC_WRITE_CL, seq, self.data_size);
 
         log::debug!("Clevo ioctl: seq=0x{:02X}, arg=0x{:08X}, request=0x{:08X}", seq, arg, request);
         Self::ioctl_write_i32(fd, request, arg as i32)
