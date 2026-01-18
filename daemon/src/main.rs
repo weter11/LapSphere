@@ -1,24 +1,24 @@
+mod battery_control;
 mod dbus_interface;
 mod fan_daemon;
 mod hardware_control;
 mod hardware_detection;
-mod tuxedo_io;
-mod battery_control;
 mod polling_scheduler;
+mod tuxedo_io;
 
 use anyhow::Result;
-use tokio::signal;
+use polling_scheduler::{PollJob, PollingScheduler};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::signal;
 use tuxedo_common::types::FanSettings;
-use polling_scheduler::{PollingScheduler, PollJob};
 
 // Global fan daemon state
-pub static FAN_DAEMON_STATE: once_cell::sync::Lazy<Arc<Mutex<Option<FanSettings>>>> = 
+pub static FAN_DAEMON_STATE: once_cell::sync::Lazy<Arc<Mutex<Option<FanSettings>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
 
 // Global polling scheduler handle
-pub static SCHEDULER_HANDLE: once_cell::sync::OnceCell<polling_scheduler::SchedulerHandle> = 
+pub static SCHEDULER_HANDLE: once_cell::sync::OnceCell<polling_scheduler::SchedulerHandle> =
     once_cell::sync::OnceCell::new();
 
 #[tokio::main]
@@ -65,10 +65,10 @@ async fn main() -> Result<()> {
     // Create and start polling scheduler
     let scheduler = PollingScheduler::new();
     let scheduler_handle = scheduler.get_handle();
-    
+
     // Store handle globally for DBus interface to use
     SCHEDULER_HANDLE.set(scheduler_handle.clone()).ok();
-    
+
     // Start scheduler in background
     tokio::spawn(async move {
         scheduler.run().await;
@@ -88,11 +88,15 @@ async fn main() -> Result<()> {
                 if let Some(ref fan_settings) = settings {
                     if fan_settings.control_enabled {
                         // Sort curves for each fan
-                        let sorted_curves: Vec<Vec<(u8, u8)>> = fan_settings.curves.iter().map(|c| {
-                            let mut points = c.points.clone();
-                            points.sort_by_key(|p| p.0);
-                            points
-                        }).collect();
+                        let sorted_curves: Vec<Vec<(u8, u8)>> = fan_settings
+                            .curves
+                            .iter()
+                            .map(|c| {
+                                let mut points = c.points.clone();
+                                points.sort_by_key(|p| p.0);
+                                points
+                            })
+                            .collect();
 
                         apply_fan_curves(&fan_io, fan_settings, &sorted_curves)?;
                     }
@@ -101,11 +105,7 @@ async fn main() -> Result<()> {
             }
         };
 
-        let fan_job = PollJob::new(
-            "fan_control".to_string(),
-            Duration::from_secs(2),
-            poll_fn,
-        );
+        let fan_job = PollJob::new("fan_control".to_string(), Duration::from_secs(2), poll_fn);
 
         if let Err(e) = scheduler_handle.add_job(fan_job) {
             log::error!("Failed to add fan control job: {}", e);
@@ -127,12 +127,16 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn apply_fan_curves(io: &tuxedo_io::TuxedoIo, settings: &FanSettings, sorted_curves: &[Vec<(u8, u8)>]) -> Result<()> {
+fn apply_fan_curves(
+    io: &tuxedo_io::TuxedoIo,
+    settings: &FanSettings,
+    sorted_curves: &[Vec<(u8, u8)>],
+) -> Result<()> {
     for (i, curve) in settings.curves.iter().enumerate() {
         if curve.fan_id >= io.get_fan_count() {
             continue;
         }
-        
+
         let temp = match io.get_fan_temperature(curve.fan_id) {
             Ok(t) => t as f32,
             Err(e) => {
@@ -140,16 +144,16 @@ fn apply_fan_curves(io: &tuxedo_io::TuxedoIo, settings: &FanSettings, sorted_cur
                 continue;
             }
         };
-        
+
         let speed = calculate_fan_speed(&sorted_curves[i], temp);
-        
+
         if let Err(e) = io.set_fan_speed(curve.fan_id, speed as u32) {
             log::error!("Failed to set fan {} speed: {}", curve.fan_id, e);
         } else {
             log::debug!("Fan {}: temp={}°C, speed={}%", curve.fan_id, temp, speed);
         }
     }
-    
+
     Ok(())
 }
 
@@ -157,29 +161,29 @@ fn calculate_fan_speed(sorted_points: &[(u8, u8)], temp: f32) -> u8 {
     if sorted_points.is_empty() {
         return 50; // Default fallback
     }
-    
+
     if sorted_points.len() == 1 {
         return sorted_points[0].1;
     }
-    
+
     if temp <= sorted_points[0].0 as f32 {
         return sorted_points[0].1;
     }
-    
+
     if temp >= sorted_points[sorted_points.len() - 1].0 as f32 {
         return sorted_points[sorted_points.len() - 1].1;
     }
-    
+
     for i in 0..sorted_points.len() - 1 {
         let (temp1, speed1) = sorted_points[i];
         let (temp2, speed2) = sorted_points[i + 1];
-        
+
         if temp >= temp1 as f32 && temp <= temp2 as f32 {
             let ratio = (temp - temp1 as f32) / (temp2 as f32 - temp1 as f32);
             let speed = speed1 as f32 + ratio * (speed2 as f32 - speed1 as f32);
             return speed.round() as u8;
         }
     }
-    
+
     50 // Fallback
 }

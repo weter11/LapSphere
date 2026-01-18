@@ -1,5 +1,5 @@
 use chrono::Local;
-use egui::{Context, CentralPanel, TopBottomPanel, RichText};
+use egui::{CentralPanel, Context, RichText, TopBottomPanel};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -7,11 +7,11 @@ use tokio::sync::{mpsc, oneshot};
 use tuxedo_common::types::*;
 
 use crate::dbus_client::DbusClient;
-use crate::theme::TuxedoTheme;
-use crate::pages::{statistics, profiles, tuning, settings};
 use crate::keyboard_shortcuts::KeyboardShortcuts;
-use crate::polling_scheduler::{RefreshCoordinator, CoordinatorHandle};
+use crate::pages::{profiles, settings, statistics, tuning};
+use crate::polling_scheduler::{CoordinatorHandle, RefreshCoordinator};
 use crate::system_tray::{SystemTray, TrayEvent};
+use crate::theme::TuxedoTheme;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Page {
@@ -31,7 +31,7 @@ pub enum SettingsTab {
 pub struct AppState {
     // Core data
     pub config: AppConfig,
-    
+
     // Hardware info (updated in background)
     pub system_info: Option<SystemInfo>,
     pub memory_info: Option<MemoryInfo>,
@@ -50,21 +50,21 @@ pub struct AppState {
     pub available_start_thresholds: Vec<u8>,
     pub available_end_thresholds: Vec<u8>,
     pub available_tdp_profiles: Vec<String>,
-    
+
     // UI state
     pub current_page: Page,
     pub settings_tab: SettingsTab,
     pub status_message: Option<StatusMessage>,
     pub restart_confirmation_pending: bool,
     pub pending_prime_profile: Option<String>,
-    
+
     // Profile editing
     pub editing_profile_index: Option<usize>,
     pub editing_profile_name: Option<String>,
-    
+
     // Async state
     pub pending_battery_update: Option<oneshot::Receiver<Result<(), anyhow::Error>>>,
-    
+
     // Refresh coordinator handle
     pub coordinator_handle: Option<CoordinatorHandle>,
 }
@@ -108,16 +108,16 @@ impl AppState {
             coordinator_handle: None,
         }
     }
-    
-pub fn load_config(&mut self) {
-    if let Ok(config) = load_config_from_disk() {
-        self.config = config;
-        self.config.statistics_sections.section_order =
-            statistics::normalize_section_order(&self.config.statistics_sections.section_order);
+
+    pub fn load_config(&mut self) {
+        if let Ok(config) = load_config_from_disk() {
+            self.config = config;
+            self.config.statistics_sections.section_order =
+                statistics::normalize_section_order(&self.config.statistics_sections.section_order);
+        }
+        self.config.autostart = false;
     }
-    self.config.autostart = false;
-}
-    
+
     pub fn save_settings(&mut self) -> anyhow::Result<()> {
         save_settings_to_disk(&self.config)?;
         self.show_message("Settings saved", false);
@@ -136,7 +136,7 @@ pub fn load_config(&mut self) {
         self.show_message("Configuration saved", false);
         Ok(())
     }
-    
+
     pub fn show_message(&mut self, text: impl Into<String>, is_error: bool) {
         self.status_message = Some(StatusMessage {
             text: text.into(),
@@ -144,20 +144,23 @@ pub fn load_config(&mut self) {
             shown_at: Instant::now(),
         });
     }
-    
+
     pub fn current_profile(&self) -> Option<&Profile> {
-        self.config.profiles.iter()
+        self.config
+            .profiles
+            .iter()
             .find(|p| p.name == self.config.current_profile)
     }
-    
+
     pub fn current_profile_mut(&mut self) -> Option<&mut Profile> {
         let current = self.config.current_profile.clone();
-        self.config.profiles.iter_mut()
-            .find(|p| p.name == current)
+        self.config.profiles.iter_mut().find(|p| p.name == current)
     }
-    
+
     pub fn current_profile_index(&self) -> Option<usize> {
-        self.config.profiles.iter()
+        self.config
+            .profiles
+            .iter()
             .position(|p| p.name == self.config.current_profile)
     }
 }
@@ -168,11 +171,11 @@ pub struct TuxedoApp {
     theme: TuxedoTheme,
     system_tray: Option<SystemTray>,
     force_quit: bool,
-    
+
     // Background update channel
     hw_update_tx: mpsc::UnboundedSender<HardwareUpdate>,
     hw_update_rx: mpsc::UnboundedReceiver<HardwareUpdate>,
-    
+
     // Keyboard shortcuts
     shortcuts: KeyboardShortcuts,
 }
@@ -202,7 +205,7 @@ impl TuxedoApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut state = AppState::new();
         state.load_config();
-        
+
         // Create DBus client
         let dbus_client = match DbusClient::new() {
             Ok(client) => {
@@ -211,87 +214,110 @@ impl TuxedoApp {
             }
             Err(e) => {
                 log::error!("❌ Failed to connect to daemon: {}", e);
-                state.show_message(
-                    format!("Failed to connect to daemon: {}", e),
-                    true
-                );
+                state.show_message(format!("Failed to connect to daemon: {}", e), true);
                 None
             }
         };
-        
+
         // Setup background polling with refresh coordinator
         let (hw_update_tx, hw_update_rx) = mpsc::unbounded_channel();
         let coordinator_handle = if let Some(ref client) = dbus_client {
             let coordinator = RefreshCoordinator::new();
             let handle = coordinator.get_handle();
-            
+
             // Setup refresh callback
             let client_clone = client.clone();
             let tx_clone = hw_update_tx.clone();
             tokio::spawn(async move {
-                coordinator.run(move |component_id| {
-                    // Trigger refresh for the component
-                    let client = client_clone.clone();
-                    let tx = tx_clone.clone();
-                    let component = component_id.to_string();
-                    
-                    tokio::spawn(async move {
-                        match component.as_str() {
-                            "cpu" => {
-                                if let Ok(Ok(info)) = client.get_cpu_info().await {
-                                    let _ = tx.send(HardwareUpdate::CpuInfo(info));
+                coordinator
+                    .run(move |component_id| {
+                        // Trigger refresh for the component
+                        let client = client_clone.clone();
+                        let tx = tx_clone.clone();
+                        let component = component_id.to_string();
+
+                        tokio::spawn(async move {
+                            match component.as_str() {
+                                "cpu" => {
+                                    if let Ok(Ok(info)) = client.get_cpu_info().await {
+                                        let _ = tx.send(HardwareUpdate::CpuInfo(info));
+                                    }
                                 }
-                            }
-                            "gpu" => {
-                                if let Ok(Ok(info)) = client.get_gpu_info().await {
-                                    let _ = tx.send(HardwareUpdate::GpuInfo(info));
+                                "gpu" => {
+                                    if let Ok(Ok(info)) = client.get_gpu_info().await {
+                                        let _ = tx.send(HardwareUpdate::GpuInfo(info));
+                                    }
                                 }
-                            }
-                            "memory" => {
-                                if let Ok(Ok(info)) = client.get_memory_info().await {
-                                    let _ = tx.send(HardwareUpdate::MemoryInfo(info));
+                                "memory" => {
+                                    if let Ok(Ok(info)) = client.get_memory_info().await {
+                                        let _ = tx.send(HardwareUpdate::MemoryInfo(info));
+                                    }
                                 }
-                            }
-                            "fans" => {
-                                if let Ok(Ok(info)) = client.get_fan_info().await {
-                                    let _ = tx.send(HardwareUpdate::FanInfo(info));
+                                "fans" => {
+                                    if let Ok(Ok(info)) = client.get_fan_info().await {
+                                        let _ = tx.send(HardwareUpdate::FanInfo(info));
+                                    }
                                 }
-                            }
-                            "battery" => {
-                                if let Ok(Ok(info)) = client.get_battery_info().await {
-                                    let _ = tx.send(HardwareUpdate::BatteryInfo(info));
+                                "battery" => {
+                                    if let Ok(Ok(info)) = client.get_battery_info().await {
+                                        let _ = tx.send(HardwareUpdate::BatteryInfo(info));
+                                    }
                                 }
-                            }
-                            "wifi" => {
-                                if let Ok(Ok(info)) = client.get_wifi_info().await {
-                                    let _ = tx.send(HardwareUpdate::WifiInfo(info));
+                                "wifi" => {
+                                    if let Ok(Ok(info)) = client.get_wifi_info().await {
+                                        let _ = tx.send(HardwareUpdate::WifiInfo(info));
+                                    }
                                 }
-                            }
-                            "storage" => {
-                                if let Ok(Ok(info)) = client.get_storage_device_info().await {
-                                    let _ = tx.send(HardwareUpdate::StorageDeviceInfo(info));
+                                "storage" => {
+                                    if let Ok(Ok(info)) = client.get_storage_device_info().await {
+                                        let _ = tx.send(HardwareUpdate::StorageDeviceInfo(info));
+                                    }
                                 }
-                            }
-                            "mount" => {
-                                if let Ok(Ok(info)) = client.get_mount_info().await {
-                                    let _ = tx.send(HardwareUpdate::MountInfo(info));
+                                "mount" => {
+                                    if let Ok(Ok(info)) = client.get_mount_info().await {
+                                        let _ = tx.send(HardwareUpdate::MountInfo(info));
+                                    }
                                 }
+                                _ => {}
                             }
-                            _ => {}
-                        }
-                    });
-                }).await;
+                        });
+                    })
+                    .await;
             });
-            
+
             // Register components with their refresh intervals
-            let _ = handle.register("cpu".to_string(), Duration::from_millis(state.config.statistics_sections.cpu_poll_rate));
-            let _ = handle.register("gpu".to_string(), Duration::from_millis(state.config.statistics_sections.gpu_poll_rate));
-            let _ = handle.register("memory".to_string(), Duration::from_millis(state.config.statistics_sections.memory_poll_rate));
-            let _ = handle.register("fans".to_string(), Duration::from_millis(state.config.statistics_sections.fans_poll_rate));
-            let _ = handle.register("battery".to_string(), Duration::from_millis(state.config.statistics_sections.battery_poll_rate));
-            let _ = handle.register("wifi".to_string(), Duration::from_millis(state.config.statistics_sections.wifi_poll_rate));
-            let _ = handle.register("storage".to_string(), Duration::from_millis(state.config.statistics_sections.storage_poll_rate));
-            let _ = handle.register("mount".to_string(), Duration::from_millis(state.config.statistics_sections.storage_poll_rate));
+            let _ = handle.register(
+                "cpu".to_string(),
+                Duration::from_millis(state.config.statistics_sections.cpu_poll_rate),
+            );
+            let _ = handle.register(
+                "gpu".to_string(),
+                Duration::from_millis(state.config.statistics_sections.gpu_poll_rate),
+            );
+            let _ = handle.register(
+                "memory".to_string(),
+                Duration::from_millis(state.config.statistics_sections.memory_poll_rate),
+            );
+            let _ = handle.register(
+                "fans".to_string(),
+                Duration::from_millis(state.config.statistics_sections.fans_poll_rate),
+            );
+            let _ = handle.register(
+                "battery".to_string(),
+                Duration::from_millis(state.config.statistics_sections.battery_poll_rate),
+            );
+            let _ = handle.register(
+                "wifi".to_string(),
+                Duration::from_millis(state.config.statistics_sections.wifi_poll_rate),
+            );
+            let _ = handle.register(
+                "storage".to_string(),
+                Duration::from_millis(state.config.statistics_sections.storage_poll_rate),
+            );
+            let _ = handle.register(
+                "mount".to_string(),
+                Duration::from_millis(state.config.statistics_sections.storage_poll_rate),
+            );
 
             // Initial system info load
             let client_clone = client.clone();
@@ -332,27 +358,28 @@ impl TuxedoApp {
                     let _ = tx_clone.send(HardwareUpdate::HardwareInterface(interface));
                 }
             });
-            
+
             Some(handle)
         } else {
             None
         };
-        
+
         // Set coordinator handle in state
         state.coordinator_handle = coordinator_handle.clone();
-        
+
         // Apply theme
         let theme = TuxedoTheme::new(&state.config.theme);
         theme.apply_with_font_size(&cc.egui_ctx, &state.config.font_size);
 
-        let system_tray = match SystemTray::new(&state.config.profiles, &state.config.current_profile) {
-            Ok(tray) => Some(tray),
-            Err(e) => {
-                log::warn!("Failed to initialize system tray: {}", e);
-                None
-            }
-        };
-        
+        let system_tray =
+            match SystemTray::new(&state.config.profiles, &state.config.current_profile) {
+                Ok(tray) => Some(tray),
+                Err(e) => {
+                    log::warn!("Failed to initialize system tray: {}", e);
+                    None
+                }
+            };
+
         Self {
             state,
             dbus_client,
@@ -364,7 +391,7 @@ impl TuxedoApp {
             shortcuts: KeyboardShortcuts::new(),
         }
     }
-    
+
     fn handle_hardware_updates(&mut self) {
         // Process all pending updates (non-blocking)
         while let Ok(update) = self.hw_update_rx.try_recv() {
@@ -399,35 +426,38 @@ impl TuxedoApp {
                 HardwareUpdate::HardwareInterface(info) => {
                     self.state.hardware_interface = Some(info);
                 }
-                HardwareUpdate::GpuClockRanges(result) => {
-                    match result {
-                        Ok(ranges) => self.state.gpu_clock_ranges = Some(ranges),
-                        Err(e) => self.state.show_message(format!("Failed to get GPU clock ranges: {}", e), true),
+                HardwareUpdate::GpuClockRanges(result) => match result {
+                    Ok(ranges) => self.state.gpu_clock_ranges = Some(ranges),
+                    Err(e) => self
+                        .state
+                        .show_message(format!("Failed to get GPU clock ranges: {}", e), true),
+                },
+                HardwareUpdate::GpuMemClockRanges(result) => match result {
+                    Ok(mut ranges) => {
+                        if !ranges.is_empty() {
+                            ranges.sort_unstable();
+                            self.state.gpu_mem_clock_ranges =
+                                Some((*ranges.first().unwrap(), *ranges.last().unwrap()));
+                        }
                     }
-                }
-                HardwareUpdate::GpuMemClockRanges(result) => {
-                    match result {
-                        Ok(mut ranges) => {
-                            if !ranges.is_empty() {
-                                ranges.sort_unstable();
-                                self.state.gpu_mem_clock_ranges = Some((*ranges.first().unwrap(), *ranges.last().unwrap()));
-                            }
-                        },
-                        Err(e) => self.state.show_message(format!("Failed to get GPU memory clock ranges: {}", e), true),
-                    }
-                }
-                HardwareUpdate::GpuCoreOffsetLimits(result) => {
-                    match result {
-                        Ok(limits) => self.state.gpu_core_offset_limits = Some(limits),
-                        Err(e) => self.state.show_message(format!("Failed to get GPU core offset limits: {}", e), true),
-                    }
-                }
-                HardwareUpdate::GpuMemOffsetLimits(result) => {
-                    match result {
-                        Ok(limits) => self.state.gpu_mem_offset_limits = Some(limits),
-                        Err(e) => self.state.show_message(format!("Failed to get GPU memory offset limits: {}", e), true),
-                    }
-                }
+                    Err(e) => self.state.show_message(
+                        format!("Failed to get GPU memory clock ranges: {}", e),
+                        true,
+                    ),
+                },
+                HardwareUpdate::GpuCoreOffsetLimits(result) => match result {
+                    Ok(limits) => self.state.gpu_core_offset_limits = Some(limits),
+                    Err(e) => self
+                        .state
+                        .show_message(format!("Failed to get GPU core offset limits: {}", e), true),
+                },
+                HardwareUpdate::GpuMemOffsetLimits(result) => match result {
+                    Ok(limits) => self.state.gpu_mem_offset_limits = Some(limits),
+                    Err(e) => self.state.show_message(
+                        format!("Failed to get GPU memory offset limits: {}", e),
+                        true,
+                    ),
+                },
                 HardwareUpdate::AvailableThresholds(start, end) => {
                     self.state.available_start_thresholds = start;
                     self.state.available_end_thresholds = end;
@@ -440,36 +470,42 @@ impl TuxedoApp {
                 }
             }
         }
-        
+
         // Check pending battery update
         if let Some(mut rx) = self.state.pending_battery_update.take() {
             match rx.try_recv() {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => {
-                    self.state.show_message(format!("Battery update failed: {}", e), true);
+                    self.state
+                        .show_message(format!("Battery update failed: {}", e), true);
                 }
                 Err(oneshot::error::TryRecvError::Empty) => {
                     self.state.pending_battery_update = Some(rx);
                 }
                 Err(oneshot::error::TryRecvError::Closed) => {
-                    self.state.show_message("Battery update channel closed", true);
+                    self.state
+                        .show_message("Battery update channel closed", true);
                 }
             }
         }
     }
-    
+
     fn draw_top_bar(&mut self, ctx: &Context) {
         TopBottomPanel::top("top_bar").show(ctx, |ui| {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.add_space(12.0);
-                
+
                 // Navigation tabs
-                ui.selectable_value(&mut self.state.current_page, Page::Statistics, "📊 Statistics");
+                ui.selectable_value(
+                    &mut self.state.current_page,
+                    Page::Statistics,
+                    "📊 Statistics",
+                );
                 ui.selectable_value(&mut self.state.current_page, Page::Profiles, "📋 Profiles");
                 ui.selectable_value(&mut self.state.current_page, Page::Tuning, "🔧 Tuning");
                 ui.selectable_value(&mut self.state.current_page, Page::Settings, "⚙️ Settings");
-                
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(12.0);
                     let time_str = Local::now().format("%H:%M:%S").to_string();
@@ -485,7 +521,7 @@ impl TuxedoApp {
             });
             ui.add_space(8.0);
         });
-        
+
         // Status message bar (if any)
         if let Some(ref msg) = self.state.status_message.clone() {
             if msg.shown_at.elapsed() < Duration::from_secs(5) {
@@ -541,12 +577,12 @@ impl eframe::App for TuxedoApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         // Handle keyboard shortcuts
         self.shortcuts.handle_shortcuts(ctx, &mut self.state);
-        
+
         // Handle background hardware updates
         self.handle_hardware_updates();
 
         self.handle_tray_events(ctx);
-        
+
         if ctx.input(|input| input.viewport().close_requested())
             && self.state.config.tray_enabled
             && !self.force_quit
@@ -557,26 +593,30 @@ impl eframe::App for TuxedoApp {
 
         // Draw top bar
         self.draw_top_bar(ctx);
-        
+
         // Draw main content
-        CentralPanel::default().show(ctx, |ui| {
-            match self.state.current_page {
-                Page::Statistics => {
-                    statistics::draw(ui, &mut self.state);
-                }
-                Page::Profiles => {
-                    profiles::draw(ui, &mut self.state, self.dbus_client.as_ref());
-                }
-                Page::Tuning => {
-                    let hw_update_tx = self.hw_update_tx.clone();
-                    tuning::draw(ui, &mut self.state, self.dbus_client.as_ref(), hw_update_tx);
-                }
-                Page::Settings => {
-                    settings::draw(ui, &mut self.state, &mut self.theme, ctx, self.dbus_client.as_ref());
-                }
+        CentralPanel::default().show(ctx, |ui| match self.state.current_page {
+            Page::Statistics => {
+                statistics::draw(ui, &mut self.state);
+            }
+            Page::Profiles => {
+                profiles::draw(ui, &mut self.state, self.dbus_client.as_ref());
+            }
+            Page::Tuning => {
+                let hw_update_tx = self.hw_update_tx.clone();
+                tuning::draw(ui, &mut self.state, self.dbus_client.as_ref(), hw_update_tx);
+            }
+            Page::Settings => {
+                settings::draw(
+                    ui,
+                    &mut self.state,
+                    &mut self.theme,
+                    ctx,
+                    self.dbus_client.as_ref(),
+                );
             }
         });
-        
+
         // Request repaint if there are pending updates
         ctx.request_repaint_after(Duration::from_millis(500));
     }
@@ -586,7 +626,8 @@ impl eframe::App for TuxedoApp {
             let client = client.clone();
             tokio::spawn(async move {
                 let _ = tokio::time::timeout(Duration::from_secs(2), client.set_fan_auto(0)).await;
-                let _ = tokio::time::timeout(Duration::from_secs(2), client.shutdown_daemon()).await;
+                let _ =
+                    tokio::time::timeout(Duration::from_secs(2), client.shutdown_daemon()).await;
             });
         }
     }

@@ -1,7 +1,7 @@
+use anyhow::Result;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use anyhow::Result;
 
 /// Lightweight UI refresh coordinator - manages when to trigger UI updates
 /// Unlike a full scheduler, this just tracks intervals and notifies when refresh is needed
@@ -67,7 +67,7 @@ impl RefreshCoordinator {
     /// Create a new refresh coordinator
     pub fn new() -> Self {
         let (command_tx, command_rx) = mpsc::unbounded_channel();
-        
+
         Self {
             components: HashMap::new(),
             command_rx,
@@ -85,10 +85,11 @@ impl RefreshCoordinator {
     /// Run the coordinator loop
     pub async fn run(mut self, refresh_callback: impl Fn(&str) + Send + 'static) {
         log::debug!("Starting UI refresh coordinator");
-        
+
         loop {
             // Find next refresh time
-            let sleep_duration = self.components
+            let sleep_duration = self
+                .components
                 .values()
                 .map(|c| c.time_until_refresh())
                 .min()
