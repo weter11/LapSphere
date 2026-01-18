@@ -6,6 +6,35 @@ use std::path::Path;
 use tuxedo_common::types::*;
 use crate::tuxedo_io::TuxedoIo;
 
+/// Keyboard effect modes for Clevo hardware
+#[derive(Debug, Clone, Copy)]
+#[repr(u32)]
+pub enum ClevoEffectMode {
+    Custom = 0x00000000,        // Static color
+    Breathe = 0x1002A000,       // Breathing effect
+    Cycle = 0x33010000,         // Color cycle through spectrum
+    Dance = 0x80000000,         // Dance effect
+    Flash = 0xA0000000,         // Flash effect
+    RandomColor = 0x70000000,   // Random color
+    Tempo = 0x90000000,         // Tempo effect
+    Wave = 0xB0000000,          // Wave effect
+}
+
+impl ClevoEffectMode {
+    pub fn from_keyboard_mode(mode: &KeyboardMode) -> (Self, Option<u8>, Option<u8>) {
+        match mode {
+            KeyboardMode::SingleColor { .. } => (Self::Custom, None, None),
+            KeyboardMode::Breathe { speed, .. } => (Self::Breathe, Some(*speed), None),
+            KeyboardMode::Cycle { speed, .. } => (Self::Cycle, Some(*speed), None),
+            KeyboardMode::Dance { speed, .. } => (Self::Dance, Some(*speed), None),
+            KeyboardMode::Flash { speed, .. } => (Self::Flash, Some(*speed), None),
+            KeyboardMode::RandomColor { speed, .. } => (Self::RandomColor, Some(*speed), None),
+            KeyboardMode::Tempo { speed, .. } => (Self::Tempo, Some(*speed), None),
+            KeyboardMode::Wave { speed, .. } => (Self::Wave, Some(*speed), None),
+        }
+    }
+}
+
 fn get_cpu_count() -> Result<u32> {
     let cpuinfo = fs::read_to_string("/proc/cpuinfo")?;
     let count = cpuinfo.lines()
@@ -193,16 +222,197 @@ pub fn apply_battery_settings(settings: &BatterySettings) -> Result<()> {
     Ok(())
 }
 
-fn apply_keyboard_settings(settings: &KeyboardSettings) -> Result<()> {
+/// Apply keyboard settings (main entry point)
+pub fn apply_keyboard_settings(settings: &KeyboardSettings) -> Result<()> {
+    // Detect hardware type and apply appropriate settings
+    if is_clevo_hardware() {
+        apply_clevo_keyboard_settings(settings)
+    } else if is_uniwill_hardware() {
+        apply_uniwill_keyboard_settings(settings)
+    } else {
+        // Fallback to sysfs-based control
+        apply_keyboard_settings_sysfs(settings)
+    }
+}
+
+pub fn preview_keyboard_settings(settings: &KeyboardSettings) -> Result<()> {
+    // For preview, we use the same hardware-specific logic
+    if is_clevo_hardware() {
+        apply_clevo_keyboard_settings(settings)
+    } else if is_uniwill_hardware() {
+        apply_uniwill_keyboard_settings(settings)
+    } else {
+        preview_keyboard_settings_sysfs(settings)
+    }
+}
+
+/// Apply keyboard settings for Clevo hardware
+fn apply_clevo_keyboard_settings(settings: &KeyboardSettings) -> Result<()> {
+    if !settings.control_enabled {
+        log::info!("Clevo keyboard control disabled, skipping");
+        return Ok(());
+    }
+
+    match &settings.mode {
+        KeyboardMode::SingleColor { r, g, b, brightness } => {
+            log::info!("Applying Clevo static color: RGB({}, {}, {}) brightness {}%", r, g, b, brightness);
+
+            // Apply color
+            apply_clevo_static_color(*r, *g, *b)?;
+
+            // Apply brightness
+            apply_clevo_brightness(*brightness)?;
+        }
+        mode => {
+            // For effect modes, we need to use the Clevo interface
+            let (effect_mode, speed, _) = ClevoEffectMode::from_keyboard_mode(mode);
+
+            log::info!("Applying Clevo effect mode: {:?}", effect_mode);
+
+            // First set the color if the mode uses it
+            if let Some((r, g, b)) = get_mode_color(mode) {
+                apply_clevo_static_color(r, g, b)?;
+            }
+
+            // Apply the effect mode
+            apply_clevo_effect_mode(effect_mode, speed)?;
+
+            // Apply brightness
+            if let Some(brightness) = get_mode_brightness(mode) {
+                apply_clevo_brightness(brightness)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Apply static color for Clevo keyboards
+fn apply_clevo_static_color(r: u8, g: u8, b: u8) -> Result<()> {
+    // Pack RGB into 0x00RRGGBB format
+    let color_value = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+
+    // For 3-zone RGB keyboards, we need to set all zones
+    // Zone 0 (left)
+    let zone0_cmd = 0xF0000000 | color_value;
+    clevo_evaluate_method(0x67, zone0_cmd)?;
+
+    // Zone 1 (center)
+    let zone1_cmd = 0xF1000000 | color_value;
+    clevo_evaluate_method(0x67, zone1_cmd)?;
+
+    // Zone 2 (right)
+    let zone2_cmd = 0xF2000000 | color_value;
+    clevo_evaluate_method(0x67, zone2_cmd)?;
+
+    log::debug!("Applied Clevo static color: RGB({}, {}, {})", r, g, b);
+    Ok(())
+}
+
+/// Apply effect mode for Clevo keyboards
+fn apply_clevo_effect_mode(mode: ClevoEffectMode, speed: Option<u8>) -> Result<()> {
+    let mut mode_value = mode as u32;
+
+    // Some modes support speed parameter (encoded in lower bits)
+    if let Some(speed) = speed {
+        // Speed is typically 0-255, map to appropriate range for the effect
+        // Different effects may use different speed encodings
+        match mode {
+            ClevoEffectMode::Breathe | ClevoEffectMode::Flash => {
+                // These modes encode speed in bits 8-15
+                mode_value = (mode_value & 0xFFFF0000) | ((speed as u32) << 8);
+            }
+            _ => {
+                // Other modes use default encoding
+            }
+        }
+    }
+
+    log::debug!("Applying Clevo effect mode: 0x{:08X}", mode_value);
+    clevo_evaluate_method(0x67, mode_value)?;
+
+    Ok(())
+}
+
+/// Apply brightness for Clevo keyboards
+fn apply_clevo_brightness(brightness: u8) -> Result<()> {
+    let brightness_cmd = 0xF4000000 | (brightness as u32);
+    clevo_evaluate_method(0x67, brightness_cmd)?;
+
+    log::debug!("Applied Clevo brightness: {}%", brightness);
+    Ok(())
+}
+
+/// Helper to evaluate Clevo methods
+fn clevo_evaluate_method(cmd: u8, arg: u32) -> Result<()> {
+    let io = TuxedoIo::new()?;
+    io.evaluate_clevo_method(cmd, arg)
+}
+
+/// Get color from keyboard mode
+fn get_mode_color(mode: &KeyboardMode) -> Option<(u8, u8, u8)> {
+    match mode {
+        KeyboardMode::SingleColor { r, g, b, .. } => Some((*r, *g, *b)),
+        KeyboardMode::Breathe { r, g, b, .. } => Some((*r, *g, *b)),
+        KeyboardMode::Flash { r, g, b, .. } => Some((*r, *g, *b)),
+        _ => None,
+    }
+}
+
+/// Get brightness from keyboard mode
+fn get_mode_brightness(mode: &KeyboardMode) -> Option<u8> {
+    match mode {
+        KeyboardMode::SingleColor { brightness, .. } |
+        KeyboardMode::Breathe { brightness, .. } |
+        KeyboardMode::Cycle { brightness, .. } |
+        KeyboardMode::Dance { brightness, .. } |
+        KeyboardMode::Flash { brightness, .. } |
+        KeyboardMode::RandomColor { brightness, .. } |
+        KeyboardMode::Tempo { brightness, .. } |
+        KeyboardMode::Wave { brightness, .. } => Some(*brightness),
+    }
+}
+
+/// Check if this is Clevo hardware
+fn is_clevo_hardware() -> bool {
+    TuxedoIo::is_available() && TuxedoIo::new()
+        .map(|io| matches!(io.get_interface(), crate::tuxedo_io::HardwareInterface::Clevo))
+        .unwrap_or(false)
+}
+
+/// Check if this is Uniwill hardware
+fn is_uniwill_hardware() -> bool {
+    TuxedoIo::is_available() && TuxedoIo::new()
+        .map(|io| matches!(io.get_interface(), crate::tuxedo_io::HardwareInterface::Uniwill))
+        .unwrap_or(false)
+}
+
+/// Apply keyboard settings for Uniwill hardware
+fn apply_uniwill_keyboard_settings(settings: &KeyboardSettings) -> Result<()> {
+    if !settings.control_enabled {
+        log::info!("Uniwill keyboard control disabled, skipping");
+        return Ok(());
+    }
+
+    log::info!("Uniwill keyboard effects not yet implemented");
+    Ok(())
+}
+
+/// Fallback sysfs-based keyboard settings
+fn apply_keyboard_settings_sysfs(settings: &KeyboardSettings) -> Result<()> {
     if !settings.control_enabled {
         log::info!("Keyboard control disabled, skipping");
         return Ok(());
     }
     
-    let base_path = find_keyboard_backlight_path()
-        .ok_or_else(|| anyhow!("Keyboard backlight not found"))?;
+    let base_path = match find_keyboard_backlight_path() {
+        Some(path) => path,
+        None => {
+            log::warn!("Keyboard backlight not found for sysfs control");
+            return Ok(());
+        }
+    };
     
-    use tuxedo_common::types::KeyboardMode;
     match &settings.mode {
         KeyboardMode::SingleColor { r, g, b, brightness } => {
             log::info!("Applying keyboard: RGB({}, {}, {}) brightness {}%", r, g, b, brightness);
@@ -210,10 +420,7 @@ fn apply_keyboard_settings(settings: &KeyboardSettings) -> Result<()> {
             let color_path = format!("{}/multi_intensity", base_path);
             if Path::new(&color_path).exists() {
                 let color_str = format!("{} {} {}", r, g, b);
-                log::info!("Writing to {}: {}", color_path, color_str);
                 fs::write(&color_path, color_str)?;
-            } else {
-                log::warn!("multi_intensity not found at {}", color_path);
             }
             
             let brightness_path = format!("{}/brightness", base_path);
@@ -226,13 +433,7 @@ fn apply_keyboard_settings(settings: &KeyboardSettings) -> Result<()> {
                 };
                 
                 let actual_brightness = ((*brightness as u32) * max_brightness) / 100;
-                
-                log::info!("Writing to {}: {} ({}% of {} max)", 
-                    brightness_path, actual_brightness, brightness, max_brightness);
-                
                 fs::write(&brightness_path, actual_brightness.to_string())?;
-            } else {
-                log::warn!("brightness not found at {}", brightness_path);
             }
             
             log::info!("✅ Keyboard backlight applied successfully");
@@ -242,7 +443,7 @@ fn apply_keyboard_settings(settings: &KeyboardSettings) -> Result<()> {
                 kbd.set_mode(&settings.mode)?;
                 log::info!("✅ Keyboard effect mode applied successfully");
             } else {
-                log::warn!("RGB keyboard control not available for effect modes");
+                log::warn!("RGB keyboard control not available for effect modes via sysfs");
             }
         }
     }
@@ -250,11 +451,12 @@ fn apply_keyboard_settings(settings: &KeyboardSettings) -> Result<()> {
     Ok(())
 }
 
-pub fn preview_keyboard_settings(settings: &KeyboardSettings) -> Result<()> {
-    let base_path = find_keyboard_backlight_path()
-        .ok_or_else(|| anyhow!("Keyboard backlight not found"))?;
+fn preview_keyboard_settings_sysfs(settings: &KeyboardSettings) -> Result<()> {
+    let base_path = match find_keyboard_backlight_path() {
+        Some(path) => path,
+        None => return Ok(()),
+    };
     
-    use tuxedo_common::types::KeyboardMode;
     match &settings.mode {
         KeyboardMode::SingleColor { r, g, b, brightness } => {
             let color_path = format!("{}/multi_intensity", base_path);

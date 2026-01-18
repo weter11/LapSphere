@@ -583,4 +583,17 @@ impl TuxedoIo {
         let request = Self::iow(MAGIC_WRITE_CL, 0x12, Self::PTR_SIZE);
         Self::ioctl_write_i32(fd, request, value)
     }
+
+    /// Evaluate a raw Clevo method via ioctl
+    pub fn evaluate_clevo_method(&self, seq: u8, arg: u32) -> Result<()> {
+        if self.interface != HardwareInterface::Clevo {
+            return Err(anyhow!("Clevo method evaluation only available on Clevo interface"));
+        }
+
+        let fd = self.device.as_raw_fd();
+        let request = Self::iow(MAGIC_WRITE_CL, seq, Self::PTR_SIZE);
+
+        log::debug!("Clevo ioctl: seq=0x{:02X}, arg=0x{:08X}, request=0x{:08X}", seq, arg, request);
+        Self::ioctl_write_i32(fd, request, arg as i32)
+    }
 }
