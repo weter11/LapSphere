@@ -833,6 +833,104 @@ fn get_tuxedo_kernel_modules() -> String {
     }
 }
 
+pub fn get_keyboard_capabilities() -> KeyboardCapabilities {
+    let mut capabilities = KeyboardCapabilities {
+        keyboard_type: KeyboardType::None,
+        supports_brightness: false,
+        supports_color: false,
+        supports_effects: false,
+        num_zones: 0,
+    };
+
+    // Check for tuxedo_keyboard sysfs
+    let base_path = "/sys/devices/platform/tuxedo_keyboard/leds";
+    if Path::new(base_path).exists() {
+        // Check for multiple zones
+        let mut zones = 0;
+        if Path::new(&format!("{}/left:kbd_backlight", base_path)).exists()
+            || Path::new(&format!("{}/rgb:kbd_backlight", base_path)).exists()
+        {
+            zones = 1;
+            capabilities.keyboard_type = KeyboardType::SingleZoneRGB;
+
+            if Path::new(&format!("{}/center:kbd_backlight", base_path)).exists()
+                && Path::new(&format!("{}/right:kbd_backlight", base_path)).exists()
+            {
+                zones = 3;
+                capabilities.keyboard_type = KeyboardType::ThreeZoneRGB;
+            }
+        }
+
+        if zones > 0 {
+            capabilities.num_zones = zones;
+            capabilities.supports_brightness = true;
+            capabilities.supports_color = true;
+
+            // Effects support - usually if there is a 'mode' file
+            let test_path = if zones == 3 {
+                format!("{}/left:kbd_backlight/mode", base_path)
+            } else {
+                format!("{}/rgb:kbd_backlight/mode", base_path)
+            };
+            capabilities.supports_effects = Path::new(&test_path).exists();
+
+            return capabilities;
+        }
+    }
+
+    // Fallback: check /sys/class/leds/
+    let class_leds = "/sys/class/leds";
+    if let Ok(entries) = fs::read_dir(class_leds) {
+        let mut kbd_leds = Vec::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.contains("kbd_backlight") {
+                kbd_leds.push(name);
+            }
+        }
+
+        if !kbd_leds.is_empty() {
+            capabilities.supports_brightness = true;
+
+            let has_rgb = kbd_leds.iter().any(|n| n.contains("rgb:"));
+            let has_tuxedo = kbd_leds.iter().any(|n| n.contains("tuxedo:"));
+
+            if has_rgb || has_tuxedo {
+                capabilities.supports_color = true;
+
+                // Count zones
+                let zones = kbd_leds.len() as u32;
+                capabilities.num_zones = zones;
+
+                if zones == 1 {
+                    capabilities.keyboard_type = KeyboardType::SingleZoneRGB;
+                } else if zones == 3 {
+                    capabilities.keyboard_type = KeyboardType::ThreeZoneRGB;
+                } else if zones == 4 {
+                    capabilities.keyboard_type = KeyboardType::FourZoneRGB;
+                } else {
+                    capabilities.keyboard_type = KeyboardType::SingleZoneRGB;
+                }
+
+                // Check for effects in the first one
+                let first_path = format!("{}/{}/mode", class_leds, kbd_leds[0]);
+                capabilities.supports_effects = Path::new(&first_path).exists();
+            } else {
+                capabilities.keyboard_type = KeyboardType::WhiteOnly;
+                capabilities.num_zones = 1;
+            }
+        }
+    }
+
+    // Per-key check - some ITE controllers might not show up as standard LEDs yet
+    // or they might have a lot of them. If we see > 10 kbd_backlight leds, it might be per-key.
+    if capabilities.num_zones > 10 {
+        capabilities.keyboard_type = KeyboardType::PerKeyRGB;
+    }
+
+    capabilities
+}
+
 pub fn get_system_info() -> Result<SystemInfo> {
     let product_name = fs::read_to_string("/sys/class/dmi/id/product_name")
         .unwrap_or_else(|_| "Unknown".to_string())

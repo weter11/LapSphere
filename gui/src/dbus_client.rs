@@ -21,6 +21,7 @@ pub enum DbusCommand {
     GetWifiInfo { reply: oneshot::Sender<Result<Vec<WiFiInfo>>> },
     GetTdpProfiles { reply: oneshot::Sender<Result<Vec<String>>> },
     GetHardwareInterfaceInfo { reply: oneshot::Sender<Result<String>> },
+    GetKeyboardCapabilities { reply: oneshot::Sender<Result<KeyboardCapabilities>> },
     ApplyProfile { profile: Profile, reply: oneshot::Sender<Result<()>> },
     SetCpuGovernor { governor: String, reply: oneshot::Sender<Result<()>> },
     SetCpuBoost { enabled: bool, reply: oneshot::Sender<Result<()>> },
@@ -125,6 +126,12 @@ impl DbusClient {
     pub fn get_hardware_interface_info(&self) -> oneshot::Receiver<Result<String>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.command_tx.send(DbusCommand::GetHardwareInterfaceInfo { reply: tx });
+        rx
+    }
+
+    pub fn get_keyboard_capabilities(&self) -> oneshot::Receiver<Result<KeyboardCapabilities>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::GetKeyboardCapabilities { reply: tx });
         rx
     }
     
@@ -317,6 +324,10 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
             }
             DbusCommand::GetHardwareInterfaceInfo { reply } => {
                 let result = get_hardware_interface_info_impl(&connection).await;
+                let _ = reply.send(result);
+            }
+            DbusCommand::GetKeyboardCapabilities { reply } => {
+                let result = get_keyboard_capabilities_impl(&connection).await;
                 let _ = reply.send(result);
             }
             DbusCommand::ApplyProfile { profile, reply } => {
@@ -548,6 +559,18 @@ async fn get_hardware_interface_info_impl(conn: &Connection) -> Result<String> {
 
     let info: String = proxy.call("GetHardwareInterfaceInfo", &()).await?;
     Ok(info)
+}
+
+async fn get_keyboard_capabilities_impl(conn: &Connection) -> Result<KeyboardCapabilities> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "com.tuxedo.Control",
+        "/com/tuxedo/Control",
+        "com.tuxedo.Control",
+    ).await?;
+
+    let json: String = proxy.call("GetKeyboardCapabilities", &()).await?;
+    Ok(serde_json::from_str(&json)?)
 }
 
 async fn apply_profile_impl(conn: &Connection, profile: &Profile) -> Result<()> {

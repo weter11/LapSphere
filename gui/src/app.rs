@@ -43,6 +43,7 @@ pub struct AppState {
     pub storage_device_info: Vec<StorageDevice>,
     pub mount_info: Vec<MountInfo>,
     pub hardware_interface: Option<String>,
+    pub keyboard_capabilities: Option<KeyboardCapabilities>,
     pub gpu_clock_ranges: Option<(u32, u32)>,
     pub gpu_mem_clock_ranges: Option<(u32, u32)>,
     pub gpu_core_offset_limits: Option<(i32, i32)>,
@@ -97,6 +98,7 @@ impl AppState {
             available_start_thresholds: Vec::new(),
             available_end_thresholds: Vec::new(),
             available_tdp_profiles: Vec::new(),
+            keyboard_capabilities: None,
             current_page: Page::Statistics,
             settings_tab: SettingsTab::Main,
             status_message: None,
@@ -195,6 +197,7 @@ pub enum HardwareUpdate {
     GpuMemOffsetLimits(Result<(i32, i32), String>),
     AvailableThresholds(Vec<u8>, Vec<u8>),
     TdpProfiles(Vec<String>),
+    KeyboardCapabilities(KeyboardCapabilities),
     Error(String),
 }
 
@@ -332,6 +335,14 @@ impl TuxedoApp {
                     let _ = tx_clone.send(HardwareUpdate::HardwareInterface(interface));
                 }
             });
+
+            let client_clone = client.clone();
+            let tx_clone = hw_update_tx.clone();
+            tokio::spawn(async move {
+                if let Ok(Ok(caps)) = client_clone.get_keyboard_capabilities().await {
+                    let _ = tx_clone.send(HardwareUpdate::KeyboardCapabilities(caps));
+                }
+            });
             
             Some(handle)
         } else {
@@ -434,6 +445,9 @@ impl TuxedoApp {
                 }
                 HardwareUpdate::TdpProfiles(profiles) => {
                     self.state.available_tdp_profiles = profiles;
+                }
+                HardwareUpdate::KeyboardCapabilities(caps) => {
+                    self.state.keyboard_capabilities = Some(caps);
                 }
                 HardwareUpdate::Error(err) => {
                     log::error!("Hardware update error: {}", err);

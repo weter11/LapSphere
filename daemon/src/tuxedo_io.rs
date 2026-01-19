@@ -66,6 +66,15 @@ pub struct TuxedoIo {
     fan_count: u32,
 }
 
+impl std::fmt::Debug for TuxedoIo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TuxedoIo")
+            .field("interface", &self.interface)
+            .field("fan_count", &self.fan_count)
+            .finish()
+    }
+}
+
 impl TuxedoIo {
     // Linux ioctl macros equivalent - manually constructed for 64-bit systems
     // _IOR(type, nr, size)  = _IOC(_IOC_READ, type, nr, size)
@@ -582,5 +591,50 @@ impl TuxedoIo {
         
         let request = Self::iow(MAGIC_WRITE_CL, 0x12, Self::PTR_SIZE);
         Self::ioctl_write_i32(fd, request, value)
+    }
+
+    // Keyboard control (Clevo only)
+    pub fn set_clevo_keyboard_mode(&self, mode_val: u32) -> Result<()> {
+        if self.interface != HardwareInterface::Clevo {
+            return Err(anyhow!("Clevo keyboard control only available on Clevo interface"));
+        }
+
+        let fd = self.device.as_raw_fd();
+        // Use sequence 0x67 (CLEVO_CMD_SET_KB_RGB_LEDS)
+        let request = Self::iow(MAGIC_WRITE_CL, 0x67, Self::PTR_SIZE);
+        // Data needs to be zero-extended to u64 to avoid sign-extension bugs in 64-bit ioctl
+        let data = mode_val as u64;
+        let res = unsafe { libc::ioctl(fd, request, &data as *const u64) };
+        Errno::result(res)
+            .map_err(|e| anyhow!("ioctl write failed (req={:#x}): {}", request, e))?;
+        Ok(())
+    }
+
+    pub fn set_clevo_keyboard_color(&self, zone: u8, r: u8, g: u8, b: u8) -> Result<()> {
+        if self.interface != HardwareInterface::Clevo {
+            return Err(anyhow!("Clevo keyboard control only available on Clevo interface"));
+        }
+
+        // Prefix for zones: 0xF0=Left, 0xF1=Center, 0xF2=Right
+        let prefix = match zone {
+            0 => 0xF0000000u32,
+            1 => 0xF1000000u32,
+            2 => 0xF2000000u32,
+            _ => return Err(anyhow!("Invalid Clevo keyboard zone: {}", zone)),
+        };
+
+        let packed_color = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+        self.set_clevo_keyboard_mode(prefix | packed_color)
+    }
+
+    pub fn set_clevo_keyboard_brightness(&self, brightness_percent: u8) -> Result<()> {
+        if self.interface != HardwareInterface::Clevo {
+            return Err(anyhow!("Clevo keyboard control only available on Clevo interface"));
+        }
+
+        // Prefix 0xF4 for brightness
+        let prefix = 0xF4000000u32;
+        let val = brightness_percent.min(100) as u32;
+        self.set_clevo_keyboard_mode(prefix | val)
     }
 }

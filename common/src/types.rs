@@ -203,9 +203,36 @@ pub struct KeyboardSettings {
     pub mode: KeyboardMode,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum KeyboardType {
+    None,
+    WhiteOnly,
+    SingleZoneRGB,
+    ThreeZoneRGB,
+    FourZoneRGB,
+    PerKeyRGB,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct KeyboardCapabilities {
+    pub keyboard_type: KeyboardType,
+    pub supports_brightness: bool,
+    pub supports_color: bool,
+    pub supports_effects: bool,
+    pub num_zones: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ZoneColor {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum KeyboardMode {
     SingleColor { r: u8, g: u8, b: u8, brightness: u8 },  // CUSTOM (0) - Static color
+    MultipleZones { zones: Vec<ZoneColor>, brightness: u8 }, // Multiple zones (e.g. 3-zone, 4-zone)
     Breathe { r: u8, g: u8, b: u8, brightness: u8, speed: u8 },  // BREATHE (1)
     Cycle { brightness: u8, speed: u8 },  // CYCLE (2) - Color cycle through spectrum
     Dance { brightness: u8, speed: u8 },  // DANCE (3)
