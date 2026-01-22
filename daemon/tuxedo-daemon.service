@@ -1,10 +1,10 @@
 [Unit]
-Description=TUXEDO Control Center Daemon
+Description=LapSphere Daemon
 
 [Service]
 Type=dbus
-BusName=com.tuxedo.Control
-ExecStart=/usr/local/bin/tuxedo-daemon
+BusName=io.lapsphere.Control
+ExecStart=/usr/local/bin/lapsphere-daemon
 User=root
 
 [Install]

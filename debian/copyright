@@ -1,10 +1,10 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
-Upstream-Name: tuxedo-control-center
-Upstream-Contact: TUXEDO Control Center Team <dev@example.com>
+Upstream-Name: lapsphere
+Upstream-Contact: LapSphere Team <dev@example.com>
 Source: https://github.com/tuxedo/control-center
 
 Files: *
-Copyright: 2024 TUXEDO Control Center Team
+Copyright: 2025-2026 LapSphere Team
 License: GPL-2.0
 
 License: GPL-2.0

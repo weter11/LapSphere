@@ -4,7 +4,7 @@ use ksni::{
 };
 use ksni::blocking::TrayMethods;
 use std::sync::mpsc;
-use tuxedo_common::types::Profile;
+use lapsphere_common::types::Profile;
 
 const TRAY_ICON_SIZE: i32 = 32; // ksni::Icon uses i32 width/height (DBus int32).
 const TRAY_ICON_BYTES_PER_PIXEL: usize = 4;
@@ -31,12 +31,12 @@ impl ksni::Tray for TrayState {
     }
 
     fn title(&self) -> String {
-        "TUXEDO Control Center".into()
+        "LapSphere".into()
     }
 
     fn tool_tip(&self) -> ToolTip {
         ToolTip {
-            title: "TUXEDO Control Center".into(),
+            title: "LapSphere".into(),
             ..Default::default()
         }
     }

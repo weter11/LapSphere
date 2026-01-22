@@ -7,7 +7,7 @@ mod widgets;
 mod polling_scheduler;
 mod system_tray;
 
-use app::TuxedoApp;
+use app::LapSphereApp;
 
 fn main() -> Result<(), eframe::Error> {
     env_logger::init();
@@ -26,9 +26,9 @@ fn main() -> Result<(), eframe::Error> {
     };
     
     eframe::run_native(
-        "TUXEDO Control Center",
+        "LapSphere",
         options,
-        Box::new(|cc| Ok(Box::new(TuxedoApp::new(cc)))),
+        Box::new(|cc| Ok(Box::new(LapSphereApp::new(cc)))),
     )
 }
 

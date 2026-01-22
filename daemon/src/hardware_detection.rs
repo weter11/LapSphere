@@ -9,7 +9,7 @@ use once_cell::sync::Lazy;
 use crate::tuxedo_io::TuxedoIo;
 use systemstat::{System, Platform, saturating_sub_bytes};
 // use tuxedo_io::TuxedoIo;
-use tuxedo_common::types::*;
+use lapsphere_common::types::*;
 
 // Thread-safe storage for previous CPU stats
 static PREVIOUS_CPU_STATS: Mutex<Option<HashMap<u32, CpuStats>>> = Mutex::new(None);

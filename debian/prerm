@@ -4,10 +4,7 @@ set -e
 case "$1" in
     remove|deconfigure)
         # Stop the daemon
-        if [ -d /run/systemd/system ]; then
-            systemctl stop tuxedo-daemon.service || true
-            systemctl disable tuxedo-daemon.service || true
-        fi
+        pkill lapsphere-daemon || true
         ;;
 esac
 

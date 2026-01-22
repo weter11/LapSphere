@@ -1,14 +1,15 @@
 use egui::{Context, Style, Visuals, Color32, Rounding, Stroke, FontId, FontFamily, TextStyle};
-use tuxedo_common::types::Theme;
+use lapsphere_common::types::Theme;
 
-pub struct TuxedoTheme {
+pub struct LapSphereTheme {
     pub visuals: Visuals,
 }
 
-impl TuxedoTheme {
-    pub fn new(theme: &Theme) -> Self {
+impl LapSphereTheme {
+    pub fn new(theme: &Theme, system_is_dark: bool) -> Self {
         let visuals = match theme {
-            Theme::Auto | Theme::Dark => Self::dark_theme(),
+            Theme::Auto => if system_is_dark { Self::dark_theme() } else { Self::light_theme() },
+            Theme::Dark => Self::dark_theme(),
             Theme::Light => Self::light_theme(),
         };
         
@@ -33,22 +34,11 @@ impl TuxedoTheme {
         ctx.set_style(style);
     }
 
-        pub fn apply_with_font_size(&self, ctx: &Context, font_size: &tuxedo_common::types::FontSize) {
-        use tuxedo_common::types::FontSize;
+        pub fn apply_with_font_size(&self, ctx: &Context, font_size: &lapsphere_common::types::FontSize) {
+        use lapsphere_common::types::FontSize;
         
-        let mut style = Style::default();
+        let mut style = (*ctx.style()).clone();
         style.visuals = self.visuals.clone();
-        
-        // Spacing
-        style.spacing.item_spacing = egui::vec2(8.0, 6.0);
-        style.spacing.button_padding = egui::vec2(12.0, 6.0);
-        style.spacing.indent = 20.0;
-        style.spacing.window_margin = egui::Margin::same(12.0);
-        style.spacing.menu_margin = egui::Margin::same(8.0);
-        
-        // Interaction
-        style.interaction.resize_grab_radius_side = 6.0;
-        style.interaction.resize_grab_radius_corner = 8.0;
         
         // Text styles with font size
         let (heading, body, button, small, mono) = match font_size {

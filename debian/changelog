@@ -1,4 +1,4 @@
-tuxedo-control-center (0.1.0-1) noble; urgency=medium
+lapsphere (0.1.0-1) noble; urgency=medium
 
   * Initial release
   * Direct sysfs hardware access
@@ -10,4 +10,4 @@ tuxedo-control-center (0.1.0-1) noble; urgency=medium
   * Profile management system
   * Auto-switching profiles based on applications
 
- -- TUXEDO Control Center Team <dev@example.com>  Sat, 14 Dec 2024 00:00:00 +0000
+ -- LapSphere Team <dev@example.com>  Sat, 14 Dec 2025-2026 00:00:00 +0000

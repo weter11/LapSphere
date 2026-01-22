@@ -4,7 +4,7 @@ use once_cell::sync::Lazy;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
-use tuxedo_common::types::*;
+use lapsphere_common::types::*;
 use crate::tuxedo_io::{TuxedoIo, HardwareInterface};
 
 fn get_cpu_count() -> Result<u32> {
@@ -576,8 +576,8 @@ impl RgbKeyboardControl {
         Ok(())
     }
     
-    pub fn set_mode(&self, mode: &tuxedo_common::types::KeyboardMode) -> Result<()> {
-        use tuxedo_common::types::KeyboardMode;
+    pub fn set_mode(&self, mode: &lapsphere_common::types::KeyboardMode) -> Result<()> {
+        use lapsphere_common::types::KeyboardMode;
         match mode {
             KeyboardMode::SingleColor { r, g, b, brightness } => {
                 // For Clevo, explicitly set mode 0 (Custom/Static)

@@ -1,7 +1,7 @@
-Source: tuxedo-control-center
+Source: lapsphere
 Section: utils
 Priority: optional
-Maintainer: TUXEDO Control Center Team <dev@example.com>
+Maintainer: LapSphere Team <dev@example.com>
 Build-Depends: debhelper-compat (= 13),
                cargo,
                rustc,
@@ -11,7 +11,7 @@ Build-Depends: debhelper-compat (= 13),
 Standards-Version: 4.6.2
 Homepage: https://github.com/tuxedo/control-center
 
-Package: tuxedo-control-center
+Package: lapsphere
 Architecture: amd64
 Depends: ${shlibs:Depends}, ${misc:Depends},
          libgtk-4-1,
@@ -21,7 +21,7 @@ Depends: ${shlibs:Depends}, ${misc:Depends},
          policykit-1
 Recommends: tuxedo-drivers
 Description: Hardware control application for TUXEDO/Clevo laptops
- TUXEDO Control Center provides a modern interface for controlling
+ LapSphere provides a modern interface for controlling
  hardware features on TUXEDO and Clevo laptops including:
   - CPU frequency and power management
   - GPU control

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=LapSphere
+GenericName=Hardware Control
+Comment=Control hardware features on LapSphere/Clevo laptops
+Exec=lapsphere
+Icon=lapsphere
+Terminal=false
+Type=Application
+Categories=System;Settings;HardwareSettings;
+Keywords=lapsphere;clevo;hardware;cpu;gpu;fan;power;performance;
+StartupNotify=true

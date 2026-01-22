@@ -2,7 +2,7 @@ use egui::{Ui, ScrollArea, RichText, Slider, ComboBox, TopBottomPanel};
 use std::path::Path;
 use crate::app::AppState;
 use crate::dbus_client::DbusClient;
-use tuxedo_common::types::{KeyboardMode, Profile, FanCurve, KeyboardCapabilities};
+use lapsphere_common::types::{KeyboardMode, Profile, FanCurve, KeyboardCapabilities};
 use crate::widgets::fan_curve_editor::FanCurveEditor;
 
 pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>, hw_update_tx: tokio::sync::mpsc::UnboundedSender<crate::app::HardwareUpdate>) {
@@ -107,8 +107,8 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>,
 fn draw_cpu_tuning(
     ui: &mut Ui,
     profile: &mut Profile,
-    cpu_caps: Option<&tuxedo_common::types::CpuCapabilities>,
-    cpu_info: &tuxedo_common::types::CpuInfo,
+    cpu_caps: Option<&lapsphere_common::types::CpuCapabilities>,
+    cpu_info: &lapsphere_common::types::CpuInfo,
     tdp_profiles: &[String],
     dbus_client: Option<&DbusClient>,
     hw_update_tx: tokio::sync::mpsc::UnboundedSender<crate::app::HardwareUpdate>,
@@ -317,7 +317,7 @@ fn draw_gpu_tuning(
     ui: &mut Ui,
     profile_idx: usize,
     dbus_client: Option<&DbusClient>,
-    gpu_info: &[tuxedo_common::types::GpuInfo],
+    gpu_info: &[lapsphere_common::types::GpuInfo],
     state: &mut AppState,
     hw_update_tx: tokio::sync::mpsc::UnboundedSender<crate::app::HardwareUpdate>,
 ) {
@@ -462,7 +462,7 @@ fn draw_gpu_tuning(
 }
 
 /// Apply GPU settings when the save button is clicked
-fn apply_gpu_settings_on_save(client: &DbusClient, gpu_settings: &tuxedo_common::types::GpuSettings) {
+fn apply_gpu_settings_on_save(client: &DbusClient, gpu_settings: &lapsphere_common::types::GpuSettings) {
     if gpu_settings.manual_clocks {
         // Apply GPU locked clocks if set
         if let (Some(min_clock), Some(max_clock)) = (gpu_settings.min_gpu_clock, gpu_settings.max_gpu_clock) {
@@ -510,7 +510,7 @@ fn draw_keyboard_tuning(
         }
     };
 
-    let keyboard_detected = caps.keyboard_type != tuxedo_common::types::KeyboardType::None;
+    let keyboard_detected = caps.keyboard_type != lapsphere_common::types::KeyboardType::None;
     ui.checkbox(&mut profile.keyboard_settings.control_enabled, "Control keyboard backlight");
     ui.add_space(6.0);
     
@@ -556,7 +556,7 @@ fn draw_keyboard_tuning(
                         if ui.selectable_label(current_mode_name == "Multiple Zones", "Multiple Zones").clicked() {
                             let mut zones = Vec::new();
                             for _ in 0..caps.num_zones {
-                                zones.push(tuxedo_common::types::ZoneColor { r: 255, g: 255, b: 255 });
+                                zones.push(lapsphere_common::types::ZoneColor { r: 255, g: 255, b: 255 });
                             }
                             profile.keyboard_settings.mode = KeyboardMode::MultipleZones { zones, brightness: 50 };
                             preview_needed = true;
@@ -827,7 +827,7 @@ fn draw_fan_tuning(ui: &mut Ui, profile: &mut Profile, fan_count: usize) {
 }
 
 fn create_default_profile_for_reset(is_standard: bool) -> Profile {
-    use tuxedo_common::types::*;
+    use lapsphere_common::types::*;
     
     if is_standard {
         Profile {

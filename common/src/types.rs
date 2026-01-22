@@ -274,8 +274,6 @@ pub struct AppConfig {
     #[serde(default)]
     pub tray_enabled: bool,
     pub autostart: bool,
-    pub fan_daemon_enabled: bool,
-    pub app_monitoring_enabled: bool,
     pub cpu_scheduler: String,
     pub font_size: FontSize,
     pub statistics_sections: StatisticsSections,
@@ -337,8 +335,6 @@ impl Default for AppConfig {
             start_minimized: false,
             tray_enabled: false,
             autostart: false,
-            fan_daemon_enabled: true,
-            app_monitoring_enabled: true,
             cpu_scheduler: "CFS".to_string(),
             font_size: FontSize::Medium,
             statistics_sections: StatisticsSections::default(),

@@ -324,7 +324,7 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                         .spacing([40.0, 6.0])
                         .show(ui, |ui| {
                             ui.label("Type:");
-                            ui.label(if gpu.gpu_type == tuxedo_common::types::GpuType::Integrated {
+                            ui.label(if gpu.gpu_type == lapsphere_common::types::GpuType::Integrated {
                                 "Integrated"
                             } else {
                                 "Discrete"

@@ -4,16 +4,7 @@ set -e
 case "$1" in
     configure)
         # Reload DBus configuration
-        if [ -d /run/systemd/system ]; then
-            systemctl daemon-reload || true
-            dbus-send --system --type=method_call --dest=org.freedesktop.DBus / org.freedesktop.DBus.ReloadConfig || true
-        fi
-        
-        # Enable and start the daemon
-        if [ -d /run/systemd/system ]; then
-            systemctl enable tuxedo-daemon.service || true
-            systemctl start tuxedo-daemon.service || true
-        fi
+        dbus-send --system --type=method_call --dest=org.freedesktop.DBus / org.freedesktop.DBus.ReloadConfig || true
         
         # Update icon cache
         if [ -x /usr/bin/gtk-update-icon-cache ]; then

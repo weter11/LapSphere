@@ -10,11 +10,15 @@ use anyhow::Result;
 use tokio::signal;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tuxedo_common::types::FanSettings;
+use lapsphere_common::types::FanSettings;
 use polling_scheduler::{PollingScheduler, PollJob};
 
 // Global fan daemon state
 pub static FAN_DAEMON_STATE: once_cell::sync::Lazy<Arc<Mutex<Option<FanSettings>>>> = 
+    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
+
+// Global GUI PID for monitoring
+pub static GUI_PID: once_cell::sync::Lazy<Arc<Mutex<Option<u32>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
 
 // Global polling scheduler handle
@@ -24,7 +28,7 @@ pub static SCHEDULER_HANDLE: once_cell::sync::OnceCell<polling_scheduler::Schedu
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
-    log::info!("Starting TUXEDO Control Center Daemon");
+    log::info!("Starting LapSphere Daemon");
 
     // Check if running as root
     if unsafe { libc::geteuid() } != 0 {
@@ -119,6 +123,29 @@ async fn main() -> Result<()> {
     let _service = dbus_interface::start_service(connection.clone()).await?;
 
     log::info!("DBus service started");
+
+    // Monitor GUI PID if not managed by systemd
+    if std::env::var_os("INVOCATION_ID").is_none() {
+        let gui_pid_clone = GUI_PID.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                let pid = {
+                    let lock = gui_pid_clone.lock().unwrap();
+                    *lock
+                };
+
+                if let Some(pid) = pid {
+                    // Check if process exists
+                    if !std::path::Path::new(&format!("/proc/{}", pid)).exists() {
+                        log::info!("GUI process (PID {}) disappeared, shutting down daemon", pid);
+                        let _ = nix::sys::signal::raise(nix::sys::signal::Signal::SIGINT);
+                        break;
+                    }
+                }
+            }
+        });
+    }
 
     // Wait for shutdown signal
     signal::ctrl_c().await?;

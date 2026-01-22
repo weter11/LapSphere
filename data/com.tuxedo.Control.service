@@ -4,8 +4,8 @@ After=multi-user.target
 
 [Service]
 Type=dbus
-BusName=com.tuxedo.Control
-ExecStart=/usr/local/bin/tuxedo-daemon
+BusName=io.lapsphere.Control
+ExecStart=/usr/local/bin/lapsphere-daemon
 Restart=on-failure
 
 [Install]

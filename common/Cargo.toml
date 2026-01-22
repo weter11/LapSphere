@@ -1,5 +1,5 @@
 [package]
-name = "tuxedo-common"
+name = "lapsphere-common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

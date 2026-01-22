@@ -195,8 +195,8 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>)
         });
 }
 
-fn create_standard_profile() -> tuxedo_common::types::Profile {
-    use tuxedo_common::types::*;
+fn create_standard_profile() -> lapsphere_common::types::Profile {
+    use lapsphere_common::types::*;
     
     Profile {
         name: "Standard".to_string(),
