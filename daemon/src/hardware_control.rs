@@ -3,8 +3,9 @@ use nvml_wrapper::Nvml;
 use once_cell::sync::Lazy;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 use tuxedo_common::types::*;
-use crate::tuxedo_io::TuxedoIo;
+use crate::tuxedo_io::{TuxedoIo, HardwareInterface};
 
 fn get_cpu_count() -> Result<u32> {
     let cpuinfo = fs::read_to_string("/proc/cpuinfo")?;
@@ -199,91 +200,23 @@ fn apply_keyboard_settings(settings: &KeyboardSettings) -> Result<()> {
         return Ok(());
     }
     
-    let base_path = find_keyboard_backlight_path()
-        .ok_or_else(|| anyhow!("Keyboard backlight not found"))?;
-    
-    use tuxedo_common::types::KeyboardMode;
-    match &settings.mode {
-        KeyboardMode::SingleColor { r, g, b, brightness } => {
-            log::info!("Applying keyboard: RGB({}, {}, {}) brightness {}%", r, g, b, brightness);
-            
-            let color_path = format!("{}/multi_intensity", base_path);
-            if Path::new(&color_path).exists() {
-                let color_str = format!("{} {} {}", r, g, b);
-                log::info!("Writing to {}: {}", color_path, color_str);
-                fs::write(&color_path, color_str)?;
-            } else {
-                log::warn!("multi_intensity not found at {}", color_path);
-            }
-            
-            let brightness_path = format!("{}/brightness", base_path);
-            if Path::new(&brightness_path).exists() {
-                let max_brightness_path = format!("{}/max_brightness", base_path);
-                let max_brightness: u32 = if let Ok(max_str) = fs::read_to_string(&max_brightness_path) {
-                    max_str.trim().parse().unwrap_or(255)
-                } else {
-                    255
-                };
-                
-                let actual_brightness = ((*brightness as u32) * max_brightness) / 100;
-                
-                log::info!("Writing to {}: {} ({}% of {} max)", 
-                    brightness_path, actual_brightness, brightness, max_brightness);
-                
-                fs::write(&brightness_path, actual_brightness.to_string())?;
-            } else {
-                log::warn!("brightness not found at {}", brightness_path);
-            }
-            
-            log::info!("✅ Keyboard backlight applied successfully");
-        }
-        _ => {
-            if let Ok(kbd) = RgbKeyboardControl::new() {
-                kbd.set_mode(&settings.mode)?;
-                log::info!("✅ Keyboard effect mode applied successfully");
-            } else {
-                log::warn!("RGB keyboard control not available for effect modes");
-            }
-        }
+    if let Ok(kbd) = RgbKeyboardControl::new() {
+        kbd.set_mode(&settings.mode)?;
+        log::info!("✅ Keyboard settings applied successfully");
+        Ok(())
+    } else {
+        log::warn!("Keyboard control not available");
+        Err(anyhow!("Keyboard control not available"))
     }
-    
-    Ok(())
 }
 
 pub fn preview_keyboard_settings(settings: &KeyboardSettings) -> Result<()> {
-    let base_path = find_keyboard_backlight_path()
-        .ok_or_else(|| anyhow!("Keyboard backlight not found"))?;
-    
-    use tuxedo_common::types::KeyboardMode;
-    match &settings.mode {
-        KeyboardMode::SingleColor { r, g, b, brightness } => {
-            let color_path = format!("{}/multi_intensity", base_path);
-            if Path::new(&color_path).exists() {
-                let color_str = format!("{} {} {}", r, g, b);
-                fs::write(&color_path, color_str)?;
-            }
-            
-            let brightness_path = format!("{}/brightness", base_path);
-            if Path::new(&brightness_path).exists() {
-                let max_brightness_path = format!("{}/max_brightness", base_path);
-                let max_brightness: u32 = if let Ok(max_str) = fs::read_to_string(&max_brightness_path) {
-                    max_str.trim().parse().unwrap_or(255)
-                } else {
-                    255
-                };
-                
-                let actual_brightness = ((*brightness as u32) * max_brightness) / 100;
-                fs::write(&brightness_path, actual_brightness.to_string())?;
-            }
-        }
-        _ => {
-            if let Ok(kbd) = RgbKeyboardControl::new() {
-                kbd.set_mode(&settings.mode)?;
-            }
-        }
+    if let Ok(kbd) = RgbKeyboardControl::new() {
+        kbd.set_mode(&settings.mode)?;
+        Ok(())
+    } else {
+        Err(anyhow!("Keyboard control not available"))
     }
-    
-    Ok(())
 }
 
 fn apply_screen_settings(settings: &ScreenSettings) -> Result<()> {
@@ -428,25 +361,6 @@ pub fn get_webcam_state() -> Result<bool> {
     io.get_webcam_state()
 }
 
-fn find_keyboard_backlight_path() -> Option<String> {
-    let possible_paths = vec![
-        "/sys/class/leds/rgb:kbd_backlight",
-        "/sys/class/leds/tuxedo::kbd_backlight",
-        "/sys/devices/platform/tuxedo_keyboard/leds/rgb:kbd_backlight",
-        "/sys/class/leds/asus::kbd_backlight",
-    ];
-    
-    for path in possible_paths {
-        let brightness_path = format!("{}/brightness", path);
-        if Path::new(&brightness_path).exists() {
-            log::info!("Found keyboard backlight at: {}", path);
-            return Some(path.to_string());
-        }
-    }
-    
-    log::warn!("No keyboard backlight found");
-    None
-}
 
 use nvml_wrapper::enum_wrappers::device::{Clock, PerformanceState};
 use nvml_wrapper::enums::device::GpuLockedClocksSetting;
@@ -546,131 +460,229 @@ pub fn set_energy_performance_preference(epp: &str) -> Result<()> {
 
 #[derive(Debug, Clone)]
 pub struct RgbKeyboardControl {
-    base_path: String,
+    paths: Vec<String>,
+    tuxedo_io: Option<Arc<TuxedoIo>>,
 }
 
 impl RgbKeyboardControl {
     pub fn new() -> Result<Self> {
-        let base_path = Self::find_keyboard_backlight_path()?;
-        Ok(Self { base_path })
+        let paths = Self::find_all_keyboard_backlight_paths();
+        let tuxedo_io = TuxedoIo::new().ok().map(Arc::new);
+
+        if paths.is_empty() && tuxedo_io.is_none() {
+            return Err(anyhow!("No keyboard backlight control available"));
+        }
+
+        Ok(Self { paths, tuxedo_io })
     }
     
     pub fn is_available() -> bool {
-        Self::find_keyboard_backlight_path().is_ok()
+        !Self::find_all_keyboard_backlight_paths().is_empty()
     }
     
-    fn find_keyboard_backlight_path() -> Result<String> {
-        let possible_paths = vec![
-            "/sys/class/leds/rgb:kbd_backlight",
-            "/sys/class/leds/tuxedo::kbd_backlight",
-            "/sys/devices/platform/tuxedo_keyboard/leds/rgb:kbd_backlight",
-            "/sys/class/leds/asus::kbd_backlight",
-        ];
+    fn find_all_keyboard_backlight_paths() -> Vec<String> {
+        let mut paths = Vec::new();
         
-        for path in possible_paths {
-            let brightness_path = format!("{}/brightness", path);
-            if Path::new(&brightness_path).exists() {
-                log::info!("Found keyboard backlight at: {}", path);
-                return Ok(path.to_string());
+        // Priority 1: tuxedo_keyboard platform device
+        let platform_base = "/sys/devices/platform/tuxedo_keyboard/leds";
+        if Path::new(platform_base).exists() {
+            // Check for 3-zone
+            let zones = ["left", "center", "right"];
+            let mut found_zones = Vec::new();
+            for zone in zones {
+                let path = format!("{}/{}:kbd_backlight", platform_base, zone);
+                if Path::new(&path).exists() {
+                    found_zones.push(path);
+                }
+            }
+
+            if !found_zones.is_empty() {
+                return found_zones;
+            }
+
+            // Check for single zone
+            let single = format!("{}/rgb:kbd_backlight", platform_base);
+            if Path::new(&single).exists() {
+                return vec![single];
+            }
+        }
+
+        // Priority 2: Standard /sys/class/leds
+        if let Ok(entries) = fs::read_dir("/sys/class/leds") {
+            let mut kbd_entries: Vec<String> = entries.flatten()
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .filter(|n| n.contains("kbd_backlight"))
+                .map(|n| format!("/sys/class/leds/{}", n))
+                .collect();
+
+            // Sort to have a consistent order (e.g. left, center, right if they are named so)
+            kbd_entries.sort();
+
+            if !kbd_entries.is_empty() {
+                return kbd_entries;
             }
         }
         
-        Err(anyhow!("No RGB keyboard backlight found"))
+        paths
     }
     
-    pub fn set_color(&self, red: u8, green: u8, blue: u8) -> Result<()> {
-        let color_path = format!("{}/multi_intensity", self.base_path);
+    pub fn set_zone_color(&self, zone_idx: usize, red: u8, green: u8, blue: u8) -> Result<()> {
+        if let Some(ref io) = self.tuxedo_io {
+            if io.get_interface() == HardwareInterface::Clevo {
+                if let Ok(_) = io.set_clevo_keyboard_color(zone_idx as u8, red, green, blue) {
+                    // Also try to set via sysfs for consistency, but ignore errors if it fails
+                    // as ioctl already succeeded.
+                }
+            }
+        }
+
+        let path = self.paths.get(zone_idx)
+            .ok_or_else(|| anyhow!("Invalid zone index: {}", zone_idx))?;
+
+        let color_path = format!("{}/multi_intensity", path);
         if !Path::new(&color_path).exists() {
-            return Err(anyhow!("RGB control not available"));
+            return Err(anyhow!("RGB control not available for zone {}", zone_idx));
         }
         
         let color_str = format!("{} {} {}", red, green, blue);
         fs::write(&color_path, color_str)?;
         
-        log::info!("Set keyboard RGB color: ({}, {}, {})", red, green, blue);
+        log::info!("Set keyboard zone {} RGB color: ({}, {}, {})", zone_idx, red, green, blue);
         Ok(())
     }
     
     pub fn set_brightness(&self, brightness: u8) -> Result<()> {
-        let brightness_path = format!("{}/brightness", self.base_path);
-        let max_brightness_path = format!("{}/max_brightness", self.base_path);
+        if let Some(ref io) = self.tuxedo_io {
+            if io.get_interface() == HardwareInterface::Clevo {
+                let _ = io.set_clevo_keyboard_brightness(brightness);
+            }
+        }
+
+        for path in &self.paths {
+            let brightness_path = format!("{}/brightness", path);
+            let max_brightness_path = format!("{}/max_brightness", path);
+
+            let max_brightness: u32 = if let Ok(max_str) = fs::read_to_string(&max_brightness_path) {
+                max_str.trim().parse().unwrap_or(255)
+            } else {
+                255
+            };
+
+            let actual_brightness = ((brightness as u32) * max_brightness) / 100;
+            let _ = fs::write(&brightness_path, actual_brightness.to_string());
+        }
         
-        let max_brightness: u32 = if let Ok(max_str) = fs::read_to_string(&max_brightness_path) {
-            max_str.trim().parse().unwrap_or(255)
-        } else {
-            255
-        };
-        
-        let actual_brightness = ((brightness as u32) * max_brightness) / 100;
-        fs::write(&brightness_path, actual_brightness.to_string())?;
-        
-        log::info!("Set keyboard brightness to {}%", brightness);
+        log::info!("Set keyboard brightness to {}% for all zones", brightness);
         Ok(())
-    }
-    
-    pub fn get_brightness(&self) -> Result<u8> {
-        let brightness_path = format!("{}/brightness", self.base_path);
-        let max_brightness_path = format!("{}/max_brightness", self.base_path);
-        
-        let current: u32 = fs::read_to_string(&brightness_path)?
-            .trim()
-            .parse()?;
-        
-        let max: u32 = fs::read_to_string(&max_brightness_path)?
-            .trim()
-            .parse()
-            .unwrap_or(255);
-        
-        let percent = ((current * 100) / max) as u8;
-        Ok(percent)
     }
     
     pub fn set_mode(&self, mode: &tuxedo_common::types::KeyboardMode) -> Result<()> {
         use tuxedo_common::types::KeyboardMode;
         match mode {
             KeyboardMode::SingleColor { r, g, b, brightness } => {
-                self.set_color(*r, *g, *b)?;
+                // For Clevo, explicitly set mode 0 (Custom/Static)
+                if let Some(ref io) = self.tuxedo_io {
+                    if io.get_interface() == HardwareInterface::Clevo {
+                        let _ = io.set_clevo_keyboard_mode(0x00000000);
+                    }
+                }
+
+                let num_zones = self.paths.len().max(if self.tuxedo_io.is_some() { 3 } else { 0 });
+                for i in 0..num_zones {
+                    let _ = self.set_zone_color(i, *r, *g, *b);
+                }
+                self.set_brightness(*brightness)?;
+            }
+            KeyboardMode::MultipleZones { zones, brightness } => {
+                if let Some(ref io) = self.tuxedo_io {
+                    if io.get_interface() == HardwareInterface::Clevo {
+                        let _ = io.set_clevo_keyboard_mode(0x00000000);
+                    }
+                }
+
+                for (i, zone) in zones.iter().enumerate() {
+                    let _ = self.set_zone_color(i, zone.r, zone.g, zone.b);
+                }
                 self.set_brightness(*brightness)?;
             }
             KeyboardMode::Breathe { r, g, b, brightness, speed } => {
+                if let Some(ref io) = self.tuxedo_io {
+                    if io.get_interface() == HardwareInterface::Clevo {
+                        let _ = io.set_clevo_keyboard_mode(0x00000001); // Mode 1
+                    }
+                }
                 self.write_effect_mode(1, "breathing")?;
                 self.write_effect_speed(*speed)?;
-                self.set_color(*r, *g, *b)?;
+                for i in 0..self.paths.len() {
+                    let _ = self.set_zone_color(i, *r, *g, *b);
+                }
                 self.set_brightness(*brightness)?;
                 log::info!("Set breathing mode with speed {}", speed);
             }
             KeyboardMode::Wave { brightness, speed } => {
+                if let Some(ref io) = self.tuxedo_io {
+                    if io.get_interface() == HardwareInterface::Clevo {
+                        let _ = io.set_clevo_keyboard_mode(0x00000007); // Mode 7
+                    }
+                }
                 self.write_effect_mode(7, "wave")?;
                 self.write_effect_speed(*speed)?;
                 self.set_brightness(*brightness)?;
                 log::info!("Set wave mode with speed {}", speed);
             }
             KeyboardMode::Cycle { brightness, speed } => {
+                if let Some(ref io) = self.tuxedo_io {
+                    if io.get_interface() == HardwareInterface::Clevo {
+                        let _ = io.set_clevo_keyboard_mode(0x00000002); // Mode 2
+                    }
+                }
                 self.write_effect_mode(2, "cycle")?;
                 self.write_effect_speed(*speed)?;
                 self.set_brightness(*brightness)?;
                 log::info!("Set cycle mode with speed {}", speed);
             }
             KeyboardMode::Dance { brightness, speed } => {
+                if let Some(ref io) = self.tuxedo_io {
+                    if io.get_interface() == HardwareInterface::Clevo {
+                        let _ = io.set_clevo_keyboard_mode(0x00000003); // Mode 3
+                    }
+                }
                 self.write_effect_mode(3, "dance")?;
                 self.write_effect_speed(*speed)?;
                 self.set_brightness(*brightness)?;
                 log::info!("Set dance mode with speed {}", speed);
             }
             KeyboardMode::Flash { r, g, b, brightness, speed } => {
+                if let Some(ref io) = self.tuxedo_io {
+                    if io.get_interface() == HardwareInterface::Clevo {
+                        let _ = io.set_clevo_keyboard_mode(0x00000004); // Mode 4
+                    }
+                }
                 self.write_effect_mode(4, "flash")?;
                 self.write_effect_speed(*speed)?;
-                self.set_color(*r, *g, *b)?;
+                for i in 0..self.paths.len() {
+                    let _ = self.set_zone_color(i, *r, *g, *b);
+                }
                 self.set_brightness(*brightness)?;
                 log::info!("Set flash mode with speed {}", speed);
             }
             KeyboardMode::RandomColor { brightness, speed } => {
+                if let Some(ref io) = self.tuxedo_io {
+                    if io.get_interface() == HardwareInterface::Clevo {
+                        let _ = io.set_clevo_keyboard_mode(0x00000005); // Mode 5
+                    }
+                }
                 self.write_effect_mode(5, "random")?;
                 self.write_effect_speed(*speed)?;
                 self.set_brightness(*brightness)?;
                 log::info!("Set random color mode with speed {}", speed);
             }
             KeyboardMode::Tempo { brightness, speed } => {
+                if let Some(ref io) = self.tuxedo_io {
+                    if io.get_interface() == HardwareInterface::Clevo {
+                        let _ = io.set_clevo_keyboard_mode(0x00000006); // Mode 6
+                    }
+                }
                 self.write_effect_mode(6, "tempo")?;
                 self.write_effect_speed(*speed)?;
                 self.set_brightness(*brightness)?;
@@ -681,23 +693,24 @@ impl RgbKeyboardControl {
     }
 
     fn write_effect_mode(&self, mode_value: u8, fallback: &str) -> Result<()> {
-        let mode_path = format!("{}/mode", self.base_path);
-        if !Path::new(&mode_path).exists() {
-            return Err(anyhow!("Keyboard effect modes not supported"));
+        for path in &self.paths {
+            let mode_path = format!("{}/mode", path);
+            if Path::new(&mode_path).exists() {
+                let value = mode_value.to_string();
+                if fs::write(&mode_path, &value).is_err() {
+                    let _ = fs::write(&mode_path, fallback);
+                }
+            }
         }
-
-        let value = mode_value.to_string();
-        if fs::write(&mode_path, &value).is_err() {
-            fs::write(&mode_path, fallback)?;
-        }
-
         Ok(())
     }
 
     fn write_effect_speed(&self, speed: u8) -> Result<()> {
-        let speed_path = format!("{}/speed", self.base_path);
-        if Path::new(&speed_path).exists() {
-            fs::write(&speed_path, speed.to_string())?;
+        for path in &self.paths {
+            let speed_path = format!("{}/speed", path);
+            if Path::new(&speed_path).exists() {
+                let _ = fs::write(&speed_path, speed.to_string());
+            }
         }
         Ok(())
     }

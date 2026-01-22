@@ -2,7 +2,7 @@ use egui::{Ui, ScrollArea, RichText, Slider, ComboBox, TopBottomPanel};
 use std::path::Path;
 use crate::app::AppState;
 use crate::dbus_client::DbusClient;
-use tuxedo_common::types::{KeyboardMode, Profile, FanCurve};
+use tuxedo_common::types::{KeyboardMode, Profile, FanCurve, KeyboardCapabilities};
 use crate::widgets::fan_curve_editor::FanCurveEditor;
 
 pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>, hw_update_tx: tokio::sync::mpsc::UnboundedSender<crate::app::HardwareUpdate>) {
@@ -85,7 +85,8 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>,
             ui.add_space(16.0);
 
             // Keyboard tuning
-            draw_keyboard_tuning(ui, &mut state.config.profiles[idx], dbus_client);
+            let keyboard_caps = state.keyboard_capabilities.clone();
+            draw_keyboard_tuning(ui, &mut state.config.profiles[idx], keyboard_caps.as_ref(), dbus_client);
             ui.add_space(16.0);
             ui.separator();
             ui.add_space(16.0);
@@ -495,24 +496,35 @@ fn apply_gpu_settings_on_save(client: &DbusClient, gpu_settings: &tuxedo_common:
 fn draw_keyboard_tuning(
     ui: &mut Ui,
     profile: &mut Profile,
+    caps: Option<&KeyboardCapabilities>,
     dbus_client: Option<&DbusClient>,
 ) {
     ui.heading("⌨️ Keyboard Backlight");
     ui.add_space(8.0);
     
-    let keyboard_caps = detect_keyboard_capabilities();
-    let keyboard_detected = keyboard_caps.supports_color || keyboard_caps.supports_effects;
+    let caps = match caps {
+        Some(c) => c,
+        None => {
+            ui.label("Keyboard capabilities not available");
+            return;
+        }
+    };
+
+    let keyboard_detected = caps.keyboard_type != tuxedo_common::types::KeyboardType::None;
     ui.checkbox(&mut profile.keyboard_settings.control_enabled, "Control keyboard backlight");
     ui.add_space(6.0);
     
     if profile.keyboard_settings.control_enabled {
         if !keyboard_detected {
             ui.label(RichText::new("Keyboard backlight device not detected.").small());
-        } else if !keyboard_caps.supports_effects {
-            ui.label(RichText::new("Effect support was not detected; some modes may not apply.").small());
-        }
-        if !keyboard_caps.supports_color {
-            ui.label(RichText::new("RGB color control is not available on this keyboard.").small());
+        } else {
+            ui.label(RichText::new(format!("Detected: {:?}", caps.keyboard_type)).small());
+            if !caps.supports_effects {
+                ui.label(RichText::new("Effect support was not detected; some modes may not apply.").small());
+            }
+            if !caps.supports_color {
+                ui.label(RichText::new("RGB color control is not available on this keyboard.").small());
+            }
         }
 
         let mut preview_needed = false;
@@ -523,6 +535,7 @@ fn draw_keyboard_tuning(
             
             let current_mode_name = match &profile.keyboard_settings.mode {
                 KeyboardMode::SingleColor { .. } => "Single Color",
+                KeyboardMode::MultipleZones { .. } => "Multiple Zones",
                 KeyboardMode::Breathe { .. } => "Breathe",
                 KeyboardMode::Cycle { .. } => "Cycle",
                 KeyboardMode::Dance { .. } => "Dance",
@@ -539,33 +552,45 @@ fn draw_keyboard_tuning(
                         profile.keyboard_settings.mode = KeyboardMode::SingleColor { r: 255, g: 255, b: 255, brightness: 50 };
                         preview_needed = true;
                     }
-                    if ui.selectable_label(current_mode_name == "Breathe", "Breathe").clicked() {
-                        profile.keyboard_settings.mode = KeyboardMode::Breathe { r: 255, g: 255, b: 255, brightness: 50, speed: 50 };
-                        preview_needed = true;
+                    if caps.num_zones > 1 {
+                        if ui.selectable_label(current_mode_name == "Multiple Zones", "Multiple Zones").clicked() {
+                            let mut zones = Vec::new();
+                            for _ in 0..caps.num_zones {
+                                zones.push(tuxedo_common::types::ZoneColor { r: 255, g: 255, b: 255 });
+                            }
+                            profile.keyboard_settings.mode = KeyboardMode::MultipleZones { zones, brightness: 50 };
+                            preview_needed = true;
+                        }
                     }
-                    if ui.selectable_label(current_mode_name == "Cycle", "Cycle").clicked() {
-                        profile.keyboard_settings.mode = KeyboardMode::Cycle { brightness: 50, speed: 50 };
-                        preview_needed = true;
-                    }
-                    if ui.selectable_label(current_mode_name == "Dance", "Dance").clicked() {
-                        profile.keyboard_settings.mode = KeyboardMode::Dance { brightness: 50, speed: 50 };
-                        preview_needed = true;
-                    }
-                    if ui.selectable_label(current_mode_name == "Flash", "Flash").clicked() {
-                        profile.keyboard_settings.mode = KeyboardMode::Flash { r: 255, g: 255, b: 255, brightness: 50, speed: 50 };
-                        preview_needed = true;
-                    }
-                    if ui.selectable_label(current_mode_name == "Random Color", "Random Color").clicked() {
-                        profile.keyboard_settings.mode = KeyboardMode::RandomColor { brightness: 50, speed: 50 };
-                        preview_needed = true;
-                    }
-                    if ui.selectable_label(current_mode_name == "Tempo", "Tempo").clicked() {
-                        profile.keyboard_settings.mode = KeyboardMode::Tempo { brightness: 50, speed: 50 };
-                        preview_needed = true;
-                    }
-                    if ui.selectable_label(current_mode_name == "Wave", "Wave").clicked() {
-                        profile.keyboard_settings.mode = KeyboardMode::Wave { brightness: 50, speed: 50 };
-                        preview_needed = true;
+                    if caps.supports_effects {
+                        if ui.selectable_label(current_mode_name == "Breathe", "Breathe").clicked() {
+                            profile.keyboard_settings.mode = KeyboardMode::Breathe { r: 255, g: 255, b: 255, brightness: 50, speed: 50 };
+                            preview_needed = true;
+                        }
+                        if ui.selectable_label(current_mode_name == "Cycle", "Cycle").clicked() {
+                            profile.keyboard_settings.mode = KeyboardMode::Cycle { brightness: 50, speed: 50 };
+                            preview_needed = true;
+                        }
+                        if ui.selectable_label(current_mode_name == "Dance", "Dance").clicked() {
+                            profile.keyboard_settings.mode = KeyboardMode::Dance { brightness: 50, speed: 50 };
+                            preview_needed = true;
+                        }
+                        if ui.selectable_label(current_mode_name == "Flash", "Flash").clicked() {
+                            profile.keyboard_settings.mode = KeyboardMode::Flash { r: 255, g: 255, b: 255, brightness: 50, speed: 50 };
+                            preview_needed = true;
+                        }
+                        if ui.selectable_label(current_mode_name == "Random Color", "Random Color").clicked() {
+                            profile.keyboard_settings.mode = KeyboardMode::RandomColor { brightness: 50, speed: 50 };
+                            preview_needed = true;
+                        }
+                        if ui.selectable_label(current_mode_name == "Tempo", "Tempo").clicked() {
+                            profile.keyboard_settings.mode = KeyboardMode::Tempo { brightness: 50, speed: 50 };
+                            preview_needed = true;
+                        }
+                        if ui.selectable_label(current_mode_name == "Wave", "Wave").clicked() {
+                            profile.keyboard_settings.mode = KeyboardMode::Wave { brightness: 50, speed: 50 };
+                            preview_needed = true;
+                        }
                     }
                 });
         });
@@ -574,63 +599,105 @@ fn draw_keyboard_tuning(
         // Mode-specific controls
         match &mut profile.keyboard_settings.mode {
             KeyboardMode::SingleColor { r, g, b, brightness } => {
-                ui.horizontal(|ui| {
-                    ui.label("Red:");
-                    if ui.add(Slider::new(r, 0..=255)).changed() {
-                        preview_needed = true;
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Green:");
-                    if ui.add(Slider::new(g, 0..=255)).changed() {
-                        preview_needed = true;
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Blue:");
-                    if ui.add(Slider::new(b, 0..=255)).changed() {
-                        preview_needed = true;
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Brightness:");
-                    if ui.add(Slider::new(brightness, 0..=100).suffix("%")).changed() {
-                        preview_needed = true;
-                    }
-                });
+                if caps.supports_color {
+                    ui.horizontal(|ui| {
+                        ui.label("Red:");
+                        if ui.add(Slider::new(r, 0..=255)).changed() {
+                            preview_needed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Green:");
+                        if ui.add(Slider::new(g, 0..=255)).changed() {
+                            preview_needed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Blue:");
+                        if ui.add(Slider::new(b, 0..=255)).changed() {
+                            preview_needed = true;
+                        }
+                    });
+
+                    // Color preview
+                    let color = egui::Color32::from_rgb(*r, *g, *b);
+                    ui.horizontal(|ui| {
+                        ui.label("Preview:");
+                        ui.colored_label(color, "■■■■■");
+                    });
+                }
                 
-                // Color preview
-                let color = egui::Color32::from_rgb(*r, *g, *b);
-                ui.horizontal(|ui| {
-                    ui.label("Preview:");
-                    ui.colored_label(color, "■■■■■");
-                });
+                if caps.supports_brightness {
+                    ui.horizontal(|ui| {
+                        ui.label("Brightness:");
+                        if ui.add(Slider::new(brightness, 0..=100).suffix("%")).changed() {
+                            preview_needed = true;
+                        }
+                    });
+                }
+            }
+            KeyboardMode::MultipleZones { zones, brightness } => {
+                for (i, zone) in zones.iter_mut().enumerate() {
+                    ui.group(|ui| {
+                        ui.label(format!("Zone {}", i));
+                        ui.horizontal(|ui| {
+                            ui.label("R:");
+                            if ui.add(Slider::new(&mut zone.r, 0..=255)).changed() {
+                                preview_needed = true;
+                            }
+                            ui.label("G:");
+                            if ui.add(Slider::new(&mut zone.g, 0..=255)).changed() {
+                                preview_needed = true;
+                            }
+                            ui.label("B:");
+                            if ui.add(Slider::new(&mut zone.b, 0..=255)).changed() {
+                                preview_needed = true;
+                            }
+
+                            let color = egui::Color32::from_rgb(zone.r, zone.g, zone.b);
+                            ui.colored_label(color, "■");
+                        });
+                    });
+                }
+
+                if caps.supports_brightness {
+                    ui.horizontal(|ui| {
+                        ui.label("Overall Brightness:");
+                        if ui.add(Slider::new(brightness, 0..=100).suffix("%")).changed() {
+                            preview_needed = true;
+                        }
+                    });
+                }
             }
             KeyboardMode::Breathe { r, g, b, brightness, speed } => {
-                ui.horizontal(|ui| {
-                    ui.label("Red:");
-                    if ui.add(Slider::new(r, 0..=255)).changed() {
-                        preview_needed = true;
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Green:");
-                    if ui.add(Slider::new(g, 0..=255)).changed() {
-                        preview_needed = true;
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Blue:");
-                    if ui.add(Slider::new(b, 0..=255)).changed() {
-                        preview_needed = true;
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Brightness:");
-                    if ui.add(Slider::new(brightness, 0..=100).suffix("%")).changed() {
-                        preview_needed = true;
-                    }
-                });
+                if caps.supports_color {
+                    ui.horizontal(|ui| {
+                        ui.label("Red:");
+                        if ui.add(Slider::new(r, 0..=255)).changed() {
+                            preview_needed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Green:");
+                        if ui.add(Slider::new(g, 0..=255)).changed() {
+                            preview_needed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Blue:");
+                        if ui.add(Slider::new(b, 0..=255)).changed() {
+                            preview_needed = true;
+                        }
+                    });
+                }
+                if caps.supports_brightness {
+                    ui.horizontal(|ui| {
+                        ui.label("Brightness:");
+                        if ui.add(Slider::new(brightness, 0..=100).suffix("%")).changed() {
+                            preview_needed = true;
+                        }
+                    });
+                }
                 ui.horizontal(|ui| {
                     ui.label("Speed:");
                     if ui.add(Slider::new(speed, 0..=100).suffix("%")).changed() {
@@ -639,30 +706,34 @@ fn draw_keyboard_tuning(
                 });
             }
             KeyboardMode::Flash { r, g, b, brightness, speed } => {
-                ui.horizontal(|ui| {
-                    ui.label("Red:");
-                    if ui.add(Slider::new(r, 0..=255)).changed() {
-                        preview_needed = true;
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Green:");
-                    if ui.add(Slider::new(g, 0..=255)).changed() {
-                        preview_needed = true;
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Blue:");
-                    if ui.add(Slider::new(b, 0..=255)).changed() {
-                        preview_needed = true;
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Brightness:");
-                    if ui.add(Slider::new(brightness, 0..=100).suffix("%")).changed() {
-                        preview_needed = true;
-                    }
-                });
+                if caps.supports_color {
+                    ui.horizontal(|ui| {
+                        ui.label("Red:");
+                        if ui.add(Slider::new(r, 0..=255)).changed() {
+                            preview_needed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Green:");
+                        if ui.add(Slider::new(g, 0..=255)).changed() {
+                            preview_needed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Blue:");
+                        if ui.add(Slider::new(b, 0..=255)).changed() {
+                            preview_needed = true;
+                        }
+                    });
+                }
+                if caps.supports_brightness {
+                    ui.horizontal(|ui| {
+                        ui.label("Brightness:");
+                        if ui.add(Slider::new(brightness, 0..=100).suffix("%")).changed() {
+                            preview_needed = true;
+                        }
+                    });
+                }
                 ui.horizontal(|ui| {
                     ui.label("Speed:");
                     if ui.add(Slider::new(speed, 0..=100).suffix("%")).changed() {
@@ -675,12 +746,14 @@ fn draw_keyboard_tuning(
             | KeyboardMode::RandomColor { brightness, speed }
             | KeyboardMode::Tempo { brightness, speed }
             | KeyboardMode::Wave { brightness, speed } => {
-                ui.horizontal(|ui| {
-                    ui.label("Brightness:");
-                    if ui.add(Slider::new(brightness, 0..=100).suffix("%")).changed() {
-                        preview_needed = true;
-                    }
-                });
+                if caps.supports_brightness {
+                    ui.horizontal(|ui| {
+                        ui.label("Brightness:");
+                        if ui.add(Slider::new(brightness, 0..=100).suffix("%")).changed() {
+                            preview_needed = true;
+                        }
+                    });
+                }
                 ui.horizontal(|ui| {
                     ui.label("Speed:");
                     if ui.add(Slider::new(speed, 0..=100).suffix("%")).changed() {
@@ -700,37 +773,6 @@ fn draw_keyboard_tuning(
                 let _ = client.preview_keyboard_settings(profile.keyboard_settings.clone());
             }
         }
-    }
-}
-
-struct KeyboardCapabilities {
-    supports_color: bool,
-    supports_effects: bool,
-}
-
-fn detect_keyboard_capabilities() -> KeyboardCapabilities {
-    let possible_paths = [
-        "/sys/class/leds/rgb:kbd_backlight",
-        "/sys/class/leds/tuxedo::kbd_backlight",
-        "/sys/devices/platform/tuxedo_keyboard/leds/rgb:kbd_backlight",
-        "/sys/class/leds/asus::kbd_backlight",
-    ];
-
-    for path in possible_paths {
-        let brightness_path = format!("{}/brightness", path);
-        if Path::new(&brightness_path).exists() {
-            let color_path = format!("{}/multi_intensity", path);
-            let mode_path = format!("{}/mode", path);
-            return KeyboardCapabilities {
-                supports_color: Path::new(&color_path).exists(),
-                supports_effects: Path::new(&mode_path).exists(),
-            };
-        }
-    }
-
-    KeyboardCapabilities {
-        supports_color: false,
-        supports_effects: false,
     }
 }
 

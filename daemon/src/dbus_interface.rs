@@ -289,6 +289,12 @@ async fn set_tdp_profile(&self, profile: &str) -> Result<(), zbus::fdo::Error> {
             Err(e) => Err(zbus::fdo::Error::Failed(e.to_string())),
         }
     }
+
+    async fn get_keyboard_capabilities(&self) -> Result<String, zbus::fdo::Error> {
+        let caps = crate::hardware_detection::get_keyboard_capabilities();
+        serde_json::to_string(&caps)
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
     
     // Keyboard preview - apply keyboard settings immediately without saving to profile
     async fn preview_keyboard_settings(&self, settings_json: &str) -> Result<(), zbus::fdo::Error> {
