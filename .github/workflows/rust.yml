@@ -25,7 +25,7 @@ jobs:
       run: |
           sudo apt-get update
           sudo apt-get install -y debhelper devscripts build-essential
-          # Install Build-Depends from debian/control and user-requested libs
+          # Install the 11 required build dependencies
           sudo apt-get install -y \
             libdbus-1-dev \
             pkg-config \
@@ -37,12 +37,7 @@ jobs:
             libatk1.0-dev \
             libgraphene-1.0-dev \
             libwayland-dev \
-            libxkbcommon-dev \
-            libx11-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev \
-            libxcb-render0-dev \
-            libxcb1-dev
+            libxkbcommon-dev
 
     - name: Clean the project
       run: cargo clean 
@@ -72,7 +67,7 @@ jobs:
     - name: Update Arch Linux
       run: |
           pacman -Syu --noconfirm
-          pacman -S --noconfirm base-devel rustup pkgconf dbus gtk3 libadwaita pango cairo gdk-pixbuf2 atk graphene wayland libxkbcommon libx11
+          pacman -S --noconfirm base-devel rustup pkgconf dbus gtk3 libadwaita pango cairo gdk-pixbuf2 atk graphene wayland libxkbcommon
 
     - name: Checkout repository
       uses: actions/checkout@v4
