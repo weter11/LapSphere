@@ -21,97 +21,37 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Install dependencies for GTK4 and glib
+    - name: Install build dependencies
       run: |
           sudo apt-get update
+          sudo apt-get install -y debhelper devscripts build-essential
+          # Install Build-Depends from debian/control
           sudo apt-get install -y \
             libdbus-1-dev \
             pkg-config \
-            libgtk-3-dev \
-            libadwaita-1-dev \
-            libpango1.0-dev \
-            libcairo2-dev \
-            libgdk-pixbuf-2.0-dev \
-            libatk1.0-dev \
-            libgraphene-1.0-dev
+            libxkbcommon-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxcb-render0-dev \
+            libxcb1-dev
 
     - name: Clean the project
       run: cargo clean 
 
-    - name: Build the project (debug)
-      run: cargo build
-
     - name: Run tests
       run: cargo test
 
-    - name: Build release binaries
-      run: cargo build --release
-
-    - name: Create release tarball
+    - name: Build Debian package
       run: |
-        mkdir -p release-package/bin
-        cp target/release/lapsphere-daemon release-package/bin/
-        cp target/release/lapsphere release-package/bin/
-        
-        # Copy dbus files
-        mkdir -p release-package/dbus
-        cp debian/io.lapsphere.Control.service release-package/dbus/ || true
-        cp debian/io.lapsphere.Control.conf release-package/dbus/ || true
-        
-        # Copy documentation
-        cp README.md LICENSE release-package/ 2>/dev/null || true
-        
-        # Create install script
-        cat > release-package/install.sh << 'EOF'
-        #!/bin/bash
-        set -e
-        
-        echo "Installing LapSphere..."
-        
-        # Install binaries
-        sudo install -D -m 755 bin/lapsphere-daemon /usr/local/bin/lapsphere-daemon
-        sudo install -D -m 755 bin/lapsphere /usr/local/bin/lapsphere
-        
-        # Install dbus files
-        if [ -f dbus/io.lapsphere.Control.service ]; then
-            sudo install -D -m 644 dbus/io.lapsphere.Control.service /usr/share/dbus-1/system-services/io.lapsphere.Control.service
-        fi
-        
-        if [ -f dbus/io.lapsphere.Control.conf ]; then
-            sudo install -D -m 644 dbus/io.lapsphere.Control.conf /usr/share/dbus-1/system.d/io.lapsphere.Control.conf
-        fi
-        
-        # Reload dbus
-        sudo systemctl restart dbus || true
-        
-        echo "✅ Installation complete!"
-        echo "Run 'lapsphere' to start the GUI"
-        EOF
-        
-        chmod +x release-package/install.sh
-        
-        # Create the tarball
-        tar -czf lapsphere-ubuntu-24.04.tar.gz release-package/
-        
-        # Show contents and size
-        echo "=== Tarball contents ==="
-        tar -tzf lapsphere-ubuntu-24.04.tar.gz
-        echo ""
-        echo "=== Tarball size ==="
-        ls -lh lapsphere-ubuntu-24.04.tar.gz
+          dpkg-buildpackage -b -uc -us
+          mkdir artifacts
+          cp ../lapsphere_*.deb artifacts/
 
-    - name: Upload release tarball
+    - name: Upload Debian package
       uses: actions/upload-artifact@v4
       with:
-        name: lapsphere-ubuntu-24.04-tarball
-        path: lapsphere-ubuntu-24.04.tar.gz
-        retention-days: 90
-
-    - name: Upload individual binaries
-      uses: actions/upload-artifact@v4
-      with:
-        name: lapsphere-ubuntu-24.04-binaries
-        path: |
-          target/release/lapsphere-daemon
-          target/release/lapsphere
+        name: lapsphere-ubuntu-24.04-deb
+        path: artifacts/*.deb
         retention-days: 90

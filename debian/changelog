@@ -1,13 +1,12 @@
 lapsphere (0.1.0-1) noble; urgency=medium
 
-  * Initial release
+  * Initial release as LapSphere
   * Direct sysfs hardware access
-  * GTK 4.14 + Libadwaita 1.5 interface
-  * DBus daemon architecture
+  * egui-based modern interface
+  * DBus daemon architecture with GUI monitoring
   * CPU frequency and governor control
   * AMD pstate status management
   * Fan curve configuration
   * Profile management system
-  * Auto-switching profiles based on applications
 
- -- LapSphere Team <dev@example.com>  Sat, 14 Dec 2025-2026 00:00:00 +0000
+ -- LapSphere Team <dev@example.com>  Sat, 14 Dec 2025 00:00:00 +0000

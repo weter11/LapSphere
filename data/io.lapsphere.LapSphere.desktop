@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=LapSphere
-Comment=Hardware control for TUXEDO/Clevo laptops
-Exec=lapsphere
+Comment=Hardware control for LapSphere/Clevo laptops
+Exec=pkexec lapsphere-daemon --gui
 Icon=preferences-system
 Terminal=false
 Type=Application

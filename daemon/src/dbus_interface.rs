@@ -397,13 +397,6 @@ async fn set_tdp_profile(&self, profile: &str) -> Result<(), zbus::fdo::Error> {
 
         Ok(())
     }
-
-    async fn register_gui_pid(&self, pid: u32) -> Result<(), zbus::fdo::Error> {
-        log::info!("GUI registered with PID: {}", pid);
-        let mut gui_pid = crate::GUI_PID.lock().unwrap();
-        *gui_pid = Some(pid);
-        Ok(())
-    }
 }
 
 fn is_systemd_managed() -> bool {

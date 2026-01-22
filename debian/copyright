@@ -1,7 +1,7 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: lapsphere
 Upstream-Contact: LapSphere Team <dev@example.com>
-Source: https://github.com/tuxedo/control-center
+Source: https://github.com/LapSphere/lapsphere
 
 Files: *
 Copyright: 2025-2026 LapSphere Team

@@ -351,11 +351,6 @@ impl LapSphereApp {
         // Set coordinator handle in state
         state.coordinator_handle = coordinator_handle.clone();
         
-        // Register GUI PID with daemon
-        if let Some(ref client) = dbus_client {
-            let _ = client.register_gui_pid(std::process::id());
-        }
-
         // Apply theme
         let theme = LapSphereTheme::new(&state.config.theme, cc.egui_ctx.style().visuals.dark_mode);
         theme.apply_with_font_size(&cc.egui_ctx, &state.config.font_size);
@@ -790,7 +785,7 @@ fn save_settings_to_disk(config: &AppConfig) -> anyhow::Result<()> {
             "[Desktop Entry]\n\
             Type=Application\n\
             Name=LapSphere\n\
-            Exec=lapsphere --tray\n\
+            Exec=pkexec lapsphere-daemon --gui --tray\n\
             Icon=lapsphere\n\
             X-GNOME-Autostart-enabled=true\n"
         );

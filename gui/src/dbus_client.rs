@@ -45,7 +45,6 @@ pub enum DbusCommand {
     GetGpuMemoryOffsetLimits { device_index: u32, reply: oneshot::Sender<Result<(i32, i32)>> },
     SetPrimeProfile { profile: String, reply: oneshot::Sender<Result<()>> },
     ShutdownDaemon { reply: oneshot::Sender<Result<()>> },
-    RegisterGuiPid { pid: u32, reply: oneshot::Sender<Result<()>> },
 }
 
 impl DbusClient {
@@ -275,12 +274,6 @@ impl DbusClient {
         let _ = self.command_tx.send(DbusCommand::ShutdownDaemon { reply: tx });
         rx
     }
-
-    pub fn register_gui_pid(&self, pid: u32) -> oneshot::Receiver<Result<()>> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self.command_tx.send(DbusCommand::RegisterGuiPid { pid, reply: tx });
-        rx
-    }
 }
 
 // Background worker - handles all DBus calls asynchronously
@@ -427,10 +420,6 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
             }
             DbusCommand::ShutdownDaemon { reply } => {
                 let result = shutdown_daemon_impl(&connection).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::RegisterGuiPid { pid, reply } => {
-                let result = register_gui_pid_impl(&connection, pid).await;
                 let _ = reply.send(result);
             }
         }
@@ -849,16 +838,5 @@ async fn shutdown_daemon_impl(conn: &Connection) -> Result<()> {
         "io.lapsphere.Control",
     ).await?;
     proxy.call::<_, _, ()>("ShutdownDaemon", &()).await?;
-    Ok(())
-}
-
-async fn register_gui_pid_impl(conn: &Connection, pid: u32) -> Result<()> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
-    proxy.call::<_, _, ()>("RegisterGuiPid", &(pid,)).await?;
     Ok(())
 }

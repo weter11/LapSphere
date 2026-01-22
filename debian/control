@@ -5,24 +5,28 @@ Maintainer: LapSphere Team <dev@example.com>
 Build-Depends: debhelper-compat (= 13),
                cargo,
                rustc,
-               libgtk-4-dev,
-               libadwaita-1-dev,
-               pkg-config
+               libdbus-1-dev,
+               pkg-config,
+               libxkbcommon-dev,
+               libwayland-dev,
+               libx11-dev,
+               libxcb-shape0-dev,
+               libxcb-xfixes0-dev,
+               libxcb-render0-dev,
+               libxcb1-dev
 Standards-Version: 4.6.2
-Homepage: https://github.com/tuxedo/control-center
+Homepage: https://github.com/LapSphere/lapsphere
 
 Package: lapsphere
 Architecture: amd64
 Depends: ${shlibs:Depends}, ${misc:Depends},
-         libgtk-4-1,
-         libadwaita-1-0,
          dbus,
-         systemd,
-         policykit-1
+         policykit-1,
+         libxkbcommon-x11-0
 Recommends: tuxedo-drivers
-Description: Hardware control application for TUXEDO/Clevo laptops
+Description: Hardware control application for LapSphere/Clevo laptops
  LapSphere provides a modern interface for controlling
- hardware features on TUXEDO and Clevo laptops including:
+ hardware features on LapSphere and Clevo laptops including:
   - CPU frequency and power management
   - GPU control
   - Fan curves
