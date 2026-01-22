@@ -66,6 +66,42 @@ fn draw_main_settings(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme
     ui.add_space(16.0);
     ui.separator();
     ui.add_space(16.0);
+
+    ui.label(RichText::new("Keyboard").strong().heading());
+    ui.add_space(8.0);
+    if let Some(caps) = &state.keyboard_capabilities {
+        Grid::new("hardware_keyboard_grid")
+            .num_columns(2)
+            .spacing([40.0, 8.0])
+            .striped(true)
+            .show(ui, |ui| {
+                ui.label("Detected Type:");
+                ui.label(format!("{:?}", caps.keyboard_type));
+                ui.end_row();
+
+                ui.label("Zones:");
+                ui.label(caps.num_zones.to_string());
+                ui.end_row();
+
+                ui.label("Supports Brightness:");
+                ui.label(if caps.supports_brightness { "Yes" } else { "No" });
+                ui.end_row();
+
+                ui.label("Supports Color:");
+                ui.label(if caps.supports_color { "Yes" } else { "No" });
+                ui.end_row();
+
+                ui.label("Supports Effects:");
+                ui.label(if caps.supports_effects { "Yes" } else { "No" });
+                ui.end_row();
+            });
+    } else {
+        ui.label("Keyboard capabilities information unavailable.");
+    }
+
+    ui.add_space(16.0);
+    ui.separator();
+    ui.add_space(16.0);
     
     // Font Size
     ui.label(RichText::new("Font Size").strong().heading());
