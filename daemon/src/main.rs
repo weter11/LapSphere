@@ -156,7 +156,17 @@ async fn main() -> Result<()> {
             gui_cmd.uid(uid);
 
             // Inherit environment variables that might be needed for X11/Wayland
-            for var in &["DISPLAY", "XAUTHORITY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"] {
+            for var in &[
+                "DISPLAY",
+                "XAUTHORITY",
+                "WAYLAND_DISPLAY",
+                "DBUS_SESSION_BUS_ADDRESS",
+                "XDG_RUNTIME_DIR",
+                "XDG_SESSION_TYPE",
+                "XDG_CURRENT_DESKTOP",
+                "GDK_BACKEND",
+                "QT_QPA_PLATFORM",
+            ] {
                 if let Ok(val) = std::env::var(var) {
                     gui_cmd.env(var, val);
                 }

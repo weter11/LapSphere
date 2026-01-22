@@ -13,7 +13,6 @@ override_dh_auto_install:
 	# Install GUI
 	install -D -m 755 target/release/lapsphere debian/lapsphere/usr/bin/lapsphere
 	
-	
 	# Install DBus service file
 	install -D -m 644 debian/io.lapsphere.Control.service debian/lapsphere/usr/share/dbus-1/system-services/io.lapsphere.Control.service
 	

@@ -25,12 +25,19 @@ jobs:
       run: |
           sudo apt-get update
           sudo apt-get install -y debhelper devscripts build-essential
-          # Install Build-Depends from debian/control
+          # Install Build-Depends from debian/control and user-requested libs
           sudo apt-get install -y \
             libdbus-1-dev \
             pkg-config \
-            libxkbcommon-dev \
+            libgtk-3-dev \
+            libadwaita-1-dev \
+            libpango1.0-dev \
+            libcairo2-dev \
+            libgdk-pixbuf-2.0-dev \
+            libatk1.0-dev \
+            libgraphene-1.0-dev \
             libwayland-dev \
+            libxkbcommon-dev \
             libx11-dev \
             libxcb-shape0-dev \
             libxcb-xfixes0-dev \
@@ -54,4 +61,34 @@ jobs:
       with:
         name: lapsphere-ubuntu-24.04-deb
         path: artifacts/*.deb
+        retention-days: 90
+
+  build-arch:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+
+    steps:
+    - name: Update Arch Linux
+      run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm base-devel rustup pkgconf dbus gtk3 libadwaita pango cairo gdk-pixbuf2 atk graphene wayland libxkbcommon libx11
+
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Rust
+      run: |
+          rustup default stable
+
+    - name: Build project
+      run: cargo build --release
+
+    - name: Upload Arch binaries
+      uses: actions/upload-artifact@v4
+      with:
+        name: lapsphere-arch-binaries
+        path: |
+          target/release/lapsphere-daemon
+          target/release/lapsphere
         retention-days: 90

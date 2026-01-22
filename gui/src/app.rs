@@ -572,6 +572,15 @@ impl eframe::App for LapSphereApp {
         // Draw top bar
         self.draw_top_bar(ctx);
         
+        // Update theme if it's Auto to react to system theme changes
+        if self.state.config.theme == Theme::Auto {
+            let is_dark = ctx.style().visuals.dark_mode;
+            if is_dark != self.theme.visuals.dark_mode {
+                self.theme = LapSphereTheme::new(&self.state.config.theme, is_dark);
+                self.theme.apply_with_font_size(ctx, &self.state.config.font_size);
+            }
+        }
+
         // Draw main content
         CentralPanel::default().show(ctx, |ui| {
             match self.state.current_page {
@@ -586,13 +595,6 @@ impl eframe::App for LapSphereApp {
                     tuning::draw(ui, &mut self.state, self.dbus_client.as_ref(), hw_update_tx);
                 }
                 Page::Settings => {
-                    // Update theme if it's Auto to react to system theme changes
-                    if self.state.config.theme == Theme::Auto {
-                        let is_dark = ctx.style().visuals.dark_mode;
-                        // We only re-apply if it would actually change something, but for simplicity:
-                        self.theme = LapSphereTheme::new(&self.state.config.theme, is_dark);
-                        self.theme.apply_with_font_size(ctx, &self.state.config.font_size);
-                    }
                     settings::draw(ui, &mut self.state, &mut self.theme, ctx, self.dbus_client.as_ref());
                 }
             }
