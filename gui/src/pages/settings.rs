@@ -450,6 +450,12 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
                     ui.label(mem_type);
                     ui.end_row();
                 }
+
+                if let Some(freq) = memory.memory_frequency {
+                    ui.label("Frequency:");
+                    ui.label(format!("{} MT/s", freq));
+                    ui.end_row();
+                }
             });
     } else {
         ui.label("Memory information unavailable.");
