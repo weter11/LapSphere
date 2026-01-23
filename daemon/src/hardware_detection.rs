@@ -865,19 +865,35 @@ pub fn get_cpu_info() -> Result<CpuInfo> {
     })
 }
 
-fn get_memory_type() -> Option<String> {
+fn get_memory_type_and_freq() -> (Option<String>, Option<u64>) {
     let output = std::process::Command::new("dmidecode")
         .args(["-t", "memory"])
         .output();
+
+    let mut mem_type = None;
+    let mut mem_speed = None;
+
     if let Ok(out) = output {
         let s = String::from_utf8_lossy(&out.stdout);
         for line in s.lines() {
+            let line = line.trim();
             if line.contains("Type: DDR") || line.contains("Type: LPDDR") {
-                return Some(line.split(':').nth(1).unwrap_or("").trim().to_string());
+                mem_type = Some(line.split(':').nth(1).unwrap_or("").trim().to_string());
+            }
+            if (line.starts_with("Speed:") || line.starts_with("Configured Memory Speed:")) && mem_speed.is_none() {
+                let speed_str = line.split(':').nth(1).unwrap_or("").trim();
+                if !speed_str.to_lowercase().contains("unknown") && !speed_str.is_empty() {
+                    // Expecting something like "3200 MT/s" or "3200 MHz"
+                    if let Some(speed_val) = speed_str.split_whitespace().next() {
+                        if let Ok(val) = speed_val.parse::<u64>() {
+                            mem_speed = Some(val);
+                        }
+                    }
+                }
             }
         }
     }
-    None
+    (mem_type, mem_speed)
 }
 
 pub fn get_memory_info() -> Result<MemoryInfo> {
@@ -895,7 +911,7 @@ pub fn get_memory_info() -> Result<MemoryInfo> {
         Err(_) => (0.0, 0.0, 0.0, 0.0, 0.0),
     };
 
-    let memory_type = get_memory_type();
+    let (memory_type, memory_frequency) = get_memory_type_and_freq();
 
     Ok(MemoryInfo {
         total_gib,
@@ -904,6 +920,7 @@ pub fn get_memory_info() -> Result<MemoryInfo> {
         available_gib,
         used_percent,
         memory_type,
+        memory_frequency,
     })
 }
 
@@ -1969,6 +1986,57 @@ fn read_sysfs_string(path: &str) -> Result<String> {
     Ok(fs::read_to_string(path)?.trim().to_string())
 }
 
+fn find_storage_temperature(block_device_path: &Path) -> Option<f32> {
+    // Strategy 1: Check device/hwmon
+    if let Ok(hwmon_entries) = std::fs::read_dir(block_device_path.join("device/hwmon")) {
+        for hwmon_entry in hwmon_entries.flatten() {
+            if let Some(temp) = read_hwmon_storage_temp(&hwmon_entry.path()) {
+                return Some(temp);
+            }
+        }
+    }
+
+    // Strategy 2: Check device/device/hwmon (common for NVMe)
+    if let Ok(hwmon_entries) = std::fs::read_dir(block_device_path.join("device/device/hwmon")) {
+        for hwmon_entry in hwmon_entries.flatten() {
+            if let Some(temp) = read_hwmon_storage_temp(&hwmon_entry.path()) {
+                return Some(temp);
+            }
+        }
+    }
+
+    // Strategy 3: Global search for hwmon associated with this device
+    if let Ok(device_link) = fs::canonicalize(block_device_path.join("device")) {
+        if let Ok(hwmon_dir) = fs::read_dir("/sys/class/hwmon") {
+            for entry in hwmon_dir.flatten() {
+                if let Ok(hwmon_device_link) = fs::canonicalize(entry.path().join("device")) {
+                    // Check if hwmon device is same as or parent of block device
+                    if device_link.starts_with(&hwmon_device_link) || hwmon_device_link.starts_with(&device_link) {
+                        if let Some(temp) = read_hwmon_storage_temp(&entry.path()) {
+                            return Some(temp);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn read_hwmon_storage_temp(path: &Path) -> Option<f32> {
+    // Try temp1_input, then temp2_input (sometimes composite)
+    for i in 1..=3 {
+        let temp_path = path.join(format!("temp{}_input", i));
+        if let Ok(temp_str) = fs::read_to_string(&temp_path) {
+            if let Ok(temp_millidegrees) = temp_str.trim().parse::<i32>() {
+                return Some(temp_millidegrees as f32 / 1000.0);
+            }
+        }
+    }
+    None
+}
+
 fn read_sector_size(path: &Path) -> u64 {
     fs::read_to_string(path.join("queue/hw_sector_size"))
         .ok()
@@ -2066,18 +2134,7 @@ pub fn get_storage_device_info() -> Result<Vec<StorageDevice>> {
         };
 
         // Try to read temperature from hwmon
-        let mut temperature = None;
-        if let Ok(hwmon_entries) = std::fs::read_dir(path.join("device/hwmon")) {
-            for hwmon_entry in hwmon_entries.flatten() {
-                let temp_input = hwmon_entry.path().join("temp1_input");
-                if let Ok(temp_str) = std::fs::read_to_string(&temp_input) {
-                    if let Ok(temp_millidegrees) = temp_str.trim().parse::<i32>() {
-                        temperature = Some(temp_millidegrees as f32 / 1000.0);
-                        break;
-                    }
-                }
-            }
-        }
+        let temperature = find_storage_temperature(&path);
 
         storage_devices.push(StorageDevice {
             device: format!("/dev/{}", dev_name),

@@ -79,6 +79,7 @@ pub struct MemoryInfo {
     pub available_gib: f64,
     pub used_percent: f32,
     pub memory_type: Option<String>,
+    pub memory_frequency: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

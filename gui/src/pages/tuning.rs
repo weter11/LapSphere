@@ -55,10 +55,6 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>,
             ui.add_space(8.0);
             
             let cpu_info_clone = state.cpu_info.clone();
-            let is_pstate_active = cpu_info_clone.as_ref().map_or(false, |info| {
-                info.amd_pstate_status.as_deref() == Some("active") ||
-                info.intel_pstate_status.as_deref() == Some("active")
-            });
 
             // Performance Profile (Separate section)
             let tdp_profiles = state.available_tdp_profiles.clone();
@@ -106,24 +102,14 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>,
             ui.add_space(16.0);
             
             // Screen tuning
-            ui.add_enabled_ui(!is_pstate_active, |ui| {
-                draw_screen_tuning(ui, &mut state.config.profiles[idx]);
-            });
-            if is_pstate_active {
-                ui.label(RichText::new("⚠️ Screen brightness control is disabled when P-State is Active").small().color(egui::Color32::YELLOW));
-            }
+            draw_screen_tuning(ui, &mut state.config.profiles[idx]);
             ui.add_space(16.0);
             ui.separator();
             ui.add_space(16.0);
             
             // Fan tuning
             let fan_count = state.fan_info.len().max(2);
-            ui.add_enabled_ui(!is_pstate_active, |ui| {
-                draw_fan_tuning(ui, &mut state.config.profiles[idx], fan_count);
-            });
-            if is_pstate_active {
-                ui.label(RichText::new("⚠️ Fan control is disabled when P-State is Active").small().color(egui::Color32::YELLOW));
-            }
+            draw_fan_tuning(ui, &mut state.config.profiles[idx], fan_count);
             ui.add_space(16.0);
         });
 }
@@ -178,9 +164,6 @@ fn draw_cpu_tuning(
         }
     };
 
-    let is_pstate_active = cpu_info.amd_pstate_status.as_deref() == Some("active") ||
-                           cpu_info.intel_pstate_status.as_deref() == Some("active");
-    
     // AMD P-State section (if available)
     if caps.has_amd_pstate {
         ui.label(RichText::new("AMD P-State Mode:").strong());
@@ -262,7 +245,6 @@ fn draw_cpu_tuning(
     
     // Governor
     if caps.has_scaling_governor && !cpu_info.available_governors.is_empty() {
-        ui.add_enabled_ui(!is_pstate_active, |ui| {
         ui.label(RichText::new("Governor:").strong());
         ui.horizontal(|ui| {
             let mut current_gov = profile.cpu_settings.governor
@@ -283,7 +265,6 @@ fn draw_cpu_tuning(
                 });
             
             profile.cpu_settings.governor = Some(current_gov);
-        });
         });
         ui.add_space(6.0);
     }
@@ -311,7 +292,6 @@ fn draw_cpu_tuning(
 
     // Frequency sliders
     if caps.has_scaling_min_freq && caps.has_scaling_max_freq {
-        ui.add_enabled_ui(!is_pstate_active, |ui| {
         ui.label(RichText::new("Frequency Limits:").strong());
 
         if let (Some(hw_min), Some(hw_max)) = (cpu_info.hw_min_freq, cpu_info.hw_max_freq) {
@@ -357,19 +337,13 @@ fn draw_cpu_tuning(
         }
 
         ui.add_space(6.0);
-        });
-        if is_pstate_active {
-            ui.label(RichText::new("⚠️ Frequency control is disabled when P-State is Active").small().color(egui::Color32::YELLOW));
-        }
     }
     
     // Boost checkbox
     if caps.has_boost {
-        ui.add_enabled_ui(!is_pstate_active, |ui| {
-            let mut boost = profile.cpu_settings.boost.unwrap_or(true);
-            ui.checkbox(&mut boost, "CPU Boost / Turbo");
-            profile.cpu_settings.boost = Some(boost);
-        });
+        let mut boost = profile.cpu_settings.boost.unwrap_or(true);
+        ui.checkbox(&mut boost, "CPU Boost / Turbo");
+        profile.cpu_settings.boost = Some(boost);
         
         // Show if boost is available for current pstate
         if caps.has_amd_pstate {
