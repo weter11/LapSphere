@@ -25,6 +25,7 @@ pub enum Page {
 pub enum SettingsTab {
     Main,
     StatsConfiguration,
+    BatteryControl,
     Hardware,
 }
 
@@ -204,6 +205,18 @@ impl LapSphereApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut state = AppState::new();
         state.load_config();
+        
+        // Improve font rendering with better tessellation options
+        let mut fonts = egui::FontDefinitions::default();
+        
+        // Configure font rasterization for better quality
+        cc.egui_ctx.options_mut(|o| {
+            // Enable improved font anti-aliasing
+            o.tessellation_options.feathering = true;
+            o.tessellation_options.feathering_size_in_pixels = 1.0;
+            // Improve text rendering quality
+            o.tessellation_options.round_text_to_pixels = true;
+        });
         
         // Create DBus client
         let dbus_client = match DbusClient::new() {
