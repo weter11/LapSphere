@@ -90,6 +90,11 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>)
                             ui.label(RichText::new(format!("Boost: {}", if boost { "On" } else { "Off" })).small());
                             ui.label(RichText::new("|").small());
                         }
+
+                        if let Some(ref tdp) = profile.cpu_settings.tdp_profile {
+                            ui.label(RichText::new(format!("Performance: {}", tdp)).small());
+                            ui.label(RichText::new("|").small());
+                        }
                         
                         // Keyboard settings
                         if profile.keyboard_settings.control_enabled {
@@ -195,8 +200,8 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>)
         });
 }
 
-fn create_standard_profile() -> tuxedo_common::types::Profile {
-    use tuxedo_common::types::*;
+fn create_standard_profile() -> lapsphere_common::types::Profile {
+    use lapsphere_common::types::*;
     
     Profile {
         name: "Standard".to_string(),
@@ -212,6 +217,7 @@ fn create_standard_profile() -> tuxedo_common::types::Profile {
             energy_performance_preference: Some("balance_performance".to_string()),
             tdp: None,
             amd_pstate_status: Some("active".to_string()),
+                intel_pstate_status: Some("active".to_string()),
         },
         gpu_settings: GpuSettings {
             dgpu_tdp: None,

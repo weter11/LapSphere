@@ -1,5 +1,5 @@
 use anyhow::Result;
-use tuxedo_common::types::*;
+use lapsphere_common::types::*;
 use zbus::{interface, Connection, ConnectionBuilder};
 use std::time::Duration;
 use nix::sys::signal::{raise, Signal};
@@ -8,7 +8,7 @@ const SHUTDOWN_SIGNAL_DELAY_MS: u64 = 200;
 
 pub struct ControlInterface;
 
-#[interface(name = "com.tuxedo.Control")]
+#[interface(name = "io.lapsphere.Control")]
 impl ControlInterface {
     async fn get_system_info(&self) -> Result<String, zbus::fdo::Error> {
         match crate::hardware_detection::get_system_info() {
@@ -100,6 +100,11 @@ impl ControlInterface {
 
     async fn set_amd_pstate_status(&self, status: &str) -> Result<(), zbus::fdo::Error> {
         crate::hardware_control::set_amd_pstate_status(status)
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
+
+    async fn set_intel_pstate_status(&self, status: &str) -> Result<(), zbus::fdo::Error> {
+        crate::hardware_control::set_intel_pstate_status(status)
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
 
@@ -406,8 +411,8 @@ fn is_systemd_managed() -> bool {
 
 pub async fn start_service(_connection: Connection) -> Result<()> {
     let _conn = ConnectionBuilder::system()?
-        .name("com.tuxedo.Control")?
-        .serve_at("/com/tuxedo/Control", ControlInterface)?
+        .name("io.lapsphere.Control")?
+        .serve_at("/io/lapsphere/Control", ControlInterface)?
         .build()
         .await?;
     

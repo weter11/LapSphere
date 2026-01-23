@@ -10,7 +10,7 @@ use anyhow::Result;
 use tokio::signal;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tuxedo_common::types::FanSettings;
+use lapsphere_common::types::FanSettings;
 use polling_scheduler::{PollingScheduler, PollJob};
 
 // Global fan daemon state
@@ -24,7 +24,17 @@ pub static SCHEDULER_HANDLE: once_cell::sync::OnceCell<polling_scheduler::Schedu
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
-    log::info!("Starting TUXEDO Control Center Daemon");
+    log::info!("Starting LapSphere Daemon");
+
+    let args: Vec<String> = std::env::args().collect();
+    let launch_gui = args.contains(&"--gui".to_string());
+
+    // Collect other arguments to pass to the GUI (e.g., --tray)
+    let gui_args: Vec<String> = args.iter()
+        .skip(1) // skip the daemon executable name
+        .filter(|&a| a != "--gui")
+        .cloned()
+        .collect();
 
     // Check if running as root
     if unsafe { libc::geteuid() } != 0 {
@@ -119,6 +129,75 @@ async fn main() -> Result<()> {
     let _service = dbus_interface::start_service(connection.clone()).await?;
 
     log::info!("DBus service started");
+
+    // Launch GUI if requested
+    if launch_gui {
+        use tokio::process::Command;
+        use std::os::unix::process::CommandExt;
+
+        let target_uid = std::env::var("SUDO_UID")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .or_else(|| std::env::var("PKEXEC_UID").ok().and_then(|v| v.parse::<u32>().ok()));
+
+        if let Some(uid) = target_uid {
+            log::info!("Launching GUI as user UID {}", uid);
+
+            // Try to find the binary in the same directory as the daemon or in PATH
+            let current_exe = std::env::current_exe().ok();
+            let gui_bin_path = current_exe.and_then(|p| p.parent().map(|parent| parent.join("lapsphere")));
+
+            let mut gui_cmd = if let Some(ref path) = gui_bin_path.filter(|p| p.exists()) {
+                Command::new(path)
+            } else {
+                Command::new("lapsphere")
+            };
+            gui_cmd.args(&gui_args);
+            gui_cmd.uid(uid);
+
+            // Inherit environment variables that might be needed for X11/Wayland
+            for var in &[
+                "DISPLAY",
+                "XAUTHORITY",
+                "WAYLAND_DISPLAY",
+                "DBUS_SESSION_BUS_ADDRESS",
+                "XDG_RUNTIME_DIR",
+                "XDG_SESSION_TYPE",
+                "XDG_CURRENT_DESKTOP",
+                "GDK_BACKEND",
+                "QT_QPA_PLATFORM",
+            ] {
+                if let Ok(val) = std::env::var(var) {
+                    gui_cmd.env(var, val);
+                }
+            }
+
+            match gui_cmd.spawn() {
+                Ok(mut child) => {
+                    tokio::spawn(async move {
+                        match child.wait().await {
+                            Ok(status) => {
+                                log::info!("GUI exited with status: {}, shutting down daemon", status);
+                            }
+                            Err(e) => {
+                                log::error!("Error waiting for GUI: {}, shutting down daemon", e);
+                            }
+                        }
+                        let _ = nix::sys::signal::raise(nix::sys::signal::Signal::SIGINT);
+                    });
+                }
+                Err(e) => {
+                    log::error!("Failed to launch GUI: {}", e);
+                    // If we failed to launch requested GUI, should we exit?
+                    // User said "if user exit gui, then stop daemon", so if it never starts...
+                    let _ = nix::sys::signal::raise(nix::sys::signal::Signal::SIGINT);
+                }
+            }
+        } else {
+            log::warn!("--gui flag passed but couldn't determine target UID (SUDO_UID or PKEXEC_UID not set)");
+            // If we are root but not via sudo/pkexec, we probably shouldn't launch GUI as root
+        }
+    }
 
     // Wait for shutdown signal
     signal::ctrl_c().await?;

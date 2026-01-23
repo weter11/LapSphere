@@ -1,13 +1,13 @@
 use egui::{Ui, ScrollArea, RichText, Slider, ComboBox, Context, Grid};
 use crate::app::{AppState, SettingsTab};
 use crate::dbus_client::DbusClient;
-use crate::theme::TuxedoTheme;
+use crate::theme::LapSphereTheme;
 use crate::pages::statistics::{normalize_section_order, STATISTICS_SECTIONS};
 
 const STORAGE_POLL_MIN_SECONDS: f32 = 0.5;
 const STORAGE_POLL_MAX_SECONDS: f32 = 10.0;
 
-pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Context, dbus_client: Option<&DbusClient>) {
+pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTheme, ctx: &Context, dbus_client: Option<&DbusClient>) {
     ui.add_space(8.0);
 
     ui.horizontal(|ui| {
@@ -31,7 +31,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Co
         });
 }
 
-fn draw_main_settings(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme, ctx: &Context, dbus_client: Option<&DbusClient>) {
+fn draw_main_settings(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTheme, ctx: &Context, dbus_client: Option<&DbusClient>) {
     // Appearance
     ui.label(RichText::new("Appearance").strong().heading());
     ui.add_space(8.0);
@@ -39,7 +39,7 @@ fn draw_main_settings(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme
     ui.horizontal(|ui| {
         ui.label("Theme:");
         
-        use tuxedo_common::types::Theme;
+        use lapsphere_common::types::Theme;
         let mut theme_changed = false;
         let mut new_theme = state.config.theme.clone();
         
@@ -58,8 +58,8 @@ fn draw_main_settings(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme
             let _ = state.save_settings();
             
             // Apply theme immediately
-            *theme = TuxedoTheme::new(&new_theme);
-            theme.apply(ctx);
+            *theme = LapSphereTheme::new(&new_theme, ctx.style().visuals.dark_mode);
+            theme.apply_with_font_size(ctx, &state.config.font_size);
         }
     });
     
@@ -74,7 +74,7 @@ fn draw_main_settings(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme
     ui.horizontal(|ui| {
         ui.label("UI Font Size:");
         
-        use tuxedo_common::types::FontSize;
+        use lapsphere_common::types::FontSize;
         let mut font_changed = false;
         let mut new_font = state.config.font_size.clone();
         
@@ -93,7 +93,7 @@ fn draw_main_settings(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme
             let _ = state.save_settings();
             
             // Apply font size immediately
-            apply_font_size(ctx, &new_font);
+            theme.apply_with_font_size(ctx, &new_font);
         }
     });
     
@@ -118,28 +118,6 @@ fn draw_main_settings(ui: &mut Ui, state: &mut AppState, theme: &mut TuxedoTheme
         // TODO: Create/remove autostart file
     }
     
-    ui.add_space(16.0);
-    ui.separator();
-    ui.add_space(16.0);
-    
-    // Daemon Controls
-    ui.label(RichText::new("Daemon Controls").strong().heading());
-    ui.add_space(8.0);
-    
-    if ui.checkbox(&mut state.config.fan_daemon_enabled, "Fan daemon").changed() {
-        let _ = state.save_settings();
-    }
-    ui.label(RichText::new("Monitor temperatures and apply fan curves").small().italics());
-    ui.add_space(6.0);
-    
-    if ui.checkbox(&mut state.config.app_monitoring_enabled, "App monitoring").changed() {
-        let _ = state.save_settings();
-    }
-    ui.label(RichText::new("Monitor running applications for automatic profile switching").small().italics());
-    
-    ui.add_space(16.0);
-    ui.separator();
-    ui.add_space(16.0);
     
     // Battery Charge Control
     draw_battery_settings(ui, state);
@@ -367,8 +345,8 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
                 ui.label(interface_label);
                 ui.end_row();
 
-                ui.label("TUXEDO Kernel Modules:");
-                ui.label(&info.tuxedo_kernel_modules);
+                ui.label("Kernel Modules:");
+                ui.label(&info.kernel_modules);
                 ui.end_row();
             });
     } else {
@@ -427,8 +405,12 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
                 ui.label(&cpu.name);
                 ui.end_row();
 
-                ui.label("Cores:");
-                ui.label(cpu.cores.len().to_string());
+                ui.label("Physical Cores:");
+                ui.label(cpu.physical_cores.to_string());
+                ui.end_row();
+
+                ui.label("Logical Cores:");
+                ui.label(cpu.logical_cores.to_string());
                 ui.end_row();
 
                 if cpu.capabilities.has_scaling_driver {
@@ -462,6 +444,12 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
                 ui.label("Total:");
                 ui.label(format!("{:.2} GiB", memory.total_gib));
                 ui.end_row();
+
+                if let Some(mem_type) = &memory.memory_type {
+                    ui.label("Type:");
+                    ui.label(mem_type);
+                    ui.end_row();
+                }
             });
     } else {
         ui.label("Memory information unavailable.");
@@ -593,6 +581,14 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
             .spacing([40.0, 8.0])
             .striped(true)
             .show(ui, |ui| {
+                ui.label("Manufacturer:");
+                ui.label(&battery.manufacturer);
+                ui.end_row();
+
+                ui.label("Model:");
+                ui.label(&battery.model);
+                ui.end_row();
+
                 ui.label("Capacity:");
                 ui.label(format!("{} mAh", battery.capacity_mah));
                 ui.end_row();
@@ -716,28 +712,6 @@ fn draw_battery_settings(ui: &mut Ui, state: &mut AppState) {
     }
 }
 
-fn apply_font_size(ctx: &Context, font_size: &tuxedo_common::types::FontSize) {
-    use egui::{FontId, FontFamily, TextStyle};
-    use tuxedo_common::types::FontSize;
-    
-    let mut style = (*ctx.style()).clone();
-    
-    let (heading, body, button, small, mono) = match font_size {
-        FontSize::Small => (18.0, 12.0, 12.0, 9.0, 11.0),
-        FontSize::Medium => (22.0, 14.0, 14.0, 11.0, 13.0),
-        FontSize::Large => (26.0, 16.0, 16.0, 13.0, 15.0),
-    };
-    
-    style.text_styles = [
-        (TextStyle::Heading, FontId::new(heading, FontFamily::Proportional)),
-        (TextStyle::Body, FontId::new(body, FontFamily::Proportional)),
-        (TextStyle::Monospace, FontId::new(mono, FontFamily::Monospace)),
-        (TextStyle::Button, FontId::new(button, FontFamily::Proportional)),
-        (TextStyle::Small, FontId::new(small, FontFamily::Proportional)),
-    ].into();
-    
-    ctx.set_style(style);
-}
 
 fn draw_prime_profile_settings(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>) {
     ui.heading("🎮 NVIDIA Prime Profile");

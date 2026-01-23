@@ -9,7 +9,7 @@ use once_cell::sync::Lazy;
 use crate::tuxedo_io::TuxedoIo;
 use systemstat::{System, Platform, saturating_sub_bytes};
 // use tuxedo_io::TuxedoIo;
-use tuxedo_common::types::*;
+use lapsphere_common::types::*;
 
 // Thread-safe storage for previous CPU stats
 static PREVIOUS_CPU_STATS: Mutex<Option<HashMap<u32, CpuStats>>> = Mutex::new(None);
@@ -145,24 +145,57 @@ fn get_scheduler_info() -> (String, Vec<String>) {
     (scheduler, available)
 }
 
-fn get_cpu_name() -> Result<String> {
-    let cpuinfo = fs::read_to_string("/proc/cpuinfo")?;
-    for line in cpuinfo.lines() {
-        if line.starts_with("model name") {
-            if let Some(name) = line.split(':').nth(1) {
-                return Ok(name.trim().to_string());
+fn get_cpu_name() -> String {
+    if let Ok(cpuinfo) = fs::read_to_string("/proc/cpuinfo") {
+        for line in cpuinfo.lines() {
+            if line.starts_with("model name") {
+                if let Some(name) = line.split(':').nth(1) {
+                    return name.trim().to_string();
+                }
             }
         }
     }
-    Err(anyhow!("CPU name not found"))
+    "Unknown CPU".to_string()
 }
 
-fn get_cpu_count() -> Result<u32> {
-    let cpuinfo = fs::read_to_string("/proc/cpuinfo")?;
-    let count = cpuinfo.lines()
-        .filter(|line| line.starts_with("processor"))
-        .count();
-    Ok(count as u32)
+fn get_cpu_topology() -> (u32, u32) {
+    let mut logical = 0;
+    let mut physical = 0;
+
+    let output = std::process::Command::new("lscpu").output();
+    if let Ok(out) = output {
+        let s = String::from_utf8_lossy(&out.stdout);
+        let mut threads_per_core = 1;
+        let mut cores_per_socket = 0;
+        let mut sockets = 0;
+
+        for line in s.lines() {
+            let line = line.trim();
+            if line.starts_with("CPU(s):") {
+                logical = line.split(':').nth(1).unwrap_or("").trim().parse().unwrap_or(0);
+            } else if line.starts_with("Thread(s) per core:") {
+                threads_per_core = line.split(':').nth(1).unwrap_or("").trim().parse().unwrap_or(1);
+            } else if line.starts_with("Core(s) per socket:") {
+                cores_per_socket = line.split(':').nth(1).unwrap_or("").trim().parse().unwrap_or(0);
+            } else if line.starts_with("Socket(s):") {
+                sockets = line.split(':').nth(1).unwrap_or("").trim().parse().unwrap_or(1);
+            }
+        }
+
+        physical = cores_per_socket * sockets;
+    }
+
+    // Fallback if lscpu fails or gives incomplete info
+    if logical == 0 {
+        logical = fs::read_to_string("/proc/cpuinfo")
+            .map(|s| s.lines().filter(|l| l.starts_with("processor")).count() as u32)
+            .unwrap_or(1);
+    }
+    if physical == 0 {
+        physical = logical;
+    }
+
+    (physical, logical)
 }
 
 fn read_cpu_frequency(cpu: u32) -> Result<u64> {
@@ -203,25 +236,26 @@ fn calculate_median(values: &[u64]) -> u64 {
     sorted[sorted.len() / 2]
 }
 
-fn get_core_temp(cpu: u32) -> Result<f32> {
-    for entry in fs::read_dir("/sys/class/hwmon")? {
-        let entry = entry?;
-        let name_path = entry.path().join("name");
-        if let Ok(name) = fs::read_to_string(&name_path) {
-            let name = name.trim();
-            if name == "k10temp" {
-                return get_package_temp();
-            } else if name == "coretemp" {
-                let temp_path = entry.path().join(format!("temp{}_input", cpu + 2));
-                if let Ok(temp_str) = fs::read_to_string(&temp_path) {
-                    if let Ok(temp) = temp_str.trim().parse::<f32>() {
-                        return Ok(temp / 1000.0);
+fn get_core_temp(cpu: u32) -> f32 {
+    if let Ok(entries) = fs::read_dir("/sys/class/hwmon") {
+        for entry in entries.flatten() {
+            let name_path = entry.path().join("name");
+            if let Ok(name) = fs::read_to_string(&name_path) {
+                let name = name.trim();
+                if name == "k10temp" {
+                    return get_package_temp().unwrap_or(0.0);
+                } else if name == "coretemp" {
+                    let temp_path = entry.path().join(format!("temp{}_input", cpu + 2));
+                    if let Ok(temp_str) = fs::read_to_string(&temp_path) {
+                        if let Ok(temp) = temp_str.trim().parse::<f32>() {
+                            return temp / 1000.0;
+                        }
                     }
                 }
             }
         }
     }
-    Err(anyhow!("Core temperature not found"))
+    0.0
 }
 
 fn get_package_temp() -> Result<f32> {
@@ -446,6 +480,7 @@ fn detect_cpu_capabilities() -> CpuCapabilities {
             Path::new(&format!("{}/scaling_available_governors", base_path)).exists(),
         
         has_amd_pstate: Path::new("/sys/devices/system/cpu/amd_pstate/status").exists(),
+        has_intel_pstate: Path::new("/sys/devices/system/cpu/intel_pstate/status").exists(),
     }
 }
 
@@ -512,6 +547,13 @@ fn read_amd_pstate_status() -> Result<String> {
     fs::read_to_string(path)
         .map(|s| s.trim().to_string())
         .map_err(|e| anyhow!("Failed to read AMD pstate status: {}", e))
+}
+
+fn read_intel_pstate_status() -> Result<String> {
+    let path = "/sys/devices/system/cpu/intel_pstate/status";
+    fs::read_to_string(path)
+        .map(|s| s.trim().to_string())
+        .map_err(|e| anyhow!("Failed to read Intel pstate status: {}", e))
 }
 
 fn read_frequency_limits() -> (Option<u64>, Option<u64>) {
@@ -660,22 +702,22 @@ pub fn get_tdp_info() -> Result<(i32, i32, i32)> {
 }
 
 pub fn get_cpu_info() -> Result<CpuInfo> {
-    let name = get_cpu_name()?;
-    let core_count = get_cpu_count()?;
+    let name = get_cpu_name();
+    let (physical_cores, logical_cores) = get_cpu_topology();
     
     let loads = calculate_cpu_load().unwrap_or_default();
     
     let mut cores = Vec::new();
     let mut frequencies = Vec::new();
     
-    for i in 0..core_count {
+    for i in 0..logical_cores {
         let freq = read_cpu_frequency(i).unwrap_or(2000000);
         frequencies.push(freq);
         cores.push(CoreInfo {
             id: i,
             frequency: freq,
             load: loads.get(&i).copied().unwrap_or(0.0),
-            temperature: get_core_temp(i).unwrap_or(0.0),
+            temperature: get_core_temp(i),
         });
     }
     
@@ -735,6 +777,12 @@ pub fn get_cpu_info() -> Result<CpuInfo> {
     } else {
         None
     };
+
+    let intel_pstate_status = if capabilities.has_intel_pstate {
+        read_intel_pstate_status().ok()
+    } else {
+        None
+    };
     
     let (min_freq, max_freq) = if capabilities.has_scaling_min_freq && capabilities.has_scaling_max_freq {
         read_frequency_limits()
@@ -777,12 +825,15 @@ pub fn get_cpu_info() -> Result<CpuInfo> {
         package_temp,
         package_power,
         cores,
+        physical_cores,
+        logical_cores,
         governor,
         available_governors,
         boost_enabled,
         smt_enabled,
         scaling_driver,
         amd_pstate_status,
+        intel_pstate_status,
         min_freq,
         max_freq,
         hw_min_freq,
@@ -797,15 +848,37 @@ pub fn get_cpu_info() -> Result<CpuInfo> {
     })
 }
 
+fn get_memory_type() -> Option<String> {
+    let output = std::process::Command::new("dmidecode")
+        .args(["-t", "memory"])
+        .output();
+    if let Ok(out) = output {
+        let s = String::from_utf8_lossy(&out.stdout);
+        for line in s.lines() {
+            if line.contains("Type: DDR") || line.contains("Type: LPDDR") {
+                return Some(line.split(':').nth(1).unwrap_or("").trim().to_string());
+            }
+        }
+    }
+    None
+}
+
 pub fn get_memory_info() -> Result<MemoryInfo> {
     let sys = System::new();
-    let mem = sys.memory()?;
+    let (total_gib, free_gib, available_gib, used_gib, used_percent) = match sys.memory() {
+        Ok(mem) => {
+            let total = mem.total.as_u64() as f64 / (1024.0 * 1024.0 * 1024.0);
+            let free = mem.free.as_u64() as f64 / (1024.0 * 1024.0 * 1024.0);
+            let available = mem.platform_memory.meminfo.get("MemAvailable")
+                .map_or(free, |v| v.as_u64() as f64 / (1024.0 * 1024.0 * 1024.0));
+            let used = total - available;
+            let percent = if total > 0.0 { (used / total * 100.0) as f32 } else { 0.0 };
+            (total, free, available, used, percent)
+        }
+        Err(_) => (0.0, 0.0, 0.0, 0.0, 0.0),
+    };
 
-    let total_gib = mem.total.as_u64() as f64 / (1024.0 * 1024.0 * 1024.0);
-    let free_gib = mem.free.as_u64() as f64 / (1024.0 * 1024.0 * 1024.0);
-    let available_gib = mem.platform_memory.meminfo.get("MemAvailable").map_or(0.0, |v| v.as_u64() as f64 / (1024.0 * 1024.0 * 1024.0));
-    let used_gib = total_gib - available_gib;
-    let used_percent = if total_gib > 0.0 { (used_gib / total_gib * 100.0) as f32 } else { 0.0 };
+    let memory_type = get_memory_type();
 
     Ok(MemoryInfo {
         total_gib,
@@ -813,6 +886,7 @@ pub fn get_memory_info() -> Result<MemoryInfo> {
         free_gib,
         available_gib,
         used_percent,
+        memory_type,
     })
 }
 
@@ -957,7 +1031,7 @@ pub fn get_system_info() -> Result<SystemInfo> {
         .trim()
         .to_string();
 
-    let tuxedo_kernel_modules = get_tuxedo_kernel_modules();
+    let kernel_modules = get_tuxedo_kernel_modules();
     
     Ok(SystemInfo {
         product_name,
@@ -965,7 +1039,7 @@ pub fn get_system_info() -> Result<SystemInfo> {
         manufacturer,
         board_name,
         bios_version,
-        tuxedo_kernel_modules,
+        kernel_modules,
     })
 }
 

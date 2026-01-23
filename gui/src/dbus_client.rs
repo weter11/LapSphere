@@ -1,5 +1,5 @@
 use anyhow::Result;
-use tuxedo_common::types::*;
+use lapsphere_common::types::*;
 use zbus::Connection;
 use tokio::sync::{mpsc, oneshot};
 
@@ -26,6 +26,7 @@ pub enum DbusCommand {
     SetCpuGovernor { governor: String, reply: oneshot::Sender<Result<()>> },
     SetCpuBoost { enabled: bool, reply: oneshot::Sender<Result<()>> },
     SetAmdPstateStatus { status: String, reply: oneshot::Sender<Result<()>> },
+    SetIntelPstateStatus { status: String, reply: oneshot::Sender<Result<()>> },
     PreviewKeyboard { settings: KeyboardSettings, reply: oneshot::Sender<Result<()>> },
     GetBatteryChargeThresholds { reply: oneshot::Sender<Result<(u8, u8)>> },
     SetBatteryChargeThresholds { start: u8, end: u8, reply: oneshot::Sender<Result<()>> },
@@ -153,6 +154,12 @@ impl DbusClient {
     pub fn set_amd_pstate_status(&self, status: String) -> oneshot::Receiver<Result<()>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.command_tx.send(DbusCommand::SetAmdPstateStatus { status, reply: tx });
+        rx
+    }
+
+    pub fn set_intel_pstate_status(&self, status: String) -> oneshot::Receiver<Result<()>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::SetIntelPstateStatus { status, reply: tx });
         rx
     }
 
@@ -346,6 +353,10 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
                 let result = set_amd_pstate_status_impl(&connection, &status).await;
                 let _ = reply.send(result);
             }
+            DbusCommand::SetIntelPstateStatus { status, reply } => {
+                let result = set_intel_pstate_status_impl(&connection, &status).await;
+                let _ = reply.send(result);
+            }
             DbusCommand::PreviewKeyboard { settings, reply } => {
                 let result = preview_keyboard_impl(&connection, &settings).await;
                 let _ = reply.send(result);
@@ -432,9 +443,9 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
 async fn get_system_info_impl(conn: &Connection) -> Result<SystemInfo> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
     
     let json: String = proxy.call("GetSystemInfo", &()).await?;
@@ -444,9 +455,9 @@ async fn get_system_info_impl(conn: &Connection) -> Result<SystemInfo> {
 async fn get_memory_info_impl(conn: &Connection) -> Result<MemoryInfo> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
 
     let json: String = proxy.call("GetMemoryInfo", &()).await?;
@@ -456,9 +467,9 @@ async fn get_memory_info_impl(conn: &Connection) -> Result<MemoryInfo> {
 async fn get_cpu_info_impl(conn: &Connection) -> Result<CpuInfo> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
     
     let json: String = proxy.call("GetCpuInfo", &()).await?;
@@ -468,9 +479,9 @@ async fn get_cpu_info_impl(conn: &Connection) -> Result<CpuInfo> {
 async fn get_gpu_info_impl(conn: &Connection) -> Result<Vec<GpuInfo>> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
     
     let json: String = proxy.call("GetGpuInfo", &()).await?;
@@ -480,9 +491,9 @@ async fn get_gpu_info_impl(conn: &Connection) -> Result<Vec<GpuInfo>> {
 async fn get_fan_info_impl(conn: &Connection) -> Result<Vec<FanInfo>> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
     
     let json: String = proxy.call("GetFanInfo", &()).await?;
@@ -492,9 +503,9 @@ async fn get_fan_info_impl(conn: &Connection) -> Result<Vec<FanInfo>> {
 async fn get_battery_info_impl(conn: &Connection) -> Result<BatteryInfo> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
 
     let json: String = proxy.call("GetBatteryInfo", &()).await?;
@@ -504,9 +515,9 @@ async fn get_battery_info_impl(conn: &Connection) -> Result<BatteryInfo> {
 async fn get_storage_device_info_impl(conn: &Connection) -> Result<Vec<StorageDevice>> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
 
     let json: String = proxy.call("GetStorageDeviceInfo", &()).await?;
@@ -516,9 +527,9 @@ async fn get_storage_device_info_impl(conn: &Connection) -> Result<Vec<StorageDe
 async fn get_mount_info_impl(conn: &Connection) -> Result<Vec<MountInfo>> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
 
     let json: String = proxy.call("GetMountInfo", &()).await?;
@@ -528,9 +539,9 @@ async fn get_mount_info_impl(conn: &Connection) -> Result<Vec<MountInfo>> {
 async fn get_wifi_info_impl(conn: &Connection) -> Result<Vec<WiFiInfo>> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
 
     let json: String = proxy.call("GetWifiInfo", &()).await?;
@@ -540,9 +551,9 @@ async fn get_wifi_info_impl(conn: &Connection) -> Result<Vec<WiFiInfo>> {
 async fn get_tdp_profiles_impl(conn: &Connection) -> Result<Vec<String>> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
 
     let json: String = proxy.call("GetTdpProfiles", &()).await?;
@@ -552,9 +563,9 @@ async fn get_tdp_profiles_impl(conn: &Connection) -> Result<Vec<String>> {
 async fn get_hardware_interface_info_impl(conn: &Connection) -> Result<String> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
 
     let info: String = proxy.call("GetHardwareInterfaceInfo", &()).await?;
@@ -564,9 +575,9 @@ async fn get_hardware_interface_info_impl(conn: &Connection) -> Result<String> {
 async fn get_keyboard_capabilities_impl(conn: &Connection) -> Result<KeyboardCapabilities> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
 
     let json: String = proxy.call("GetKeyboardCapabilities", &()).await?;
@@ -576,9 +587,9 @@ async fn get_keyboard_capabilities_impl(conn: &Connection) -> Result<KeyboardCap
 async fn apply_profile_impl(conn: &Connection, profile: &Profile) -> Result<()> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
     
     let json = serde_json::to_string(profile)?;
@@ -589,9 +600,9 @@ async fn apply_profile_impl(conn: &Connection, profile: &Profile) -> Result<()> 
 async fn set_cpu_governor_impl(conn: &Connection, governor: &str) -> Result<()> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
     
     proxy.call::<_, _, ()>("SetCpuGovernor", &(governor,)).await?;
@@ -601,9 +612,9 @@ async fn set_cpu_governor_impl(conn: &Connection, governor: &str) -> Result<()> 
 async fn preview_keyboard_impl(conn: &Connection, settings: &KeyboardSettings) -> Result<()> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
     
     let json = serde_json::to_string(settings)?;
@@ -614,9 +625,9 @@ async fn preview_keyboard_impl(conn: &Connection, settings: &KeyboardSettings) -
 async fn set_cpu_boost_impl(conn: &Connection, enabled: bool) -> Result<()> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
 
     proxy.call::<_, _, ()>("SetCpuBoost", &(enabled,)).await?;
@@ -626,21 +637,33 @@ async fn set_cpu_boost_impl(conn: &Connection, enabled: bool) -> Result<()> {
 async fn set_amd_pstate_status_impl(conn: &Connection, status: &str) -> Result<()> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
 
     proxy.call::<_, _, ()>("SetAmdPstateStatus", &(status,)).await?;
     Ok(())
 }
 
+async fn set_intel_pstate_status_impl(conn: &Connection, status: &str) -> Result<()> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
+    ).await?;
+
+    proxy.call::<_, _, ()>("SetIntelPstateStatus", &(status,)).await?;
+    Ok(())
+}
+
 async fn get_battery_thresholds_impl(conn: &Connection) -> Result<(u8, u8)> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
     
     let start: u8 = proxy.call("GetBatteryChargeStartThreshold", &()).await?;
@@ -651,9 +674,9 @@ async fn get_battery_thresholds_impl(conn: &Connection) -> Result<(u8, u8)> {
 async fn set_battery_thresholds_impl(conn: &Connection, start: u8, end: u8) -> Result<()> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
     
     proxy.call::<_, _, ()>("SetBatteryChargeStartThreshold", &(start,)).await?;
@@ -664,9 +687,9 @@ async fn set_battery_thresholds_impl(conn: &Connection, start: u8, end: u8) -> R
 async fn get_battery_available_start_thresholds_impl(conn: &Connection) -> Result<Vec<u8>> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
 
     let json: String = proxy.call("GetBatteryAvailableStartThresholds", &()).await?;
@@ -676,9 +699,9 @@ async fn get_battery_available_start_thresholds_impl(conn: &Connection) -> Resul
 async fn get_battery_available_end_thresholds_impl(conn: &Connection) -> Result<Vec<u8>> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
 
     let json: String = proxy.call("GetBatteryAvailableEndThresholds", &()).await?;
@@ -688,9 +711,9 @@ async fn get_battery_available_end_thresholds_impl(conn: &Connection) -> Result<
 async fn set_battery_settings_impl(conn: &Connection, settings: BatterySettings) -> Result<()> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
 
     let json = serde_json::to_string(&settings)?;
@@ -701,9 +724,9 @@ async fn set_battery_settings_impl(conn: &Connection, settings: BatterySettings)
 async fn set_fan_auto_impl(conn: &Connection, fan_id: u32) -> Result<()> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
     proxy.call::<_, _, ()>("SetFanAuto", &(fan_id,)).await?;
     Ok(())
@@ -712,9 +735,9 @@ async fn set_fan_auto_impl(conn: &Connection, fan_id: u32) -> Result<()> {
 async fn set_gpu_locked_clocks_impl(conn: &Connection, device_index: u32, min_clock: u32, max_clock: u32) -> Result<()> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
     proxy.call::<_, _, ()>("SetGpuLockedClocks", &(device_index, min_clock, max_clock)).await?;
     Ok(())
@@ -723,9 +746,9 @@ async fn set_gpu_locked_clocks_impl(conn: &Connection, device_index: u32, min_cl
 async fn reset_gpu_clocks_impl(conn: &Connection, device_index: u32) -> Result<()> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
     proxy.call::<_, _, ()>("ResetGpuClocks", &(device_index,)).await?;
     Ok(())
@@ -734,9 +757,9 @@ async fn reset_gpu_clocks_impl(conn: &Connection, device_index: u32) -> Result<(
 async fn get_gpu_clock_ranges_impl(conn: &Connection, device_index: u32) -> Result<(u32, u32)> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
     let json: String = proxy.call("GetGpuClockRanges", &(device_index,)).await?;
     Ok(serde_json::from_str(&json)?)
@@ -745,9 +768,9 @@ async fn get_gpu_clock_ranges_impl(conn: &Connection, device_index: u32) -> Resu
 async fn get_gpu_mem_clock_ranges_impl(conn: &Connection, device_index: u32) -> Result<Vec<u32>> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
     let json: String = proxy.call("GetGpuMemClockRanges", &(device_index,)).await?;
     Ok(serde_json::from_str(&json)?)
@@ -756,9 +779,9 @@ async fn get_gpu_mem_clock_ranges_impl(conn: &Connection, device_index: u32) -> 
 async fn set_memory_locked_clocks_impl(conn: &Connection, device_index: u32, min_clock: u32, max_clock: u32) -> Result<()> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
     proxy.call::<_, _, ()>("SetMemoryLockedClocks", &(device_index, min_clock, max_clock)).await?;
     Ok(())
@@ -767,9 +790,9 @@ async fn set_memory_locked_clocks_impl(conn: &Connection, device_index: u32, min
 async fn reset_memory_locked_clocks_impl(conn: &Connection, device_index: u32) -> Result<()> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
     proxy.call::<_, _, ()>("ResetMemoryLockedClocks", &(device_index,)).await?;
     Ok(())
@@ -778,9 +801,9 @@ async fn reset_memory_locked_clocks_impl(conn: &Connection, device_index: u32) -
 async fn set_gpu_core_offset_impl(conn: &Connection, device_index: u32, offset: i32) -> Result<()> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
     proxy.call::<_, _, ()>("SetGpuCoreOffset", &(device_index, offset)).await?;
     Ok(())
@@ -789,9 +812,9 @@ async fn set_gpu_core_offset_impl(conn: &Connection, device_index: u32, offset: 
 async fn set_gpu_memory_offset_impl(conn: &Connection, device_index: u32, offset: i32) -> Result<()> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
     proxy.call::<_, _, ()>("SetGpuMemoryOffset", &(device_index, offset)).await?;
     Ok(())
@@ -800,9 +823,9 @@ async fn set_gpu_memory_offset_impl(conn: &Connection, device_index: u32, offset
 async fn get_gpu_core_offset_limits_impl(conn: &Connection, device_index: u32) -> Result<(i32, i32)> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
     let limits: (i32, i32) = proxy.call("GetGpuCoreOffsetLimits", &(device_index,)).await?;
     Ok(limits)
@@ -811,9 +834,9 @@ async fn get_gpu_core_offset_limits_impl(conn: &Connection, device_index: u32) -
 async fn get_gpu_memory_offset_limits_impl(conn: &Connection, device_index: u32) -> Result<(i32, i32)> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
     let limits: (i32, i32) = proxy.call("GetGpuMemoryOffsetLimits", &(device_index,)).await?;
     Ok(limits)
@@ -822,9 +845,9 @@ async fn get_gpu_memory_offset_limits_impl(conn: &Connection, device_index: u32)
 async fn set_prime_profile_impl(conn: &Connection, profile: &str) -> Result<()> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
     proxy.call::<_, _, ()>("SetPrimeProfile", &(profile,)).await?;
     Ok(())
@@ -833,9 +856,9 @@ async fn set_prime_profile_impl(conn: &Connection, profile: &str) -> Result<()> 
 async fn shutdown_daemon_impl(conn: &Connection) -> Result<()> {
     let proxy = zbus::Proxy::new(
         conn,
-        "com.tuxedo.Control",
-        "/com/tuxedo/Control",
-        "com.tuxedo.Control",
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
     ).await?;
     proxy.call::<_, _, ()>("ShutdownDaemon", &()).await?;
     Ok(())

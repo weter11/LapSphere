@@ -1,4 +1,0 @@
-[D-BUS Service]
-Name=com.tuxedo.Control
-Exec=/usr/bin/tuxedo-daemon
-User=root

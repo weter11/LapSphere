@@ -1,6 +1,6 @@
 use egui::{Ui, RichText, Color32};
 use egui_plot::{Plot, PlotPoints, Line, Points, Polygon, PlotPoint};
-use tuxedo_common::types::FanCurve;
+use lapsphere_common::types::FanCurve;
 
 pub struct FanCurveEditor {
     pub fan_id: u32,

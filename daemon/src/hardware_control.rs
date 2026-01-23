@@ -4,7 +4,7 @@ use once_cell::sync::Lazy;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
-use tuxedo_common::types::*;
+use lapsphere_common::types::*;
 use crate::tuxedo_io::{TuxedoIo, HardwareInterface};
 
 fn get_cpu_count() -> Result<u32> {
@@ -124,6 +124,21 @@ pub fn set_amd_pstate_status(status: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn set_intel_pstate_status(status: &str) -> Result<()> {
+    let path = "/sys/devices/system/cpu/intel_pstate/status";
+    if !Path::new(path).exists() {
+        return Err(anyhow!("Intel pstate not available"));
+    }
+
+    if !["passive", "active"].contains(&status) {
+        return Err(anyhow!("Invalid Intel pstate status: {}", status));
+    }
+
+    fs::write(path, status)?;
+    log::info!("Set Intel pstate status to: {}", status);
+    Ok(())
+}
+
 pub fn apply_profile(profile: &Profile) -> Result<()> {
     log::info!("Applying profile: {}", profile.name);
     
@@ -138,6 +153,10 @@ pub fn apply_profile(profile: &Profile) -> Result<()> {
     
     if let Some(ref amd_status) = profile.cpu_settings.amd_pstate_status {
         set_amd_pstate_status(amd_status)?;
+    }
+
+    if let Some(ref intel_status) = profile.cpu_settings.intel_pstate_status {
+        set_intel_pstate_status(intel_status)?;
     }
     
     if let Some(ref epp) = profile.cpu_settings.energy_performance_preference {
@@ -196,7 +215,16 @@ pub fn apply_battery_settings(settings: &BatterySettings) -> Result<()> {
 
 fn apply_keyboard_settings(settings: &KeyboardSettings) -> Result<()> {
     if !settings.control_enabled {
-        log::info!("Keyboard control disabled, skipping");
+        log::info!("Keyboard control disabled, setting to default white");
+        if let Ok(kbd) = RgbKeyboardControl::new() {
+            let white_mode = KeyboardMode::SingleColor {
+                r: 255,
+                g: 255,
+                b: 255,
+                brightness: 50,
+            };
+            let _ = kbd.set_mode(&white_mode);
+        }
         return Ok(());
     }
     
@@ -576,8 +604,8 @@ impl RgbKeyboardControl {
         Ok(())
     }
     
-    pub fn set_mode(&self, mode: &tuxedo_common::types::KeyboardMode) -> Result<()> {
-        use tuxedo_common::types::KeyboardMode;
+    pub fn set_mode(&self, mode: &lapsphere_common::types::KeyboardMode) -> Result<()> {
+        use lapsphere_common::types::KeyboardMode;
         match mode {
             KeyboardMode::SingleColor { r, g, b, brightness } => {
                 // For Clevo, explicitly set mode 0 (Custom/Static)

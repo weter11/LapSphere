@@ -4,10 +4,10 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
-use tuxedo_common::types::*;
+use lapsphere_common::types::*;
 
 use crate::dbus_client::DbusClient;
-use crate::theme::TuxedoTheme;
+use crate::theme::LapSphereTheme;
 use crate::pages::{statistics, profiles, tuning, settings};
 use crate::keyboard_shortcuts::KeyboardShortcuts;
 use crate::polling_scheduler::{RefreshCoordinator, CoordinatorHandle};
@@ -117,7 +117,6 @@ pub fn load_config(&mut self) {
         self.config.statistics_sections.section_order =
             statistics::normalize_section_order(&self.config.statistics_sections.section_order);
     }
-    self.config.autostart = false;
 }
     
     pub fn save_settings(&mut self) -> anyhow::Result<()> {
@@ -164,10 +163,10 @@ pub fn load_config(&mut self) {
     }
 }
 
-pub struct TuxedoApp {
+pub struct LapSphereApp {
     state: AppState,
     dbus_client: Option<DbusClient>,
-    theme: TuxedoTheme,
+    theme: LapSphereTheme,
     system_tray: Option<SystemTray>,
     force_quit: bool,
     
@@ -201,7 +200,7 @@ pub enum HardwareUpdate {
     Error(String),
 }
 
-impl TuxedoApp {
+impl LapSphereApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut state = AppState::new();
         state.load_config();
@@ -209,7 +208,7 @@ impl TuxedoApp {
         // Create DBus client
         let dbus_client = match DbusClient::new() {
             Ok(client) => {
-                log::info!("✅ Connected to TUXEDO daemon");
+                log::info!("✅ Connected to LapSphere daemon");
                 Some(client)
             }
             Err(e) => {
@@ -353,7 +352,7 @@ impl TuxedoApp {
         state.coordinator_handle = coordinator_handle.clone();
         
         // Apply theme
-        let theme = TuxedoTheme::new(&state.config.theme);
+        let theme = LapSphereTheme::new(&state.config.theme, cc.egui_ctx.style().visuals.dark_mode);
         theme.apply_with_font_size(&cc.egui_ctx, &state.config.font_size);
 
         let system_tray = match SystemTray::new(&state.config.profiles, &state.config.current_profile) {
@@ -486,15 +485,16 @@ impl TuxedoApp {
                 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(12.0);
-                    let time_str = Local::now().format("%H:%M:%S").to_string();
-                    ui.label(RichText::new(time_str).monospace());
+                    ui.vertical(|ui| {
+                        let time_str = Local::now().format("%H:%M:%S").to_string();
+                        ui.label(RichText::new(time_str).monospace().small());
 
-                    ui.add_space(12.0);
-                    let date_str = Local::now().format("%Y-%m-%d").to_string();
-                    ui.label(RichText::new(date_str).monospace());
+                        let date_str = Local::now().format("%Y-%m-%d").to_string();
+                        ui.label(RichText::new(date_str).monospace().small());
 
-                    // Current profile indicator
-                    ui.label(format!("Profile: {}", self.state.config.current_profile));
+                        // Current profile indicator
+                        ui.label(RichText::new(format!("Profile: {}", self.state.config.current_profile)).small());
+                    });
                 });
             });
             ui.add_space(8.0);
@@ -551,7 +551,7 @@ impl TuxedoApp {
     }
 }
 
-impl eframe::App for TuxedoApp {
+impl eframe::App for LapSphereApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         // Handle keyboard shortcuts
         self.shortcuts.handle_shortcuts(ctx, &mut self.state);
@@ -572,6 +572,15 @@ impl eframe::App for TuxedoApp {
         // Draw top bar
         self.draw_top_bar(ctx);
         
+        // Update theme if it's Auto to react to system theme changes
+        if self.state.config.theme == Theme::Auto {
+            let is_dark = ctx.style().visuals.dark_mode;
+            if is_dark != self.theme.visuals.dark_mode {
+                self.theme = LapSphereTheme::new(&self.state.config.theme, is_dark);
+                self.theme.apply_with_font_size(ctx, &self.state.config.font_size);
+            }
+        }
+
         // Draw main content
         CentralPanel::default().show(ctx, |ui| {
             match self.state.current_page {
@@ -613,8 +622,6 @@ struct SettingsConfig {
     start_minimized: bool,
     tray_enabled: bool,
     autostart: bool,
-    fan_daemon_enabled: bool,
-    app_monitoring_enabled: bool,
     cpu_scheduler: String,
     font_size: FontSize,
     statistics_sections: StatisticsSections,
@@ -630,8 +637,6 @@ impl Default for SettingsConfig {
             start_minimized: config.start_minimized,
             tray_enabled: config.tray_enabled,
             autostart: config.autostart,
-            fan_daemon_enabled: config.fan_daemon_enabled,
-            app_monitoring_enabled: config.app_monitoring_enabled,
             cpu_scheduler: config.cpu_scheduler,
             font_size: config.font_size,
             statistics_sections: config.statistics_sections,
@@ -648,8 +653,6 @@ impl From<&AppConfig> for SettingsConfig {
             start_minimized: config.start_minimized,
             tray_enabled: config.tray_enabled,
             autostart: config.autostart,
-            fan_daemon_enabled: config.fan_daemon_enabled,
-            app_monitoring_enabled: config.app_monitoring_enabled,
             cpu_scheduler: config.cpu_scheduler.clone(),
             font_size: config.font_size.clone(),
             statistics_sections: config.statistics_sections.clone(),
@@ -665,8 +668,6 @@ impl SettingsConfig {
         config.start_minimized = self.start_minimized;
         config.tray_enabled = self.tray_enabled;
         config.autostart = self.autostart;
-        config.fan_daemon_enabled = self.fan_daemon_enabled;
-        config.app_monitoring_enabled = self.app_monitoring_enabled;
         config.cpu_scheduler = self.cpu_scheduler.clone();
         config.font_size = self.font_size.clone();
         config.statistics_sections = self.statistics_sections.clone();
@@ -719,7 +720,7 @@ fn load_profiles_from_disk(path: &str) -> anyhow::Result<ProfilesConfig> {
 }
 
 fn load_config_from_disk() -> anyhow::Result<AppConfig> {
-    let config_dir = std::env::var("HOME")? + "/.config/tuxedo-control-center";
+    let config_dir = std::env::var("HOME")? + "/.config/lapsphere";
     let settings_path = format!("{}/settings.json", config_dir);
     let profiles_path = format!("{}/profiles.json", config_dir);
     let legacy_path = format!("{}/config.json", config_dir);
@@ -769,16 +770,37 @@ fn load_config_from_disk() -> anyhow::Result<AppConfig> {
 }
 
 fn save_settings_to_disk(config: &AppConfig) -> anyhow::Result<()> {
-    let config_dir = std::env::var("HOME")? + "/.config/tuxedo-control-center";
+    let config_dir = std::env::var("HOME")? + "/.config/lapsphere";
     std::fs::create_dir_all(&config_dir)?;
     let settings_path = format!("{}/settings.json", config_dir);
     let json = serde_json::to_string_pretty(&SettingsConfig::from(config))?;
     std::fs::write(settings_path, json)?;
+
+    // Handle autostart
+    let home = std::env::var("HOME")?;
+    let autostart_dir = format!("{}/.config/autostart", home);
+    let desktop_file = format!("{}/io.lapsphere.LapSphere.desktop", autostart_dir);
+
+    if config.autostart {
+        std::fs::create_dir_all(&autostart_dir)?;
+        let content = format!(
+            "[Desktop Entry]\n\
+            Type=Application\n\
+            Name=LapSphere\n\
+            Exec=pkexec lapsphere-daemon --gui --tray\n\
+            Icon=lapsphere\n\
+            X-GNOME-Autostart-enabled=true\n"
+        );
+        std::fs::write(&desktop_file, content)?;
+    } else if std::path::Path::new(&desktop_file).exists() {
+        std::fs::remove_file(&desktop_file)?;
+    }
+
     Ok(())
 }
 
 fn save_profiles_to_disk(config: &AppConfig) -> anyhow::Result<()> {
-    let config_dir = std::env::var("HOME")? + "/.config/tuxedo-control-center";
+    let config_dir = std::env::var("HOME")? + "/.config/lapsphere";
     std::fs::create_dir_all(&config_dir)?;
     let profiles_path = format!("{}/profiles.json", config_dir);
     let json = serde_json::to_string_pretty(&ProfilesConfig::from(config))?;

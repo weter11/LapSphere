@@ -324,7 +324,7 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                         .spacing([40.0, 6.0])
                         .show(ui, |ui| {
                             ui.label("Type:");
-                            ui.label(if gpu.gpu_type == tuxedo_common::types::GpuType::Integrated {
+                            ui.label(if gpu.gpu_type == lapsphere_common::types::GpuType::Integrated {
                                 "Integrated"
                             } else {
                                 "Discrete"
@@ -435,14 +435,6 @@ fn draw_battery_info(ui: &mut Ui, state: &AppState) {
                             );
                             ui.end_row();
                         }
-                        
-                        ui.label("Manufacturer:");
-                        ui.label(&battery.manufacturer);
-                        ui.end_row();
-                        
-                        ui.label("Model:");
-                        ui.label(&battery.model);
-                        ui.end_row();
                         
                         if let Some(start) = battery.charge_start_threshold {
                             ui.label("Charge Start:");

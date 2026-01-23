@@ -4,13 +4,10 @@ set -e
 case "$1" in
     purge)
         # Remove configuration files
-        rm -rf /etc/tuxedo-control-center || true
+        rm -rf /etc/lapsphere || true
         
         # Reload DBus
-        if [ -d /run/systemd/system ]; then
-            systemctl daemon-reload || true
-            dbus-send --system --type=method_call --dest=org.freedesktop.DBus / org.freedesktop.DBus.ReloadConfig || true
-        fi
+        dbus-send --system --type=method_call --dest=org.freedesktop.DBus / org.freedesktop.DBus.ReloadConfig || true
         ;;
     
     remove)

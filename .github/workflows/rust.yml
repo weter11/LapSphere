@@ -21,10 +21,13 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Install dependencies for GTK4 and glib
+    - name: Install build dependencies
       run: |
           sudo apt-get update
+          sudo apt-get install -y debhelper devscripts build-essential
           sudo apt-get install -y \
+            cargo \
+            rustc \
             libdbus-1-dev \
             pkg-config \
             libgtk-3-dev \
@@ -33,97 +36,55 @@ jobs:
             libcairo2-dev \
             libgdk-pixbuf-2.0-dev \
             libatk1.0-dev \
-            libgraphene-1.0-dev
+            libgraphene-1.0-dev \
+            libwayland-dev \
+            libxkbcommon-dev
 
     - name: Clean the project
       run: cargo clean 
 
-    - name: Build the project (debug)
-      run: cargo build
-
     - name: Run tests
       run: cargo test
 
-    - name: Build release binaries
-      run: cargo build --release
-
-    - name: Create release tarball
+    - name: Build Debian package
       run: |
-        mkdir -p release-package/bin
-        cp target/release/tuxedo-daemon release-package/bin/
-        cp target/release/tuxedo-control-center release-package/bin/
-        
-        # Copy systemd and dbus files
-        mkdir -p release-package/systemd
-        mkdir -p release-package/dbus
-        cp debian/tuxedo-daemon.service release-package/systemd/ || true
-        cp debian/com.tuxedo.Control.service release-package/dbus/ || true
-        cp debian/com.tuxedo.Control.conf release-package/dbus/ || true
-        
-        # Copy documentation
-        cp README.md LICENSE release-package/ 2>/dev/null || true
-        
-        # Create install script
-        cat > release-package/install.sh << 'EOF'
-        #!/bin/bash
-        set -e
-        
-        echo "Installing TUXEDO Control Center..."
-        
-        # Install binaries
-        sudo install -D -m 755 bin/tuxedo-daemon /usr/local/bin/tuxedo-daemon
-        sudo install -D -m 755 bin/tuxedo-control-center /usr/local/bin/tuxedo-control-center
-        
-        # Install systemd service
-        if [ -f systemd/tuxedo-daemon.service ]; then
-            sudo install -D -m 644 systemd/tuxedo-daemon.service /etc/systemd/system/tuxedo-daemon.service
-        fi
-        
-        # Install dbus files
-        if [ -f dbus/com.tuxedo.Control.service ]; then
-            sudo install -D -m 644 dbus/com.tuxedo.Control.service /usr/share/dbus-1/system-services/com.tuxedo.Control.service
-        fi
-        
-        if [ -f dbus/com.tuxedo.Control.conf ]; then
-            sudo install -D -m 644 dbus/com.tuxedo.Control.conf /usr/share/dbus-1/system.d/com.tuxedo.Control.conf
-        fi
-        
-        # Reload systemd and dbus
-        sudo systemctl daemon-reload
-        sudo systemctl restart dbus || true
-        
-        # Enable and start service
-        sudo systemctl enable tuxedo-daemon.service
-        sudo systemctl start tuxedo-daemon.service
-        
-        echo "✅ Installation complete!"
-        echo "Run 'tuxedo-control-center' to start the GUI"
-        EOF
-        
-        chmod +x release-package/install.sh
-        
-        # Create the tarball
-        tar -czf tuxedo-rs-ubuntu-24.04.tar.gz release-package/
-        
-        # Show contents and size
-        echo "=== Tarball contents ==="
-        tar -tzf tuxedo-rs-ubuntu-24.04.tar.gz
-        echo ""
-        echo "=== Tarball size ==="
-        ls -lh tuxedo-rs-ubuntu-24.04.tar.gz
+          dpkg-buildpackage -b -uc -us
+          mkdir artifacts
+          cp ../lapsphere_*.deb artifacts/
 
-    - name: Upload release tarball
+    - name: Upload Debian package
       uses: actions/upload-artifact@v4
       with:
-        name: tuxedo-rs-ubuntu-24.04-tarball
-        path: tuxedo-rs-ubuntu-24.04.tar.gz
+        name: lapsphere-ubuntu-24.04-deb
+        path: artifacts/*.deb
         retention-days: 90
 
-    - name: Upload individual binaries
+  build-arch:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+
+    steps:
+    - name: Update Arch Linux
+      run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm base-devel rustup pkgconf dbus gtk3 libadwaita pango cairo gdk-pixbuf2 atk graphene wayland libxkbcommon
+
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Rust
+      run: |
+          rustup default stable
+
+    - name: Build project
+      run: cargo build --release
+
+    - name: Upload Arch binaries
       uses: actions/upload-artifact@v4
       with:
-        name: tuxedo-rs-ubuntu-24.04-binaries
+        name: lapsphere-arch-binaries
         path: |
-          target/release/tuxedo-daemon
-          target/release/tuxedo-control-center
+          target/release/lapsphere-daemon
+          target/release/lapsphere
         retention-days: 90
