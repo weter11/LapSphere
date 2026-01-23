@@ -65,7 +65,7 @@ impl FanCurveEditor {
             .include_y(100.0)
             .set_margin_fraction(egui::vec2(0.05, 0.05));
         
-        let response = plot.show(ui, |plot_ui| {
+        plot.show(ui, |plot_ui| {
             // Draw reference zones first
             self.draw_reference_zones(plot_ui);
             
@@ -87,7 +87,6 @@ impl FanCurveEditor {
             
             // Draw and handle point interactions
             for (idx, (temp, speed)) in self.curve.points.iter().enumerate() {
-                let point = PlotPoint::new(*temp as f64, *speed as f64);
                 let points = PlotPoints::new(vec![[*temp as f64, *speed as f64]]);
                 
                 let is_selected = self.selected_point == Some(idx);

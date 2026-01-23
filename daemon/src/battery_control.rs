@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub struct BatteryControl {
     battery_path: PathBuf,
@@ -118,32 +118,4 @@ impl BatteryControl {
         Ok(thresholds)
     }
     
-    /// Get battery status
-    pub fn get_status(&self) -> Result<String> {
-        let path = self.battery_path.join("status");
-        let content = fs::read_to_string(&path)?;
-        Ok(content.trim().to_string())
-    }
-    
-    /// Get battery capacity (percentage)
-    pub fn get_capacity(&self) -> Result<u8> {
-        let path = self.battery_path.join("capacity");
-        let content = fs::read_to_string(&path)?;
-        let value: u8 = content.trim().parse()?;
-        Ok(value)
-    }
-    
-    /// Get battery manufacturer
-    pub fn get_manufacturer(&self) -> Result<String> {
-        let path = self.battery_path.join("manufacturer");
-        let content = fs::read_to_string(&path)?;
-        Ok(content.trim().to_string())
-    }
-    
-    /// Get battery model
-    pub fn get_model_name(&self) -> Result<String> {
-        let path = self.battery_path.join("model_name");
-        let content = fs::read_to_string(&path)?;
-        Ok(content.trim().to_string())
-    }
 }

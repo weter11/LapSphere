@@ -158,20 +158,6 @@ impl SystemTray {
         None
     }
 
-    pub fn update_profiles(&mut self, profiles: &[Profile], current: &str) -> anyhow::Result<()> {
-        let profile_names: Vec<String> = profiles.iter().map(|profile| profile.name.clone()).collect();
-        let current_index = profiles
-            .iter()
-            .position(|profile| profile.name == current)
-            .unwrap_or(0);
-
-        self._tray_handle.update(|tray| {
-            tray.profiles = profile_names;
-            tray.current_profile = current_index;
-        });
-
-        Ok(())
-    }
 }
 
 pub enum TrayEvent {

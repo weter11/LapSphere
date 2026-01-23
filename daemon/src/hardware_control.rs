@@ -328,7 +328,7 @@ pub fn set_fan_speed(fan_id: u32, speed_percent: u32) -> Result<()> {
     Ok(())
 }
 
-pub fn set_fan_auto(fan_id: u32) -> Result<()> {
+pub fn set_fan_auto(_fan_id: u32) -> Result<()> {
     if !TuxedoIo::is_available() {
         return Err(anyhow!("Fan control not available"));
     }
@@ -504,12 +504,9 @@ impl RgbKeyboardControl {
         Ok(Self { paths, tuxedo_io })
     }
     
-    pub fn is_available() -> bool {
-        !Self::find_all_keyboard_backlight_paths().is_empty()
-    }
     
     fn find_all_keyboard_backlight_paths() -> Vec<String> {
-        let mut paths = Vec::new();
+        let paths = Vec::new();
         
         // Priority 1: tuxedo_keyboard platform device
         let platform_base = "/sys/devices/platform/tuxedo_keyboard/leds";

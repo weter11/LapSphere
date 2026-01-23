@@ -60,7 +60,6 @@ pub struct AppState {
     pub pending_prime_profile: Option<String>,
     
     // Profile editing
-    pub editing_profile_index: Option<usize>,
     pub editing_profile_name: Option<String>,
     
     // Async state
@@ -104,7 +103,6 @@ impl AppState {
             status_message: None,
             restart_confirmation_pending: false,
             pending_prime_profile: None,
-            editing_profile_index: None,
             editing_profile_name: None,
             pending_battery_update: None,
             coordinator_handle: None,
@@ -130,13 +128,6 @@ pub fn load_config(&mut self) {
         self.show_message("Profiles saved", false);
         Ok(())
     }
-
-    pub fn save_config(&mut self) -> anyhow::Result<()> {
-        save_settings_to_disk(&self.config)?;
-        save_profiles_to_disk(&self.config)?;
-        self.show_message("Configuration saved", false);
-        Ok(())
-    }
     
     pub fn show_message(&mut self, text: impl Into<String>, is_error: bool) {
         self.status_message = Some(StatusMessage {
@@ -149,12 +140,6 @@ pub fn load_config(&mut self) {
     pub fn current_profile(&self) -> Option<&Profile> {
         self.config.profiles.iter()
             .find(|p| p.name == self.config.current_profile)
-    }
-    
-    pub fn current_profile_mut(&mut self) -> Option<&mut Profile> {
-        let current = self.config.current_profile.clone();
-        self.config.profiles.iter_mut()
-            .find(|p| p.name == current)
     }
     
     pub fn current_profile_index(&self) -> Option<usize> {
@@ -197,7 +182,6 @@ pub enum HardwareUpdate {
     AvailableThresholds(Vec<u8>, Vec<u8>),
     TdpProfiles(Vec<String>),
     KeyboardCapabilities(KeyboardCapabilities),
-    Error(String),
 }
 
 impl LapSphereApp {
@@ -463,9 +447,6 @@ impl LapSphereApp {
                 }
                 HardwareUpdate::KeyboardCapabilities(caps) => {
                     self.state.keyboard_capabilities = Some(caps);
-                }
-                HardwareUpdate::Error(err) => {
-                    log::error!("Hardware update error: {}", err);
                 }
             }
         }

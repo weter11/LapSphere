@@ -57,10 +57,6 @@ pub enum CoordinatorCommand {
     Register(String, Duration),
     /// Update component refresh interval
     UpdateInterval(String, Duration),
-    /// Unregister a component
-    Unregister(String),
-    /// Shutdown coordinator
-    Shutdown,
 }
 
 impl RefreshCoordinator {
@@ -118,14 +114,6 @@ impl RefreshCoordinator {
                                 log::info!("Updated interval for {} to {:?}", id, interval);
                             }
                         }
-                        CoordinatorCommand::Unregister(id) => {
-                            log::debug!("Unregistering component: {}", id);
-                            self.components.remove(&id);
-                        }
-                        CoordinatorCommand::Shutdown => {
-                            log::info!("Shutting down UI refresh coordinator");
-                            break;
-                        }
                     }
                 }
             }
@@ -152,19 +140,5 @@ impl CoordinatorHandle {
         self.command_tx
             .send(CoordinatorCommand::UpdateInterval(id, interval))
             .map_err(|e| anyhow::anyhow!("Failed to update interval: {}", e))
-    }
-
-    /// Unregister a component
-    pub fn unregister(&self, id: String) -> Result<()> {
-        self.command_tx
-            .send(CoordinatorCommand::Unregister(id))
-            .map_err(|e| anyhow::anyhow!("Failed to unregister: {}", e))
-    }
-
-    /// Shutdown the coordinator
-    pub fn shutdown(&self) -> Result<()> {
-        self.command_tx
-            .send(CoordinatorCommand::Shutdown)
-            .map_err(|e| anyhow::anyhow!("Failed to shutdown: {}", e))
     }
 }

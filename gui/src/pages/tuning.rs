@@ -1,5 +1,4 @@
 use egui::{Ui, ScrollArea, RichText, Slider, ComboBox, TopBottomPanel};
-use std::path::Path;
 use crate::app::AppState;
 use crate::dbus_client::DbusClient;
 use lapsphere_common::types::{KeyboardMode, Profile, FanCurve, KeyboardCapabilities};
@@ -125,7 +124,7 @@ fn draw_performance_profile_tuning(
             .clone()
             .unwrap_or_else(|| "System default".to_string());
 
-        ComboBox::from_id_source("performance_profile_combo")
+        ComboBox::from_id_salt("performance_profile_combo")
             .selected_text(&selected_label)
             .show_ui(ui, |ui| {
                 if ui.selectable_label(current_profile.is_none(), "System default").clicked() {
@@ -173,7 +172,7 @@ fn draw_cpu_tuning(
                 .unwrap_or_else(|| "active".to_string());
             let previous_pstate = current_pstate.clone();
             
-            ComboBox::from_id_source("amd_pstate_combo")
+            ComboBox::from_id_salt("amd_pstate_combo")
                 .selected_text(&current_pstate)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut current_pstate, "active".to_string(), "Active");
@@ -215,7 +214,7 @@ fn draw_cpu_tuning(
                 .unwrap_or_else(|| "active".to_string());
             let previous_pstate = current_pstate.clone();
 
-            ComboBox::from_id_source("intel_pstate_combo")
+            ComboBox::from_id_salt("intel_pstate_combo")
                 .selected_text(&current_pstate)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut current_pstate, "active".to_string(), "Active");
@@ -256,7 +255,7 @@ fn draw_cpu_tuning(
                         .unwrap_or_else(|| "performance".to_string())
                 });
             
-            ComboBox::from_id_source("governor_combo")
+            ComboBox::from_id_salt("governor_combo")
                 .selected_text(&current_gov)
                 .show_ui(ui, |ui| {
                     for gov in &cpu_info.available_governors {
@@ -277,7 +276,7 @@ fn draw_cpu_tuning(
                 .clone()
                 .unwrap_or_else(|| "balance_performance".to_string());
             
-            ComboBox::from_id_source("epp_combo")
+            ComboBox::from_id_salt("epp_combo")
                 .selected_text(&current_epp)
                 .show_ui(ui, |ui| {
                     for epp in &cpu_info.available_epp_options {
@@ -601,7 +600,7 @@ fn draw_keyboard_tuning(
                 KeyboardMode::Wave { .. } => "Wave",
             };
             
-            ComboBox::from_id_source("keyboard_mode")
+            ComboBox::from_id_salt("keyboard_mode")
                 .selected_text(current_mode_name)
                 .show_ui(ui, |ui| {
                     if ui.selectable_label(current_mode_name == "Single Color", "Single Color").clicked() {
