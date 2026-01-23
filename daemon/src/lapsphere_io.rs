@@ -4,7 +4,7 @@ use std::os::unix::io::AsRawFd;
 use nix::errno::Errno;
 use nix::libc;
 
-const TUXEDO_IO_DEVICE: &str = "/dev/tuxedo_io";
+const TUXEDO_IO_DEVICE: &str = "/dev/lapsphere_io";
 const IOCTL_MAGIC: u8 = 0xEC;
 const MAGIC_READ_CL: u8 = IOCTL_MAGIC + 1;
 const MAGIC_WRITE_CL: u8 = IOCTL_MAGIC + 2;
@@ -60,22 +60,22 @@ pub enum HardwareInterface {
     None,
 }
 
-pub struct TuxedoIo {
+pub struct LapSphereIo {
     device: std::fs::File,
     interface: HardwareInterface,
     fan_count: u32,
 }
 
-impl std::fmt::Debug for TuxedoIo {
+impl std::fmt::Debug for LapSphereIo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TuxedoIo")
+        f.debug_struct("LapSphereIo")
             .field("interface", &self.interface)
             .field("fan_count", &self.fan_count)
             .finish()
     }
 }
 
-impl TuxedoIo {
+impl LapSphereIo {
     // Linux ioctl macros equivalent - manually constructed for 64-bit systems
     // _IOR(type, nr, size)  = _IOC(_IOC_READ, type, nr, size)
     // _IOW(type, nr, size)  = _IOC(_IOC_WRITE, type, nr, size)
@@ -134,7 +134,7 @@ impl TuxedoIo {
 
         log::info!("Detected interface: {:?}, fan count: {}", interface, fan_count);
 
-        Ok(TuxedoIo {
+        Ok(LapSphereIo {
             device,
             interface,
             fan_count,

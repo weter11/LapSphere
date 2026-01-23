@@ -54,17 +54,31 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>,
         .show(ui, |ui| {
             ui.add_space(8.0);
             
-            // CPU tuning
             let cpu_info_clone = state.cpu_info.clone();
+            let is_pstate_active = cpu_info_clone.as_ref().map_or(false, |info| {
+                info.amd_pstate_status.as_deref() == Some("active") ||
+                info.intel_pstate_status.as_deref() == Some("active")
+            });
+
+            // Performance Profile (Separate section)
+            let tdp_profiles = state.available_tdp_profiles.clone();
+            if !tdp_profiles.is_empty() {
+                ui.heading("🚀 Performance Profile");
+                ui.add_space(8.0);
+                draw_performance_profile_tuning(ui, &mut state.config.profiles[idx], &tdp_profiles);
+                ui.add_space(16.0);
+                ui.separator();
+                ui.add_space(16.0);
+            }
+
+            // CPU tuning
             if let Some(cpu_info) = &cpu_info_clone {
                 let cpu_caps = Some(&cpu_info.capabilities);
-                let tdp_profiles = state.available_tdp_profiles.clone();
                 draw_cpu_tuning(
                     ui,
                     &mut state.config.profiles[idx],
                     cpu_caps,
                     cpu_info,
-                    &tdp_profiles,
                     dbus_client,
                     hw_update_tx.clone(),
                 );
@@ -92,16 +106,57 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>,
             ui.add_space(16.0);
             
             // Screen tuning
-            draw_screen_tuning(ui, &mut state.config.profiles[idx]);
+            ui.add_enabled_ui(!is_pstate_active, |ui| {
+                draw_screen_tuning(ui, &mut state.config.profiles[idx]);
+            });
+            if is_pstate_active {
+                ui.label(RichText::new("⚠️ Screen brightness control is disabled when P-State is Active").small().color(egui::Color32::YELLOW));
+            }
             ui.add_space(16.0);
             ui.separator();
             ui.add_space(16.0);
             
             // Fan tuning
             let fan_count = state.fan_info.len().max(2);
-            draw_fan_tuning(ui, &mut state.config.profiles[idx], fan_count);
+            ui.add_enabled_ui(!is_pstate_active, |ui| {
+                draw_fan_tuning(ui, &mut state.config.profiles[idx], fan_count);
+            });
+            if is_pstate_active {
+                ui.label(RichText::new("⚠️ Fan control is disabled when P-State is Active").small().color(egui::Color32::YELLOW));
+            }
             ui.add_space(16.0);
         });
+}
+
+fn draw_performance_profile_tuning(
+    ui: &mut Ui,
+    profile: &mut Profile,
+    tdp_profiles: &[String],
+) {
+    ui.horizontal(|ui| {
+        let mut current_profile = profile.cpu_settings.tdp_profile.clone();
+        let selected_label = current_profile
+            .clone()
+            .unwrap_or_else(|| "System default".to_string());
+
+        ComboBox::from_id_source("performance_profile_combo")
+            .selected_text(&selected_label)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(current_profile.is_none(), "System default").clicked() {
+                    current_profile = None;
+                }
+                for profile_name in tdp_profiles {
+                    if ui.selectable_label(
+                        current_profile.as_deref() == Some(profile_name.as_str()),
+                        profile_name,
+                    ).clicked() {
+                        current_profile = Some(profile_name.clone());
+                    }
+                }
+            });
+
+        profile.cpu_settings.tdp_profile = current_profile;
+    });
 }
 
 fn draw_cpu_tuning(
@@ -109,7 +164,6 @@ fn draw_cpu_tuning(
     profile: &mut Profile,
     cpu_caps: Option<&lapsphere_common::types::CpuCapabilities>,
     cpu_info: &lapsphere_common::types::CpuInfo,
-    tdp_profiles: &[String],
     dbus_client: Option<&DbusClient>,
     hw_update_tx: tokio::sync::mpsc::UnboundedSender<crate::app::HardwareUpdate>,
 ) {
@@ -123,6 +177,9 @@ fn draw_cpu_tuning(
             return;
         }
     };
+
+    let is_pstate_active = cpu_info.amd_pstate_status.as_deref() == Some("active") ||
+                           cpu_info.intel_pstate_status.as_deref() == Some("active");
     
     // AMD P-State section (if available)
     if caps.has_amd_pstate {
@@ -165,9 +222,47 @@ fn draw_cpu_tuning(
         });
         ui.add_space(6.0);
     }
+
+    // Intel P-State section (if available)
+    if caps.has_intel_pstate {
+        ui.label(RichText::new("Intel P-State Mode:").strong());
+        ui.horizontal(|ui| {
+            let mut current_pstate = profile.cpu_settings.intel_pstate_status
+                .clone()
+                .unwrap_or_else(|| "active".to_string());
+            let previous_pstate = current_pstate.clone();
+
+            ComboBox::from_id_source("intel_pstate_combo")
+                .selected_text(&current_pstate)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut current_pstate, "active".to_string(), "Active");
+                    ui.selectable_value(&mut current_pstate, "passive".to_string(), "Passive");
+                });
+
+            if current_pstate != previous_pstate {
+                if let Some(client) = dbus_client {
+                    let client = client.clone();
+                    let tx = hw_update_tx.clone();
+                    let pstate = current_pstate.clone();
+                    tokio::spawn(async move {
+                        let _ = client.set_intel_pstate_status(pstate).await;
+                        if let Ok(result) = client.get_cpu_info().await {
+                            if let Ok(info) = result {
+                                let _ = tx.send(crate::app::HardwareUpdate::CpuInfo(info));
+                            }
+                        }
+                    });
+                }
+            }
+
+            profile.cpu_settings.intel_pstate_status = Some(current_pstate);
+        });
+        ui.add_space(6.0);
+    }
     
     // Governor
     if caps.has_scaling_governor && !cpu_info.available_governors.is_empty() {
+        ui.add_enabled_ui(!is_pstate_active, |ui| {
         ui.label(RichText::new("Governor:").strong());
         ui.horizontal(|ui| {
             let mut current_gov = profile.cpu_settings.governor
@@ -188,6 +283,7 @@ fn draw_cpu_tuning(
                 });
             
             profile.cpu_settings.governor = Some(current_gov);
+        });
         });
         ui.add_space(6.0);
     }
@@ -213,37 +309,9 @@ fn draw_cpu_tuning(
         ui.add_space(6.0);
     }
 
-    if !tdp_profiles.is_empty() {
-        ui.label(RichText::new("Performance Profile:").strong());
-        ui.horizontal(|ui| {
-            let mut current_profile = profile.cpu_settings.tdp_profile.clone();
-            let selected_label = current_profile
-                .clone()
-                .unwrap_or_else(|| "System default".to_string());
-
-            ComboBox::from_id_source("performance_profile_combo")
-                .selected_text(&selected_label)
-                .show_ui(ui, |ui| {
-                    if ui.selectable_label(current_profile.is_none(), "System default").clicked() {
-                        current_profile = None;
-                    }
-                    for profile_name in tdp_profiles {
-                        if ui.selectable_label(
-                            current_profile.as_deref() == Some(profile_name.as_str()),
-                            profile_name,
-                        ).clicked() {
-                            current_profile = Some(profile_name.clone());
-                        }
-                    }
-                });
-
-            profile.cpu_settings.tdp_profile = current_profile;
-        });
-        ui.add_space(6.0);
-    }
-    
     // Frequency sliders
     if caps.has_scaling_min_freq && caps.has_scaling_max_freq {
+        ui.add_enabled_ui(!is_pstate_active, |ui| {
         ui.label(RichText::new("Frequency Limits:").strong());
 
         if let (Some(hw_min), Some(hw_max)) = (cpu_info.hw_min_freq, cpu_info.hw_max_freq) {
@@ -289,13 +357,19 @@ fn draw_cpu_tuning(
         }
 
         ui.add_space(6.0);
+        });
+        if is_pstate_active {
+            ui.label(RichText::new("⚠️ Frequency control is disabled when P-State is Active").small().color(egui::Color32::YELLOW));
+        }
     }
     
     // Boost checkbox
     if caps.has_boost {
-        let mut boost = profile.cpu_settings.boost.unwrap_or(true);
-        ui.checkbox(&mut boost, "CPU Boost / Turbo");
-        profile.cpu_settings.boost = Some(boost);
+        ui.add_enabled_ui(!is_pstate_active, |ui| {
+            let mut boost = profile.cpu_settings.boost.unwrap_or(true);
+            ui.checkbox(&mut boost, "CPU Boost / Turbo");
+            profile.cpu_settings.boost = Some(boost);
+        });
         
         // Show if boost is available for current pstate
         if caps.has_amd_pstate {
@@ -511,7 +585,17 @@ fn draw_keyboard_tuning(
     };
 
     let keyboard_detected = caps.keyboard_type != lapsphere_common::types::KeyboardType::None;
-    ui.checkbox(&mut profile.keyboard_settings.control_enabled, "Control keyboard backlight");
+    if ui.checkbox(&mut profile.keyboard_settings.control_enabled, "Control keyboard backlight").changed() {
+        if !profile.keyboard_settings.control_enabled {
+            // Set to white when disabling control
+            profile.keyboard_settings.mode = lapsphere_common::types::KeyboardMode::SingleColor {
+                r: 255,
+                g: 255,
+                b: 255,
+                brightness: 50,
+            };
+        }
+    }
     ui.add_space(6.0);
     
     if profile.keyboard_settings.control_enabled {
@@ -526,8 +610,6 @@ fn draw_keyboard_tuning(
                 ui.label(RichText::new("RGB color control is not available on this keyboard.").small());
             }
         }
-
-        let mut preview_needed = false;
 
         // Mode selector
         ui.horizontal(|ui| {
@@ -550,7 +632,6 @@ fn draw_keyboard_tuning(
                 .show_ui(ui, |ui| {
                     if ui.selectable_label(current_mode_name == "Single Color", "Single Color").clicked() {
                         profile.keyboard_settings.mode = KeyboardMode::SingleColor { r: 255, g: 255, b: 255, brightness: 50 };
-                        preview_needed = true;
                     }
                     if caps.num_zones > 1 {
                         if ui.selectable_label(current_mode_name == "Multiple Zones", "Multiple Zones").clicked() {
@@ -559,37 +640,29 @@ fn draw_keyboard_tuning(
                                 zones.push(lapsphere_common::types::ZoneColor { r: 255, g: 255, b: 255 });
                             }
                             profile.keyboard_settings.mode = KeyboardMode::MultipleZones { zones, brightness: 50 };
-                            preview_needed = true;
                         }
                     }
                     if caps.supports_effects {
                         if ui.selectable_label(current_mode_name == "Breathe", "Breathe").clicked() {
                             profile.keyboard_settings.mode = KeyboardMode::Breathe { r: 255, g: 255, b: 255, brightness: 50, speed: 50 };
-                            preview_needed = true;
                         }
                         if ui.selectable_label(current_mode_name == "Cycle", "Cycle").clicked() {
                             profile.keyboard_settings.mode = KeyboardMode::Cycle { brightness: 50, speed: 50 };
-                            preview_needed = true;
                         }
                         if ui.selectable_label(current_mode_name == "Dance", "Dance").clicked() {
                             profile.keyboard_settings.mode = KeyboardMode::Dance { brightness: 50, speed: 50 };
-                            preview_needed = true;
                         }
                         if ui.selectable_label(current_mode_name == "Flash", "Flash").clicked() {
                             profile.keyboard_settings.mode = KeyboardMode::Flash { r: 255, g: 255, b: 255, brightness: 50, speed: 50 };
-                            preview_needed = true;
                         }
                         if ui.selectable_label(current_mode_name == "Random Color", "Random Color").clicked() {
                             profile.keyboard_settings.mode = KeyboardMode::RandomColor { brightness: 50, speed: 50 };
-                            preview_needed = true;
                         }
                         if ui.selectable_label(current_mode_name == "Tempo", "Tempo").clicked() {
                             profile.keyboard_settings.mode = KeyboardMode::Tempo { brightness: 50, speed: 50 };
-                            preview_needed = true;
                         }
                         if ui.selectable_label(current_mode_name == "Wave", "Wave").clicked() {
                             profile.keyboard_settings.mode = KeyboardMode::Wave { brightness: 50, speed: 50 };
-                            preview_needed = true;
                         }
                     }
                 });
@@ -602,21 +675,15 @@ fn draw_keyboard_tuning(
                 if caps.supports_color {
                     ui.horizontal(|ui| {
                         ui.label("Red:");
-                        if ui.add(Slider::new(r, 0..=255)).changed() {
-                            preview_needed = true;
-                        }
+                        ui.add(Slider::new(r, 0..=255));
                     });
                     ui.horizontal(|ui| {
                         ui.label("Green:");
-                        if ui.add(Slider::new(g, 0..=255)).changed() {
-                            preview_needed = true;
-                        }
+                        ui.add(Slider::new(g, 0..=255));
                     });
                     ui.horizontal(|ui| {
                         ui.label("Blue:");
-                        if ui.add(Slider::new(b, 0..=255)).changed() {
-                            preview_needed = true;
-                        }
+                        ui.add(Slider::new(b, 0..=255));
                     });
 
                     // Color preview
@@ -630,9 +697,7 @@ fn draw_keyboard_tuning(
                 if caps.supports_brightness {
                     ui.horizontal(|ui| {
                         ui.label("Brightness:");
-                        if ui.add(Slider::new(brightness, 0..=100).suffix("%")).changed() {
-                            preview_needed = true;
-                        }
+                        ui.add(Slider::new(brightness, 0..=100).suffix("%"));
                     });
                 }
             }
@@ -642,17 +707,11 @@ fn draw_keyboard_tuning(
                         ui.label(format!("Zone {}", i));
                         ui.horizontal(|ui| {
                             ui.label("R:");
-                            if ui.add(Slider::new(&mut zone.r, 0..=255)).changed() {
-                                preview_needed = true;
-                            }
+                            ui.add(Slider::new(&mut zone.r, 0..=255));
                             ui.label("G:");
-                            if ui.add(Slider::new(&mut zone.g, 0..=255)).changed() {
-                                preview_needed = true;
-                            }
+                            ui.add(Slider::new(&mut zone.g, 0..=255));
                             ui.label("B:");
-                            if ui.add(Slider::new(&mut zone.b, 0..=255)).changed() {
-                                preview_needed = true;
-                            }
+                            ui.add(Slider::new(&mut zone.b, 0..=255));
 
                             let color = egui::Color32::from_rgb(zone.r, zone.g, zone.b);
                             ui.colored_label(color, "■");
@@ -663,9 +722,7 @@ fn draw_keyboard_tuning(
                 if caps.supports_brightness {
                     ui.horizontal(|ui| {
                         ui.label("Overall Brightness:");
-                        if ui.add(Slider::new(brightness, 0..=100).suffix("%")).changed() {
-                            preview_needed = true;
-                        }
+                        ui.add(Slider::new(brightness, 0..=100).suffix("%"));
                     });
                 }
             }
@@ -673,72 +730,52 @@ fn draw_keyboard_tuning(
                 if caps.supports_color {
                     ui.horizontal(|ui| {
                         ui.label("Red:");
-                        if ui.add(Slider::new(r, 0..=255)).changed() {
-                            preview_needed = true;
-                        }
+                        ui.add(Slider::new(r, 0..=255));
                     });
                     ui.horizontal(|ui| {
                         ui.label("Green:");
-                        if ui.add(Slider::new(g, 0..=255)).changed() {
-                            preview_needed = true;
-                        }
+                        ui.add(Slider::new(g, 0..=255));
                     });
                     ui.horizontal(|ui| {
                         ui.label("Blue:");
-                        if ui.add(Slider::new(b, 0..=255)).changed() {
-                            preview_needed = true;
-                        }
+                        ui.add(Slider::new(b, 0..=255));
                     });
                 }
                 if caps.supports_brightness {
                     ui.horizontal(|ui| {
                         ui.label("Brightness:");
-                        if ui.add(Slider::new(brightness, 0..=100).suffix("%")).changed() {
-                            preview_needed = true;
-                        }
+                        ui.add(Slider::new(brightness, 0..=100).suffix("%"));
                     });
                 }
                 ui.horizontal(|ui| {
                     ui.label("Speed:");
-                    if ui.add(Slider::new(speed, 0..=100).suffix("%")).changed() {
-                        preview_needed = true;
-                    }
+                    ui.add(Slider::new(speed, 0..=100).suffix("%"));
                 });
             }
             KeyboardMode::Flash { r, g, b, brightness, speed } => {
                 if caps.supports_color {
                     ui.horizontal(|ui| {
                         ui.label("Red:");
-                        if ui.add(Slider::new(r, 0..=255)).changed() {
-                            preview_needed = true;
-                        }
+                        ui.add(Slider::new(r, 0..=255));
                     });
                     ui.horizontal(|ui| {
                         ui.label("Green:");
-                        if ui.add(Slider::new(g, 0..=255)).changed() {
-                            preview_needed = true;
-                        }
+                        ui.add(Slider::new(g, 0..=255));
                     });
                     ui.horizontal(|ui| {
                         ui.label("Blue:");
-                        if ui.add(Slider::new(b, 0..=255)).changed() {
-                            preview_needed = true;
-                        }
+                        ui.add(Slider::new(b, 0..=255));
                     });
                 }
                 if caps.supports_brightness {
                     ui.horizontal(|ui| {
                         ui.label("Brightness:");
-                        if ui.add(Slider::new(brightness, 0..=100).suffix("%")).changed() {
-                            preview_needed = true;
-                        }
+                        ui.add(Slider::new(brightness, 0..=100).suffix("%"));
                     });
                 }
                 ui.horizontal(|ui| {
                     ui.label("Speed:");
-                    if ui.add(Slider::new(speed, 0..=100).suffix("%")).changed() {
-                        preview_needed = true;
-                    }
+                    ui.add(Slider::new(speed, 0..=100).suffix("%"));
                 });
             }
             KeyboardMode::Cycle { brightness, speed }
@@ -749,26 +786,18 @@ fn draw_keyboard_tuning(
                 if caps.supports_brightness {
                     ui.horizontal(|ui| {
                         ui.label("Brightness:");
-                        if ui.add(Slider::new(brightness, 0..=100).suffix("%")).changed() {
-                            preview_needed = true;
-                        }
+                        ui.add(Slider::new(brightness, 0..=100).suffix("%"));
                     });
                 }
                 ui.horizontal(|ui| {
                     ui.label("Speed:");
-                    if ui.add(Slider::new(speed, 0..=100).suffix("%")).changed() {
-                        preview_needed = true;
-                    }
+                    ui.add(Slider::new(speed, 0..=100).suffix("%"));
                 });
             }
         }
         
         // Preview button
         if ui.button("👁️ Preview").clicked() {
-            preview_needed = true;
-        }
-
-        if preview_needed {
             if let Some(client) = dbus_client {
                 let _ = client.preview_keyboard_settings(profile.keyboard_settings.clone());
             }
@@ -844,6 +873,7 @@ fn create_default_profile_for_reset(is_standard: bool) -> Profile {
                 energy_performance_preference: Some("balance_performance".to_string()),
                 tdp: None,
                 amd_pstate_status: Some("active".to_string()),
+                intel_pstate_status: Some("active".to_string()),
             },
             gpu_settings: GpuSettings {
                 dgpu_tdp: None,

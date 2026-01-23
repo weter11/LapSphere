@@ -26,6 +26,7 @@ pub enum DbusCommand {
     SetCpuGovernor { governor: String, reply: oneshot::Sender<Result<()>> },
     SetCpuBoost { enabled: bool, reply: oneshot::Sender<Result<()>> },
     SetAmdPstateStatus { status: String, reply: oneshot::Sender<Result<()>> },
+    SetIntelPstateStatus { status: String, reply: oneshot::Sender<Result<()>> },
     PreviewKeyboard { settings: KeyboardSettings, reply: oneshot::Sender<Result<()>> },
     GetBatteryChargeThresholds { reply: oneshot::Sender<Result<(u8, u8)>> },
     SetBatteryChargeThresholds { start: u8, end: u8, reply: oneshot::Sender<Result<()>> },
@@ -153,6 +154,12 @@ impl DbusClient {
     pub fn set_amd_pstate_status(&self, status: String) -> oneshot::Receiver<Result<()>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.command_tx.send(DbusCommand::SetAmdPstateStatus { status, reply: tx });
+        rx
+    }
+
+    pub fn set_intel_pstate_status(&self, status: String) -> oneshot::Receiver<Result<()>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::SetIntelPstateStatus { status, reply: tx });
         rx
     }
 
@@ -344,6 +351,10 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
             }
             DbusCommand::SetAmdPstateStatus { status, reply } => {
                 let result = set_amd_pstate_status_impl(&connection, &status).await;
+                let _ = reply.send(result);
+            }
+            DbusCommand::SetIntelPstateStatus { status, reply } => {
+                let result = set_intel_pstate_status_impl(&connection, &status).await;
                 let _ = reply.send(result);
             }
             DbusCommand::PreviewKeyboard { settings, reply } => {
@@ -632,6 +643,18 @@ async fn set_amd_pstate_status_impl(conn: &Connection, status: &str) -> Result<(
     ).await?;
 
     proxy.call::<_, _, ()>("SetAmdPstateStatus", &(status,)).await?;
+    Ok(())
+}
+
+async fn set_intel_pstate_status_impl(conn: &Connection, status: &str) -> Result<()> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
+    ).await?;
+
+    proxy.call::<_, _, ()>("SetIntelPstateStatus", &(status,)).await?;
     Ok(())
 }
 

@@ -2,7 +2,7 @@ mod dbus_interface;
 mod fan_daemon;
 mod hardware_control;
 mod hardware_detection;
-mod tuxedo_io;
+mod lapsphere_io;
 mod battery_control;
 mod polling_scheduler;
 
@@ -43,25 +43,25 @@ async fn main() -> Result<()> {
     }
 
     // Initialize hardware interfaces
-    let tuxedo_io = if tuxedo_io::TuxedoIo::is_available() {
-        match tuxedo_io::TuxedoIo::new() {
+    let lapsphere_io = if lapsphere_io::LapSphereIo::is_available() {
+        match lapsphere_io::LapSphereIo::new() {
             Ok(io) => {
                 let interface = match io.get_interface() {
-                    tuxedo_io::HardwareInterface::Clevo => "Clevo",
-                    tuxedo_io::HardwareInterface::Uniwill => "Uniwill",
-                    tuxedo_io::HardwareInterface::None => "None",
+                    lapsphere_io::HardwareInterface::Clevo => "Clevo",
+                    lapsphere_io::HardwareInterface::Uniwill => "Uniwill",
+                    lapsphere_io::HardwareInterface::None => "None",
                 };
                 log::info!("Detected hardware interface: {}", interface);
                 log::info!("Number of fans: {}", io.get_fan_count());
                 Some(io)
             }
             Err(e) => {
-                log::warn!("Failed to initialize tuxedo_io: {}", e);
+                log::warn!("Failed to initialize lapsphere_io: {}", e);
                 None
             }
         }
     } else {
-        log::warn!("/dev/tuxedo_io not available - some features will be disabled");
+        log::warn!("/dev/lapsphere_io not available - some features will be disabled");
         None
     };
 
@@ -85,7 +85,7 @@ async fn main() -> Result<()> {
     });
 
     // Add fan control polling job if hardware is available
-    if let Some(io) = tuxedo_io {
+    if let Some(io) = lapsphere_io {
         let fan_io = Arc::new(io);
         let poll_fn = {
             let fan_io = fan_io.clone();
@@ -206,7 +206,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn apply_fan_curves(io: &tuxedo_io::TuxedoIo, settings: &FanSettings, sorted_curves: &[Vec<(u8, u8)>]) -> Result<()> {
+fn apply_fan_curves(io: &lapsphere_io::LapSphereIo, settings: &FanSettings, sorted_curves: &[Vec<(u8, u8)>]) -> Result<()> {
     for (i, curve) in settings.curves.iter().enumerate() {
         if curve.fan_id >= io.get_fan_count() {
             continue;

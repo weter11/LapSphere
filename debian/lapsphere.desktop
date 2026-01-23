@@ -7,5 +7,5 @@ Icon=lapsphere
 Terminal=false
 Type=Application
 Categories=System;Settings;HardwareSettings;
-Keywords=lapsphere;clevo;hardware;cpu;gpu;fan;power;performance;
+Keywords=lapsphere;clevo;hardware;cpu;gpu;fan;power;performance;gaming;
 StartupNotify=true

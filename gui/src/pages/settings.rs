@@ -345,8 +345,8 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
                 ui.label(interface_label);
                 ui.end_row();
 
-                ui.label("TUXEDO Kernel Modules:");
-                ui.label(&info.tuxedo_kernel_modules);
+                ui.label("Kernel Modules:");
+                ui.label(&info.kernel_modules);
                 ui.end_row();
             });
     } else {
@@ -405,8 +405,12 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
                 ui.label(&cpu.name);
                 ui.end_row();
 
-                ui.label("Cores:");
-                ui.label(cpu.cores.len().to_string());
+                ui.label("Physical Cores:");
+                ui.label(cpu.physical_cores.to_string());
+                ui.end_row();
+
+                ui.label("Logical Cores:");
+                ui.label(cpu.logical_cores.to_string());
                 ui.end_row();
 
                 if cpu.capabilities.has_scaling_driver {
@@ -440,6 +444,12 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
                 ui.label("Total:");
                 ui.label(format!("{:.2} GiB", memory.total_gib));
                 ui.end_row();
+
+                if let Some(mem_type) = &memory.memory_type {
+                    ui.label("Type:");
+                    ui.label(mem_type);
+                    ui.end_row();
+                }
             });
     } else {
         ui.label("Memory information unavailable.");
@@ -571,6 +581,14 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
             .spacing([40.0, 8.0])
             .striped(true)
             .show(ui, |ui| {
+                ui.label("Manufacturer:");
+                ui.label(&battery.manufacturer);
+                ui.end_row();
+
+                ui.label("Model:");
+                ui.label(&battery.model);
+                ui.end_row();
+
                 ui.label("Capacity:");
                 ui.label(format!("{} mAh", battery.capacity_mah));
                 ui.end_row();

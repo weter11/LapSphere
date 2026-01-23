@@ -182,12 +182,34 @@ pub enum TrayEvent {
 }
 
 fn load_tray_icon() -> Vec<ksni::Icon> {
-    // Placeholder icon until an embedded resource is wired in (ARGB, all channels 255).
-    let argb = vec![255u8; TRAY_ICON_BYTE_LEN];
+    let mut data = vec![0u8; TRAY_ICON_BYTE_LEN];
+
+    for y in 0..TRAY_ICON_SIZE {
+        for x in 0..TRAY_ICON_SIZE {
+            let idx = ((y * TRAY_ICON_SIZE + x) * 4) as usize;
+
+            // Gaming-themed "L" icon: neon green on transparent background
+            let is_l_vertical = x >= 10 && x <= 14 && y >= 6 && y <= 26;
+            let is_l_horizontal = x >= 10 && x <= 22 && y >= 22 && y <= 26;
+
+            if is_l_vertical || is_l_horizontal {
+                data[idx] = 0;     // Blue
+                data[idx + 1] = 255; // Green
+                data[idx + 2] = 0;   // Red
+                data[idx + 3] = 255; // Alpha
+            } else {
+                // Background
+                data[idx] = 0;
+                data[idx + 1] = 0;
+                data[idx + 2] = 0;
+                data[idx + 3] = 0; // Transparent
+            }
+        }
+    }
 
     vec![ksni::Icon {
         width: TRAY_ICON_SIZE,
         height: TRAY_ICON_SIZE,
-        data: argb,
+        data,
     }]
 }

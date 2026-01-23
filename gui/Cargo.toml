@@ -8,7 +8,7 @@ license.workspace = true
 # Core egui
 eframe = "0.29"
 egui = "0.29"
-egui_extras = { version = "0.29" }
+egui_extras = { version = "0.29", features = ["svg", "image"] }
 egui_plot = "0.29.0"
 
 # Your existing dependencies

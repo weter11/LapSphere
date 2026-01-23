@@ -33,5 +33,35 @@ fn main() -> Result<(), eframe::Error> {
 }
 
 fn load_icon() -> egui::IconData {
-    egui::IconData::default()
+    let width = 32;
+    let height = 32;
+    let mut rgba = vec![0u8; (width * height * 4) as usize];
+
+    for y in 0..height {
+        for x in 0..width {
+            let idx = ((y * width + x) * 4) as usize;
+
+            // Gaming-themed "L" icon: neon green on dark background
+            let is_l_vertical = x >= 10 && x <= 14 && y >= 6 && y <= 26;
+            let is_l_horizontal = x >= 10 && x <= 22 && y >= 22 && y <= 26;
+
+            if is_l_vertical || is_l_horizontal {
+                rgba[idx] = 0;     // R
+                rgba[idx + 1] = 255; // G
+                rgba[idx + 2] = 0;   // B
+                rgba[idx + 3] = 255; // A
+            } else {
+                rgba[idx] = 26;
+                rgba[idx + 1] = 26;
+                rgba[idx + 2] = 26;
+                rgba[idx + 3] = 255;
+            }
+        }
+    }
+
+    egui::IconData {
+        rgba,
+        width,
+        height,
+    }
 }

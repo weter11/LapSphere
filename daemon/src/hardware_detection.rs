@@ -6,9 +6,9 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Instant;
 use once_cell::sync::Lazy;
-use crate::tuxedo_io::TuxedoIo;
+use crate::lapsphere_io::LapSphereIo;
 use systemstat::{System, Platform, saturating_sub_bytes};
-// use tuxedo_io::TuxedoIo;
+// use lapsphere_io::LapSphereIo;
 use lapsphere_common::types::*;
 
 // Thread-safe storage for previous CPU stats
@@ -157,12 +157,38 @@ fn get_cpu_name() -> Result<String> {
     Err(anyhow!("CPU name not found"))
 }
 
-fn get_cpu_count() -> Result<u32> {
-    let cpuinfo = fs::read_to_string("/proc/cpuinfo")?;
-    let count = cpuinfo.lines()
-        .filter(|line| line.starts_with("processor"))
-        .count();
-    Ok(count as u32)
+fn get_cpu_topology() -> (u32, u32) {
+    let output = std::process::Command::new("lscpu").output();
+    if let Ok(out) = output {
+        let s = String::from_utf8_lossy(&out.stdout);
+        let mut logical = 0;
+        let mut threads_per_core = 1;
+        let mut cores_per_socket = 0;
+        let mut sockets = 0;
+
+        for line in s.lines() {
+            if line.starts_with("CPU(s):") {
+                logical = line.split(':').nth(1).unwrap_or("").trim().parse().unwrap_or(0);
+            } else if line.starts_with("Thread(s) per core:") {
+                threads_per_core = line.split(':').nth(1).unwrap_or("").trim().parse().unwrap_or(1);
+            } else if line.starts_with("Core(s) per socket:") {
+                cores_per_socket = line.split(':').nth(1).unwrap_or("").trim().parse().unwrap_or(0);
+            } else if line.starts_with("Socket(s):") {
+                sockets = line.split(':').nth(1).unwrap_or("").trim().parse().unwrap_or(1);
+            }
+        }
+
+        let physical = cores_per_socket * sockets;
+        if physical > 0 {
+            return (physical, logical);
+        }
+    }
+
+    // Fallback if lscpu fails
+    let logical = fs::read_to_string("/proc/cpuinfo")
+        .map(|s| s.lines().filter(|l| l.starts_with("processor")).count() as u32)
+        .unwrap_or(1);
+    (logical, logical)
 }
 
 fn read_cpu_frequency(cpu: u32) -> Result<u64> {
@@ -446,6 +472,7 @@ fn detect_cpu_capabilities() -> CpuCapabilities {
             Path::new(&format!("{}/scaling_available_governors", base_path)).exists(),
         
         has_amd_pstate: Path::new("/sys/devices/system/cpu/amd_pstate/status").exists(),
+        has_intel_pstate: Path::new("/sys/devices/system/cpu/intel_pstate/status").exists(),
     }
 }
 
@@ -514,6 +541,13 @@ fn read_amd_pstate_status() -> Result<String> {
         .map_err(|e| anyhow!("Failed to read AMD pstate status: {}", e))
 }
 
+fn read_intel_pstate_status() -> Result<String> {
+    let path = "/sys/devices/system/cpu/intel_pstate/status";
+    fs::read_to_string(path)
+        .map(|s| s.trim().to_string())
+        .map_err(|e| anyhow!("Failed to read Intel pstate status: {}", e))
+}
+
 fn read_frequency_limits() -> (Option<u64>, Option<u64>) {
     let min_freq = fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq")
         .ok()
@@ -559,12 +593,12 @@ fn read_available_epp_options() -> Vec<String> {
 }
 
 pub fn get_tdp_profiles() -> Result<Vec<String>> {
-    if !TuxedoIo::is_available() {
-        log::info!("TDP profiles not available (/dev/tuxedo_io not present)");
+    if !LapSphereIo::is_available() {
+        log::info!("TDP profiles not available (/dev/lapsphere_io not present)");
         return Ok(vec![]);
     }
     
-    match TuxedoIo::new() {
+    match LapSphereIo::new() {
         Ok(io) => {
             match io.get_available_profiles() {
                 Ok(profiles) => {
@@ -578,14 +612,14 @@ pub fn get_tdp_profiles() -> Result<Vec<String>> {
             }
         }
         Err(e) => {
-            log::warn!("Failed to open /dev/tuxedo_io: {}", e);
+            log::warn!("Failed to open /dev/lapsphere_io: {}", e);
             Ok(vec![])
         }
     }
 }
 
 pub fn get_current_tdp_profile() -> Result<String> {
-    if !TuxedoIo::is_available() {
+    if !LapSphereIo::is_available() {
         return Err(anyhow!("TDP profiles not available"));
     }
     
@@ -601,11 +635,11 @@ pub fn get_current_tdp_profile() -> Result<String> {
 }
 
 pub fn get_fan_speeds() -> Result<Vec<(u32, u32)>> {
-    if !TuxedoIo::is_available() {
+    if !LapSphereIo::is_available() {
         return Ok(vec![]);
     }
     
-    let io = TuxedoIo::new()?;
+    let io = LapSphereIo::new()?;
     let mut fans = Vec::new();
     
     for fan_id in 0..io.get_fan_count() {
@@ -623,11 +657,11 @@ pub fn get_fan_speeds() -> Result<Vec<(u32, u32)>> {
 }
 
 pub fn get_fan_temperatures() -> Result<Vec<(u32, u32)>> {
-    if !TuxedoIo::is_available() {
+    if !LapSphereIo::is_available() {
         return Ok(vec![]);
     }
     
-    let io = TuxedoIo::new()?;
+    let io = LapSphereIo::new()?;
     let mut temps = Vec::new();
     
     for fan_id in 0..io.get_fan_count() {
@@ -645,11 +679,11 @@ pub fn get_fan_temperatures() -> Result<Vec<(u32, u32)>> {
 }
 
 pub fn get_tdp_info() -> Result<(i32, i32, i32)> {
-    if !TuxedoIo::is_available() {
+    if !LapSphereIo::is_available() {
         return Err(anyhow!("TDP info not available"));
     }
     
-    let io = TuxedoIo::new()?;
+    let io = LapSphereIo::new()?;
     
     // Try to get TDP0 (main TDP)
     let current = io.get_tdp(0)?;
@@ -661,14 +695,14 @@ pub fn get_tdp_info() -> Result<(i32, i32, i32)> {
 
 pub fn get_cpu_info() -> Result<CpuInfo> {
     let name = get_cpu_name()?;
-    let core_count = get_cpu_count()?;
+    let (physical_cores, logical_cores) = get_cpu_topology();
     
     let loads = calculate_cpu_load().unwrap_or_default();
     
     let mut cores = Vec::new();
     let mut frequencies = Vec::new();
     
-    for i in 0..core_count {
+    for i in 0..logical_cores {
         let freq = read_cpu_frequency(i).unwrap_or(2000000);
         frequencies.push(freq);
         cores.push(CoreInfo {
@@ -735,6 +769,12 @@ pub fn get_cpu_info() -> Result<CpuInfo> {
     } else {
         None
     };
+
+    let intel_pstate_status = if capabilities.has_intel_pstate {
+        read_intel_pstate_status().ok()
+    } else {
+        None
+    };
     
     let (min_freq, max_freq) = if capabilities.has_scaling_min_freq && capabilities.has_scaling_max_freq {
         read_frequency_limits()
@@ -777,12 +817,15 @@ pub fn get_cpu_info() -> Result<CpuInfo> {
         package_temp,
         package_power,
         cores,
+        physical_cores,
+        logical_cores,
         governor,
         available_governors,
         boost_enabled,
         smt_enabled,
         scaling_driver,
         amd_pstate_status,
+        intel_pstate_status,
         min_freq,
         max_freq,
         hw_min_freq,
@@ -797,6 +840,21 @@ pub fn get_cpu_info() -> Result<CpuInfo> {
     })
 }
 
+fn get_memory_type() -> Option<String> {
+    let output = std::process::Command::new("dmidecode")
+        .args(["-t", "memory"])
+        .output();
+    if let Ok(out) = output {
+        let s = String::from_utf8_lossy(&out.stdout);
+        for line in s.lines() {
+            if line.contains("Type: DDR") || line.contains("Type: LPDDR") {
+                return Some(line.split(':').nth(1).unwrap_or("").trim().to_string());
+            }
+        }
+    }
+    None
+}
+
 pub fn get_memory_info() -> Result<MemoryInfo> {
     let sys = System::new();
     let mem = sys.memory()?;
@@ -806,6 +864,7 @@ pub fn get_memory_info() -> Result<MemoryInfo> {
     let available_gib = mem.platform_memory.meminfo.get("MemAvailable").map_or(0.0, |v| v.as_u64() as f64 / (1024.0 * 1024.0 * 1024.0));
     let used_gib = total_gib - available_gib;
     let used_percent = if total_gib > 0.0 { (used_gib / total_gib * 100.0) as f32 } else { 0.0 };
+    let memory_type = get_memory_type();
 
     Ok(MemoryInfo {
         total_gib,
@@ -813,6 +872,7 @@ pub fn get_memory_info() -> Result<MemoryInfo> {
         free_gib,
         available_gib,
         used_percent,
+        memory_type,
     })
 }
 
@@ -957,7 +1017,7 @@ pub fn get_system_info() -> Result<SystemInfo> {
         .trim()
         .to_string();
 
-    let tuxedo_kernel_modules = get_tuxedo_kernel_modules();
+    let kernel_modules = get_tuxedo_kernel_modules();
     
     Ok(SystemInfo {
         product_name,
@@ -965,7 +1025,7 @@ pub fn get_system_info() -> Result<SystemInfo> {
         manufacturer,
         board_name,
         bios_version,
-        tuxedo_kernel_modules,
+        kernel_modules,
     })
 }
 

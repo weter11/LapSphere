@@ -436,14 +436,6 @@ fn draw_battery_info(ui: &mut Ui, state: &AppState) {
                             ui.end_row();
                         }
                         
-                        ui.label("Manufacturer:");
-                        ui.label(&battery.manufacturer);
-                        ui.end_row();
-                        
-                        ui.label("Model:");
-                        ui.label(&battery.model);
-                        ui.end_row();
-                        
                         if let Some(start) = battery.charge_start_threshold {
                             ui.label("Charge Start:");
                             ui.label(format!("{}%", start));

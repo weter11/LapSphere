@@ -208,7 +208,7 @@ impl LapSphereApp {
         // Create DBus client
         let dbus_client = match DbusClient::new() {
             Ok(client) => {
-                log::info!("✅ Connected to TUXEDO daemon");
+                log::info!("✅ Connected to LapSphere daemon");
                 Some(client)
             }
             Err(e) => {

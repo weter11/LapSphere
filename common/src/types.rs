@@ -7,7 +7,7 @@ pub struct SystemInfo {
     pub manufacturer: String,
     pub board_name: String,
     pub bios_version: String,
-    pub tuxedo_kernel_modules: String,
+    pub kernel_modules: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,12 +20,15 @@ pub struct CpuInfo {
     pub power_source: Option<String>,  // NEW: Shows source of power reading
     pub all_power_sources: Vec<PowerSource>,  // NEW: All available power sources
     pub cores: Vec<CoreInfo>,
+    pub physical_cores: u32,
+    pub logical_cores: u32,
     pub governor: String,
     pub available_governors: Vec<String>,
     pub boost_enabled: bool,
     pub smt_enabled: bool,
     pub scaling_driver: String,
     pub amd_pstate_status: Option<String>,
+    pub intel_pstate_status: Option<String>,
     pub min_freq: Option<u64>,
     pub max_freq: Option<u64>,
     pub hw_min_freq: Option<u64>,
@@ -50,6 +53,7 @@ pub struct CpuCapabilities {
     pub has_scaling_max_freq: bool,
     pub has_available_governors: bool,
     pub has_amd_pstate: bool,
+    pub has_intel_pstate: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,6 +78,7 @@ pub struct MemoryInfo {
     pub free_gib: f64,
     pub available_gib: f64,
     pub used_percent: f32,
+    pub memory_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,6 +187,7 @@ pub struct CpuSettings {
     pub energy_performance_preference: Option<String>,  // ADD
     pub tdp: Option<u32>,
     pub amd_pstate_status: Option<String>,
+    pub intel_pstate_status: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -419,6 +425,7 @@ impl Default for CpuSettings {
             performance_profile: None,
             tdp: None,
             amd_pstate_status: None,
+            intel_pstate_status: None,
             tdp_profile: None,                          // ADD
             energy_performance_preference: None,        // ADD
         }
