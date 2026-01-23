@@ -25,7 +25,6 @@ pub enum Page {
 pub enum SettingsTab {
     Main,
     StatsConfiguration,
-    BatteryControl,
     Hardware,
 }
 

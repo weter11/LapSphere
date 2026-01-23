@@ -11,9 +11,8 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTheme, ctx: 
     ui.add_space(8.0);
 
     ui.horizontal(|ui| {
-        ui.selectable_value(&mut state.settings_tab, SettingsTab::Main, "Appearance");
+        ui.selectable_value(&mut state.settings_tab, SettingsTab::Main, "Main");
         ui.selectable_value(&mut state.settings_tab, SettingsTab::StatsConfiguration, "Stats configuration");
-        ui.selectable_value(&mut state.settings_tab, SettingsTab::BatteryControl, "Battery Control");
         ui.selectable_value(&mut state.settings_tab, SettingsTab::Hardware, "Hardware info");
     });
 
@@ -27,7 +26,6 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTheme, ctx: 
             match state.settings_tab {
                 SettingsTab::Main => draw_main_settings(ui, state, theme, ctx, dbus_client),
                 SettingsTab::StatsConfiguration => draw_stats_configuration(ui, state),
-                SettingsTab::BatteryControl => draw_battery_settings(ui, state),
                 SettingsTab::Hardware => draw_hardware_info(ui, state),
             }
         });
@@ -35,7 +33,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTheme, ctx: 
 
 fn draw_main_settings(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTheme, ctx: &Context, dbus_client: Option<&DbusClient>) {
     // Appearance
-    ui.label(RichText::new("Theme").strong().heading());
+    ui.label(RichText::new("Appearance").strong().heading());
     ui.add_space(8.0);
     
     ui.horizontal(|ui| {
@@ -119,6 +117,13 @@ fn draw_main_settings(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTh
         let _ = state.save_settings();
         // TODO: Create/remove autostart file
     }
+    
+    ui.add_space(16.0);
+    ui.separator();
+    ui.add_space(16.0);
+    
+    // Battery Charge Control
+    draw_battery_settings(ui, state);
     
     ui.add_space(16.0);
     ui.separator();

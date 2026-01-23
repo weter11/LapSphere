@@ -196,7 +196,7 @@ impl LapSphereTheme {
                     weak_bg_fill: Color32::from_rgb(85, 145, 215),
                     bg_stroke: Stroke::new(1.0, Color32::from_rgb(55, 115, 185)),
                     rounding: Rounding::same(8.0),
-                    fg_stroke: Stroke::new(2.0, Color32::from_gray(255)),  // White on blue is fine
+                    fg_stroke: Stroke::new(2.0, Color32::WHITE),
                     expansion: 1.0,
                 },
                 open: egui::style::WidgetVisuals {
@@ -216,7 +216,7 @@ impl LapSphereTheme {
 
             hyperlink_color: Color32::from_rgb(30, 90, 190),
 
-            window_fill: Color32::from_gray(248),
+            window_fill: Color32::from_gray(242),
             window_stroke: Stroke::new(1.0, Color32::from_gray(200)),
             window_shadow: egui::epaint::Shadow {
                 offset: egui::vec2(0.0, 10.0),
@@ -226,15 +226,15 @@ impl LapSphereTheme {
             },
             window_rounding: Rounding::same(10.0),
 
-            panel_fill: Color32::from_gray(252),
+            panel_fill: Color32::from_gray(250),
 
-            override_text_color: Some(Color32::from_gray(20)),
+            override_text_color: Some(Color32::from_gray(25)),
             warn_fg_color: Color32::from_rgb(170, 90, 0),
             error_fg_color: Color32::from_rgb(200, 30, 30),
 
-            faint_bg_color: Color32::from_gray(236),
-            extreme_bg_color: Color32::from_gray(215),
-            code_bg_color: Color32::from_gray(228),
+            faint_bg_color: Color32::from_gray(232),
+            extreme_bg_color: Color32::from_gray(210),
+            code_bg_color: Color32::from_gray(225),
 
             ..Visuals::light()
         }
