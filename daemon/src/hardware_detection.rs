@@ -1,5 +1,4 @@
 use anyhow::{anyhow, Result};
-use nvml_wrapper::Nvml;
 use std::fs;
 use std::path::Path;
 use std::collections::HashMap;
@@ -7,7 +6,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 use once_cell::sync::Lazy;
 use crate::tuxedo_io::TuxedoIo;
-use systemstat::{System, Platform, saturating_sub_bytes};
+use systemstat::{System, Platform};
 // use tuxedo_io::TuxedoIo;
 use lapsphere_common::types::*;
 
@@ -165,7 +164,7 @@ fn get_cpu_topology() -> (u32, u32) {
     let output = std::process::Command::new("lscpu").output();
     if let Ok(out) = output {
         let s = String::from_utf8_lossy(&out.stdout);
-        let mut threads_per_core = 1;
+        let mut _threads_per_core = 1;
         let mut cores_per_socket = 0;
         let mut sockets = 0;
 
@@ -174,7 +173,7 @@ fn get_cpu_topology() -> (u32, u32) {
             if line.starts_with("CPU(s):") {
                 logical = line.split(':').nth(1).unwrap_or("").trim().parse().unwrap_or(0);
             } else if line.starts_with("Thread(s) per core:") {
-                threads_per_core = line.split(':').nth(1).unwrap_or("").trim().parse().unwrap_or(1);
+                _threads_per_core = line.split(':').nth(1).unwrap_or("").trim().parse().unwrap_or(1);
             } else if line.starts_with("Core(s) per socket:") {
                 cores_per_socket = line.split(':').nth(1).unwrap_or("").trim().parse().unwrap_or(0);
             } else if line.starts_with("Socket(s):") {
@@ -682,42 +681,6 @@ pub fn get_fan_speeds() -> Result<Vec<(u32, u32)>> {
     Ok(fans)
 }
 
-pub fn get_fan_temperatures() -> Result<Vec<(u32, u32)>> {
-    if !TuxedoIo::is_available() {
-        return Ok(vec![]);
-    }
-    
-    let io = TuxedoIo::new()?;
-    let mut temps = Vec::new();
-    
-    for fan_id in 0..io.get_fan_count() {
-        match io.get_fan_temperature(fan_id) {
-            Ok(temp) => {
-                if temp > 0 {
-                    temps.push((fan_id, temp));
-                }
-            }
-            Err(_) => break,
-        }
-    }
-    
-    Ok(temps)
-}
-
-pub fn get_tdp_info() -> Result<(i32, i32, i32)> {
-    if !TuxedoIo::is_available() {
-        return Err(anyhow!("TDP info not available"));
-    }
-    
-    let io = TuxedoIo::new()?;
-    
-    // Try to get TDP0 (main TDP)
-    let current = io.get_tdp(0)?;
-    let min = io.get_tdp_min(0)?;
-    let max = io.get_tdp_max(0)?;
-    
-    Ok((current, min, max))
-}
 
 pub fn get_cpu_info() -> Result<CpuInfo> {
     let name = get_cpu_name();
@@ -1056,7 +1019,7 @@ pub fn get_system_info() -> Result<SystemInfo> {
         .trim()
         .to_string();
     
-    let mut manufacturer = fs::read_to_string("/sys/class/dmi/id/sys_vendor")
+    let manufacturer = fs::read_to_string("/sys/class/dmi/id/sys_vendor")
         .unwrap_or_else(|_| "Unknown".to_string())
         .trim()
         .to_string();
@@ -1310,13 +1273,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         let status = runtime_status.unwrap_or_else(|| {
             match device.performance_state() {
                 Ok(state) => format!("{:?}", state),
-                Err(_) => {
-                    // Fall back to power state
-                    match device.power_state() {
-                        Ok(state) => format!("{:?}", state),
-                        Err(_) => "Active".to_string(),
-                    }
-                }
+                Err(_) => "Active".to_string(),
             }
         });
 
@@ -1436,7 +1393,7 @@ fn read_gpu_load(device_path: &str) -> Option<f32> {
     }
     
     // Intel
-    if let Ok(load_str) = fs::read_to_string(format!("{}/gt_RP0_freq_mhz", device_path)) {
+    if let Ok(_load_str) = fs::read_to_string(format!("{}/gt_RP0_freq_mhz", device_path)) {
         // Intel doesn't directly expose load, would need calculation
     }
     
@@ -1807,23 +1764,6 @@ fn read_wifi_signal(interface: &str) -> Option<i32> {
     None
 }
 
-/// Map WiFi center frequency in MHz to a channel number using common IEEE 802.11
-/// band formulas. These ranges intentionally cover 2.4/5/6 GHz bands and return
-/// None for anything outside the supported ranges.
-fn channel_from_frequency_mhz(freq: u32) -> Option<u32> {
-    const FREQ_24_GHZ_BASE: u32 = 2407;
-    const FREQ_24_GHZ_SPECIAL: u32 = 2484;
-    const FREQ_5_GHZ_BASE: u32 = 5000;
-    const FREQ_6_GHZ_BASE: u32 = 5950;
-
-    match freq {
-        FREQ_24_GHZ_SPECIAL => Some(14), // 2.4 GHz band (802.11b/g/n)
-        2412..=2472 => Some((freq - FREQ_24_GHZ_BASE) / 5), // 2.4 GHz band (802.11b/g/n)
-        5000..=5900 => Some((freq - FREQ_5_GHZ_BASE) / 5), // 5 GHz band (802.11a/n/ac)
-        5955..=7115 => Some((freq - FREQ_6_GHZ_BASE) / 5), // 6 GHz band (802.11ax)
-        _ => None,
-    }
-}
 fn read_wifi_driver_info(interface: &str) -> (Option<String>, Option<String>) {
     let ethtool_cmd = find_binary("ethtool").unwrap_or_else(|| "ethtool".to_string());
     if let Ok(output) = std::process::Command::new(ethtool_cmd)

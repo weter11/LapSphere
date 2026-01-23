@@ -1,5 +1,4 @@
 mod dbus_interface;
-mod fan_daemon;
 mod hardware_control;
 mod hardware_detection;
 mod tuxedo_io;
@@ -208,7 +207,6 @@ async fn main() -> Result<()> {
     // Launch GUI if requested
     if launch_gui {
         use tokio::process::Command;
-        use std::os::unix::process::CommandExt;
 
         let target_uid = std::env::var("SUDO_UID")
             .ok()

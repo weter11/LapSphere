@@ -1,4 +1,4 @@
-use egui::{Context, Style, Visuals, Color32, Rounding, Stroke, FontId, FontFamily, TextStyle};
+use egui::{Context, Visuals, Color32, Rounding, Stroke, FontId, FontFamily, TextStyle};
 use lapsphere_common::types::Theme;
 
 pub struct LapSphereTheme {
@@ -16,25 +16,7 @@ impl LapSphereTheme {
         Self { visuals }
     }
     
-    pub fn apply(&self, ctx: &Context) {
-        let mut style = Style::default();
-        style.visuals = self.visuals.clone();
-        
-        // Spacing
-        style.spacing.item_spacing = egui::vec2(8.0, 6.0);
-        style.spacing.button_padding = egui::vec2(12.0, 6.0);
-        style.spacing.indent = 20.0;
-        style.spacing.window_margin = egui::Margin::same(12.0);
-        style.spacing.menu_margin = egui::Margin::same(8.0);
-        
-        // Interaction
-        style.interaction.resize_grab_radius_side = 6.0;
-        style.interaction.resize_grab_radius_corner = 8.0;
-        
-        ctx.set_style(style);
-    }
-
-        pub fn apply_with_font_size(&self, ctx: &Context, font_size: &lapsphere_common::types::FontSize) {
+    pub fn apply_with_font_size(&self, ctx: &Context, font_size: &lapsphere_common::types::FontSize) {
         use lapsphere_common::types::FontSize;
         
         let mut style = (*ctx.style()).clone();

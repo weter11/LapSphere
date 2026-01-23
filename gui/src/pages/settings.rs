@@ -649,7 +649,7 @@ fn draw_battery_settings(ui: &mut Ui, state: &mut AppState) {
         // Start Threshold
         ui.horizontal(|ui| {
             ui.label("Start Threshold:");
-            if ComboBox::from_id_source("start_threshold_combo")
+            if ComboBox::from_id_salt("start_threshold_combo")
                 .selected_text(format!("{}%", state.config.battery_settings.charge_start_threshold))
                 .show_ui(ui, |ui| {
                     let mut changed = false;
@@ -672,7 +672,7 @@ fn draw_battery_settings(ui: &mut Ui, state: &mut AppState) {
         // End Threshold
         ui.horizontal(|ui| {
             ui.label("End Threshold:");
-            if ComboBox::from_id_source("end_threshold_combo")
+            if ComboBox::from_id_salt("end_threshold_combo")
                 .selected_text(format!("{}%", state.config.battery_settings.charge_end_threshold))
                 .show_ui(ui, |ui| {
                     let mut changed = false;
@@ -751,7 +751,7 @@ fn draw_prime_profile_settings(ui: &mut Ui, state: &mut AppState, dbus_client: O
     
     ui.horizontal(|ui| {
         ui.label("Current Profile:");
-        ComboBox::from_id_source("settings_prime_profile_combo")
+        ComboBox::from_id_salt("settings_prime_profile_combo")
             .selected_text(&selected_profile)
             .show_ui(ui, |ui| {
                 if ui.selectable_value(&mut selected_profile, "on-demand".to_string(), "On-Demand").clicked() {

@@ -172,7 +172,6 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>)
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Create New Profile:").strong());
                 
-                let text_edit_id = ui.make_persistent_id("new_profile_name");
                 let mut new_name = state.editing_profile_name.clone().unwrap_or_default();
                 ui.text_edit_singleline(&mut new_name);
                 state.editing_profile_name = Some(new_name.clone());
