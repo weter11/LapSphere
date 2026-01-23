@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=io.lapsphere.Control
+Exec=/usr/bin/lapsphere-daemon
+User=root

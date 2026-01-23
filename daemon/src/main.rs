@@ -27,19 +27,89 @@ async fn main() -> Result<()> {
     log::info!("Starting LapSphere Daemon");
 
     let args: Vec<String> = std::env::args().collect();
-    let launch_gui = args.contains(&"--gui".to_string());
 
-    // Collect other arguments to pass to the GUI (e.g., --tray)
+    if args.contains(&"--help".to_string()) || args.contains(&"-h".to_string()) {
+        println!("LapSphere Daemon - Hardware Control for Laptops");
+        println!("\nUsage: lapsphere-daemon [OPTIONS]");
+        println!("\nOptions:");
+        println!("  --gui       Launch the graphical user interface");
+        println!("  --tray      Start minimized to system tray");
+        println!("  --help, -h  Show this help message");
+        println!("  --debug     Enable debug logging");
+        println!("\nConfiguration:");
+        println!("  Settings are stored in ~/.config/lapsphere/settings.json");
+        println!("  Profiles are stored in ~/.config/lapsphere/profiles.json");
+        println!("\nTo configure via CLI, you can edit these JSON files directly.");
+        return Ok(());
+    }
+
+    let launch_gui = args.contains(&"--gui".to_string());
+    let launch_tray = args.contains(&"--tray".to_string());
+
+    // Collect other arguments to pass to the GUI
     let gui_args: Vec<String> = args.iter()
-        .skip(1) // skip the daemon executable name
+        .skip(1)
         .filter(|&a| a != "--gui")
         .cloned()
         .collect();
 
     // Check if running as root
     if unsafe { libc::geteuid() } != 0 {
-        eprintln!("Error: Daemon must run as root");
+        if !launch_gui && !launch_tray {
+            println!("--- LapSphere Hardware Statistics (Limited - non-root) ---");
+            match hardware_detection::get_cpu_info() {
+                Ok(cpu) => {
+                    println!("CPU: {}", cpu.name);
+                    println!("  Load: {:.1}%", cpu.median_load);
+                    println!("  Temp: {:.1}°C", cpu.package_temp);
+                }
+                Err(e) => println!("Error getting CPU info: {}", e),
+            }
+            match hardware_detection::get_memory_info() {
+                Ok(mem) => {
+                    println!("Memory: {:.1} / {:.1} GiB ({:.1}%)",
+                        mem.used_gib, mem.total_gib, mem.used_percent);
+                }
+                Err(e) => println!("Error getting memory info: {}", e),
+            }
+            println!("\nError: Full daemon functionality requires root privileges.");
+        } else {
+            eprintln!("Error: Daemon must run as root to support GUI or tray modes.");
+        }
         std::process::exit(1);
+    }
+
+    if !launch_gui && !launch_tray {
+        println!("--- LapSphere Hardware Statistics ---");
+        match hardware_detection::get_cpu_info() {
+            Ok(cpu) => {
+                println!("CPU: {}", cpu.name);
+                println!("  Load: {:.1}%", cpu.median_load);
+                println!("  Temp: {:.1}°C", cpu.package_temp);
+                if let Some(power) = cpu.package_power {
+                    println!("  Power: {:.1}W", power);
+                }
+            }
+            Err(e) => println!("Error getting CPU info: {}", e),
+        }
+
+        match hardware_detection::get_memory_info() {
+            Ok(mem) => {
+                println!("Memory: {:.1} / {:.1} GiB ({:.1}%)",
+                    mem.used_gib, mem.total_gib, mem.used_percent);
+            }
+            Err(e) => println!("Error getting memory info: {}", e),
+        }
+
+        if let Ok(gpus) = hardware_detection::get_gpu_info() {
+            for gpu in gpus {
+                println!("GPU: {}", gpu.name);
+                if let Some(load) = gpu.load { println!("  Load: {:.1}%", load); }
+                if let Some(temp) = gpu.temperature { println!("  Temp: {:.1}°C", temp); }
+            }
+        }
+
+        println!("\nDaemon is running. Press Ctrl+C to exit.");
     }
 
     // Initialize hardware interfaces
@@ -126,7 +196,12 @@ async fn main() -> Result<()> {
 
     // Start DBus service
     let connection = zbus::Connection::system().await?;
-    let _service = dbus_interface::start_service(connection.clone()).await?;
+    let connection_clone = connection.clone();
+    tokio::spawn(async move {
+        if let Err(e) = dbus_interface::start_service(connection_clone).await {
+            log::error!("Failed to start DBus service: {}", e);
+        }
+    });
 
     log::info!("DBus service started");
 

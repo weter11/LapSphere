@@ -2,7 +2,7 @@
 Name=LapSphere
 GenericName=Hardware Control
 Comment=Control hardware features on LapSphere/Clevo laptops
-Exec=pkexec lapsphere-daemon --gui
+Exec=lapsphere
 Icon=lapsphere
 Terminal=false
 Type=Application
