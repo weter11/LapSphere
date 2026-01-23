@@ -803,7 +803,7 @@ fn save_settings_to_disk(config: &AppConfig) -> anyhow::Result<()> {
             "[Desktop Entry]\n\
             Type=Application\n\
             Name=LapSphere\n\
-            Exec=pkexec lapsphere-daemon --gui --tray\n\
+            Exec=lapsphere --tray\n\
             Icon=lapsphere\n\
             X-GNOME-Autostart-enabled=true\n"
         );
