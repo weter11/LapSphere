@@ -206,8 +206,6 @@ impl LapSphereApp {
         state.load_config();
         
         // Improve font rendering with better tessellation options
-        let mut fonts = egui::FontDefinitions::default();
-        
         // Configure font rasterization for better quality
         cc.egui_ctx.options_mut(|o| {
             // Enable improved font anti-aliasing
