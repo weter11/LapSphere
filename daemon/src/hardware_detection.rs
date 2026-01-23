@@ -198,33 +198,51 @@ fn get_cpu_topology() -> (u32, u32) {
     (physical, logical)
 }
 
-fn read_cpu_frequency(cpu: u32) -> Result<u64> {
-    let path = format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_cur_freq", cpu);
-    if let Ok(s) = fs::read_to_string(&path) {
-        if let Ok(freq) = s.trim().parse() {
-            return Ok(freq);
-        }
-    }
+fn read_cpu_frequencies(logical_cores: u32) -> Vec<u64> {
+    let mut freqs = Vec::with_capacity(logical_cores as usize);
     
-    let path = format!("/sys/devices/system/cpu/cpu{}/cpufreq/cpuinfo_cur_freq", cpu);
-    if let Ok(s) = fs::read_to_string(&path) {
-        if let Ok(freq) = s.trim().parse() {
-            return Ok(freq);
+    // Try sysfs first as it is core-specific and efficient
+    for i in 0..logical_cores {
+        let mut found = false;
+        for filename in &["scaling_cur_freq", "cpuinfo_cur_freq"] {
+            let path = format!("/sys/devices/system/cpu/cpu{}/cpufreq/{}", i, filename);
+            if let Ok(s) = fs::read_to_string(&path) {
+                if let Ok(freq) = s.trim().parse::<u64>() {
+                    freqs.push(freq);
+                    found = true;
+                    break;
+                }
+            }
         }
+        if found { continue; }
+        freqs.push(0); // Placeholder
     }
-    
-    let cpuinfo = fs::read_to_string("/proc/cpuinfo")?;
-    for line in cpuinfo.lines().skip((cpu * 30) as usize).take(30) {
-        if line.starts_with("cpu MHz") {
-            if let Some(mhz) = line.split(':').nth(1) {
-                if let Ok(mhz_val) = mhz.trim().parse::<f64>() {
-                    return Ok((mhz_val * 1000.0) as u64);
+
+    // If any are still 0, try parsing /proc/cpuinfo once
+    if freqs.iter().any(|&f| f == 0) {
+        if let Ok(cpuinfo) = fs::read_to_string("/proc/cpuinfo") {
+            let mut core_idx = 0;
+            for line in cpuinfo.lines() {
+                if line.starts_with("cpu MHz") {
+                    if let Some(mhz_str) = line.split(':').nth(1) {
+                        if let Ok(mhz) = mhz_str.trim().parse::<f64>() {
+                            if core_idx < freqs.len() && freqs[core_idx] == 0 {
+                                freqs[core_idx] = (mhz * 1000.0) as u64;
+                            }
+                            core_idx += 1;
+                        }
+                    }
                 }
             }
         }
     }
+
+    // Fill remaining with a default value
+    for f in freqs.iter_mut() {
+        if *f == 0 { *f = 2000000; }
+    }
     
-    Ok(2000000)
+    freqs
 }
 
 fn calculate_median(values: &[u64]) -> u64 {
@@ -707,12 +725,11 @@ pub fn get_cpu_info() -> Result<CpuInfo> {
     
     let loads = calculate_cpu_load().unwrap_or_default();
     
+    let frequencies = read_cpu_frequencies(logical_cores);
     let mut cores = Vec::new();
-    let mut frequencies = Vec::new();
     
     for i in 0..logical_cores {
-        let freq = read_cpu_frequency(i).unwrap_or(2000000);
-        frequencies.push(freq);
+        let freq = frequencies[i as usize];
         cores.push(CoreInfo {
             id: i,
             frequency: freq,
@@ -1006,20 +1023,31 @@ pub fn get_keyboard_capabilities() -> KeyboardCapabilities {
 }
 
 pub fn get_system_info() -> Result<SystemInfo> {
-    let product_name = fs::read_to_string("/sys/class/dmi/id/product_name")
+    let mut product_name = fs::read_to_string("/sys/class/dmi/id/product_name")
         .unwrap_or_else(|_| "Unknown".to_string())
         .trim()
         .to_string();
+
+    if product_name == "Unknown" || product_name.is_empty() {
+        if let Ok(model) = fs::read_to_string("/proc/device-tree/model") {
+            product_name = model.trim_matches('\0').trim().to_string();
+        }
+    }
 
     let product_sku = fs::read_to_string("/sys/class/dmi/id/product_sku")
         .unwrap_or_else(|_| "Unknown".to_string())
         .trim()
         .to_string();
     
-    let manufacturer = fs::read_to_string("/sys/class/dmi/id/sys_vendor")
+    let mut manufacturer = fs::read_to_string("/sys/class/dmi/id/sys_vendor")
         .unwrap_or_else(|_| "Unknown".to_string())
         .trim()
         .to_string();
+
+    if manufacturer == "Unknown" {
+        // Try to get from os-release or something else?
+        // For now just leave it.
+    }
 
     let board_name = fs::read_to_string("/sys/class/dmi/id/board_name")
         .unwrap_or_else(|_| "Unknown".to_string())

@@ -240,43 +240,59 @@ impl LapSphereApp {
                     tokio::spawn(async move {
                         match component.as_str() {
                             "cpu" => {
-                                if let Ok(Ok(info)) = client.get_cpu_info().await {
-                                    let _ = tx.send(HardwareUpdate::CpuInfo(info));
+                                match client.get_cpu_info().await {
+                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::CpuInfo(info)); }
+                                    Ok(Err(e)) => log::error!("Failed to get CPU info: {}", e),
+                                    Err(e) => log::error!("DBus error getting CPU info: {}", e),
                                 }
                             }
                             "gpu" => {
-                                if let Ok(Ok(info)) = client.get_gpu_info().await {
-                                    let _ = tx.send(HardwareUpdate::GpuInfo(info));
+                                match client.get_gpu_info().await {
+                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::GpuInfo(info)); }
+                                    Ok(Err(e)) => log::error!("Failed to get GPU info: {}", e),
+                                    Err(e) => log::error!("DBus error getting GPU info: {}", e),
                                 }
                             }
                             "memory" => {
-                                if let Ok(Ok(info)) = client.get_memory_info().await {
-                                    let _ = tx.send(HardwareUpdate::MemoryInfo(info));
+                                match client.get_memory_info().await {
+                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::MemoryInfo(info)); }
+                                    Ok(Err(e)) => log::error!("Failed to get Memory info: {}", e),
+                                    Err(e) => log::error!("DBus error getting Memory info: {}", e),
                                 }
                             }
                             "fans" => {
-                                if let Ok(Ok(info)) = client.get_fan_info().await {
-                                    let _ = tx.send(HardwareUpdate::FanInfo(info));
+                                match client.get_fan_info().await {
+                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::FanInfo(info)); }
+                                    Ok(Err(e)) => log::error!("Failed to get Fan info: {}", e),
+                                    Err(e) => log::error!("DBus error getting Fan info: {}", e),
                                 }
                             }
                             "battery" => {
-                                if let Ok(Ok(info)) = client.get_battery_info().await {
-                                    let _ = tx.send(HardwareUpdate::BatteryInfo(info));
+                                match client.get_battery_info().await {
+                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::BatteryInfo(info)); }
+                                    Ok(Err(e)) => log::error!("Failed to get Battery info: {}", e),
+                                    Err(e) => log::error!("DBus error getting Battery info: {}", e),
                                 }
                             }
                             "wifi" => {
-                                if let Ok(Ok(info)) = client.get_wifi_info().await {
-                                    let _ = tx.send(HardwareUpdate::WifiInfo(info));
+                                match client.get_wifi_info().await {
+                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::WifiInfo(info)); }
+                                    Ok(Err(e)) => log::error!("Failed to get WiFi info: {}", e),
+                                    Err(e) => log::error!("DBus error getting WiFi info: {}", e),
                                 }
                             }
                             "storage" => {
-                                if let Ok(Ok(info)) = client.get_storage_device_info().await {
-                                    let _ = tx.send(HardwareUpdate::StorageDeviceInfo(info));
+                                match client.get_storage_device_info().await {
+                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::StorageDeviceInfo(info)); }
+                                    Ok(Err(e)) => log::error!("Failed to get Storage info: {}", e),
+                                    Err(e) => log::error!("DBus error getting Storage info: {}", e),
                                 }
                             }
                             "mount" => {
-                                if let Ok(Ok(info)) = client.get_mount_info().await {
-                                    let _ = tx.send(HardwareUpdate::MountInfo(info));
+                                match client.get_mount_info().await {
+                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::MountInfo(info)); }
+                                    Ok(Err(e)) => log::error!("Failed to get Mount info: {}", e),
+                                    Err(e) => log::error!("DBus error getting Mount info: {}", e),
                                 }
                             }
                             _ => {}

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use lapsphere_common::types::*;
-use zbus::{interface, Connection, ConnectionBuilder};
+use zbus::{interface, Connection};
 use std::time::Duration;
 use nix::sys::signal::{raise, Signal};
 
@@ -409,14 +409,13 @@ fn is_systemd_managed() -> bool {
         || std::env::var_os("SYSTEMD_EXEC_PID").is_some()
 }
 
-pub async fn start_service(_connection: Connection) -> Result<()> {
-    let _conn = ConnectionBuilder::system()?
-        .name("io.lapsphere.Control")?
-        .serve_at("/io/lapsphere/Control", ControlInterface)?
-        .build()
+pub async fn start_service(connection: Connection) -> Result<()> {
+    connection
+        .object_server()
+        .at("/io/lapsphere/Control", ControlInterface)
         .await?;
+
+    connection.request_name("io.lapsphere.Control").await?;
     
-    // Keep connection alive
-    std::future::pending::<()>().await;
     Ok(())
 }
