@@ -3,12 +3,12 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::time;
 use lapsphere_common::types::{FanCurve, FanSettings};
-use crate::lapsphere_io;
-use crate::lapsphere_io::LapSphereIo;
+use crate::tuxedo_io;
+use crate::tuxedo_io::TuxedoIo;
 use crate::dbus_interface::ControlInterface;
 
 pub struct FanCurveManager {
-    io: Option<LapSphereIo>,
+    io: Option<TuxedoIo>,
     settings: Option<FanSettings>,
     last_update: Instant,
     update_interval: Duration,
@@ -17,8 +17,8 @@ pub struct FanCurveManager {
 
 impl FanCurveManager {
     pub fn new() -> Result<Self> {
-        let io = if LapSphereIo::is_available() {
-            Some(LapSphereIo::new()?)
+        let io = if TuxedoIo::is_available() {
+            Some(TuxedoIo::new()?)
         } else {
             None
         };
@@ -50,7 +50,7 @@ impl FanCurveManager {
             return Ok(());
         }
         
-        let io = self.io.as_ref().ok_or_else(|| anyhow!("LapSphereIo not available"))?;
+        let io = self.io.as_ref().ok_or_else(|| anyhow!("TuxedoIo not available"))?;
         let settings = self.settings.as_ref().ok_or_else(|| anyhow!("No settings configured"))?;
         
         for curve in &settings.curves {
@@ -221,12 +221,12 @@ impl FanDaemon {
     }
     
     fn apply_fan_curves(&self, settings: &FanSettings) -> Result<()> {
-        // Use /dev/lapsphere_io instead of sysfs
-        if !LapSphereIo::is_available() {
+        // Use /dev/tuxedo_io instead of sysfs
+        if !TuxedoIo::is_available() {
             return Ok(());
         }
         
-        let io = LapSphereIo::new()?;
+        let io = TuxedoIo::new()?;
         
         for curve in &settings.curves {
             // Read current temperature for this fan
@@ -241,7 +241,7 @@ impl FanDaemon {
             // Find appropriate speed based on curve
             let speed = self.calculate_fan_speed(temp, &curve.points);
             
-            // Apply speed using lapsphere_io ioctl
+            // Apply speed using tuxedo_io ioctl
             if let Err(e) = io.set_fan_speed(curve.fan_id, speed as u32) {
                 log::error!("Failed to set speed for fan {}: {}", curve.fan_id, e);
             }

@@ -144,11 +144,11 @@ async fn set_tdp_profile(&self, profile: &str) -> Result<(), zbus::fdo::Error> {
 }
 
     async fn get_fan_info(&self) -> Result<String, zbus::fdo::Error> {
-        if !crate::lapsphere_io::LapSphereIo::is_available() {
+        if !crate::tuxedo_io::TuxedoIo::is_available() {
             return Ok("[]".to_string());
         }
         
-        match crate::lapsphere_io::LapSphereIo::new() {
+        match crate::tuxedo_io::TuxedoIo::new() {
             Ok(io) => {
                 let mut fans_info = Vec::new();
                 for fan_id in 0..io.get_fan_count() {
@@ -172,11 +172,11 @@ async fn set_tdp_profile(&self, profile: &str) -> Result<(), zbus::fdo::Error> {
     }
 
     async fn get_fan_temperature(&self, fan_id: u32) -> Result<u32, zbus::fdo::Error> {
-        if !crate::lapsphere_io::LapSphereIo::is_available() {
-            return Err(zbus::fdo::Error::Failed("lapsphere_io not available".to_string()));
+        if !crate::tuxedo_io::TuxedoIo::is_available() {
+            return Err(zbus::fdo::Error::Failed("tuxedo_io not available".to_string()));
         }
         
-        match crate::lapsphere_io::LapSphereIo::new() {
+        match crate::tuxedo_io::TuxedoIo::new() {
             Ok(io) => io.get_fan_temperature(fan_id)
                 .map_err(|e| zbus::fdo::Error::Failed(e.to_string())),
             Err(e) => Err(zbus::fdo::Error::Failed(e.to_string())),
@@ -277,16 +277,16 @@ async fn set_tdp_profile(&self, profile: &str) -> Result<(), zbus::fdo::Error> {
     }
     
     async fn get_hardware_interface_info(&self) -> Result<String, zbus::fdo::Error> {
-        if !crate::lapsphere_io::LapSphereIo::is_available() {
+        if !crate::tuxedo_io::TuxedoIo::is_available() {
             return Ok("None".to_string());
         }
         
-        match crate::lapsphere_io::LapSphereIo::new() {
+        match crate::tuxedo_io::TuxedoIo::new() {
             Ok(io) => {
                 let interface = match io.get_interface() {
-                    crate::lapsphere_io::HardwareInterface::Clevo => "Clevo",
-                    crate::lapsphere_io::HardwareInterface::Uniwill => "Uniwill",
-                    crate::lapsphere_io::HardwareInterface::None => "None",
+                    crate::tuxedo_io::HardwareInterface::Clevo => "Clevo",
+                    crate::tuxedo_io::HardwareInterface::Uniwill => "Uniwill",
+                    crate::tuxedo_io::HardwareInterface::None => "None",
                 };
                 let fan_count = io.get_fan_count();
                 Ok(format!("Interface: {}, Fans: {}", interface, fan_count))

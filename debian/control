@@ -24,9 +24,13 @@ Architecture: amd64
 Depends: ${shlibs:Depends}, ${misc:Depends},
          dbus,
          policykit-1,
-         libxkbcommon-x11-0
+         libxkbcommon-x11-0,
+         dmidecode,
+         pciutils,
+         ethtool,
+         iw
 Recommends: tuxedo-drivers
-Description: Hardware control application for LapSphere/Clevo laptops
+Description: Hardware control application for LapSphere laptops
  LapSphere provides a modern interface for controlling
  hardware features on LapSphere and Clevo laptops including:
   - CPU frequency and power management

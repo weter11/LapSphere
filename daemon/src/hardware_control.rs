@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 use lapsphere_common::types::*;
-use crate::lapsphere_io::{LapSphereIo, HardwareInterface};
+use crate::tuxedo_io::{TuxedoIo, HardwareInterface};
 
 fn get_cpu_count() -> Result<u32> {
     let cpuinfo = fs::read_to_string("/proc/cpuinfo")?;
@@ -298,11 +298,11 @@ fn apply_screen_settings(settings: &ScreenSettings) -> Result<()> {
 }
 
 pub fn set_tdp_profile(profile_name: &str) -> Result<()> {
-    if !LapSphereIo::is_available() {
+    if !TuxedoIo::is_available() {
         return Err(anyhow!("TDP profiles not available"));
     }
     
-    let io = LapSphereIo::new()?;
+    let io = TuxedoIo::new()?;
     let profiles = io.get_available_profiles()?;
     
     if let Some(profile_id) = profiles.iter().position(|p| p == profile_name) {
@@ -315,13 +315,13 @@ pub fn set_tdp_profile(profile_name: &str) -> Result<()> {
 }
 
 pub fn set_fan_speed(fan_id: u32, speed_percent: u32) -> Result<()> {
-    if !LapSphereIo::is_available() {
+    if !TuxedoIo::is_available() {
         return Err(anyhow!("Fan control not available"));
     }
     
     let speed = speed_percent.min(100);
     log::info!("DBus request: set fan {} to {}%", fan_id, speed);
-    let io = LapSphereIo::new()?;
+    let io = TuxedoIo::new()?;
     io.set_fan_speed(fan_id, speed)?;
     
     log::info!("Set fan {} to {}%", fan_id, speed);
@@ -329,11 +329,11 @@ pub fn set_fan_speed(fan_id: u32, speed_percent: u32) -> Result<()> {
 }
 
 pub fn set_fan_auto(fan_id: u32) -> Result<()> {
-    if !LapSphereIo::is_available() {
+    if !TuxedoIo::is_available() {
         return Err(anyhow!("Fan control not available"));
     }
     
-    let io = LapSphereIo::new()?;
+    let io = TuxedoIo::new()?;
     io.set_fan_auto()?;
     
     log::info!("Set all fans to auto mode");
@@ -341,8 +341,8 @@ pub fn set_fan_auto(fan_id: u32) -> Result<()> {
 }
 
 fn apply_fan_settings(settings: &FanSettings) -> Result<()> {
-    if !LapSphereIo::is_available() {
-        log::info!("Fan control not available (/dev/lapsphere_io not present)");
+    if !TuxedoIo::is_available() {
+        log::info!("Fan control not available (/dev/tuxedo_io not present)");
         return Ok(());
     }
     
@@ -369,11 +369,11 @@ fn apply_fan_settings(settings: &FanSettings) -> Result<()> {
 }
 
 pub fn set_webcam_state(enabled: bool) -> Result<()> {
-    if !LapSphereIo::is_available() {
+    if !TuxedoIo::is_available() {
         return Err(anyhow!("Webcam control not available"));
     }
     
-    let io = LapSphereIo::new()?;
+    let io = TuxedoIo::new()?;
     io.set_webcam_state(enabled)?;
     
     log::info!("Set webcam to: {}", if enabled { "enabled" } else { "disabled" });
@@ -381,11 +381,11 @@ pub fn set_webcam_state(enabled: bool) -> Result<()> {
 }
 
 pub fn get_webcam_state() -> Result<bool> {
-    if !LapSphereIo::is_available() {
+    if !TuxedoIo::is_available() {
         return Err(anyhow!("Webcam state not available"));
     }
     
-    let io = LapSphereIo::new()?;
+    let io = TuxedoIo::new()?;
     io.get_webcam_state()
 }
 
@@ -489,19 +489,19 @@ pub fn set_energy_performance_preference(epp: &str) -> Result<()> {
 #[derive(Debug, Clone)]
 pub struct RgbKeyboardControl {
     paths: Vec<String>,
-    lapsphere_io: Option<Arc<LapSphereIo>>,
+    tuxedo_io: Option<Arc<TuxedoIo>>,
 }
 
 impl RgbKeyboardControl {
     pub fn new() -> Result<Self> {
         let paths = Self::find_all_keyboard_backlight_paths();
-        let lapsphere_io = LapSphereIo::new().ok().map(Arc::new);
+        let tuxedo_io = TuxedoIo::new().ok().map(Arc::new);
 
-        if paths.is_empty() && lapsphere_io.is_none() {
+        if paths.is_empty() && tuxedo_io.is_none() {
             return Err(anyhow!("No keyboard backlight control available"));
         }
 
-        Ok(Self { paths, lapsphere_io })
+        Ok(Self { paths, tuxedo_io })
     }
     
     pub fn is_available() -> bool {
@@ -555,7 +555,7 @@ impl RgbKeyboardControl {
     }
     
     pub fn set_zone_color(&self, zone_idx: usize, red: u8, green: u8, blue: u8) -> Result<()> {
-        if let Some(ref io) = self.lapsphere_io {
+        if let Some(ref io) = self.tuxedo_io {
             if io.get_interface() == HardwareInterface::Clevo {
                 if let Ok(_) = io.set_clevo_keyboard_color(zone_idx as u8, red, green, blue) {
                     // Also try to set via sysfs for consistency, but ignore errors if it fails
@@ -580,7 +580,7 @@ impl RgbKeyboardControl {
     }
     
     pub fn set_brightness(&self, brightness: u8) -> Result<()> {
-        if let Some(ref io) = self.lapsphere_io {
+        if let Some(ref io) = self.tuxedo_io {
             if io.get_interface() == HardwareInterface::Clevo {
                 let _ = io.set_clevo_keyboard_brightness(brightness);
             }
@@ -609,20 +609,20 @@ impl RgbKeyboardControl {
         match mode {
             KeyboardMode::SingleColor { r, g, b, brightness } => {
                 // For Clevo, explicitly set mode 0 (Custom/Static)
-                if let Some(ref io) = self.lapsphere_io {
+                if let Some(ref io) = self.tuxedo_io {
                     if io.get_interface() == HardwareInterface::Clevo {
                         let _ = io.set_clevo_keyboard_mode(0x00000000);
                     }
                 }
 
-                let num_zones = self.paths.len().max(if self.lapsphere_io.is_some() { 3 } else { 0 });
+                let num_zones = self.paths.len().max(if self.tuxedo_io.is_some() { 3 } else { 0 });
                 for i in 0..num_zones {
                     let _ = self.set_zone_color(i, *r, *g, *b);
                 }
                 self.set_brightness(*brightness)?;
             }
             KeyboardMode::MultipleZones { zones, brightness } => {
-                if let Some(ref io) = self.lapsphere_io {
+                if let Some(ref io) = self.tuxedo_io {
                     if io.get_interface() == HardwareInterface::Clevo {
                         let _ = io.set_clevo_keyboard_mode(0x00000000);
                     }
@@ -634,7 +634,7 @@ impl RgbKeyboardControl {
                 self.set_brightness(*brightness)?;
             }
             KeyboardMode::Breathe { r, g, b, brightness, speed } => {
-                if let Some(ref io) = self.lapsphere_io {
+                if let Some(ref io) = self.tuxedo_io {
                     if io.get_interface() == HardwareInterface::Clevo {
                         let _ = io.set_clevo_keyboard_mode(0x00000001); // Mode 1
                     }
@@ -648,7 +648,7 @@ impl RgbKeyboardControl {
                 log::info!("Set breathing mode with speed {}", speed);
             }
             KeyboardMode::Wave { brightness, speed } => {
-                if let Some(ref io) = self.lapsphere_io {
+                if let Some(ref io) = self.tuxedo_io {
                     if io.get_interface() == HardwareInterface::Clevo {
                         let _ = io.set_clevo_keyboard_mode(0x00000007); // Mode 7
                     }
@@ -659,7 +659,7 @@ impl RgbKeyboardControl {
                 log::info!("Set wave mode with speed {}", speed);
             }
             KeyboardMode::Cycle { brightness, speed } => {
-                if let Some(ref io) = self.lapsphere_io {
+                if let Some(ref io) = self.tuxedo_io {
                     if io.get_interface() == HardwareInterface::Clevo {
                         let _ = io.set_clevo_keyboard_mode(0x00000002); // Mode 2
                     }
@@ -670,7 +670,7 @@ impl RgbKeyboardControl {
                 log::info!("Set cycle mode with speed {}", speed);
             }
             KeyboardMode::Dance { brightness, speed } => {
-                if let Some(ref io) = self.lapsphere_io {
+                if let Some(ref io) = self.tuxedo_io {
                     if io.get_interface() == HardwareInterface::Clevo {
                         let _ = io.set_clevo_keyboard_mode(0x00000003); // Mode 3
                     }
@@ -681,7 +681,7 @@ impl RgbKeyboardControl {
                 log::info!("Set dance mode with speed {}", speed);
             }
             KeyboardMode::Flash { r, g, b, brightness, speed } => {
-                if let Some(ref io) = self.lapsphere_io {
+                if let Some(ref io) = self.tuxedo_io {
                     if io.get_interface() == HardwareInterface::Clevo {
                         let _ = io.set_clevo_keyboard_mode(0x00000004); // Mode 4
                     }
@@ -695,7 +695,7 @@ impl RgbKeyboardControl {
                 log::info!("Set flash mode with speed {}", speed);
             }
             KeyboardMode::RandomColor { brightness, speed } => {
-                if let Some(ref io) = self.lapsphere_io {
+                if let Some(ref io) = self.tuxedo_io {
                     if io.get_interface() == HardwareInterface::Clevo {
                         let _ = io.set_clevo_keyboard_mode(0x00000005); // Mode 5
                     }
@@ -706,7 +706,7 @@ impl RgbKeyboardControl {
                 log::info!("Set random color mode with speed {}", speed);
             }
             KeyboardMode::Tempo { brightness, speed } => {
-                if let Some(ref io) = self.lapsphere_io {
+                if let Some(ref io) = self.tuxedo_io {
                     if io.get_interface() == HardwareInterface::Clevo {
                         let _ = io.set_clevo_keyboard_mode(0x00000006); // Mode 6
                     }
