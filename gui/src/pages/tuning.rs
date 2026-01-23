@@ -21,7 +21,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>,
     TopBottomPanel::top("tuning_header").show_inside(ui, |ui| {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            ui.heading(format!("Editing: {}", profile_name));
+            ui.label(RichText::new(format!("Editing: {}", profile_name)).strong());
             
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Save button - always visible
@@ -63,7 +63,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>,
             // Performance Profile (Separate section)
             let tdp_profiles = state.available_tdp_profiles.clone();
             if !tdp_profiles.is_empty() {
-                ui.heading("🚀 Performance Profile");
+                ui.label(RichText::new("🚀 Performance Profile").strong());
                 ui.add_space(8.0);
                 draw_performance_profile_tuning(ui, &mut state.config.profiles[idx], &tdp_profiles);
                 ui.add_space(16.0);
@@ -83,7 +83,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>,
                     hw_update_tx.clone(),
                 );
             } else {
-                ui.heading("🖥️ CPU Tuning");
+                ui.label(RichText::new("🖥️ CPU Tuning").strong());
                 ui.add_space(8.0);
                 ui.label("CPU information not available");
             }
@@ -167,7 +167,7 @@ fn draw_cpu_tuning(
     dbus_client: Option<&DbusClient>,
     hw_update_tx: tokio::sync::mpsc::UnboundedSender<crate::app::HardwareUpdate>,
 ) {
-    ui.heading("🖥️ CPU Tuning");
+    ui.label(RichText::new("🖥️ CPU Tuning").strong());
     ui.add_space(8.0);
     
     let caps = match cpu_caps {
@@ -396,7 +396,7 @@ fn draw_gpu_tuning(
     hw_update_tx: tokio::sync::mpsc::UnboundedSender<crate::app::HardwareUpdate>,
 ) {
     let profile = &mut state.config.profiles[profile_idx];
-    ui.heading("GPU Tuning");
+    ui.label(RichText::new("GPU Tuning").strong());
     ui.add_space(8.0);
 
     let is_nvidia = gpu_info.iter().any(|g| g.name.contains("NVIDIA"));
@@ -573,7 +573,7 @@ fn draw_keyboard_tuning(
     caps: Option<&KeyboardCapabilities>,
     dbus_client: Option<&DbusClient>,
 ) {
-    ui.heading("⌨️ Keyboard Backlight");
+    ui.label(RichText::new("⌨️ Keyboard Backlight").strong());
     ui.add_space(8.0);
     
     let caps = match caps {
@@ -806,7 +806,7 @@ fn draw_keyboard_tuning(
 }
 
 fn draw_screen_tuning(ui: &mut Ui, profile: &mut Profile) {
-    ui.heading("🖥️ Screen");
+    ui.label(RichText::new("🖥️ Screen").strong());
     ui.add_space(8.0);
     
     ui.checkbox(&mut profile.screen_settings.system_control, "Use system brightness control");
@@ -821,7 +821,7 @@ fn draw_screen_tuning(ui: &mut Ui, profile: &mut Profile) {
 }
 
 fn draw_fan_tuning(ui: &mut Ui, profile: &mut Profile, fan_count: usize) {
-    ui.heading("💨 Fan Control");
+    ui.label(RichText::new("💨 Fan Control").strong());
     ui.add_space(8.0);
     
     ui.checkbox(&mut profile.fan_settings.control_enabled, "Enable custom fan curves");

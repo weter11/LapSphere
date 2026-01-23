@@ -85,7 +85,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState) {
 }
 
 fn draw_memory_info(ui: &mut Ui, state: &AppState) {
-    CollapsingHeader::new(RichText::new("🧠 Memory (RAM)").heading())
+    CollapsingHeader::new(RichText::new("🧠 Memory (RAM)").strong())
         .default_open(true)
         .show(ui, |ui| {
             if let Some(ref mem) = state.memory_info {
@@ -122,7 +122,7 @@ fn draw_memory_info(ui: &mut Ui, state: &AppState) {
 }
 
 fn draw_system_info(ui: &mut Ui, state: &AppState) {
-    CollapsingHeader::new(RichText::new("📊 System Information").heading())
+    CollapsingHeader::new(RichText::new("📊 System Information").strong())
         .default_open(true)  // Changed to true
         .show(ui, |ui| {
             if let Some(ref info) = state.system_info {
@@ -151,7 +151,7 @@ fn draw_system_info(ui: &mut Ui, state: &AppState) {
 }
 
 fn draw_cpu_info(ui: &mut Ui, state: &AppState) {
-    CollapsingHeader::new(RichText::new("🖥️ CPU").heading())
+    CollapsingHeader::new(RichText::new("🖥️ CPU").strong())
         .default_open(true)
         .show(ui, |ui| {
             if let Some(ref cpu) = state.cpu_info {
@@ -308,7 +308,7 @@ fn draw_cpu_info(ui: &mut Ui, state: &AppState) {
 }
 
 fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
-    CollapsingHeader::new(RichText::new("🎮 GPU").heading())
+    CollapsingHeader::new(RichText::new("🎮 GPU").strong())
         .default_open(true)  // Changed to true
         .show(ui, |ui| {
             if !state.gpu_info.is_empty() {
@@ -394,7 +394,7 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
 }
 
 fn draw_battery_info(ui: &mut Ui, state: &AppState) {
-    CollapsingHeader::new(RichText::new("🔋 Battery").heading())
+    CollapsingHeader::new(RichText::new("🔋 Battery").strong())
         .default_open(true)
         .show(ui, |ui| {
             if let Some(ref battery) = state.battery_info {
@@ -455,7 +455,7 @@ fn draw_battery_info(ui: &mut Ui, state: &AppState) {
 }
 
 fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
-    CollapsingHeader::new(RichText::new("📶 WiFi").heading())
+    CollapsingHeader::new(RichText::new("📶 WiFi").strong())
         .default_open(true)
         .show(ui, |ui| {
             if !state.wifi_info.is_empty() {
@@ -594,7 +594,7 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
 }
 
 fn draw_storage_info(ui: &mut Ui, state: &AppState) {
-    CollapsingHeader::new(RichText::new("💾 Storage").heading())
+    CollapsingHeader::new(RichText::new("💾 Storage").strong())
         .default_open(true)
         .show(ui, |ui| {
             if !state.storage_device_info.is_empty() {
@@ -686,7 +686,7 @@ fn draw_storage_info(ui: &mut Ui, state: &AppState) {
 }
 
 fn draw_fan_info(ui: &mut Ui, state: &AppState) {
-    CollapsingHeader::new(RichText::new("💨 Fans").heading())
+    CollapsingHeader::new(RichText::new("💨 Fans").strong())
         .default_open(true)
         .show(ui, |ui| {
             if !state.fan_info.is_empty() {

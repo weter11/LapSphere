@@ -33,7 +33,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTheme, ctx: 
 
 fn draw_main_settings(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTheme, ctx: &Context, dbus_client: Option<&DbusClient>) {
     // Appearance
-    ui.label(RichText::new("Appearance").strong().heading());
+    ui.label(RichText::new("Appearance").strong());
     ui.add_space(8.0);
     
     ui.horizontal(|ui| {
@@ -68,7 +68,7 @@ fn draw_main_settings(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTh
     ui.add_space(16.0);
     
     // Font Size
-    ui.label(RichText::new("Font Size").strong().heading());
+    ui.label(RichText::new("Font Size").strong());
     ui.add_space(8.0);
     
     ui.horizontal(|ui| {
@@ -102,7 +102,7 @@ fn draw_main_settings(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTh
     ui.add_space(16.0);
     
     // Startup
-    ui.label(RichText::new("Startup").strong().heading());
+    ui.label(RichText::new("Startup").strong());
     ui.add_space(8.0);
     
     if ui.checkbox(&mut state.config.start_minimized, "Start minimized").changed() {
@@ -135,7 +135,7 @@ fn draw_main_settings(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTh
 
 fn draw_stats_configuration(ui: &mut Ui, state: &mut AppState) {
     // Statistics Page Layout
-    ui.label(RichText::new("Statistics Page Layout").strong().heading());
+    ui.label(RichText::new("Statistics Page Layout").strong());
     ui.add_space(8.0);
     
     if ui.checkbox(&mut state.config.statistics_sections.show_system_info, "Show system info").changed() {
@@ -167,7 +167,7 @@ fn draw_stats_configuration(ui: &mut Ui, state: &mut AppState) {
     ui.separator();
     ui.add_space(16.0);
 
-    ui.label(RichText::new("Section Order").strong().heading());
+    ui.label(RichText::new("Section Order").strong());
     ui.add_space(8.0);
 
     let normalized = normalize_section_order(&state.config.statistics_sections.section_order);
@@ -204,7 +204,7 @@ fn draw_stats_configuration(ui: &mut Ui, state: &mut AppState) {
     ui.add_space(16.0);
     
     // Polling Rates
-    ui.label(RichText::new("Polling Rates").strong().heading());
+    ui.label(RichText::new("Polling Rates").strong());
     ui.add_space(8.0);
     ui.label(RichText::new("How often to update each section (in seconds)").small().italics());
     ui.add_space(6.0);
@@ -316,7 +316,7 @@ fn draw_stats_configuration(ui: &mut Ui, state: &mut AppState) {
 fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
     let interface_label = hardware_interface_label(state.hardware_interface.as_deref());
 
-    ui.label(RichText::new("System").strong().heading());
+    ui.label(RichText::new("System").strong());
     ui.add_space(8.0);
     if let Some(info) = &state.system_info {
         Grid::new("hardware_system_grid")
@@ -360,7 +360,7 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
     ui.separator();
     ui.add_space(16.0);
 
-    ui.label(RichText::new("Keyboard").strong().heading());
+    ui.label(RichText::new("Keyboard").strong());
     ui.add_space(8.0);
     if let Some(caps) = &state.keyboard_capabilities {
         Grid::new("hardware_keyboard_grid")
@@ -396,7 +396,7 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
     ui.separator();
     ui.add_space(16.0);
 
-    ui.label(RichText::new("CPU").strong().heading());
+    ui.label(RichText::new("CPU").strong());
     ui.add_space(8.0);
     if let Some(cpu) = &state.cpu_info {
         Grid::new("hardware_cpu_grid")
@@ -436,7 +436,7 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
     ui.separator();
     ui.add_space(16.0);
 
-    ui.label(RichText::new("Memory").strong().heading());
+    ui.label(RichText::new("Memory").strong());
     ui.add_space(8.0);
     if let Some(memory) = &state.memory_info {
         Grid::new("hardware_memory_grid")
@@ -462,7 +462,7 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
     ui.separator();
     ui.add_space(16.0);
 
-    ui.label(RichText::new("GPU").strong().heading());
+    ui.label(RichText::new("GPU").strong());
     ui.add_space(8.0);
     if state.gpu_info.is_empty() {
         ui.label("GPU information unavailable.");
@@ -489,7 +489,7 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
     ui.separator();
     ui.add_space(16.0);
 
-    ui.label(RichText::new("Storage").strong().heading());
+    ui.label(RichText::new("Storage").strong());
     ui.add_space(8.0);
     if state.storage_device_info.is_empty() {
         ui.label("Storage information unavailable.");
@@ -516,7 +516,7 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
     ui.separator();
     ui.add_space(16.0);
 
-    ui.label(RichText::new("WiFi").strong().heading());
+    ui.label(RichText::new("WiFi").strong());
     ui.add_space(8.0);
     if state.wifi_info.is_empty() {
         ui.label("WiFi information unavailable.");
@@ -576,7 +576,7 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
     ui.separator();
     ui.add_space(16.0);
 
-    ui.label(RichText::new("Battery").strong().heading());
+    ui.label(RichText::new("Battery").strong());
     ui.add_space(8.0);
     if let Some(battery) = &state.battery_info {
         Grid::new("hardware_battery_grid")
@@ -604,7 +604,7 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
     ui.separator();
     ui.add_space(16.0);
 
-    ui.label(RichText::new("Fans").strong().heading());
+    ui.label(RichText::new("Fans").strong());
     ui.add_space(8.0);
     let fan_mode = state
         .current_profile()
@@ -634,7 +634,7 @@ fn hardware_interface_label(interface: Option<&str>) -> &'static str {
 }
 
 fn draw_battery_settings(ui: &mut Ui, state: &mut AppState) {
-    ui.heading("🔋 Battery Charge Control");
+    ui.label(RichText::new("🔋 Battery Charge Control").strong());
     ui.add_space(8.0);
 
     if ui.checkbox(&mut state.config.battery_settings.control_enabled, "Enable charge thresholds").changed() {
@@ -717,7 +717,7 @@ fn draw_battery_settings(ui: &mut Ui, state: &mut AppState) {
 
 
 fn draw_prime_profile_settings(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>) {
-    ui.heading("🎮 NVIDIA Prime Profile");
+    ui.label(RichText::new("🎮 NVIDIA Prime Profile").strong());
     ui.add_space(8.0);
     
     // Check if NVIDIA GPU is present
