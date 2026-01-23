@@ -502,14 +502,16 @@ impl LapSphereApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(12.0);
                     ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;  // Tighter spacing between rows
+                        
                         let time_str = Local::now().format("%H:%M:%S").to_string();
-                        ui.label(RichText::new(time_str).monospace().small());
+                        ui.label(RichText::new(time_str).monospace().size(13.0));  // Increased from small()
 
                         let date_str = Local::now().format("%Y-%m-%d").to_string();
-                        ui.label(RichText::new(date_str).monospace().small());
+                        ui.label(RichText::new(date_str).monospace().size(13.0));  // Increased from small()
 
                         // Current profile indicator
-                        ui.label(RichText::new(format!("Profile: {}", self.state.config.current_profile)).small());
+                        ui.label(RichText::new(format!("Profile: {}", self.state.config.current_profile)).size(13.0));  // Increased from small()
                     });
                 });
             });
