@@ -5,8 +5,8 @@ lapsphere (0.1.0-1) noble; urgency=medium
   * egui-based modern interface
   * DBus daemon architecture with GUI monitoring
   * CPU frequency and governor control
-  * AMD pstate status management
+  * AMD/Intel pstate status management
   * Fan curve configuration
   * Profile management system
 
- -- LapSphere Team <dev@example.com>  Sat, 14 Dec 2025 00:00:00 +0000
+ -- LapSphere Team <hungaryam@gmail.com>  Thursday, 22 Jan 2025 00:00:00 +0000
