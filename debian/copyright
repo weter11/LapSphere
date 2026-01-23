@@ -1,7 +1,7 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: lapsphere
-Upstream-Contact: LapSphere Team <dev@example.com>
-Source: https://github.com/LapSphere/lapsphere
+Upstream-Contact: LapSphere Team <hungaryam@gmail.com>
+Source: https://github.com/weter11/lapsphere
 
 Files: *
 Copyright: 2025-2026 LapSphere Team
