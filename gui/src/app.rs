@@ -378,6 +378,13 @@ impl LapSphereApp {
         let theme = LapSphereTheme::new(&state.config.theme, cc.egui_ctx.style().visuals.dark_mode);
         theme.apply_with_font_size(&cc.egui_ctx, &state.config.font_size);
 
+        // Apply current profile to daemon on startup to ensure background jobs are active
+        if let Some(profile) = state.current_profile().cloned() {
+            if let Some(ref client) = dbus_client {
+                let _ = client.apply_profile(profile);
+            }
+        }
+
         let system_tray = match SystemTray::new(&state.config.profiles, &state.config.current_profile) {
             Ok(tray) => Some(tray),
             Err(e) => {
@@ -522,6 +529,9 @@ impl LapSphereApp {
                             ui.selectable_value(&mut self.state.current_page, Page::Profiles, "📋 Profiles");
                             ui.selectable_value(&mut self.state.current_page, Page::Tuning, "🔧 Tuning");
                             ui.selectable_value(&mut self.state.current_page, Page::Settings, "⚙ Settings");
+                            if ui.button("❓ Help").clicked() {
+                                self.shortcuts.toggle_help();
+                            }
                         });
                     },
                 );

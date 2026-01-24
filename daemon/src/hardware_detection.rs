@@ -1254,13 +1254,35 @@ fn get_nvidia_voltage(index: u32) -> Option<f32> {
     let path_lock = crate::NVIDIA_SMI_LEGACY_PATH.lock().unwrap();
     if let Some(ref path) = *path_lock {
         if Path::new(path).exists() {
+            // Try -q -d VOLTAGE format first as requested by user
+            if let Ok(output) = std::process::Command::new(path)
+                .args(["-i", &index.to_string(), "-q", "-d", "VOLTAGE"])
+                .output()
+            {
+                if output.status.success() {
+                    let s = String::from_utf8_lossy(&output.stdout);
+                    for line in s.lines() {
+                        if line.contains("Graphics") && line.contains(':') {
+                            if let Some(val_part) = line.split(':').nth(1) {
+                                let parts: Vec<&str> = val_part.trim().split_whitespace().collect();
+                                if let Some(num_str) = parts.get(0) {
+                                    if let Ok(val) = num_str.parse::<f32>() {
+                                        return Some(val / 1000.0);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Fallback to query-gpu
             if let Ok(output) = std::process::Command::new(path)
                 .args(["-i", &index.to_string(), "--query-gpu=voltage.graphics", "--format=csv,noheader,nounits"])
                 .output()
             {
                 if output.status.success() {
                     let s = String::from_utf8_lossy(&output.stdout);
-                    // nvidia-smi usually returns mV
                     return s.trim().parse::<f32>().ok().map(|v| v / 1000.0);
                 }
             }

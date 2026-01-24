@@ -9,6 +9,10 @@ impl KeyboardShortcuts {
     pub fn new() -> Self {
         Self { show_help: false }
     }
+
+    pub fn toggle_help(&mut self) {
+        self.show_help = !self.show_help;
+    }
     
     pub fn handle_shortcuts(&mut self, ctx: &Context, state: &mut AppState) -> bool {
         let mut handled = false;
@@ -24,6 +28,7 @@ impl KeyboardShortcuts {
             
             // F1 - Show help
             if i.key_pressed(Key::F1) {
+                log::info!("F1 key pressed, toggling help");
                 self.show_help = !self.show_help;
                 handled = true;
             }
