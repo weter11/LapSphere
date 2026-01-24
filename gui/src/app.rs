@@ -1,5 +1,5 @@
 use chrono::Local;
-use egui::{Context, CentralPanel, TopBottomPanel, RichText};
+use egui::{Align, CentralPanel, Context, FontFamily, FontId, Layout, RichText, TextStyle, TopBottomPanel};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -470,31 +470,52 @@ impl LapSphereApp {
     
     fn draw_top_bar(&mut self, ctx: &Context) {
         TopBottomPanel::top("top_bar").show(ctx, |ui| {
-            ui.add_space(8.0);
+            ui.add_space(6.0);
             ui.horizontal(|ui| {
-                ui.add_space(12.0);
-                
-                // Navigation tabs
-                ui.selectable_value(&mut self.state.current_page, Page::Statistics, "📊 Statistics");
-                ui.selectable_value(&mut self.state.current_page, Page::Profiles, "📋 Profiles");
-                ui.selectable_value(&mut self.state.current_page, Page::Tuning, "🔧 Tuning");
-                ui.selectable_value(&mut self.state.current_page, Page::Settings, "⚙️ Settings");
-                
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.add_space(12.0);
-                    ui.vertical(|ui| {
-                        let time_str = Local::now().format("%H:%M:%S").to_string();
-                        ui.label(RichText::new(time_str).monospace().small());
+                ui.add_space(8.0);
 
-                        let date_str = Local::now().format("%Y-%m-%d").to_string();
-                        ui.label(RichText::new(date_str).monospace().small());
+                let time_str = Local::now().format("%H:%M:%S").to_string();
+                let date_str = Local::now().format("%Y-%m-%d").to_string();
+                let profile_str = format!("Profile: {}", self.state.config.current_profile);
+                let base_size = TextStyle::Small.resolve(ui.style()).size;
+                let top_bar_size = base_size + 1.0;
+                let mono_font = FontId::new(top_bar_size, FontFamily::Monospace);
+                let text_font = FontId::new(top_bar_size, FontFamily::Proportional);
+                let text_color = ui.visuals().text_color();
+                let right_width = ui.fonts(|fonts| {
+                    let time_width = fonts.layout_no_wrap(time_str.clone(), mono_font.clone(), text_color).size().x;
+                    let date_width = fonts.layout_no_wrap(date_str.clone(), mono_font.clone(), text_color).size().x;
+                    let profile_width = fonts.layout_no_wrap(profile_str.clone(), text_font.clone(), text_color).size().x;
+                    time_width.max(date_width).max(profile_width)
+                }) + 16.0;
+                let tabs_width = (ui.available_width() - right_width).max(0.0);
 
-                        // Current profile indicator
-                        ui.label(RichText::new(format!("Profile: {}", self.state.config.current_profile)).small());
-                    });
-                });
+                ui.allocate_ui_with_layout(
+                    egui::vec2(tabs_width, ui.available_height()),
+                    Layout::left_to_right(Align::Center).with_main_align(Align::Center),
+                    |ui| {
+                        // Navigation tabs
+                        ui.selectable_value(&mut self.state.current_page, Page::Statistics, "📊 Statistics");
+                        ui.selectable_value(&mut self.state.current_page, Page::Profiles, "📋 Profiles");
+                        ui.selectable_value(&mut self.state.current_page, Page::Tuning, "🔧 Tuning");
+                        ui.selectable_value(&mut self.state.current_page, Page::Settings, "⚙ Settings");
+                    },
+                );
+
+                ui.allocate_ui_with_layout(
+                    egui::vec2(right_width, ui.available_height()),
+                    Layout::right_to_left(Align::Center),
+                    |ui| {
+                        ui.add_space(8.0);
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new(time_str).font(mono_font.clone()));
+                            ui.label(RichText::new(date_str).font(mono_font.clone()));
+                            ui.label(RichText::new(profile_str).font(text_font.clone()));
+                        });
+                    },
+                );
             });
-            ui.add_space(8.0);
+            ui.add_space(6.0);
         });
         
         // Status message bar (if any)

@@ -37,7 +37,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState) {
     ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            ui.add_space(8.0);
+            ui.add_space(6.0);
 
             let order = normalize_section_order(&state.config.statistics_sections.section_order);
             if order != state.config.statistics_sections.section_order {
@@ -48,35 +48,35 @@ pub fn draw(ui: &mut Ui, state: &mut AppState) {
                 match section.as_str() {
                     "SystemInfo" if state.config.statistics_sections.show_system_info => {
                         draw_system_info(ui, state);
-                        ui.add_space(12.0);
+                        ui.add_space(6.0);
                     }
                     "CPU" if state.config.statistics_sections.show_cpu => {
                         draw_cpu_info(ui, state);
-                        ui.add_space(12.0);
+                        ui.add_space(6.0);
                     }
                     "Memory" if state.config.statistics_sections.show_memory => {
                         draw_memory_info(ui, state);
-                        ui.add_space(12.0);
+                        ui.add_space(6.0);
                     }
                     "GPU" if state.config.statistics_sections.show_gpu => {
                         draw_gpu_info(ui, state);
-                        ui.add_space(12.0);
+                        ui.add_space(6.0);
                     }
                     "Battery" if state.config.statistics_sections.show_battery => {
                         draw_battery_info(ui, state);
-                        ui.add_space(12.0);
+                        ui.add_space(6.0);
                     }
                     "WiFi" if state.config.statistics_sections.show_wifi => {
                         draw_wifi_info(ui, state);
-                        ui.add_space(12.0);
+                        ui.add_space(6.0);
                     }
                     "Storage" if state.config.statistics_sections.show_storage => {
                         draw_storage_info(ui, state);
-                        ui.add_space(12.0);
+                        ui.add_space(6.0);
                     }
                     "Fans" if state.config.statistics_sections.show_fans => {
                         draw_fan_info(ui, state);
-                        ui.add_space(12.0);
+                        ui.add_space(6.0);
                     }
                     _ => {}
                 }
@@ -85,13 +85,13 @@ pub fn draw(ui: &mut Ui, state: &mut AppState) {
 }
 
 fn draw_memory_info(ui: &mut Ui, state: &AppState) {
-    CollapsingHeader::new(RichText::new("🧠 Memory (RAM)").heading())
+    CollapsingHeader::new(RichText::new("🐏 Memory (RAM)").heading())
         .default_open(true)
         .show(ui, |ui| {
             if let Some(ref mem) = state.memory_info {
                 Grid::new("memory_grid")
                     .num_columns(2)
-                    .spacing([40.0, 8.0])
+                    .spacing([36.0, 6.0])
                     .striped(true)
                     .show(ui, |ui| {
                         ui.label("Usage:");
@@ -128,7 +128,7 @@ fn draw_system_info(ui: &mut Ui, state: &AppState) {
             if let Some(ref info) = state.system_info {
                 Grid::new("system_grid")
                     .num_columns(2)
-                    .spacing([40.0, 8.0])
+                    .spacing([36.0, 6.0])
                     .striped(true)
                     .show(ui, |ui| {
                         ui.label("Notebook Model:");
@@ -151,13 +151,13 @@ fn draw_system_info(ui: &mut Ui, state: &AppState) {
 }
 
 fn draw_cpu_info(ui: &mut Ui, state: &AppState) {
-    CollapsingHeader::new(RichText::new("🖥️ CPU").heading())
+    CollapsingHeader::new(RichText::new("🖥 CPU").heading())
         .default_open(true)
         .show(ui, |ui| {
             if let Some(ref cpu) = state.cpu_info {
                 Grid::new("cpu_grid")
                     .num_columns(2)
-                    .spacing([40.0, 8.0])
+                    .spacing([36.0, 6.0])
                     .striped(true)
                     .show(ui, |ui| {
                         ui.label("Processor:");
@@ -268,7 +268,7 @@ fn draw_cpu_info(ui: &mut Ui, state: &AppState) {
                     });
                 
                 // Per-core details (still collapsed by default)
-                ui.add_space(8.0);
+                ui.add_space(6.0);
                 CollapsingHeader::new(format!("Core Details ({} cores)", cpu.cores.len()))
                     .default_open(false)
                     .show(ui, |ui| {
@@ -321,7 +321,7 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                     ui.label(RichText::new(&gpu.name).strong());
                     Grid::new(format!("gpu_grid_{}", idx))
                         .num_columns(2)
-                        .spacing([40.0, 6.0])
+                        .spacing([36.0, 6.0])
                         .show(ui, |ui| {
                             ui.label("Type:");
                             ui.label(if gpu.gpu_type == lapsphere_common::types::GpuType::Integrated {
@@ -400,7 +400,7 @@ fn draw_battery_info(ui: &mut Ui, state: &AppState) {
             if let Some(ref battery) = state.battery_info {
                 Grid::new("battery_grid")
                     .num_columns(2)
-                    .spacing([40.0, 8.0])
+                    .spacing([36.0, 6.0])
                     .striped(true)
                     .show(ui, |ui| {
                         ui.label("Capacity:");
@@ -585,7 +585,7 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
                             ui.end_row();
                         });
                     
-                    ui.add_space(8.0);
+                    ui.add_space(6.0);
                 }
             } else {
                 ui.label("No WiFi interface detected");
@@ -602,7 +602,7 @@ fn draw_storage_info(ui: &mut Ui, state: &AppState) {
                     ui.label(RichText::new(&device.model).strong());
                     Grid::new(format!("storage_device_grid_{}", device.device))
                         .num_columns(2)
-                        .spacing([40.0, 8.0])
+                        .spacing([36.0, 6.0])
                         .striped(true)
                         .show(ui, |ui| {
                             ui.label("Device:");
@@ -646,7 +646,7 @@ fn draw_storage_info(ui: &mut Ui, state: &AppState) {
                                 ui.end_row();
                             }
                         });
-                    ui.add_space(8.0);
+                    ui.add_space(6.0);
                 }
             } else {
                 ui.label("No storage devices detected");
@@ -658,7 +658,7 @@ fn draw_storage_info(ui: &mut Ui, state: &AppState) {
                     ui.label(RichText::new(&mount.mount_point).strong());
                     Grid::new(format!("mount_grid_{}", mount.mount_point))
                         .num_columns(2)
-                        .spacing([40.0, 8.0])
+                        .spacing([36.0, 6.0])
                         .striped(true)
                         .show(ui, |ui| {
                             ui.label("Usage:");
@@ -679,7 +679,7 @@ fn draw_storage_info(ui: &mut Ui, state: &AppState) {
                             ui.label(&mount.filesystem_type);
                             ui.end_row();
                         });
-                    ui.add_space(8.0);
+                    ui.add_space(6.0);
                 }
             }
         });
@@ -692,7 +692,7 @@ fn draw_fan_info(ui: &mut Ui, state: &AppState) {
             if !state.fan_info.is_empty() {
                 Grid::new("fans_grid")
                     .num_columns(3)
-                    .spacing([40.0, 8.0])
+                    .spacing([36.0, 6.0])
                     .striped(true)
                     .show(ui, |ui| {
                         ui.label(RichText::new("Fan").strong());

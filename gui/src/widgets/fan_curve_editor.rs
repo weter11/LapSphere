@@ -22,17 +22,17 @@ impl FanCurveEditor {
     pub fn show(&mut self, ui: &mut Ui) {
         ui.vertical(|ui| {
             ui.heading(format!("Fan {} Curve", self.fan_id));
-            ui.add_space(8.0);
+            ui.add_space(6.0);
             
             // Graph with dragging
             self.draw_graph(ui);
             
-            ui.add_space(12.0);
+            ui.add_space(10.0);
             
             // Points editor
             self.draw_points_editor(ui);
             
-            ui.add_space(12.0);
+            ui.add_space(10.0);
             
             // Controls
             ui.horizontal(|ui| {
@@ -261,7 +261,7 @@ impl FanCurveEditor {
                     
                     // Delete button for each point (only if more than 2 points)
                     if self.curve.points.len() > 2 {
-                        if ui.small_button("🗑️").clicked() {
+                        if ui.small_button("🗑").clicked() {
                             to_remove = Some(idx);
                         }
                     } else {

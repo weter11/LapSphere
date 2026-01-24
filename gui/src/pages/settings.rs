@@ -8,7 +8,7 @@ const STORAGE_POLL_MIN_SECONDS: f32 = 0.5;
 const STORAGE_POLL_MAX_SECONDS: f32 = 10.0;
 
 pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTheme, ctx: &Context, dbus_client: Option<&DbusClient>) {
-    ui.add_space(8.0);
+    ui.add_space(6.0);
 
     ui.horizontal(|ui| {
         ui.selectable_value(&mut state.settings_tab, SettingsTab::Main, "Main");
@@ -16,9 +16,9 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTheme, ctx: 
         ui.selectable_value(&mut state.settings_tab, SettingsTab::Hardware, "Hardware info");
     });
 
-    ui.add_space(8.0);
+    ui.add_space(6.0);
     ui.separator();
-    ui.add_space(8.0);
+    ui.add_space(6.0);
 
     ScrollArea::vertical()
         .auto_shrink([false, false])
@@ -34,7 +34,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTheme, ctx: 
 fn draw_main_settings(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTheme, ctx: &Context, dbus_client: Option<&DbusClient>) {
     // Appearance
     ui.label(RichText::new("Appearance").strong().heading());
-    ui.add_space(8.0);
+    ui.add_space(6.0);
     
     ui.horizontal(|ui| {
         ui.label("Theme:");
@@ -63,13 +63,13 @@ fn draw_main_settings(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTh
         }
     });
     
-    ui.add_space(16.0);
+    ui.add_space(12.0);
     ui.separator();
-    ui.add_space(16.0);
+    ui.add_space(12.0);
     
     // Font Size
     ui.label(RichText::new("Font Size").strong().heading());
-    ui.add_space(8.0);
+    ui.add_space(6.0);
     
     ui.horizontal(|ui| {
         ui.label("UI Font Size:");
@@ -97,13 +97,13 @@ fn draw_main_settings(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTh
         }
     });
     
-    ui.add_space(16.0);
+    ui.add_space(12.0);
     ui.separator();
-    ui.add_space(16.0);
+    ui.add_space(12.0);
     
     // Startup
     ui.label(RichText::new("Startup").strong().heading());
-    ui.add_space(8.0);
+    ui.add_space(6.0);
     
     if ui.checkbox(&mut state.config.start_minimized, "Start minimized").changed() {
         let _ = state.save_settings();
@@ -119,12 +119,16 @@ fn draw_main_settings(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTh
     }
     
     
+    ui.add_space(12.0);
+    ui.separator();
+    ui.add_space(12.0);
+
     // Battery Charge Control
     draw_battery_settings(ui, state);
-    
-    ui.add_space(16.0);
+
+    ui.add_space(12.0);
     ui.separator();
-    ui.add_space(16.0);
+    ui.add_space(12.0);
     
     // NVIDIA Prime Profile
     draw_prime_profile_settings(ui, state, dbus_client);
@@ -133,7 +137,7 @@ fn draw_main_settings(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTh
 fn draw_stats_configuration(ui: &mut Ui, state: &mut AppState) {
     // Statistics Page Layout
     ui.label(RichText::new("Statistics Page Layout").strong().heading());
-    ui.add_space(8.0);
+    ui.add_space(6.0);
     
     if ui.checkbox(&mut state.config.statistics_sections.show_system_info, "Show system info").changed() {
         let _ = state.save_settings();
@@ -160,12 +164,12 @@ fn draw_stats_configuration(ui: &mut Ui, state: &mut AppState) {
         let _ = state.save_settings();
     }
     
-    ui.add_space(16.0);
+    ui.add_space(12.0);
     ui.separator();
-    ui.add_space(16.0);
+    ui.add_space(12.0);
 
     ui.label(RichText::new("Section Order").strong().heading());
-    ui.add_space(8.0);
+    ui.add_space(6.0);
 
     let normalized = normalize_section_order(&state.config.statistics_sections.section_order);
     if normalized != state.config.statistics_sections.section_order {
@@ -196,13 +200,13 @@ fn draw_stats_configuration(ui: &mut Ui, state: &mut AppState) {
         let _ = state.save_settings();
     }
     
-    ui.add_space(16.0);
+    ui.add_space(12.0);
     ui.separator();
-    ui.add_space(16.0);
+    ui.add_space(12.0);
     
     // Polling Rates
     ui.label(RichText::new("Polling Rates").strong().heading());
-    ui.add_space(8.0);
+    ui.add_space(6.0);
     ui.label(RichText::new("How often to update each section (in seconds)").small().italics());
     ui.add_space(6.0);
     
@@ -314,11 +318,11 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
     let interface_label = hardware_interface_label(state.hardware_interface.as_deref());
 
     ui.label(RichText::new("System").strong().heading());
-    ui.add_space(8.0);
+    ui.add_space(6.0);
     if let Some(info) = &state.system_info {
         Grid::new("hardware_system_grid")
             .num_columns(2)
-            .spacing([40.0, 8.0])
+            .spacing([36.0, 6.0])
             .striped(true)
             .show(ui, |ui| {
                 ui.label("Model:");
@@ -353,16 +357,16 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
         ui.label("System information unavailable.");
     }
 
-    ui.add_space(16.0);
+    ui.add_space(12.0);
     ui.separator();
-    ui.add_space(16.0);
+    ui.add_space(12.0);
 
     ui.label(RichText::new("Keyboard").strong().heading());
-    ui.add_space(8.0);
+    ui.add_space(6.0);
     if let Some(caps) = &state.keyboard_capabilities {
         Grid::new("hardware_keyboard_grid")
             .num_columns(2)
-            .spacing([40.0, 8.0])
+            .spacing([36.0, 6.0])
             .striped(true)
             .show(ui, |ui| {
                 ui.label("Detected Type:");
@@ -389,16 +393,16 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
         ui.label("Keyboard capabilities information unavailable.");
     }
 
-    ui.add_space(16.0);
+    ui.add_space(12.0);
     ui.separator();
-    ui.add_space(16.0);
+    ui.add_space(12.0);
 
     ui.label(RichText::new("CPU").strong().heading());
-    ui.add_space(8.0);
+    ui.add_space(6.0);
     if let Some(cpu) = &state.cpu_info {
         Grid::new("hardware_cpu_grid")
             .num_columns(2)
-            .spacing([40.0, 8.0])
+            .spacing([36.0, 6.0])
             .striped(true)
             .show(ui, |ui| {
                 ui.label("Model:");
@@ -429,16 +433,16 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
         ui.label("CPU information unavailable.");
     }
 
-    ui.add_space(16.0);
+    ui.add_space(12.0);
     ui.separator();
-    ui.add_space(16.0);
+    ui.add_space(12.0);
 
     ui.label(RichText::new("Memory").strong().heading());
-    ui.add_space(8.0);
+    ui.add_space(6.0);
     if let Some(memory) = &state.memory_info {
         Grid::new("hardware_memory_grid")
             .num_columns(2)
-            .spacing([40.0, 8.0])
+            .spacing([36.0, 6.0])
             .striped(true)
             .show(ui, |ui| {
                 ui.label("Total:");
@@ -461,12 +465,12 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
         ui.label("Memory information unavailable.");
     }
 
-    ui.add_space(16.0);
+    ui.add_space(12.0);
     ui.separator();
-    ui.add_space(16.0);
+    ui.add_space(12.0);
 
     ui.label(RichText::new("GPU").strong().heading());
-    ui.add_space(8.0);
+    ui.add_space(6.0);
     if state.gpu_info.is_empty() {
         ui.label("GPU information unavailable.");
     } else {
@@ -474,7 +478,7 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
             ui.label(RichText::new(&gpu.name).strong());
             Grid::new(format!("hardware_gpu_grid_{}", idx))
                 .num_columns(2)
-                .spacing([40.0, 8.0])
+                .spacing([36.0, 6.0])
                 .striped(true)
                 .show(ui, |ui| {
                     ui.label("Type:");
@@ -483,17 +487,17 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
                 });
 
             if idx + 1 < state.gpu_info.len() {
-                ui.add_space(8.0);
+                ui.add_space(6.0);
             }
         }
     }
 
-    ui.add_space(16.0);
+    ui.add_space(12.0);
     ui.separator();
-    ui.add_space(16.0);
+    ui.add_space(12.0);
 
     ui.label(RichText::new("Storage").strong().heading());
-    ui.add_space(8.0);
+    ui.add_space(6.0);
     if state.storage_device_info.is_empty() {
         ui.label("Storage information unavailable.");
     } else {
@@ -501,7 +505,7 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
             ui.label(RichText::new(&device.model).strong());
             Grid::new(format!("hardware_storage_grid_{}", idx))
                 .num_columns(2)
-                .spacing([40.0, 8.0])
+                .spacing([36.0, 6.0])
                 .striped(true)
                 .show(ui, |ui| {
                     ui.label("Size:");
@@ -510,17 +514,17 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
                 });
 
             if idx + 1 < state.storage_device_info.len() {
-                ui.add_space(8.0);
+                ui.add_space(6.0);
             }
         }
     }
 
-    ui.add_space(16.0);
+    ui.add_space(12.0);
     ui.separator();
-    ui.add_space(16.0);
+    ui.add_space(12.0);
 
     ui.label(RichText::new("WiFi").strong().heading());
-    ui.add_space(8.0);
+    ui.add_space(6.0);
     if state.wifi_info.is_empty() {
         ui.label("WiFi information unavailable.");
     } else {
@@ -528,7 +532,7 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
             ui.label(RichText::new(&wifi.interface).strong());
             Grid::new(format!("hardware_wifi_grid_{}", idx))
                 .num_columns(2)
-                .spacing([40.0, 8.0])
+                .spacing([36.0, 6.0])
                 .striped(true)
                 .show(ui, |ui| {
                     ui.label("Network controller:");
@@ -570,21 +574,21 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
                 });
 
             if idx + 1 < state.wifi_info.len() {
-                ui.add_space(8.0);
+                ui.add_space(6.0);
             }
         }
     }
 
-    ui.add_space(16.0);
+    ui.add_space(12.0);
     ui.separator();
-    ui.add_space(16.0);
+    ui.add_space(12.0);
 
     ui.label(RichText::new("Battery").strong().heading());
-    ui.add_space(8.0);
+    ui.add_space(6.0);
     if let Some(battery) = &state.battery_info {
         Grid::new("hardware_battery_grid")
             .num_columns(2)
-            .spacing([40.0, 8.0])
+            .spacing([36.0, 6.0])
             .striped(true)
             .show(ui, |ui| {
                 ui.label("Manufacturer:");
@@ -603,19 +607,19 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
         ui.label("Battery information unavailable.");
     }
 
-    ui.add_space(16.0);
+    ui.add_space(12.0);
     ui.separator();
-    ui.add_space(16.0);
+    ui.add_space(12.0);
 
     ui.label(RichText::new("Fans").strong().heading());
-    ui.add_space(8.0);
+    ui.add_space(6.0);
     let fan_mode = state
         .current_profile()
         .map(|profile| if profile.fan_settings.control_enabled { "Manual" } else { "Auto" })
         .unwrap_or("Auto");
     Grid::new("hardware_fans_grid")
         .num_columns(2)
-        .spacing([40.0, 8.0])
+        .spacing([36.0, 6.0])
         .striped(true)
         .show(ui, |ui| {
             ui.label("Mode:");
@@ -638,12 +642,12 @@ fn hardware_interface_label(interface: Option<&str>) -> &'static str {
 
 fn draw_battery_settings(ui: &mut Ui, state: &mut AppState) {
     ui.heading("🔋 Battery Charge Control");
-    ui.add_space(8.0);
+    ui.add_space(6.0);
 
     if ui.checkbox(&mut state.config.battery_settings.control_enabled, "Enable charge thresholds").changed() {
         let _ = state.save_settings();
     }
-    ui.add_space(6.0);
+    ui.add_space(4.0);
 
     if state.config.battery_settings.control_enabled {
         // Start Threshold
@@ -703,7 +707,7 @@ fn draw_battery_settings(ui: &mut Ui, state: &mut AppState) {
         }
 
         // Apply button
-        ui.add_space(6.0);
+        ui.add_space(4.0);
         if ui.button("💾 Apply Battery Settings").clicked() {
             // Create DBus client and apply settings
             if let Ok(client) = crate::dbus_client::DbusClient::new() {
@@ -721,7 +725,7 @@ fn draw_battery_settings(ui: &mut Ui, state: &mut AppState) {
 
 fn draw_prime_profile_settings(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>) {
     ui.heading("🎮 NVIDIA Prime Profile");
-    ui.add_space(8.0);
+    ui.add_space(6.0);
     
     // Check if NVIDIA GPU is present
     let has_nvidia = state.gpu_info.iter().any(|g| g.name.contains("NVIDIA"));
@@ -731,10 +735,10 @@ fn draw_prime_profile_settings(ui: &mut Ui, state: &mut AppState, dbus_client: O
         return;
     }
     
-    ui.label(RichText::new("⚠️ Changing the Prime profile requires a system restart to take effect.")
+    ui.label(RichText::new("⚠ Changing the Prime profile requires a system restart to take effect.")
         .small()
         .italics());
-    ui.add_space(6.0);
+    ui.add_space(4.0);
     
     // Get current saved profile from config
     let current_profile = state.current_profile()
@@ -771,7 +775,7 @@ fn draw_prime_profile_settings(ui: &mut Ui, state: &mut AppState, dbus_client: O
         state.pending_prime_profile = Some(selected_profile.clone());
     }
     
-    ui.add_space(8.0);
+    ui.add_space(6.0);
     
     // Description of each mode
     ui.vertical(|ui| {
@@ -789,7 +793,7 @@ fn draw_prime_profile_settings(ui: &mut Ui, state: &mut AppState, dbus_client: O
         }
     });
     
-    ui.add_space(12.0);
+    ui.add_space(6.0);
     
     // Show Apply button if selection differs from saved config
     if selected_profile != current_profile {
@@ -813,7 +817,7 @@ fn draw_prime_profile_settings(ui: &mut Ui, state: &mut AppState, dbus_client: O
             }
         });
         
-        ui.add_space(8.0);
+        ui.add_space(6.0);
         
         // Two-step restart confirmation
         if !state.restart_confirmation_pending {
@@ -837,7 +841,7 @@ fn draw_prime_profile_settings(ui: &mut Ui, state: &mut AppState, dbus_client: O
                 }
             });
             
-            ui.label(RichText::new("⚠️ This will immediately reboot your laptop! Save all work first.")
+            ui.label(RichText::new("⚠ This will immediately reboot your laptop! Save all work first.")
                 .small()
                 .color(egui::Color32::from_rgb(255, 100, 100)));
         }

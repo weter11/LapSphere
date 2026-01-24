@@ -59,11 +59,11 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>,
             let tdp_profiles = state.available_tdp_profiles.clone();
             if !tdp_profiles.is_empty() {
                 ui.heading("🚀 Performance Profile");
-                ui.add_space(8.0);
+                ui.add_space(6.0);
                 draw_performance_profile_tuning(ui, &mut state.config.profiles[idx], &tdp_profiles);
-                ui.add_space(16.0);
+                ui.add_space(12.0);
                 ui.separator();
-                ui.add_space(16.0);
+                ui.add_space(12.0);
             }
 
             // CPU tuning
@@ -78,38 +78,38 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>,
                     hw_update_tx.clone(),
                 );
             } else {
-                ui.heading("🖥️ CPU Tuning");
-                ui.add_space(8.0);
+                ui.heading("🖥 CPU Tuning");
+                ui.add_space(6.0);
                 ui.label("CPU information not available");
             }
-            ui.add_space(16.0);
+            ui.add_space(12.0);
             ui.separator();
-            ui.add_space(16.0);
+            ui.add_space(12.0);
             
             // GPU tuning
             let gpu_info = state.gpu_info.clone();
             draw_gpu_tuning(ui, idx, dbus_client, &gpu_info, state, hw_update_tx.clone());
-            ui.add_space(16.0);
+            ui.add_space(12.0);
             ui.separator();
-            ui.add_space(16.0);
+            ui.add_space(12.0);
 
             // Keyboard tuning
             let keyboard_caps = state.keyboard_capabilities.clone();
             draw_keyboard_tuning(ui, &mut state.config.profiles[idx], keyboard_caps.as_ref(), dbus_client);
-            ui.add_space(16.0);
+            ui.add_space(12.0);
             ui.separator();
-            ui.add_space(16.0);
+            ui.add_space(12.0);
             
             // Screen tuning
             draw_screen_tuning(ui, &mut state.config.profiles[idx]);
-            ui.add_space(16.0);
+            ui.add_space(12.0);
             ui.separator();
-            ui.add_space(16.0);
+            ui.add_space(12.0);
             
             // Fan tuning
             let fan_count = state.fan_info.len().max(2);
             draw_fan_tuning(ui, &mut state.config.profiles[idx], fan_count);
-            ui.add_space(16.0);
+            ui.add_space(12.0);
         });
 }
 
@@ -152,7 +152,7 @@ fn draw_cpu_tuning(
     dbus_client: Option<&DbusClient>,
     hw_update_tx: tokio::sync::mpsc::UnboundedSender<crate::app::HardwareUpdate>,
 ) {
-    ui.heading("🖥️ CPU Tuning");
+    ui.heading("🖥 CPU Tuning");
     ui.add_space(8.0);
     
     let caps = match cpu_caps {
@@ -546,7 +546,7 @@ fn draw_keyboard_tuning(
     caps: Option<&KeyboardCapabilities>,
     dbus_client: Option<&DbusClient>,
 ) {
-    ui.heading("⌨️ Keyboard Backlight");
+    ui.heading("⌨ Keyboard Backlight");
     ui.add_space(8.0);
     
     let caps = match caps {
@@ -770,7 +770,7 @@ fn draw_keyboard_tuning(
         }
         
         // Preview button
-        if ui.button("👁️ Preview").clicked() {
+        if ui.button("👁 Preview").clicked() {
             if let Some(client) = dbus_client {
                 let _ = client.preview_keyboard_settings(profile.keyboard_settings.clone());
             }
@@ -779,7 +779,7 @@ fn draw_keyboard_tuning(
 }
 
 fn draw_screen_tuning(ui: &mut Ui, profile: &mut Profile) {
-    ui.heading("🖥️ Screen");
+    ui.heading("🖥 Screen");
     ui.add_space(8.0);
     
     ui.checkbox(&mut profile.screen_settings.system_control, "Use system brightness control");
