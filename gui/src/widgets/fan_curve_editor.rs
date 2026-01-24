@@ -55,6 +55,8 @@ impl FanCurveEditor {
             .show_grid(true)
             .x_axis_label("Temperature (°C)")
             .y_axis_label("Fan Speed (%)")
+            .y_axis_min_width(48.0)
+            .x_grid_spacer(egui_plot::uniform_grid_spacer(|_| [10.0, 5.0, 1.0]))
             .allow_zoom(false)
             .allow_drag(false)
             .allow_boxed_zoom(false)

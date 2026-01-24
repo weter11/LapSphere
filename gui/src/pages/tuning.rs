@@ -550,8 +550,22 @@ fn draw_gpu_standard_controls(
 }
 
 fn draw_gpu_advanced_controls(ui: &mut Ui, profile: &mut Profile) {
-    ui.label(RichText::new("Advanced GPU Tuning:").strong());
+    ui.label(RichText::new("Advanced GPU Tuning (Dynamic Offsets):").strong());
     ui.add_space(6.0);
+
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut profile.gpu_settings.advanced.drain_offset_control, "Drain Offset Control");
+        ui.checkbox(&mut profile.gpu_settings.advanced.power_offset_control, "Power Offset Control");
+    });
+    ui.checkbox(&mut profile.gpu_settings.advanced.critical_temp_range_control, "Critical Temperature Range Control");
+
+    ui.horizontal(|ui| {
+        ui.label("Smart Rounding Threshold:");
+        ui.add(egui::DragValue::new(&mut profile.gpu_settings.advanced.smart_rounding_threshold).speed(1).range(0..=100));
+        ui.label(RichText::new("(Applied at P-State 0)").small().italics());
+    });
+
+    ui.add_space(8.0);
 
     Grid::new("gpu_advanced_grid")
         .num_columns(3)

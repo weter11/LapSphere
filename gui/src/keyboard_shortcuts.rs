@@ -62,6 +62,20 @@ impl KeyboardShortcuts {
                         ui.label("Show this help");
                         ui.end_row();
                     });
+
+                ui.add_space(16.0);
+                ui.separator();
+                ui.add_space(8.0);
+                ui.heading("NVIDIA Overclocking Help");
+                ui.add_space(8.0);
+                ui.label("Dynamic offsets automatically adjust your GPU frequency based on current stats:");
+                ui.label("• Freq Offset: Linearly drops from max to min based on current frequency.");
+                ui.label("• Drain Offset: Adjusts based on temperature and frequency ranges.");
+                ui.label("• Power Offset: Decreases from max to min as power usage increases.");
+                ui.label("• Total Offset: Combined offsets applied at P-State 0 with Smart Rounding.");
+                ui.label("• Smart Rounding: Only rounds up to the next threshold if the value is at least 2/3 of the way.");
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("Note: Advanced control requires a background daemon loop and may affect stability if values are set too high.").small().italics());
             });
     }
 }

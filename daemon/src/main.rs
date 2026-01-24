@@ -20,6 +20,23 @@ pub static FAN_DAEMON_STATE: once_cell::sync::Lazy<Arc<Mutex<Option<FanSettings>
 pub static SCHEDULER_HANDLE: once_cell::sync::OnceCell<polling_scheduler::SchedulerHandle> = 
     once_cell::sync::OnceCell::new();
 
+// Global GPU daemon state
+pub static GPU_DAEMON_STATE: once_cell::sync::Lazy<Arc<Mutex<Option<lapsphere_common::types::GpuSettings>>>> =
+    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
+
+pub struct GpuOverclockStats {
+    pub freq_offset: i32,
+    pub drain_offset: i32,
+    pub power_offset: i32,
+    pub total_offset: i32,
+}
+
+pub static CURRENT_GPU_OVERCLOCK_STATS: once_cell::sync::Lazy<Arc<Mutex<Option<GpuOverclockStats>>>> =
+    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
+
+pub static NVIDIA_SMI_LEGACY_PATH: once_cell::sync::Lazy<Arc<Mutex<Option<String>>>> =
+    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
+
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
@@ -193,6 +210,33 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Add GPU overclocking polling job
+    let gpu_poll_fn = || {
+        let settings = {
+            let state = GPU_DAEMON_STATE.lock().unwrap();
+            state.clone()
+        };
+
+        if let Some(ref gpu_settings) = settings {
+            if gpu_settings.manual_clocks {
+                apply_gpu_overclocking(gpu_settings)?;
+            }
+        }
+        Ok(())
+    };
+
+    let gpu_job = PollJob::new(
+        "gpu_overclock".to_string(),
+        Duration::from_millis(1000), // Default 1s
+        gpu_poll_fn,
+    );
+
+    if let Err(e) = scheduler_handle.add_job(gpu_job) {
+        log::error!("Failed to add GPU overclocking job: {}", e);
+    } else {
+        log::info!("GPU overclocking polling job added");
+    }
+
     // Start DBus service
     let connection = zbus::Connection::system().await?;
     let connection_clone = connection.clone();
@@ -302,6 +346,128 @@ fn apply_fan_curves(io: &tuxedo_io::TuxedoIo, settings: &FanSettings, sorted_cur
         }
     }
     
+    Ok(())
+}
+
+fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -> Result<()> {
+    // 1. Get current GPU stats (temperature, power, frequency)
+    let gpus = crate::hardware_detection::get_gpu_info()?;
+    let nvidia_gpu = gpus.iter().find(|g| g.name.to_lowercase().contains("nvidia"));
+
+    if let Some(gpu) = nvidia_gpu {
+        // Only apply if advanced control is enabled
+        if !gpu_settings.manual_clocks {
+            return Ok(());
+        }
+
+        let temp = gpu.temperature.unwrap_or(0.0);
+        let power = gpu.power.unwrap_or(0.0);
+        let freq = gpu.frequency.unwrap_or(0) as f32;
+
+        let adv = &gpu_settings.advanced;
+
+        // Freq Offset calculation
+        let freq_offset = if freq <= adv.frequency_min as f32 {
+            adv.freq_offset_max as f32
+        } else if freq >= adv.frequency_max as f32 {
+            adv.freq_offset_min as f32
+        } else {
+            let ratio = (freq - adv.frequency_min as f32) / (adv.frequency_max - adv.frequency_min) as f32;
+            adv.freq_offset_max as f32 - ratio * (adv.freq_offset_max - adv.freq_offset_min) as f32
+        };
+
+        // Drain Offset calculation
+        let mut drain_offset = 0.0;
+        if adv.drain_offset_control {
+            let is_high_freq = freq >= adv.high_freq_min as f32 && freq <= adv.high_freq_max as f32;
+            let is_low_freq = freq >= adv.low_freq_min as f32 && freq <= adv.low_freq_max as f32;
+
+            if adv.critical_temp_range_control && temp >= adv.critical_temp_min as f32 && temp <= adv.critical_temp_max as f32 {
+                if is_low_freq {
+                    drain_offset = adv.drain_offset_lmin as f32;
+                } else if is_high_freq {
+                    drain_offset = adv.drain_offset_hmin as f32;
+                }
+            } else if temp > adv.temperature_max as f32 {
+                if is_low_freq {
+                    drain_offset = adv.drain_offset_lmax as f32;
+                } else if is_high_freq {
+                    drain_offset = adv.drain_offset_hmin as f32;
+                }
+            } else {
+                let temp_range = (adv.temperature_max - adv.temperature_min) as f32;
+                let temp_ratio = if temp_range > 0.0 {
+                    ((temp - adv.temperature_min as f32) / temp_range).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+
+                if is_high_freq {
+                    // linearly decreased from 'drain_offset_hmax' to 'drain_offset_hmin'
+                    drain_offset = adv.drain_offset_hmax as f32 - temp_ratio * (adv.drain_offset_hmax - adv.drain_offset_hmin) as f32;
+                } else {
+                    // linearly increased from 'drain_offset_lmin' to 'drain_offset_lmax'
+                    drain_offset = adv.drain_offset_lmin as f32 + temp_ratio * (adv.drain_offset_lmax - adv.drain_offset_lmin) as f32;
+                }
+            }
+        }
+
+        // Power Offset calculation
+        let mut power_offset = 0.0;
+        if adv.power_offset_control {
+            if power <= adv.plimit_min as f32 {
+                power_offset = adv.power_offset_max as f32;
+            } else if power >= adv.plimit_max as f32 {
+                power_offset = adv.power_offset_min as f32;
+            } else {
+                let p_range = (adv.plimit_max - adv.plimit_min) as f32;
+                let p_ratio = if p_range > 0.0 {
+                    (power - adv.plimit_min as f32) / p_range
+                } else {
+                    0.0
+                };
+                power_offset = adv.power_offset_max as f32 - p_ratio * (adv.power_offset_max - adv.power_offset_min) as f32;
+            }
+        }
+
+        // Total Offset
+        let total_offset = freq_offset + drain_offset + power_offset;
+
+        let nvml = crate::hardware_control::get_nvml()?;
+        let device = nvml.device_by_index(0)?; // Assuming device 0
+        let pstate = device.performance_state()?;
+
+        let final_offset = if pstate == nvml_wrapper::enum_wrappers::device::PerformanceState::Zero {
+             // SMART ROUNDING
+             let threshold = adv.smart_rounding_threshold as f32;
+             if threshold > 0.0 {
+                 let multiples = (total_offset / threshold).floor();
+                 let remainder = total_offset - (multiples * threshold);
+                 if remainder >= (2.0/3.0) * threshold {
+                     (multiples + 1.0) * threshold
+                 } else {
+                     multiples * threshold
+                 }
+             } else {
+                 total_offset
+             }
+        } else {
+            adv.freq_offset_min as f32
+        };
+
+        crate::hardware_control::set_gpu_core_offset(0, final_offset as i32)?;
+
+        // Update global stats for UI
+        {
+            let mut stats = CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
+            *stats = Some(GpuOverclockStats {
+                freq_offset: freq_offset as i32,
+                drain_offset: drain_offset as i32,
+                power_offset: power_offset as i32,
+                total_offset: final_offset as i32,
+            });
+        }
+    }
     Ok(())
 }
 

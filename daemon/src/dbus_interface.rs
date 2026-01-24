@@ -111,6 +111,13 @@ impl ControlInterface {
     async fn apply_profile(&self, profile_json: &str) -> Result<(), zbus::fdo::Error> {
         let profile: Profile = serde_json::from_str(profile_json)
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+
+        // Update GPU daemon state for dynamic overclocking
+        {
+            let mut state = crate::GPU_DAEMON_STATE.lock().unwrap();
+            *state = Some(profile.gpu_settings.clone());
+        }
+
         crate::hardware_control::apply_profile(&profile)
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
@@ -375,6 +382,16 @@ async fn set_tdp_profile(&self, profile: &str) -> Result<(), zbus::fdo::Error> {
     async fn set_prime_profile(&self, profile: &str) -> Result<(), zbus::fdo::Error> {
         crate::hardware_control::set_prime_profile(profile)
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
+
+    async fn set_nvidia_smi_legacy_path(&self, path: &str) -> Result<(), zbus::fdo::Error> {
+        let mut path_lock = crate::NVIDIA_SMI_LEGACY_PATH.lock().unwrap();
+        if path.is_empty() {
+            *path_lock = None;
+        } else {
+            *path_lock = Some(path.to_string());
+        }
+        Ok(())
     }
 
     // Polling scheduler methods

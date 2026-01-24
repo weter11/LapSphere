@@ -1057,9 +1057,7 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
     // First, try to get NVIDIA GPU info via NVML
     if Path::new("/sys/bus/pci/drivers/nvidia").exists() {
         if let Ok(nvidia_gpus) = get_nvidia_gpu_info() {
-            for mut gpu in nvidia_gpus {
-                // NVIDIA discrete GPU, not integrated
-                gpu.gpu_type = GpuType::Discrete;
+            for gpu in nvidia_gpus {
                 gpus.push(gpu);
             }
         }
@@ -1131,6 +1129,10 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
                 load,
                 power,
                 voltage,
+                freq_offset: None,
+                drain_offset: None,
+                power_offset: None,
+                total_offset: None,
             });
         }
     }
@@ -1248,6 +1250,25 @@ pub fn get_gpu_memory_offset_limits(device_index: u32) -> Result<(i32, i32)> {
     Ok((offset_info.min_clock_offset_mhz, offset_info.max_clock_offset_mhz))
 }
 
+fn get_nvidia_voltage(index: u32) -> Option<f32> {
+    let path_lock = crate::NVIDIA_SMI_LEGACY_PATH.lock().unwrap();
+    if let Some(ref path) = *path_lock {
+        if Path::new(path).exists() {
+            if let Ok(output) = std::process::Command::new(path)
+                .args(["-i", &index.to_string(), "--query-gpu=voltage.graphics", "--format=csv,noheader,nounits"])
+                .output()
+            {
+                if output.status.success() {
+                    let s = String::from_utf8_lossy(&output.stdout);
+                    // nvidia-smi usually returns mV
+                    return s.trim().parse::<f32>().ok().map(|v| v / 1000.0);
+                }
+            }
+        }
+    }
+    None
+}
+
 fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
     let nvml = get_nvml()?;
     let mut gpus = Vec::new();
@@ -1294,10 +1315,11 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 device.power_usage().ok().map(|p| p as f32 / 1000.0),
             )
         };
-        let voltage = None;
 
-        gpus.push(GpuInfo {
-            name,
+        let voltage = get_nvidia_voltage(i);
+
+        let mut gpu_info = GpuInfo {
+            name: name.clone(),
             gpu_type,
             status,
             frequency,
@@ -1306,7 +1328,24 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             load,
             power,
             voltage,
-        });
+            freq_offset: None,
+            drain_offset: None,
+            power_offset: None,
+            total_offset: None,
+        };
+
+        // Fill in offsets if they exist in global state (assuming first NVIDIA GPU for now)
+        if name.to_lowercase().contains("nvidia") {
+            let stats_lock = crate::CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
+            if let Some(ref stats) = *stats_lock {
+                gpu_info.freq_offset = Some(stats.freq_offset);
+                gpu_info.drain_offset = Some(stats.drain_offset);
+                gpu_info.power_offset = Some(stats.power_offset);
+                gpu_info.total_offset = Some(stats.total_offset);
+            }
+        }
+
+        gpus.push(gpu_info);
     }
 
     Ok(gpus)
@@ -1422,9 +1461,6 @@ fn read_gpu_power(device_path: &str) -> Option<f32> {
         }
     }
 
-
-
-    
     None
 }
 
