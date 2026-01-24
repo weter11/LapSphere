@@ -6,10 +6,10 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>)
     ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            ui.add_space(8.0);
+            ui.add_space(6.0);
             
             ui.heading(format!("Current Profile: {}", state.config.current_profile));
-            ui.add_space(12.0);
+            ui.add_space(10.0);
             
             // Profile list with radio buttons
             let mut profile_to_switch = None;
@@ -55,7 +55,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>)
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             // Delete button (only for non-standard profiles)
                             if !is_standard {
-                                if ui.button("🗑️ Delete").clicked() {
+                                if ui.button("🗑 Delete").clicked() {
                                     profile_to_delete = Some(idx);
                                 }
                             }
@@ -68,7 +68,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>)
                             }
                             
                             // Edit button - switches to tuning page
-                            if ui.button("✏️ Edit").clicked() {
+                            if ui.button("✏ Edit").clicked() {
                                 if !is_current {
                                     profile_to_switch = Some(idx);
                                 }
@@ -78,7 +78,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>)
                     });
                     
                     // Profile details summary
-                    ui.add_space(6.0);
+                    ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         // CPU settings summary
                         if let Some(ref gov) = profile.cpu_settings.governor {
@@ -114,7 +114,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>)
                     });
                 });
                 
-                ui.add_space(8.0);
+                ui.add_space(6.0);
             }
             
             // Handle profile switch
@@ -165,9 +165,9 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>)
             }
             
             // Add new profile section
-            ui.add_space(16.0);
+            ui.add_space(12.0);
             ui.separator();
-            ui.add_space(8.0);
+            ui.add_space(6.0);
             
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Create New Profile:").strong());
@@ -228,6 +228,7 @@ fn create_standard_profile() -> lapsphere_common::types::Profile {
             core_offset: Some(0),
             memory_offset: Some(0),
             prime_profile: Some("on-demand".to_string()),
+            advanced: GpuAdvancedSettings::default(),
         },
         keyboard_settings: KeyboardSettings {
             control_enabled: false,

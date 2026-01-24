@@ -1,4 +1,4 @@
-use egui::{Context, Visuals, Color32, Rounding, Stroke, FontId, FontFamily, TextStyle};
+use egui::{Context, Visuals, Color32, Rounding, Stroke, FontId, FontFamily, TextStyle, Vec2, FontDefinitions};
 use lapsphere_common::types::Theme;
 
 pub struct LapSphereTheme {
@@ -21,6 +21,7 @@ impl LapSphereTheme {
         
         let mut style = (*ctx.style()).clone();
         style.visuals = self.visuals.clone();
+        style.spacing.item_spacing = Vec2::new(6.0, 2.0);
         
         // Text styles with font size
         let (heading, body, button, small, mono) = match font_size {
@@ -53,6 +54,20 @@ impl LapSphereTheme {
         
         style.text_styles = text_styles;
         ctx.set_style(style);
+        ctx.set_fonts(Self::hinted_fonts());
+    }
+
+    fn hinted_fonts() -> FontDefinitions {
+        use egui::FontTweak;
+
+        let mut fonts = FontDefinitions::default();
+        for font in fonts.font_data.values_mut() {
+            font.tweak = FontTweak {
+                scale: 1.02,
+                ..font.tweak
+            };
+        }
+        fonts
     }
     
     fn dark_theme() -> Visuals {

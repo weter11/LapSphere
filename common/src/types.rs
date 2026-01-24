@@ -202,6 +202,32 @@ pub struct GpuSettings {
     pub core_offset: Option<i32>,
     pub memory_offset: Option<i32>,
     pub prime_profile: Option<String>,
+    #[serde(default)]
+    pub advanced: GpuAdvancedSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GpuAdvancedSettings {
+    pub temperature_min: i32,
+    pub temperature_max: i32,
+    pub plimit_min: i32,
+    pub plimit_max: i32,
+    pub frequency_min: i32,
+    pub frequency_max: i32,
+    pub freq_offset_max: i32,
+    pub freq_offset_min: i32,
+    pub low_freq_min: i32,
+    pub low_freq_max: i32,
+    pub drain_offset_lmin: i32,
+    pub drain_offset_lmax: i32,
+    pub high_freq_min: i32,
+    pub high_freq_max: i32,
+    pub drain_offset_hmin: i32,
+    pub drain_offset_hmax: i32,
+    pub critical_temp_min: i32,
+    pub critical_temp_max: i32,
+    pub power_offset_max: i32,
+    pub power_offset_min: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -445,6 +471,34 @@ impl Default for GpuSettings {
             core_offset: Some(0),
             memory_offset: Some(0),
             prime_profile: Some("on-demand".to_string()),
+            advanced: GpuAdvancedSettings::default(),
+        }
+    }
+}
+
+impl Default for GpuAdvancedSettings {
+    fn default() -> Self {
+        Self {
+            temperature_min: 20,
+            temperature_max: 80,
+            plimit_min: 20,
+            plimit_max: 120,
+            frequency_min: 900,
+            frequency_max: 1800,
+            freq_offset_max: 300,
+            freq_offset_min: 150,
+            low_freq_min: 1000,
+            low_freq_max: 1440,
+            drain_offset_lmin: -30,
+            drain_offset_lmax: 0,
+            high_freq_min: 1440,
+            high_freq_max: 1800,
+            drain_offset_hmin: 0,
+            drain_offset_hmax: 15,
+            critical_temp_min: 48,
+            critical_temp_max: 61,
+            power_offset_max: 35,
+            power_offset_min: 0,
         }
     }
 }

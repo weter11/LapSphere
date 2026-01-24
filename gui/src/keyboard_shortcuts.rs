@@ -38,7 +38,7 @@ impl KeyboardShortcuts {
     }
     
     fn draw_help_window(&mut self, ctx: &Context) {
-        egui::Window::new("⌨️ Keyboard Shortcuts")
+        egui::Window::new("⌨ Keyboard Shortcuts")
             .open(&mut self.show_help)
             .default_width(400.0)
             .show(ctx, |ui| {
