@@ -24,6 +24,11 @@ impl FanCurveEditor {
             ui.heading(format!("Fan {} Curve", self.fan_id));
             ui.add_space(6.0);
             
+            ui.horizontal(|ui| {
+                ui.add_space(12.0);
+                ui.label(RichText::new("Fan Speed (%)").small().strong());
+            });
+
             // Graph with dragging
             self.draw_graph(ui);
             
@@ -54,8 +59,7 @@ impl FanCurveEditor {
             .show_axes(true)
             .show_grid(true)
             .x_axis_label("Temperature (°C)")
-            .y_axis_label("Fan Speed (%)")
-            .y_axis_min_width(32.0)
+            // Removed y_axis_label to fix spacing
             .allow_zoom(false)
             .allow_drag(false)
             .allow_boxed_zoom(false)
@@ -65,8 +69,22 @@ impl FanCurveEditor {
             .include_y(0.0)
             .include_y(100.0)
             .set_margin_fraction(egui::vec2(0.1, 0.1))
-            .x_axis_formatter(|tick, _range| format!("{:.0}", tick.value))
-            .y_axis_formatter(|tick, _range| format!("{:.0}%", tick.value));
+            .x_axis_formatter(|tick, _range| {
+                let val = tick.value.round();
+                if (tick.value - val).abs() < 0.001 && val >= 0.0 && val <= 100.0 && val as i32 % 10 == 0 {
+                    format!("{:.0}", val)
+                } else {
+                    String::new()
+                }
+            })
+            .y_axis_formatter(|tick, _range| {
+                let val = tick.value.round();
+                if (tick.value - val).abs() < 0.001 && val >= 0.0 && val <= 100.0 && val as i32 % 20 == 0 {
+                    format!("{:.0}%", val)
+                } else {
+                    String::new()
+                }
+            });
         
         plot.show(ui, |plot_ui| {
             // Draw reference zones first

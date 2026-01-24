@@ -452,7 +452,7 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
                  total_offset
              }
         } else {
-            adv.freq_offset_min as f32
+            0.0 // Overclock only for P-state 0
         };
 
         crate::hardware_control::set_gpu_core_offset(0, final_offset as i32)?;
