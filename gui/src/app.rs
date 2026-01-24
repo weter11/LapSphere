@@ -58,6 +58,8 @@ pub struct AppState {
     pub status_message: Option<StatusMessage>,
     pub restart_confirmation_pending: bool,
     pub pending_prime_profile: Option<String>,
+    pub gpu_tuning_mode_advanced: bool,
+    pub selected_fan_curve: usize,
     
     // Profile editing
     pub editing_profile_name: Option<String>,
@@ -106,6 +108,17 @@ impl AppState {
             editing_profile_name: None,
             pending_battery_update: None,
             coordinator_handle: None,
+            gpu_tuning_mode_advanced: false,
+            selected_fan_curve: 0,
+        }
+    }
+
+    fn clamp_fan_selection(&mut self) {
+        let fan_count = self.fan_info.len();
+        if fan_count == 0 {
+            self.selected_fan_curve = 0;
+        } else if self.selected_fan_curve >= fan_count {
+            self.selected_fan_curve = fan_count.saturating_sub(1);
         }
     }
     
@@ -577,6 +590,8 @@ impl eframe::App for LapSphereApp {
         
         // Handle background hardware updates
         self.handle_hardware_updates();
+
+        self.state.clamp_fan_selection();
 
         self.handle_tray_events(ctx);
         

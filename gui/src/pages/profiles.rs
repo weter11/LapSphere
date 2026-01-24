@@ -228,6 +228,7 @@ fn create_standard_profile() -> lapsphere_common::types::Profile {
             core_offset: Some(0),
             memory_offset: Some(0),
             prime_profile: Some("on-demand".to_string()),
+            advanced: GpuAdvancedSettings::default(),
         },
         keyboard_settings: KeyboardSettings {
             control_enabled: false,

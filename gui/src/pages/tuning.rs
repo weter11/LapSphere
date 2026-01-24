@@ -1,7 +1,7 @@
-use egui::{Ui, ScrollArea, RichText, Slider, ComboBox, TopBottomPanel};
+use egui::{Ui, ScrollArea, RichText, Slider, ComboBox, TopBottomPanel, Grid};
 use crate::app::AppState;
 use crate::dbus_client::DbusClient;
-use lapsphere_common::types::{KeyboardMode, Profile, FanCurve, KeyboardCapabilities};
+use lapsphere_common::types::{KeyboardMode, Profile, FanCurve, KeyboardCapabilities, FanInfo};
 use crate::widgets::fan_curve_editor::FanCurveEditor;
 
 pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>, hw_update_tx: tokio::sync::mpsc::UnboundedSender<crate::app::HardwareUpdate>) {
@@ -107,8 +107,17 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>,
             ui.add_space(12.0);
             
             // Fan tuning
-            let fan_count = state.fan_info.len().max(2);
-            draw_fan_tuning(ui, &mut state.config.profiles[idx], fan_count);
+            let fan_count = state.fan_info.len();
+            let fan_info = state.fan_info.clone();
+            let mut selected_fan_curve = state.selected_fan_curve;
+            draw_fan_tuning(
+                ui,
+                &mut state.config.profiles[idx],
+                &fan_info,
+                &mut selected_fan_curve,
+                fan_count,
+            );
+            state.selected_fan_curve = selected_fan_curve;
             ui.add_space(12.0);
         });
 }
@@ -368,7 +377,6 @@ fn draw_gpu_tuning(
     state: &mut AppState,
     hw_update_tx: tokio::sync::mpsc::UnboundedSender<crate::app::HardwareUpdate>,
 ) {
-    let profile = &mut state.config.profiles[profile_idx];
     ui.heading("GPU Tuning");
     ui.add_space(8.0);
 
@@ -379,10 +387,19 @@ fn draw_gpu_tuning(
         return;
     }
 
-    ui.checkbox(&mut profile.gpu_settings.manual_clocks, "Enable Manual Clock Control");
+    let tuning_mode_advanced = state.gpu_tuning_mode_advanced;
+    let mut manual_clocks = state.config.profiles[profile_idx].gpu_settings.manual_clocks;
+    ui.checkbox(&mut manual_clocks, "Enable Manual Clock Control");
+    state.config.profiles[profile_idx].gpu_settings.manual_clocks = manual_clocks;
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label("Mode:");
+        ui.radio_value(&mut state.gpu_tuning_mode_advanced, false, "Standard");
+        ui.radio_value(&mut state.gpu_tuning_mode_advanced, true, "Advanced");
+    });
     ui.label(RichText::new("GPU settings will be applied when you click Save. Disabling manual control will reset to factory settings.").small().italics());
 
-    if profile.gpu_settings.manual_clocks {
+    if state.config.profiles[profile_idx].gpu_settings.manual_clocks {
         // Fetch ranges if they haven't been fetched yet
         if state.gpu_clock_ranges.is_none() {
             if let Some(client) = dbus_client {
@@ -433,79 +450,190 @@ fn draw_gpu_tuning(
             }
         }
 
-    if profile.gpu_settings.manual_clocks {
-        // GPU Locked Clocks section
-        ui.label(RichText::new("GPU Locked Clocks:").strong());
-        if let Some((min_range, max_range)) = state.gpu_clock_ranges {
-            let mut min_gpu_clock = profile.gpu_settings.min_gpu_clock.unwrap_or(min_range);
-            let mut max_gpu_clock = profile.gpu_settings.max_gpu_clock.unwrap_or(max_range);
-
-            ui.horizontal(|ui| {
-                ui.label("Min:");
-                ui.add(Slider::new(&mut min_gpu_clock, min_range..=max_range).suffix(" MHz"));
-            });
-
-            ui.horizontal(|ui| {
-                ui.label("Max:");
-                ui.add(Slider::new(&mut max_gpu_clock, min_range..=max_range).suffix(" MHz"));
-            });
-
-            profile.gpu_settings.min_gpu_clock = Some(min_gpu_clock);
-            profile.gpu_settings.max_gpu_clock = Some(max_gpu_clock);
-        } else {
-            ui.label("Fetching GPU clock ranges...");
+    if state.config.profiles[profile_idx].gpu_settings.manual_clocks {
+        let profile = &mut state.config.profiles[profile_idx];
+        draw_gpu_standard_controls(
+            ui,
+            profile,
+            state.gpu_clock_ranges,
+            state.gpu_mem_clock_ranges,
+            state.gpu_core_offset_limits,
+            state.gpu_mem_offset_limits,
+        );
+        if tuning_mode_advanced {
+            ui.add_space(16.0);
+            ui.separator();
+            ui.add_space(12.0);
+            draw_gpu_advanced_controls(ui, profile);
         }
 
         ui.add_space(16.0);
-
-        // Memory Locked Clocks section
-        ui.label(RichText::new("Memory Locked Clocks:").strong());
-        if let Some((min_range, max_range)) = state.gpu_mem_clock_ranges {
-            let mut min_mem_clock = profile.gpu_settings.min_mem_clock.unwrap_or(min_range);
-            let mut max_mem_clock = profile.gpu_settings.max_mem_clock.unwrap_or(max_range);
-
-            ui.horizontal(|ui| {
-                ui.label("Min:");
-                ui.add(Slider::new(&mut min_mem_clock, min_range..=max_range).suffix(" MHz"));
-            });
-
-            ui.horizontal(|ui| {
-                ui.label("Max:");
-                ui.add(Slider::new(&mut max_mem_clock, min_range..=max_range).suffix(" MHz"));
-            });
-
-            profile.gpu_settings.min_mem_clock = Some(min_mem_clock);
-            profile.gpu_settings.max_mem_clock = Some(max_mem_clock);
-        } else {
-            ui.label("Fetching memory clock ranges...");
-        }
-
-        ui.add_space(16.0);
-
-        // GPU Core Offset
-        ui.label(RichText::new("GPU Core Offset:").strong());
-        if let Some((min_limit, max_limit)) = state.gpu_core_offset_limits {
-            let mut core_offset = profile.gpu_settings.core_offset.unwrap_or(0);
-            ui.add(Slider::new(&mut core_offset, min_limit..=max_limit).suffix(" MHz"));
-            profile.gpu_settings.core_offset = Some(core_offset);
-        }
-
-        ui.add_space(16.0);
-
-        // GPU Memory Offset
-        ui.label(RichText::new("GPU Memory Offset:").strong());
-        if let Some((min_limit, max_limit)) = state.gpu_mem_offset_limits {
-            let mut memory_offset = profile.gpu_settings.memory_offset.unwrap_or(0);
-            ui.add(Slider::new(&mut memory_offset, min_limit..=max_limit).suffix(" MHz"));
-            profile.gpu_settings.memory_offset = Some(memory_offset);
-        } else {
-            ui.label("Fetching GPU memory offset limits...");
-        }
-
-        ui.add_space(16.0);
-
         ui.label(RichText::new("Clock and offset controls are applied when you click Save. They are managed by NVML.").small().italics());
     }}
+}
+
+fn draw_gpu_standard_controls(
+    ui: &mut Ui,
+    profile: &mut Profile,
+    gpu_clock_ranges: Option<(u32, u32)>,
+    gpu_mem_clock_ranges: Option<(u32, u32)>,
+    gpu_core_offset_limits: Option<(i32, i32)>,
+    gpu_mem_offset_limits: Option<(i32, i32)>,
+) {
+    // GPU Locked Clocks section
+    ui.label(RichText::new("GPU Locked Clocks:").strong());
+    if let Some((min_range, max_range)) = gpu_clock_ranges {
+        let mut min_gpu_clock = profile.gpu_settings.min_gpu_clock.unwrap_or(min_range);
+        let mut max_gpu_clock = profile.gpu_settings.max_gpu_clock.unwrap_or(max_range);
+
+        ui.horizontal(|ui| {
+            ui.label("Min:");
+            ui.add(Slider::new(&mut min_gpu_clock, min_range..=max_range).suffix(" MHz"));
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Max:");
+            ui.add(Slider::new(&mut max_gpu_clock, min_range..=max_range).suffix(" MHz"));
+        });
+
+        profile.gpu_settings.min_gpu_clock = Some(min_gpu_clock);
+        profile.gpu_settings.max_gpu_clock = Some(max_gpu_clock);
+    } else {
+        ui.label("Fetching GPU clock ranges...");
+    }
+
+    ui.add_space(16.0);
+
+    // Memory Locked Clocks section
+    ui.label(RichText::new("Memory Locked Clocks:").strong());
+    if let Some((min_range, max_range)) = gpu_mem_clock_ranges {
+        let mut min_mem_clock = profile.gpu_settings.min_mem_clock.unwrap_or(min_range);
+        let mut max_mem_clock = profile.gpu_settings.max_mem_clock.unwrap_or(max_range);
+
+        ui.horizontal(|ui| {
+            ui.label("Min:");
+            ui.add(Slider::new(&mut min_mem_clock, min_range..=max_range).suffix(" MHz"));
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Max:");
+            ui.add(Slider::new(&mut max_mem_clock, min_range..=max_range).suffix(" MHz"));
+        });
+
+        profile.gpu_settings.min_mem_clock = Some(min_mem_clock);
+        profile.gpu_settings.max_mem_clock = Some(max_mem_clock);
+    } else {
+        ui.label("Fetching memory clock ranges...");
+    }
+
+    ui.add_space(16.0);
+
+    // GPU Core Offset
+    ui.label(RichText::new("GPU Core Offset:").strong());
+    if let Some((min_limit, max_limit)) = gpu_core_offset_limits {
+        let mut core_offset = profile.gpu_settings.core_offset.unwrap_or(0);
+        ui.add(Slider::new(&mut core_offset, min_limit..=max_limit).suffix(" MHz"));
+        profile.gpu_settings.core_offset = Some(core_offset);
+    }
+
+    ui.add_space(16.0);
+
+    // GPU Memory Offset
+    ui.label(RichText::new("GPU Memory Offset:").strong());
+    if let Some((min_limit, max_limit)) = gpu_mem_offset_limits {
+        let mut memory_offset = profile.gpu_settings.memory_offset.unwrap_or(0);
+        ui.add(Slider::new(&mut memory_offset, min_limit..=max_limit).suffix(" MHz"));
+        profile.gpu_settings.memory_offset = Some(memory_offset);
+    } else {
+        ui.label("Fetching GPU memory offset limits...");
+    }
+}
+
+fn draw_gpu_advanced_controls(ui: &mut Ui, profile: &mut Profile) {
+    ui.label(RichText::new("Advanced GPU Tuning:").strong());
+    ui.add_space(6.0);
+
+    Grid::new("gpu_advanced_grid")
+        .num_columns(3)
+        .spacing([12.0, 8.0])
+        .striped(true)
+        .show(ui, |ui| {
+            ui.label(RichText::new("Setting").strong());
+            ui.label(RichText::new("Min").strong());
+            ui.label(RichText::new("Max").strong());
+            ui.end_row();
+
+            add_range_row(
+                ui,
+                "Temperature (°C)",
+                &mut profile.gpu_settings.advanced.temperature_min,
+                &mut profile.gpu_settings.advanced.temperature_max,
+            );
+            add_range_row(
+                ui,
+                "Power limits (W)",
+                &mut profile.gpu_settings.advanced.plimit_min,
+                &mut profile.gpu_settings.advanced.plimit_max,
+            );
+            add_range_row(
+                ui,
+                "Frequency thresholds (MHz)",
+                &mut profile.gpu_settings.advanced.frequency_min,
+                &mut profile.gpu_settings.advanced.frequency_max,
+            );
+            add_range_row(
+                ui,
+                "Base frequency offsets (MHz)",
+                &mut profile.gpu_settings.advanced.freq_offset_min,
+                &mut profile.gpu_settings.advanced.freq_offset_max,
+            );
+            add_range_row(
+                ui,
+                "Low frequency range (MHz)",
+                &mut profile.gpu_settings.advanced.low_freq_min,
+                &mut profile.gpu_settings.advanced.low_freq_max,
+            );
+            add_range_row(
+                ui,
+                "Low drain offsets (MHz)",
+                &mut profile.gpu_settings.advanced.drain_offset_lmin,
+                &mut profile.gpu_settings.advanced.drain_offset_lmax,
+            );
+            add_range_row(
+                ui,
+                "High frequency range (MHz)",
+                &mut profile.gpu_settings.advanced.high_freq_min,
+                &mut profile.gpu_settings.advanced.high_freq_max,
+            );
+            add_range_row(
+                ui,
+                "High drain offsets (MHz)",
+                &mut profile.gpu_settings.advanced.drain_offset_hmin,
+                &mut profile.gpu_settings.advanced.drain_offset_hmax,
+            );
+            add_range_row(
+                ui,
+                "Critical temperature (°C)",
+                &mut profile.gpu_settings.advanced.critical_temp_min,
+                &mut profile.gpu_settings.advanced.critical_temp_max,
+            );
+            add_range_row(
+                ui,
+                "Power offset range (MHz)",
+                &mut profile.gpu_settings.advanced.power_offset_min,
+                &mut profile.gpu_settings.advanced.power_offset_max,
+            );
+        });
+
+    ui.add_space(6.0);
+    ui.label(RichText::new("Values are examples. Set what is appropriate for your hardware.").small().italics());
+}
+
+fn add_range_row(ui: &mut Ui, label: &str, min_value: &mut i32, max_value: &mut i32) {
+    ui.label(label);
+    ui.add(egui::DragValue::new(min_value).speed(1));
+    ui.add(egui::DragValue::new(max_value).speed(1));
+    ui.end_row();
 }
 
 /// Apply GPU settings when the save button is clicked
@@ -793,7 +921,13 @@ fn draw_screen_tuning(ui: &mut Ui, profile: &mut Profile) {
     }
 }
 
-fn draw_fan_tuning(ui: &mut Ui, profile: &mut Profile, fan_count: usize) {
+fn draw_fan_tuning(
+    ui: &mut Ui,
+    profile: &mut Profile,
+    fan_info: &[FanInfo],
+    selected_fan_curve: &mut usize,
+    fan_count: usize,
+) {
     ui.heading("💨 Fan Control");
     ui.add_space(8.0);
     
@@ -801,6 +935,10 @@ fn draw_fan_tuning(ui: &mut Ui, profile: &mut Profile, fan_count: usize) {
     ui.add_space(6.0);
     
     if profile.fan_settings.control_enabled {
+        if fan_count == 0 {
+            ui.label("No fans detected");
+            return;
+        }
         // Ensure curves exist
         while profile.fan_settings.curves.len() < fan_count {
             let fan_id = profile.fan_settings.curves.len() as u32;
@@ -810,20 +948,35 @@ fn draw_fan_tuning(ui: &mut Ui, profile: &mut Profile, fan_count: usize) {
             });
         }
         
-        // Show editor for each fan
-        for curve in profile.fan_settings.curves.iter_mut() {
-            if (curve.fan_id as usize) < fan_count {
-                ui.separator();
-                ui.add_space(8.0);
-                
-                egui::CollapsingHeader::new(format!("Fan {} Configuration", curve.fan_id))
-                    .default_open(curve.fan_id == 0)
-                    .show(ui, |ui| {
-                        let mut editor = FanCurveEditor::new(curve.fan_id, curve.clone());
-                        editor.show(ui);
-                        *curve = editor.get_curve();
-                    });
+        // Ensure we stay within available fans
+        let available_fans = profile.fan_settings.curves.len().min(fan_count);
+        if available_fans == 0 {
+            ui.label("No fan curves available");
+            return;
+        }
+
+        let selected_fan = (*selected_fan_curve).min(available_fans.saturating_sub(1));
+        *selected_fan_curve = selected_fan;
+
+        ui.horizontal(|ui| {
+            for idx in 0..available_fans {
+                let label = fan_info
+                    .get(idx)
+                    .map(|fan| fan.name.clone())
+                    .unwrap_or_else(|| format!("Fan {}", idx));
+                if ui.selectable_label(selected_fan == idx, label).clicked() {
+                    *selected_fan_curve = idx;
+                }
             }
+        });
+
+        ui.separator();
+        ui.add_space(8.0);
+
+        if let Some(curve) = profile.fan_settings.curves.get_mut(selected_fan) {
+            let mut editor = FanCurveEditor::new(curve.fan_id, curve.clone());
+            editor.show(ui);
+            *curve = editor.get_curve();
         }
     }
 }
@@ -858,6 +1011,7 @@ fn create_default_profile_for_reset(is_standard: bool) -> Profile {
                 core_offset: Some(0),
                 memory_offset: Some(0),
                 prime_profile: Some("on-demand".to_string()),
+                advanced: GpuAdvancedSettings::default(),
             },
             keyboard_settings: KeyboardSettings {
                 control_enabled: false,
