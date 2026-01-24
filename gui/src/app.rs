@@ -492,13 +492,14 @@ impl LapSphereApp {
 
                 ui.allocate_ui_with_layout(
                     egui::vec2(tabs_width, ui.available_height()),
-                    Layout::left_to_right(Align::Center).with_main_align(Align::Center),
+                    Layout::left_to_right(Align::Center),
                     |ui| {
-                        // Navigation tabs
-                        ui.selectable_value(&mut self.state.current_page, Page::Statistics, "📊 Statistics");
-                        ui.selectable_value(&mut self.state.current_page, Page::Profiles, "📋 Profiles");
-                        ui.selectable_value(&mut self.state.current_page, Page::Tuning, "🔧 Tuning");
-                        ui.selectable_value(&mut self.state.current_page, Page::Settings, "⚙ Settings");
+                        ui.horizontal_centered(|ui| {
+                            ui.selectable_value(&mut self.state.current_page, Page::Statistics, "📊 Statistics");
+                            ui.selectable_value(&mut self.state.current_page, Page::Profiles, "📋 Profiles");
+                            ui.selectable_value(&mut self.state.current_page, Page::Tuning, "🔧 Tuning");
+                            ui.selectable_value(&mut self.state.current_page, Page::Settings, "⚙ Settings");
+                        });
                     },
                 );
 
