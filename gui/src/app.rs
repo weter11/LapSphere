@@ -58,7 +58,6 @@ pub struct AppState {
     pub status_message: Option<StatusMessage>,
     pub restart_confirmation_pending: bool,
     pub pending_prime_profile: Option<String>,
-    pub gpu_tuning_mode_advanced: bool,
     pub selected_fan_curve: usize,
     
     // Profile editing
@@ -108,7 +107,6 @@ impl AppState {
             editing_profile_name: None,
             pending_battery_update: None,
             coordinator_handle: None,
-            gpu_tuning_mode_advanced: false,
             selected_fan_curve: 0,
         }
     }

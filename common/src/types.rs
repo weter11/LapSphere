@@ -207,6 +207,8 @@ pub struct GpuSettings {
     pub memory_offset: Option<i32>,
     pub prime_profile: Option<String>,
     #[serde(default)]
+    pub advanced_control: bool,
+    #[serde(default)]
     pub advanced: GpuAdvancedSettings,
 }
 
@@ -497,6 +499,7 @@ impl Default for GpuSettings {
             core_offset: Some(0),
             memory_offset: Some(0),
             prime_profile: Some("on-demand".to_string()),
+            advanced_control: false,
             advanced: GpuAdvancedSettings::default(),
         }
     }

@@ -355,8 +355,8 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
     let nvidia_gpu = gpus.iter().find(|g| g.name.to_lowercase().contains("nvidia"));
 
     if let Some(gpu) = nvidia_gpu {
-        // Only apply if advanced control is enabled
-        if !gpu_settings.manual_clocks {
+        // Only apply if manual clocks AND advanced control are enabled
+        if !gpu_settings.manual_clocks || !gpu_settings.advanced_control {
             return Ok(());
         }
 

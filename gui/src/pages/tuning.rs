@@ -387,16 +387,16 @@ fn draw_gpu_tuning(
         return;
     }
 
-    let tuning_mode_advanced = state.gpu_tuning_mode_advanced;
     let mut manual_clocks = state.config.profiles[profile_idx].gpu_settings.manual_clocks;
     ui.checkbox(&mut manual_clocks, "Enable Manual Clock Control");
     state.config.profiles[profile_idx].gpu_settings.manual_clocks = manual_clocks;
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.label("Mode:");
-        ui.radio_value(&mut state.gpu_tuning_mode_advanced, false, "Standard");
-        ui.radio_value(&mut state.gpu_tuning_mode_advanced, true, "Advanced");
+        ui.radio_value(&mut state.config.profiles[profile_idx].gpu_settings.advanced_control, false, "Standard");
+        ui.radio_value(&mut state.config.profiles[profile_idx].gpu_settings.advanced_control, true, "Advanced");
     });
+    let tuning_mode_advanced = state.config.profiles[profile_idx].gpu_settings.advanced_control;
     ui.label(RichText::new("GPU settings will be applied when you click Save. Disabling manual control will reset to factory settings.").small().italics());
 
     if state.config.profiles[profile_idx].gpu_settings.manual_clocks {
@@ -528,15 +528,17 @@ fn draw_gpu_standard_controls(
 
     ui.add_space(16.0);
 
-    // GPU Core Offset
-    ui.label(RichText::new("GPU Core Offset:").strong());
-    if let Some((min_limit, max_limit)) = gpu_core_offset_limits {
-        let mut core_offset = profile.gpu_settings.core_offset.unwrap_or(0);
-        ui.add(Slider::new(&mut core_offset, min_limit..=max_limit).suffix(" MHz"));
-        profile.gpu_settings.core_offset = Some(core_offset);
-    }
+    // GPU Core Offset - only for Standard control
+    if !profile.gpu_settings.advanced_control {
+        ui.label(RichText::new("GPU Core Offset:").strong());
+        if let Some((min_limit, max_limit)) = gpu_core_offset_limits {
+            let mut core_offset = profile.gpu_settings.core_offset.unwrap_or(0);
+            ui.add(Slider::new(&mut core_offset, min_limit..=max_limit).suffix(" MHz"));
+            profile.gpu_settings.core_offset = Some(core_offset);
+        }
 
-    ui.add_space(16.0);
+        ui.add_space(16.0);
+    }
 
     // GPU Memory Offset
     ui.label(RichText::new("GPU Memory Offset:").strong());
@@ -663,9 +665,11 @@ fn apply_gpu_settings_on_save(client: &DbusClient, gpu_settings: &lapsphere_comm
             let _ = client.set_memory_locked_clocks(0, min_mem, max_mem);
         }
         
-        // Apply core offset if set
-        if let Some(core_offset) = gpu_settings.core_offset {
-            let _ = client.set_gpu_core_offset(0, core_offset);
+        // Apply core offset if set and not in advanced mode (advanced mode is handled by daemon loop)
+        if !gpu_settings.advanced_control {
+            if let Some(core_offset) = gpu_settings.core_offset {
+                let _ = client.set_gpu_core_offset(0, core_offset);
+            }
         }
         
         // Apply memory offset if set
@@ -1025,6 +1029,7 @@ fn create_default_profile_for_reset(is_standard: bool) -> Profile {
                 core_offset: Some(0),
                 memory_offset: Some(0),
                 prime_profile: Some("on-demand".to_string()),
+                advanced_control: false,
                 advanced: GpuAdvancedSettings::default(),
             },
             keyboard_settings: KeyboardSettings {
