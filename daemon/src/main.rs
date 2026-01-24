@@ -221,9 +221,7 @@ async fn main() -> Result<()> {
         };
 
         if let Some(ref gpu_settings) = settings {
-            if gpu_settings.manual_clocks {
-                apply_gpu_overclocking(gpu_settings)?;
-            }
+            apply_gpu_overclocking(gpu_settings)?;
         }
         Ok(())
     };
@@ -353,8 +351,8 @@ fn apply_fan_curves(io: &tuxedo_io::TuxedoIo, settings: &FanSettings, sorted_cur
 }
 
 fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -> Result<()> {
-    // Clear stats and last offset if advanced control is disabled
-    if !gpu_settings.advanced_control {
+    // Clear stats and last offset if advanced control or manual clocks are disabled
+    if !gpu_settings.advanced_control || !gpu_settings.manual_clocks {
         {
             let mut stats = CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
             *stats = None;
@@ -376,10 +374,6 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
             return Ok(());
         }
 
-        // Only apply if manual clocks AND advanced control are enabled
-        if !gpu_settings.manual_clocks {
-            return Ok(());
-        }
 
         let temp = gpu.temperature.unwrap_or(0.0);
         let power = gpu.power.unwrap_or(0.0);
