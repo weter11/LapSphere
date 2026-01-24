@@ -37,6 +37,9 @@ pub static CURRENT_GPU_OVERCLOCK_STATS: once_cell::sync::Lazy<Arc<Mutex<Option<G
 pub static NVIDIA_SMI_LEGACY_PATH: once_cell::sync::Lazy<Arc<Mutex<Option<String>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
 
+pub static LAST_APPLIED_OFFSET: once_cell::sync::Lazy<Arc<Mutex<Option<i32>>>> =
+    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
+
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
@@ -350,13 +353,31 @@ fn apply_fan_curves(io: &tuxedo_io::TuxedoIo, settings: &FanSettings, sorted_cur
 }
 
 fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -> Result<()> {
+    // Clear stats and last offset if advanced control is disabled
+    if !gpu_settings.advanced_control {
+        {
+            let mut stats = CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
+            *stats = None;
+        }
+        {
+            let mut last = LAST_APPLIED_OFFSET.lock().unwrap();
+            *last = None;
+        }
+        return Ok(());
+    }
+
     // 1. Get current GPU stats (temperature, power, frequency)
     let gpus = crate::hardware_detection::get_gpu_info()?;
     let nvidia_gpu = gpus.iter().find(|g| g.name.to_lowercase().contains("nvidia"));
 
     if let Some(gpu) = nvidia_gpu {
+        // Check if GPU is suspended or not active
+        if gpu.status.to_lowercase().contains("suspended") {
+            return Ok(());
+        }
+
         // Only apply if manual clocks AND advanced control are enabled
-        if !gpu_settings.manual_clocks || !gpu_settings.advanced_control {
+        if !gpu_settings.manual_clocks {
             return Ok(());
         }
 
@@ -455,7 +476,17 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
             0.0 // Overclock only for P-state 0
         };
 
-        crate::hardware_control::set_gpu_core_offset(0, final_offset as i32)?;
+        let final_offset_i32 = final_offset as i32;
+
+        // ONLY APPLY IF CHANGED (fix stuttering)
+        {
+            let mut last = LAST_APPLIED_OFFSET.lock().unwrap();
+            if *last != Some(final_offset_i32) {
+                crate::hardware_control::set_gpu_core_offset(0, final_offset_i32)?;
+                *last = Some(final_offset_i32);
+                log::info!("Applied new dynamic GPU offset: {} MHz", final_offset_i32);
+            }
+        }
 
         // Update global stats for UI
         {

@@ -1338,7 +1338,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             )
         };
 
-        let voltage = get_nvidia_voltage(i);
+        let voltage = if is_suspended { None } else { get_nvidia_voltage(i) };
 
         let mut gpu_info = GpuInfo {
             name: name.clone(),

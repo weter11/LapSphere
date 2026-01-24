@@ -363,22 +363,6 @@ fn draw_stats_configuration(ui: &mut Ui, state: &mut AppState, dbus_client: Opti
         }
     });
 
-    let mut gpu_oc_poll = (state.config.statistics_sections.gpu_overclock_poll_rate as f32) / 1000.0;
-    ui.horizontal(|ui| {
-        ui.label("GPU Overclock Refresh:");
-        if ui.add(Slider::new(&mut gpu_oc_poll, 0.1..=5.0).step_by(0.1).suffix(" s")).changed() {
-            let new_rate = (gpu_oc_poll * 1000.0) as u64;
-            state.config.statistics_sections.gpu_overclock_poll_rate = new_rate;
-            let _ = state.save_settings();
-            // Update coordinator interval
-            if let Some(ref handle) = state.coordinator_handle {
-                let _ = handle.update_interval("gpu_overclock".to_string(), std::time::Duration::from_millis(new_rate));
-            }
-            if let Some(client) = dbus_client {
-                let _ = client.update_polling_interval("gpu_overclock", new_rate);
-            }
-        }
-    });
 }
 
 fn draw_hardware_info(ui: &mut Ui, state: &AppState) {

@@ -464,7 +464,19 @@ fn draw_gpu_tuning(
             ui.add_space(16.0);
             ui.separator();
             ui.add_space(12.0);
-            draw_gpu_advanced_controls(ui, profile);
+
+            let mut gpu_oc_poll = state.config.statistics_sections.gpu_overclock_poll_rate;
+            draw_gpu_advanced_controls(ui, profile, &mut gpu_oc_poll);
+            if gpu_oc_poll != state.config.statistics_sections.gpu_overclock_poll_rate {
+                state.config.statistics_sections.gpu_overclock_poll_rate = gpu_oc_poll;
+                let _ = state.save_settings();
+                if let Some(ref handle) = state.coordinator_handle {
+                    let _ = handle.update_interval("gpu_overclock".to_string(), std::time::Duration::from_millis(gpu_oc_poll));
+                }
+                if let Some(client) = dbus_client {
+                    let _ = client.update_polling_interval("gpu_overclock", gpu_oc_poll);
+                }
+            }
         }
 
         ui.add_space(16.0);
@@ -551,9 +563,22 @@ fn draw_gpu_standard_controls(
     }
 }
 
-fn draw_gpu_advanced_controls(ui: &mut Ui, profile: &mut Profile) {
+fn draw_gpu_advanced_controls(
+    ui: &mut Ui,
+    profile: &mut Profile,
+    gpu_overclock_poll_rate: &mut u64,
+) {
     ui.label(RichText::new("Advanced GPU Tuning (Dynamic Offsets):").strong());
     ui.add_space(6.0);
+
+    let mut gpu_oc_poll = (*gpu_overclock_poll_rate as f32) / 1000.0;
+    ui.horizontal(|ui| {
+        ui.label("Dynamic Offset Refresh Rate:");
+        if ui.add(Slider::new(&mut gpu_oc_poll, 0.1..=5.0).step_by(0.1).suffix(" s")).changed() {
+            *gpu_overclock_poll_rate = (gpu_oc_poll * 1000.0) as u64;
+        }
+    });
+    ui.add_space(8.0);
 
     ui.horizontal(|ui| {
         ui.checkbox(&mut profile.gpu_settings.advanced.drain_offset_control, "Drain Offset Control");
