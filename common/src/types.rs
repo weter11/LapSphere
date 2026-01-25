@@ -210,6 +210,16 @@ pub struct GpuSettings {
     pub advanced_control: bool,
     #[serde(default)]
     pub advanced: GpuAdvancedSettings,
+    #[serde(default)]
+    pub advanced_min_gpu_clock: Option<u32>,
+    #[serde(default)]
+    pub advanced_max_gpu_clock: Option<u32>,
+    #[serde(default)]
+    pub advanced_min_mem_clock: Option<u32>,
+    #[serde(default)]
+    pub advanced_max_mem_clock: Option<u32>,
+    #[serde(default)]
+    pub advanced_memory_offset: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -501,6 +511,11 @@ impl Default for GpuSettings {
             prime_profile: Some("on-demand".to_string()),
             advanced_control: false,
             advanced: GpuAdvancedSettings::default(),
+            advanced_min_gpu_clock: None,
+            advanced_max_gpu_clock: None,
+            advanced_min_mem_clock: None,
+            advanced_max_mem_clock: None,
+            advanced_memory_offset: Some(0),
         }
     }
 }

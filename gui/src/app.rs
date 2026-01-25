@@ -27,6 +27,7 @@ pub enum SettingsTab {
     StatsConfiguration,
     Hardware,
     Help,
+    About,
 }
 
 pub struct AppState {

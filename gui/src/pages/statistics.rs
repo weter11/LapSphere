@@ -333,6 +333,7 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                             
                             ui.label("Status:");
                             // Display performance state with better formatting
+                            let is_suspended = gpu.status.to_lowercase().contains("suspended");
                             let status_display = match gpu.status.as_str() {
                                 "P0" => "P0 (Maximum Performance)",
                                 "P1" => "P1 (High Performance)",
@@ -348,6 +349,15 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                             };
                             ui.label(status_display);
                             ui.end_row();
+
+                            if gpu.name.contains("NVIDIA")
+                                && !is_suspended
+                                && gpu.status.starts_with('P')
+                            {
+                                ui.label("P-State:");
+                                ui.label(&gpu.status);
+                                ui.end_row();
+                            }
                             
                             if let Some(freq) = gpu.frequency {
                                 ui.label("Core Frequency:");

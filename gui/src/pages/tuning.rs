@@ -452,21 +452,30 @@ fn draw_gpu_tuning(
 
     if state.config.profiles[profile_idx].gpu_settings.manual_clocks {
         let profile = &mut state.config.profiles[profile_idx];
-        draw_gpu_standard_controls(
-            ui,
-            profile,
-            state.gpu_clock_ranges,
-            state.gpu_mem_clock_ranges,
-            state.gpu_core_offset_limits,
-            state.gpu_mem_offset_limits,
-        );
+        if !tuning_mode_advanced {
+            draw_gpu_standard_controls(
+                ui,
+                profile,
+                state.gpu_clock_ranges,
+                state.gpu_mem_clock_ranges,
+                state.gpu_core_offset_limits,
+                state.gpu_mem_offset_limits,
+            );
+        }
         if tuning_mode_advanced {
             ui.add_space(16.0);
             ui.separator();
             ui.add_space(12.0);
 
             let mut gpu_oc_poll = state.config.statistics_sections.gpu_overclock_poll_rate;
-            draw_gpu_advanced_controls(ui, profile, &mut gpu_oc_poll);
+            draw_gpu_advanced_controls(
+                ui,
+                profile,
+                &mut gpu_oc_poll,
+                state.gpu_clock_ranges,
+                state.gpu_mem_clock_ranges,
+                state.gpu_mem_offset_limits,
+            );
             if gpu_oc_poll != state.config.statistics_sections.gpu_overclock_poll_rate {
                 state.config.statistics_sections.gpu_overclock_poll_rate = gpu_oc_poll;
                 let _ = state.save_settings();
@@ -492,6 +501,8 @@ fn draw_gpu_standard_controls(
     gpu_core_offset_limits: Option<(i32, i32)>,
     gpu_mem_offset_limits: Option<(i32, i32)>,
 ) {
+    ui.label(RichText::new("Standard Mode").strong());
+    ui.add_space(6.0);
     // GPU Locked Clocks section
     ui.label(RichText::new("GPU Locked Clocks:").strong());
     if let Some((min_range, max_range)) = gpu_clock_ranges {
@@ -552,14 +563,18 @@ fn draw_gpu_standard_controls(
         ui.add_space(16.0);
     }
 
-    // GPU Memory Offset
-    ui.label(RichText::new("GPU Memory Offset:").strong());
-    if let Some((min_limit, max_limit)) = gpu_mem_offset_limits {
-        let mut memory_offset = profile.gpu_settings.memory_offset.unwrap_or(0);
-        ui.add(Slider::new(&mut memory_offset, min_limit..=max_limit).suffix(" MHz"));
-        profile.gpu_settings.memory_offset = Some(memory_offset);
+    // GPU Memory Offset (Standard mode only)
+    if !profile.gpu_settings.advanced_control {
+        ui.label(RichText::new("GPU Memory Offset:").strong());
+        if let Some((min_limit, max_limit)) = gpu_mem_offset_limits {
+            let mut memory_offset = profile.gpu_settings.memory_offset.unwrap_or(0);
+            ui.add(Slider::new(&mut memory_offset, min_limit..=max_limit).suffix(" MHz"));
+            profile.gpu_settings.memory_offset = Some(memory_offset);
+        } else {
+            ui.label("Fetching GPU memory offset limits...");
+        }
     } else {
-        ui.label("Fetching GPU memory offset limits...");
+        profile.gpu_settings.memory_offset = Some(0);
     }
 }
 
@@ -567,7 +582,61 @@ fn draw_gpu_advanced_controls(
     ui: &mut Ui,
     profile: &mut Profile,
     gpu_overclock_poll_rate: &mut u64,
+    gpu_clock_ranges: Option<(u32, u32)>,
+    gpu_mem_clock_ranges: Option<(u32, u32)>,
+    gpu_mem_offset_limits: Option<(i32, i32)>,
 ) {
+    ui.label(RichText::new("Advanced Mode").strong());
+    ui.add_space(6.0);
+    ui.label(RichText::new("GPU Locked Clocks (Advanced):").strong());
+        if let Some((min_range, max_range)) = gpu_clock_ranges {
+            let mut min_gpu_clock = profile.gpu_settings.advanced_min_gpu_clock.unwrap_or(min_range);
+            let mut max_gpu_clock = profile.gpu_settings.advanced_max_gpu_clock.unwrap_or(max_range);
+            ui.horizontal(|ui| {
+                ui.label("Min:");
+                ui.add(Slider::new(&mut min_gpu_clock, min_range..=max_range).suffix(" MHz"));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Max:");
+                let max_limit = max_gpu_clock;
+                ui.add(Slider::new(&mut max_gpu_clock, min_gpu_clock..=max_limit).suffix(" MHz"));
+            });
+            profile.gpu_settings.advanced_min_gpu_clock = Some(min_gpu_clock);
+            profile.gpu_settings.advanced_max_gpu_clock = Some(max_gpu_clock);
+        } else {
+            ui.label("Fetching GPU clock ranges...");
+    }
+
+    ui.add_space(8.0);
+    ui.label(RichText::new("Memory Locked Clocks (Advanced):").strong());
+        if let Some((min_range, max_range)) = gpu_mem_clock_ranges {
+            let mut min_mem_clock = profile.gpu_settings.advanced_min_mem_clock.unwrap_or(min_range);
+            let mut max_mem_clock = profile.gpu_settings.advanced_max_mem_clock.unwrap_or(max_range);
+            ui.horizontal(|ui| {
+                ui.label("Min:");
+                ui.add(Slider::new(&mut min_mem_clock, min_range..=max_range).suffix(" MHz"));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Max:");
+                let max_limit = max_mem_clock;
+                ui.add(Slider::new(&mut max_mem_clock, min_mem_clock..=max_limit).suffix(" MHz"));
+            });
+            profile.gpu_settings.advanced_min_mem_clock = Some(min_mem_clock);
+            profile.gpu_settings.advanced_max_mem_clock = Some(max_mem_clock);
+        } else {
+            ui.label("Fetching memory clock ranges...");
+    }
+
+    ui.add_space(8.0);
+    ui.label(RichText::new("GPU Memory Offset (Advanced):").strong());
+    if let Some((min_limit, max_limit)) = gpu_mem_offset_limits {
+        let mut advanced_mem_offset = profile.gpu_settings.advanced_memory_offset.unwrap_or(0);
+        ui.add(Slider::new(&mut advanced_mem_offset, min_limit..=max_limit).suffix(" MHz"));
+        profile.gpu_settings.advanced_memory_offset = Some(advanced_mem_offset);
+    } else {
+        ui.label("Fetching GPU memory offset limits...");
+    }
+
     ui.label(RichText::new("Advanced GPU Tuning (Dynamic Offsets):").strong());
     ui.add_space(6.0);
 
@@ -681,12 +750,24 @@ fn add_range_row(ui: &mut Ui, label: &str, min_value: &mut i32, max_value: &mut 
 fn apply_gpu_settings_on_save(client: &DbusClient, gpu_settings: &lapsphere_common::types::GpuSettings) {
     if gpu_settings.manual_clocks {
         // Apply GPU locked clocks if set
-        if let (Some(min_clock), Some(max_clock)) = (gpu_settings.min_gpu_clock, gpu_settings.max_gpu_clock) {
+        if gpu_settings.advanced_control {
+            if let (Some(min_clock), Some(max_clock)) =
+                (gpu_settings.advanced_min_gpu_clock, gpu_settings.advanced_max_gpu_clock)
+            {
+                let _ = client.set_gpu_locked_clocks(0, min_clock, max_clock);
+            }
+        } else if let (Some(min_clock), Some(max_clock)) = (gpu_settings.min_gpu_clock, gpu_settings.max_gpu_clock) {
             let _ = client.set_gpu_locked_clocks(0, min_clock, max_clock);
         }
         
         // Apply memory locked clocks if set
-        if let (Some(min_mem), Some(max_mem)) = (gpu_settings.min_mem_clock, gpu_settings.max_mem_clock) {
+        if gpu_settings.advanced_control {
+            if let (Some(min_mem), Some(max_mem)) =
+                (gpu_settings.advanced_min_mem_clock, gpu_settings.advanced_max_mem_clock)
+            {
+                let _ = client.set_memory_locked_clocks(0, min_mem, max_mem);
+            }
+        } else if let (Some(min_mem), Some(max_mem)) = (gpu_settings.min_mem_clock, gpu_settings.max_mem_clock) {
             let _ = client.set_memory_locked_clocks(0, min_mem, max_mem);
         }
         
@@ -698,7 +779,11 @@ fn apply_gpu_settings_on_save(client: &DbusClient, gpu_settings: &lapsphere_comm
         }
         
         // Apply memory offset if set
-        if let Some(memory_offset) = gpu_settings.memory_offset {
+        if gpu_settings.advanced_control {
+            if let Some(advanced_offset) = gpu_settings.advanced_memory_offset {
+                let _ = client.set_gpu_memory_offset(0, advanced_offset);
+            }
+        } else if let Some(memory_offset) = gpu_settings.memory_offset {
             let _ = client.set_gpu_memory_offset(0, memory_offset);
         }
     } else {
@@ -1056,6 +1141,11 @@ fn create_default_profile_for_reset(is_standard: bool) -> Profile {
                 prime_profile: Some("on-demand".to_string()),
                 advanced_control: false,
                 advanced: GpuAdvancedSettings::default(),
+                advanced_min_gpu_clock: None,
+                advanced_max_gpu_clock: None,
+                advanced_min_mem_clock: None,
+                advanced_max_mem_clock: None,
+                advanced_memory_offset: Some(0),
             },
             keyboard_settings: KeyboardSettings {
                 control_enabled: false,
