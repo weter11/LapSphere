@@ -18,9 +18,27 @@ impl KeyboardShortcuts {
         let mut handled = false;
         
         ctx.input(|i| {
-            // Ctrl+S - Save
+            // Ctrl+1 - Statistics
             if i.modifiers.command && i.key_pressed(Key::Num1) {
                 state.current_page = Page::Statistics;
+                handled = true;
+            }
+
+            // Ctrl+2 - Profiles
+            if i.modifiers.command && i.key_pressed(Key::Num2) {
+                state.current_page = Page::Profiles;
+                handled = true;
+            }
+
+            // Ctrl+3 - Tuning
+            if i.modifiers.command && i.key_pressed(Key::Num3) {
+                state.current_page = Page::Tuning;
+                handled = true;
+            }
+
+            // Ctrl+4 - Settings
+            if i.modifiers.command && i.key_pressed(Key::Num4) {
+                state.current_page = Page::Settings;
                 handled = true;
             }
             
@@ -43,44 +61,70 @@ impl KeyboardShortcuts {
     }
     
     fn draw_help_window(&mut self, ctx: &Context) {
-        egui::Window::new("⌨ Keyboard Shortcuts")
-            .open(&mut self.show_help)
-            .default_width(400.0)
-            .show(ctx, |ui| {
-                ui.heading("Global Shortcuts");
-                ui.add_space(8.0);
-                
-                egui::Grid::new("shortcuts_grid")
-                    .num_columns(2)
-                    .spacing([40.0, 8.0])
-                    .striped(true)
-                    .show(ui, |ui| {
-                        ui.label(egui::RichText::new("Ctrl+S").monospace());
-                        ui.label("Save configuration");
-                        ui.end_row();
-                        
-                        ui.label(egui::RichText::new("Ctrl+1").monospace());
-                        ui.label("Statistics page");
-                        ui.end_row();
-                        
-                        ui.label(egui::RichText::new("F1").monospace());
-                        ui.label("Show this help");
-                        ui.end_row();
-                    });
+        let viewport_id = egui::ViewportId::from_hash_of("help_window");
+        let viewport_builder = egui::ViewportBuilder::default()
+            .with_title("Help")
+            .with_inner_size([420.0, 360.0])
+            .with_min_inner_size([320.0, 260.0]);
 
-                ui.add_space(16.0);
-                ui.separator();
-                ui.add_space(8.0);
-                ui.heading("NVIDIA Overclocking Help");
-                ui.add_space(8.0);
-                ui.label("Dynamic offsets automatically adjust your GPU frequency based on current stats:");
-                ui.label("• Freq Offset: Linearly drops from max to min based on current frequency.");
-                ui.label("• Drain Offset: Adjusts based on temperature and frequency ranges.");
-                ui.label("• Power Offset: Decreases from max to min as power usage increases.");
-                ui.label("• Total Offset: Combined offsets applied at P-State 0 with Smart Rounding.");
-                ui.label("• Smart Rounding: Only rounds up to the next threshold if the value is at least 2/3 of the way.");
-                ui.add_space(8.0);
-                ui.label(egui::RichText::new("Note: Advanced control requires a background daemon loop and may affect stability if values are set too high.").small().italics());
+        ctx.show_viewport_immediate(viewport_id, viewport_builder, |ctx, class| {
+            if !self.show_help {
+                return;
+            }
+            if class == egui::ViewportClass::Embedded {
+                egui::Window::new("⌨ Keyboard Shortcuts")
+                    .open(&mut self.show_help)
+                    .default_width(420.0)
+                    .show(ctx, |ui| draw_help_contents(ui));
+                return;
+            }
+
+            if ctx.input(|input| input.viewport().close_requested()) {
+                self.show_help = false;
+                return;
+            }
+
+            egui::CentralPanel::default().show(ctx, |ui| {
+                draw_help_contents(ui);
             });
+        });
     }
+}
+
+fn draw_help_contents(ui: &mut egui::Ui) {
+    ui.heading("Global Shortcuts");
+    ui.add_space(8.0);
+
+    egui::Grid::new("shortcuts_grid")
+        .num_columns(2)
+        .spacing([40.0, 8.0])
+        .striped(true)
+        .show(ui, |ui| {
+            ui.label(egui::RichText::new("Ctrl+1").monospace());
+            ui.label("Statistics page");
+            ui.end_row();
+
+            ui.label(egui::RichText::new("Ctrl+2").monospace());
+            ui.label("Profiles page");
+            ui.end_row();
+
+            ui.label(egui::RichText::new("Ctrl+3").monospace());
+            ui.label("Tuning page");
+            ui.end_row();
+
+            ui.label(egui::RichText::new("Ctrl+4").monospace());
+            ui.label("Settings page");
+            ui.end_row();
+
+            ui.label(egui::RichText::new("F1").monospace());
+            ui.label("Show help window");
+            ui.end_row();
+        });
+
+    ui.add_space(16.0);
+    ui.separator();
+    ui.add_space(8.0);
+    ui.heading("Help & NVIDIA Overclocking");
+    ui.add_space(8.0);
+    ui.label("See Settings → Help for the full NVIDIA overclocking reference.");
 }
