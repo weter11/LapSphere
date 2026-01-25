@@ -41,6 +41,8 @@ pub enum DbusCommand {
     GetGpuCoreOffsetLimits { device_index: u32, reply: oneshot::Sender<Result<(i32, i32)>> },
     GetGpuMemoryOffsetLimits { device_index: u32, reply: oneshot::Sender<Result<(i32, i32)>> },
     SetPrimeProfile { profile: String, reply: oneshot::Sender<Result<()>> },
+    SetNvidiaSmiLegacyPath { path: String, reply: oneshot::Sender<Result<()>> },
+    UpdatePollingInterval { component: String, interval_ms: u64, reply: oneshot::Sender<Result<()>> },
     ShutdownDaemon { reply: oneshot::Sender<Result<()>> },
 }
 
@@ -252,6 +254,22 @@ impl DbusClient {
         rx
     }
 
+    pub fn set_nvidia_smi_legacy_path(&self, path: &str) -> oneshot::Receiver<Result<()>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::SetNvidiaSmiLegacyPath { path: path.to_string(), reply: tx });
+        rx
+    }
+
+    pub fn update_polling_interval(&self, component: &str, interval_ms: u64) -> oneshot::Receiver<Result<()>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::UpdatePollingInterval {
+            component: component.to_string(),
+            interval_ms,
+            reply: tx
+        });
+        rx
+    }
+
     pub fn shutdown_daemon(&self) -> oneshot::Receiver<Result<()>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.command_tx.send(DbusCommand::ShutdownDaemon { reply: tx });
@@ -387,6 +405,14 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
             }
             DbusCommand::SetPrimeProfile { profile, reply } => {
                 let result = set_prime_profile_impl(&connection, &profile).await;
+                let _ = reply.send(result);
+            }
+            DbusCommand::SetNvidiaSmiLegacyPath { path, reply } => {
+                let result = set_nvidia_smi_legacy_path_impl(&connection, &path).await;
+                let _ = reply.send(result);
+            }
+            DbusCommand::UpdatePollingInterval { component, interval_ms, reply } => {
+                let result = update_polling_interval_impl(&connection, &component, interval_ms).await;
                 let _ = reply.send(result);
             }
             DbusCommand::ShutdownDaemon { reply } => {
@@ -760,6 +786,28 @@ async fn set_prime_profile_impl(conn: &Connection, profile: &str) -> Result<()> 
         "io.lapsphere.Control",
     ).await?;
     proxy.call::<_, _, ()>("SetPrimeProfile", &(profile,)).await?;
+    Ok(())
+}
+
+async fn set_nvidia_smi_legacy_path_impl(conn: &Connection, path: &str) -> Result<()> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
+    ).await?;
+    proxy.call::<_, _, ()>("SetNvidiaSmiLegacyPath", &(path,)).await?;
+    Ok(())
+}
+
+async fn update_polling_interval_impl(conn: &Connection, component: &str, interval_ms: u64) -> Result<()> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
+    ).await?;
+    proxy.call::<_, _, ()>("UpdatePollingInterval", &(component, interval_ms)).await?;
     Ok(())
 }
 

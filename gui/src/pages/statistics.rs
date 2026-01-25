@@ -385,6 +385,36 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                                 );
                                 ui.end_row();
                             }
+
+                            if let Some(voltage) = gpu.voltage {
+                                ui.label("Voltage:");
+                                ui.label(format!("{:.3} V", voltage));
+                                ui.end_row();
+                            }
+
+                            if let Some(fo) = gpu.freq_offset {
+                                ui.label("Freq Offset:");
+                                ui.label(format!("{}{} MHz", if fo >= 0 { "+" } else { "" }, fo));
+                                ui.end_row();
+                            }
+
+                            if let Some(do_) = gpu.drain_offset {
+                                ui.label("Drain Offset:");
+                                ui.label(format!("{}{} MHz", if do_ >= 0 { "+" } else { "" }, do_));
+                                ui.end_row();
+                            }
+
+                            if let Some(po) = gpu.power_offset {
+                                ui.label("Power Offset:");
+                                ui.label(format!("{}{} MHz", if po >= 0 { "+" } else { "" }, po));
+                                ui.end_row();
+                            }
+
+                            if let Some(to) = gpu.total_offset {
+                                ui.label("Total Offset:");
+                                ui.label(RichText::new(format!("{}{} MHz", if to >= 0 { "+" } else { "" }, to)).strong());
+                                ui.end_row();
+                            }
                         });
                 }
             } else {

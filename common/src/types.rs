@@ -93,6 +93,10 @@ pub struct GpuInfo {
     pub load: Option<f32>,
     pub power: Option<f32>,
     pub voltage: Option<f32>,
+    pub freq_offset: Option<i32>,
+    pub drain_offset: Option<i32>,
+    pub power_offset: Option<i32>,
+    pub total_offset: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -203,6 +207,8 @@ pub struct GpuSettings {
     pub memory_offset: Option<i32>,
     pub prime_profile: Option<String>,
     #[serde(default)]
+    pub advanced_control: bool,
+    #[serde(default)]
     pub advanced: GpuAdvancedSettings,
 }
 
@@ -228,6 +234,18 @@ pub struct GpuAdvancedSettings {
     pub critical_temp_max: i32,
     pub power_offset_max: i32,
     pub power_offset_min: i32,
+    #[serde(default)]
+    pub drain_offset_control: bool,
+    #[serde(default)]
+    pub power_offset_control: bool,
+    #[serde(default)]
+    pub critical_temp_range_control: bool,
+    #[serde(default = "default_smart_rounding_threshold")]
+    pub smart_rounding_threshold: i32,
+}
+
+fn default_smart_rounding_threshold() -> i32 {
+    15
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -309,6 +327,8 @@ pub struct AppConfig {
     pub autostart: bool,
     pub cpu_scheduler: String,
     pub font_size: FontSize,
+    #[serde(default)]
+    pub nvidia_smi_legacy_path: Option<String>,
     pub statistics_sections: StatisticsSections,
     pub tuning_section_order: Vec<String>,
     pub profiles: Vec<Profile>,
@@ -351,6 +371,12 @@ pub struct StatisticsSections {
     pub wifi_poll_rate: u64,
     pub storage_poll_rate: u64,
     pub fans_poll_rate: u64,
+    #[serde(default = "default_gpu_overclock_poll_rate")]
+    pub gpu_overclock_poll_rate: u64,
+}
+
+fn default_gpu_overclock_poll_rate() -> u64 {
+    1000
 }
 
 fn default_memory_poll_rate() -> u64 {
@@ -370,6 +396,7 @@ impl Default for AppConfig {
             autostart: false,
             cpu_scheduler: "CFS".to_string(),
             font_size: FontSize::Medium,
+            nvidia_smi_legacy_path: None,
             statistics_sections: StatisticsSections::default(),
             tuning_section_order: vec![
                 "Keyboard".to_string(),
@@ -423,6 +450,7 @@ impl Default for StatisticsSections {
             wifi_poll_rate: 5000,           // 5 seconds
             storage_poll_rate: 5 * 1000,    // 5 seconds
             fans_poll_rate: 1000,           // 1 second
+            gpu_overclock_poll_rate: 1000,
         }
     }
 }
@@ -471,6 +499,7 @@ impl Default for GpuSettings {
             core_offset: Some(0),
             memory_offset: Some(0),
             prime_profile: Some("on-demand".to_string()),
+            advanced_control: false,
             advanced: GpuAdvancedSettings::default(),
         }
     }
@@ -499,6 +528,10 @@ impl Default for GpuAdvancedSettings {
             critical_temp_max: 61,
             power_offset_max: 35,
             power_offset_min: 0,
+            drain_offset_control: false,
+            power_offset_control: false,
+            critical_temp_range_control: false,
+            smart_rounding_threshold: 15,
         }
     }
 }

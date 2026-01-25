@@ -25,7 +25,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTheme, ctx: 
         .show(ui, |ui| {
             match state.settings_tab {
                 SettingsTab::Main => draw_main_settings(ui, state, theme, ctx, dbus_client),
-                SettingsTab::StatsConfiguration => draw_stats_configuration(ui, state),
+                SettingsTab::StatsConfiguration => draw_stats_configuration(ui, state, dbus_client),
                 SettingsTab::Hardware => draw_hardware_info(ui, state),
             }
         });
@@ -132,9 +132,38 @@ fn draw_main_settings(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTh
     
     // NVIDIA Prime Profile
     draw_prime_profile_settings(ui, state, dbus_client);
+
+    ui.add_space(12.0);
+    ui.separator();
+    ui.add_space(12.0);
+
+    // NVIDIA Advanced Settings
+    draw_nvidia_advanced_settings(ui, state, dbus_client);
 }
 
-fn draw_stats_configuration(ui: &mut Ui, state: &mut AppState) {
+fn draw_nvidia_advanced_settings(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>) {
+    ui.heading("🎮 NVIDIA Advanced Settings");
+    ui.add_space(6.0);
+
+    ui.label(RichText::new("Voltage Monitoring (nvidia-smi 565 or earlier):").strong());
+    ui.horizontal(|ui| {
+        let mut path = state.config.nvidia_smi_legacy_path.clone().unwrap_or_default();
+        if ui.text_edit_singleline(&mut path).changed() {
+            state.config.nvidia_smi_legacy_path = if path.is_empty() { None } else { Some(path.clone()) };
+            let _ = state.save_settings();
+            if let Some(client) = dbus_client {
+                let client = client.clone();
+                let path_clone = path.clone();
+                tokio::spawn(async move {
+                    let _ = client.set_nvidia_smi_legacy_path(&path_clone).await;
+                });
+            }
+        }
+    });
+    ui.label(RichText::new("Path to nvidia-smi binary v565 or earlier. Example: '/opt/nvidia-565/bin/nvidia-smi'").small().italics());
+}
+
+fn draw_stats_configuration(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>) {
     // Statistics Page Layout
     ui.label(RichText::new("Statistics Page Layout").strong().heading());
     ui.add_space(6.0);
@@ -221,6 +250,9 @@ fn draw_stats_configuration(ui: &mut Ui, state: &mut AppState) {
             if let Some(ref handle) = state.coordinator_handle {
                 let _ = handle.update_interval("cpu".to_string(), std::time::Duration::from_millis(new_rate));
             }
+            if let Some(client) = dbus_client {
+                let _ = client.update_polling_interval("cpu", new_rate);
+            }
         }
     });
 
@@ -234,6 +266,9 @@ fn draw_stats_configuration(ui: &mut Ui, state: &mut AppState) {
             // Update coordinator interval
             if let Some(ref handle) = state.coordinator_handle {
                 let _ = handle.update_interval("memory".to_string(), std::time::Duration::from_millis(new_rate));
+            }
+            if let Some(client) = dbus_client {
+                let _ = client.update_polling_interval("memory", new_rate);
             }
         }
     });
@@ -249,6 +284,9 @@ fn draw_stats_configuration(ui: &mut Ui, state: &mut AppState) {
             if let Some(ref handle) = state.coordinator_handle {
                 let _ = handle.update_interval("gpu".to_string(), std::time::Duration::from_millis(new_rate));
             }
+            if let Some(client) = dbus_client {
+                let _ = client.update_polling_interval("gpu", new_rate);
+            }
         }
     });
     
@@ -263,6 +301,9 @@ fn draw_stats_configuration(ui: &mut Ui, state: &mut AppState) {
             if let Some(ref handle) = state.coordinator_handle {
                 let _ = handle.update_interval("battery".to_string(), std::time::Duration::from_millis(new_rate));
             }
+            if let Some(client) = dbus_client {
+                let _ = client.update_polling_interval("battery", new_rate);
+            }
         }
     });
     
@@ -276,6 +317,9 @@ fn draw_stats_configuration(ui: &mut Ui, state: &mut AppState) {
             // Update coordinator interval
             if let Some(ref handle) = state.coordinator_handle {
                 let _ = handle.update_interval("wifi".to_string(), std::time::Duration::from_millis(new_rate));
+            }
+            if let Some(client) = dbus_client {
+                let _ = client.update_polling_interval("wifi", new_rate);
             }
         }
     });
@@ -296,6 +340,9 @@ fn draw_stats_configuration(ui: &mut Ui, state: &mut AppState) {
                 let _ = handle.update_interval("storage".to_string(), std::time::Duration::from_millis(new_rate));
                 let _ = handle.update_interval("mount".to_string(), std::time::Duration::from_millis(new_rate));
             }
+            if let Some(client) = dbus_client {
+                let _ = client.update_polling_interval("storage", new_rate);
+            }
         }
     });
     
@@ -310,8 +357,12 @@ fn draw_stats_configuration(ui: &mut Ui, state: &mut AppState) {
             if let Some(ref handle) = state.coordinator_handle {
                 let _ = handle.update_interval("fans".to_string(), std::time::Duration::from_millis(new_rate));
             }
+            if let Some(client) = dbus_client {
+                let _ = client.update_polling_interval("fans", new_rate);
+            }
         }
     });
+
 }
 
 fn draw_hardware_info(ui: &mut Ui, state: &AppState) {

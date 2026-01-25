@@ -387,16 +387,16 @@ fn draw_gpu_tuning(
         return;
     }
 
-    let tuning_mode_advanced = state.gpu_tuning_mode_advanced;
     let mut manual_clocks = state.config.profiles[profile_idx].gpu_settings.manual_clocks;
     ui.checkbox(&mut manual_clocks, "Enable Manual Clock Control");
     state.config.profiles[profile_idx].gpu_settings.manual_clocks = manual_clocks;
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.label("Mode:");
-        ui.radio_value(&mut state.gpu_tuning_mode_advanced, false, "Standard");
-        ui.radio_value(&mut state.gpu_tuning_mode_advanced, true, "Advanced");
+        ui.radio_value(&mut state.config.profiles[profile_idx].gpu_settings.advanced_control, false, "Standard");
+        ui.radio_value(&mut state.config.profiles[profile_idx].gpu_settings.advanced_control, true, "Advanced");
     });
+    let tuning_mode_advanced = state.config.profiles[profile_idx].gpu_settings.advanced_control;
     ui.label(RichText::new("GPU settings will be applied when you click Save. Disabling manual control will reset to factory settings.").small().italics());
 
     if state.config.profiles[profile_idx].gpu_settings.manual_clocks {
@@ -464,7 +464,19 @@ fn draw_gpu_tuning(
             ui.add_space(16.0);
             ui.separator();
             ui.add_space(12.0);
-            draw_gpu_advanced_controls(ui, profile);
+
+            let mut gpu_oc_poll = state.config.statistics_sections.gpu_overclock_poll_rate;
+            draw_gpu_advanced_controls(ui, profile, &mut gpu_oc_poll);
+            if gpu_oc_poll != state.config.statistics_sections.gpu_overclock_poll_rate {
+                state.config.statistics_sections.gpu_overclock_poll_rate = gpu_oc_poll;
+                let _ = state.save_settings();
+                if let Some(ref handle) = state.coordinator_handle {
+                    let _ = handle.update_interval("gpu_overclock".to_string(), std::time::Duration::from_millis(gpu_oc_poll));
+                }
+                if let Some(client) = dbus_client {
+                    let _ = client.update_polling_interval("gpu_overclock", gpu_oc_poll);
+                }
+            }
         }
 
         ui.add_space(16.0);
@@ -528,15 +540,17 @@ fn draw_gpu_standard_controls(
 
     ui.add_space(16.0);
 
-    // GPU Core Offset
-    ui.label(RichText::new("GPU Core Offset:").strong());
-    if let Some((min_limit, max_limit)) = gpu_core_offset_limits {
-        let mut core_offset = profile.gpu_settings.core_offset.unwrap_or(0);
-        ui.add(Slider::new(&mut core_offset, min_limit..=max_limit).suffix(" MHz"));
-        profile.gpu_settings.core_offset = Some(core_offset);
-    }
+    // GPU Core Offset - only for Standard control
+    if !profile.gpu_settings.advanced_control {
+        ui.label(RichText::new("GPU Core Offset:").strong());
+        if let Some((min_limit, max_limit)) = gpu_core_offset_limits {
+            let mut core_offset = profile.gpu_settings.core_offset.unwrap_or(0);
+            ui.add(Slider::new(&mut core_offset, min_limit..=max_limit).suffix(" MHz"));
+            profile.gpu_settings.core_offset = Some(core_offset);
+        }
 
-    ui.add_space(16.0);
+        ui.add_space(16.0);
+    }
 
     // GPU Memory Offset
     ui.label(RichText::new("GPU Memory Offset:").strong());
@@ -549,9 +563,36 @@ fn draw_gpu_standard_controls(
     }
 }
 
-fn draw_gpu_advanced_controls(ui: &mut Ui, profile: &mut Profile) {
-    ui.label(RichText::new("Advanced GPU Tuning:").strong());
+fn draw_gpu_advanced_controls(
+    ui: &mut Ui,
+    profile: &mut Profile,
+    gpu_overclock_poll_rate: &mut u64,
+) {
+    ui.label(RichText::new("Advanced GPU Tuning (Dynamic Offsets):").strong());
     ui.add_space(6.0);
+
+    let mut gpu_oc_poll = (*gpu_overclock_poll_rate as f32) / 1000.0;
+    ui.horizontal(|ui| {
+        ui.label("Dynamic Offset Refresh Rate:");
+        if ui.add(Slider::new(&mut gpu_oc_poll, 0.1..=5.0).step_by(0.1).suffix(" s")).changed() {
+            *gpu_overclock_poll_rate = (gpu_oc_poll * 1000.0) as u64;
+        }
+    });
+    ui.add_space(8.0);
+
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut profile.gpu_settings.advanced.drain_offset_control, "Drain Offset Control");
+        ui.checkbox(&mut profile.gpu_settings.advanced.power_offset_control, "Power Offset Control");
+    });
+    ui.checkbox(&mut profile.gpu_settings.advanced.critical_temp_range_control, "Critical Temperature Range Control");
+
+    ui.horizontal(|ui| {
+        ui.label("Smart Rounding Threshold:");
+        ui.add(egui::DragValue::new(&mut profile.gpu_settings.advanced.smart_rounding_threshold).speed(1).range(0..=100));
+        ui.label(RichText::new("(Applied at P-State 0)").small().italics());
+    });
+
+    ui.add_space(8.0);
 
     Grid::new("gpu_advanced_grid")
         .num_columns(3)
@@ -649,9 +690,11 @@ fn apply_gpu_settings_on_save(client: &DbusClient, gpu_settings: &lapsphere_comm
             let _ = client.set_memory_locked_clocks(0, min_mem, max_mem);
         }
         
-        // Apply core offset if set
-        if let Some(core_offset) = gpu_settings.core_offset {
-            let _ = client.set_gpu_core_offset(0, core_offset);
+        // Apply core offset if set and not in advanced mode (advanced mode is handled by daemon loop)
+        if !gpu_settings.advanced_control {
+            if let Some(core_offset) = gpu_settings.core_offset {
+                let _ = client.set_gpu_core_offset(0, core_offset);
+            }
         }
         
         // Apply memory offset if set
@@ -1011,6 +1054,7 @@ fn create_default_profile_for_reset(is_standard: bool) -> Profile {
                 core_offset: Some(0),
                 memory_offset: Some(0),
                 prime_profile: Some("on-demand".to_string()),
+                advanced_control: false,
                 advanced: GpuAdvancedSettings::default(),
             },
             keyboard_settings: KeyboardSettings {

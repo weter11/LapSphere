@@ -58,7 +58,6 @@ pub struct AppState {
     pub status_message: Option<StatusMessage>,
     pub restart_confirmation_pending: bool,
     pub pending_prime_profile: Option<String>,
-    pub gpu_tuning_mode_advanced: bool,
     pub selected_fan_curve: usize,
     
     // Profile editing
@@ -108,7 +107,6 @@ impl AppState {
             editing_profile_name: None,
             pending_battery_update: None,
             coordinator_handle: None,
-            gpu_tuning_mode_advanced: false,
             selected_fan_curve: 0,
         }
     }
@@ -307,6 +305,16 @@ impl LapSphereApp {
             let _ = handle.register("wifi".to_string(), Duration::from_millis(state.config.statistics_sections.wifi_poll_rate));
             let _ = handle.register("storage".to_string(), Duration::from_millis(state.config.statistics_sections.storage_poll_rate));
             let _ = handle.register("mount".to_string(), Duration::from_millis(state.config.statistics_sections.storage_poll_rate));
+            let _ = handle.register("gpu_overclock".to_string(), Duration::from_millis(state.config.statistics_sections.gpu_overclock_poll_rate));
+
+            // Sync legacy path to daemon
+            if let Some(ref path) = state.config.nvidia_smi_legacy_path {
+                let client_clone = client.clone();
+                let path_clone = path.clone();
+                tokio::spawn(async move {
+                    let _ = client_clone.set_nvidia_smi_legacy_path(&path_clone).await;
+                });
+            }
 
             // Initial system info load
             let client_clone = client.clone();
@@ -367,6 +375,13 @@ impl LapSphereApp {
         // Apply theme
         let theme = LapSphereTheme::new(&state.config.theme, cc.egui_ctx.style().visuals.dark_mode);
         theme.apply_with_font_size(&cc.egui_ctx, &state.config.font_size);
+
+        // Apply current profile to daemon on startup to ensure background jobs are active
+        if let Some(profile) = state.current_profile().cloned() {
+            if let Some(ref client) = dbus_client {
+                let _ = client.apply_profile(profile);
+            }
+        }
 
         let system_tray = match SystemTray::new(&state.config.profiles, &state.config.current_profile) {
             Ok(tray) => Some(tray),
@@ -512,6 +527,9 @@ impl LapSphereApp {
                             ui.selectable_value(&mut self.state.current_page, Page::Profiles, "📋 Profiles");
                             ui.selectable_value(&mut self.state.current_page, Page::Tuning, "🔧 Tuning");
                             ui.selectable_value(&mut self.state.current_page, Page::Settings, "⚙ Settings");
+                            if ui.button("❓ Help").clicked() {
+                                self.shortcuts.toggle_help();
+                            }
                         });
                     },
                 );
@@ -658,6 +676,7 @@ struct SettingsConfig {
     autostart: bool,
     cpu_scheduler: String,
     font_size: FontSize,
+    nvidia_smi_legacy_path: Option<String>,
     statistics_sections: StatisticsSections,
     tuning_section_order: Vec<String>,
     battery_settings: BatterySettings,
@@ -673,6 +692,7 @@ impl Default for SettingsConfig {
             autostart: config.autostart,
             cpu_scheduler: config.cpu_scheduler,
             font_size: config.font_size,
+            nvidia_smi_legacy_path: config.nvidia_smi_legacy_path.clone(),
             statistics_sections: config.statistics_sections,
             tuning_section_order: config.tuning_section_order,
             battery_settings: config.battery_settings,
@@ -689,6 +709,7 @@ impl From<&AppConfig> for SettingsConfig {
             autostart: config.autostart,
             cpu_scheduler: config.cpu_scheduler.clone(),
             font_size: config.font_size.clone(),
+            nvidia_smi_legacy_path: config.nvidia_smi_legacy_path.clone(),
             statistics_sections: config.statistics_sections.clone(),
             tuning_section_order: config.tuning_section_order.clone(),
             battery_settings: config.battery_settings.clone(),
@@ -704,6 +725,7 @@ impl SettingsConfig {
         config.autostart = self.autostart;
         config.cpu_scheduler = self.cpu_scheduler.clone();
         config.font_size = self.font_size.clone();
+        config.nvidia_smi_legacy_path = self.nvidia_smi_legacy_path.clone();
         config.statistics_sections = self.statistics_sections.clone();
         config.tuning_section_order = self.tuning_section_order.clone();
         config.battery_settings = self.battery_settings.clone();
