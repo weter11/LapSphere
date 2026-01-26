@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Instant;
 use once_cell::sync::Lazy;
-use crate::tuxedo_io::TuxedoIo;
+use crate::tuxedo_io::{TuxedoIo, HardwareInterface};
 use systemstat::{System, Platform};
 // use tuxedo_io::TuxedoIo;
 use lapsphere_common::types::*;
@@ -650,14 +650,23 @@ pub fn get_current_tdp_profile() -> Result<String> {
         return Err(anyhow!("TDP profiles not available"));
     }
     
-    // Since there's no direct "get current profile" ioctl,
-    // we return a default message or the first profile
+    let io = TuxedoIo::new()?;
     let profiles = get_tdp_profiles()?;
     if profiles.is_empty() {
         return Err(anyhow!("No TDP profiles available"));
     }
+
+    if io.get_interface() == HardwareInterface::Uniwill {
+        if let Ok(profile_id) = io.get_uw_performance_profile() {
+            // profile_id: 1=powersave, 2=enthusiast, 3=overboost
+            let idx = (profile_id.saturating_sub(1)) as usize;
+            if idx < profiles.len() {
+                return Ok(profiles[idx].clone());
+            }
+        }
+    }
     
-    // Return the first profile as default since we can't detect the current one
+    // Fallback to the first profile
     Ok(profiles[0].clone())
 }
 
@@ -800,6 +809,31 @@ pub fn get_cpu_info() -> Result<CpuInfo> {
 
     let (scheduler, available_schedulers) = get_scheduler_info();
 
+    let mut tdp0 = None;
+    let mut tdp1 = None;
+    let mut tdp2 = None;
+    let mut tdp0_range = None;
+    let mut tdp1_range = None;
+    let mut tdp2_range = None;
+
+    if let Ok(io) = TuxedoIo::new() {
+        if io.get_interface() == HardwareInterface::Uniwill {
+            tdp0 = io.get_tdp(0).ok();
+            tdp1 = io.get_tdp(1).ok();
+            tdp2 = io.get_tdp(2).ok();
+
+            if let (Ok(min), Ok(max)) = (io.get_tdp_min(0), io.get_tdp_max(0)) {
+                tdp0_range = Some((min, max));
+            }
+            if let (Ok(min), Ok(max)) = (io.get_tdp_min(1), io.get_tdp_max(1)) {
+                tdp1_range = Some((min, max));
+            }
+            if let (Ok(min), Ok(max)) = (io.get_tdp_min(2), io.get_tdp_max(2)) {
+                tdp2_range = Some((min, max));
+            }
+        }
+    }
+
     Ok(CpuInfo {
         name,
         median_frequency,
@@ -824,6 +858,12 @@ pub fn get_cpu_info() -> Result<CpuInfo> {
         power_source,
         energy_performance_preference,
         available_epp_options,
+        tdp0,
+        tdp1,
+        tdp2,
+        tdp0_range,
+        tdp1_range,
+        tdp2_range,
         capabilities,
         scheduler,
         available_schedulers,

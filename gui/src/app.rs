@@ -70,6 +70,8 @@ pub struct AppState {
     
     // Refresh coordinator handle
     pub coordinator_handle: Option<CoordinatorHandle>,
+
+    pub keyboard_brush_color: [u8; 3],
 }
 
 #[derive(Debug, Clone)]
@@ -110,6 +112,7 @@ impl AppState {
             pending_battery_update: None,
             coordinator_handle: None,
             selected_fan_curve: 0,
+            keyboard_brush_color: [255, 255, 255],
         }
     }
 

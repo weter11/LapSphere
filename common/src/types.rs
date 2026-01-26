@@ -37,6 +37,12 @@ pub struct CpuInfo {
     pub available_epp_options: Vec<String>,
     pub scheduler: String,
     pub available_schedulers: Vec<String>,
+    pub tdp0: Option<u32>,
+    pub tdp1: Option<u32>,
+    pub tdp2: Option<u32>,
+    pub tdp0_range: Option<(u32, u32)>,
+    pub tdp1_range: Option<(u32, u32)>,
+    pub tdp2_range: Option<(u32, u32)>,
     pub capabilities: CpuCapabilities,
 }
 
@@ -191,6 +197,9 @@ pub struct CpuSettings {
     pub tdp_profile: Option<String>,              // ADD
     pub energy_performance_preference: Option<String>,  // ADD
     pub tdp: Option<u32>,
+    pub tdp0: Option<u32>,
+    pub tdp1: Option<u32>,
+    pub tdp2: Option<u32>,
     pub amd_pstate_status: Option<String>,
     pub intel_pstate_status: Option<String>,
 }
@@ -294,6 +303,7 @@ pub struct ZoneColor {
 pub enum KeyboardMode {
     SingleColor { r: u8, g: u8, b: u8, brightness: u8 },  // CUSTOM (0) - Static color
     MultipleZones { zones: Vec<ZoneColor>, brightness: u8 }, // Multiple zones (e.g. 3-zone, 4-zone)
+    PerKeyRGB { keys: Vec<ZoneColor>, brightness: u8 },
     Breathe { r: u8, g: u8, b: u8, brightness: u8, speed: u8 },  // BREATHE (1)
     Cycle { brightness: u8, speed: u8 },  // CYCLE (2) - Color cycle through spectrum
     Dance { brightness: u8, speed: u8 },  // DANCE (3)
@@ -493,6 +503,9 @@ impl Default for CpuSettings {
             intel_pstate_status: None,
             tdp_profile: None,                          // ADD
             energy_performance_preference: None,        // ADD
+            tdp0: None,
+            tdp1: None,
+            tdp2: None,
         }
     }
 }

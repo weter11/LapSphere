@@ -370,6 +370,78 @@ impl TuxedoIo {
         }
     }
 
+    pub fn get_tdp(&self, tdp_index: u8) -> Result<u32> {
+        if self.interface != HardwareInterface::Uniwill {
+            return Err(anyhow!("TDP control only available on Uniwill interface"));
+        }
+        let fd = self.device.as_raw_fd();
+        let seq = 0x18 + tdp_index;
+        let request = Self::ior(MAGIC_READ_UW, seq, Self::PTR_SIZE);
+        let val = Self::ioctl_read_i32(fd, request)?;
+        Ok(val as u32)
+    }
+
+    pub fn get_tdp_min(&self, tdp_index: u8) -> Result<u32> {
+        if self.interface != HardwareInterface::Uniwill {
+            return Err(anyhow!("TDP control only available on Uniwill interface"));
+        }
+        let fd = self.device.as_raw_fd();
+        let seq = 0x1b + tdp_index;
+        let request = Self::ior(MAGIC_READ_UW, seq, Self::PTR_SIZE);
+        let val = Self::ioctl_read_i32(fd, request)?;
+        Ok(val as u32)
+    }
+
+    pub fn get_tdp_max(&self, tdp_index: u8) -> Result<u32> {
+        if self.interface != HardwareInterface::Uniwill {
+            return Err(anyhow!("TDP control only available on Uniwill interface"));
+        }
+        let fd = self.device.as_raw_fd();
+        let seq = 0x1e + tdp_index;
+        let request = Self::ior(MAGIC_READ_UW, seq, Self::PTR_SIZE);
+        let val = Self::ioctl_read_i32(fd, request)?;
+        Ok(val as u32)
+    }
+
+    pub fn set_tdp(&self, tdp_index: u8, value: u32) -> Result<()> {
+        if self.interface != HardwareInterface::Uniwill {
+            return Err(anyhow!("TDP control only available on Uniwill interface"));
+        }
+        let fd = self.device.as_raw_fd();
+        let seq = 0x15 + tdp_index;
+        let request = Self::iow(MAGIC_WRITE_UW, seq, Self::PTR_SIZE);
+        Self::ioctl_write_i32(fd, request, value as i32)
+    }
+
+    pub fn get_uw_performance_profile(&self) -> Result<u32> {
+        if self.interface != HardwareInterface::Uniwill {
+            return Err(anyhow!("Uniwill performance profile only available on Uniwill interface"));
+        }
+        let fd = self.device.as_raw_fd();
+        let request = Self::ior(MAGIC_READ_UW, 0x14, Self::PTR_SIZE);
+        let mode_data = Self::ioctl_read_i32(fd, request)? as u32;
+
+        // According to tuxedo_io.c:
+        // Case 1: (0xa0 set, 0x10 cleared) -> PROFILE_POWERSAVE (1)
+        // Case 2: (0xa0 cleared, 0x10 cleared) -> PROFILE_ENTHUSIAST (2)
+        // Case 3: (0x10 set, 0xa0 cleared) -> PROFILE_OVERBOOST (3)
+        let a0_set = (mode_data & 0xa0) == 0xa0;
+        let a0_cleared = (mode_data & 0xa0) == 0;
+        let bit10_set = (mode_data & 0x10) != 0;
+        let bit10_cleared = (mode_data & 0x10) == 0;
+
+        if a0_set && bit10_cleared {
+            Ok(1)
+        } else if a0_cleared && bit10_cleared {
+            Ok(2)
+        } else if bit10_set && a0_cleared {
+            Ok(3)
+        } else {
+            // Default to enthusiast if unknown
+            Ok(2)
+        }
+    }
+
     pub fn get_fan_temperature(&self, fan_id: u32) -> Result<u32> {
         let fd = self.device.as_raw_fd();
 
