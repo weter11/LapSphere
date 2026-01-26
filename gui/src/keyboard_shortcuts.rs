@@ -101,8 +101,56 @@ fn draw_help_contents(ui: &mut egui::Ui) {
     ui.heading("NVIDIA Overclocking Parameter Reference");
     ui.add_space(8.0);
 
-    ui.label("This system dynamically adjusts GPU clock offsets based on telemetry. Below are the parameters as shown in the Tuning UI:");
+    ui.label("This system provides both static clock locking and dynamic offset adjustment based on telemetry. Below are descriptions for all settings found in the Tuning UI:");
     ui.add_space(12.0);
+
+    ui.heading("Standard & Common Controls");
+    ui.add_space(4.0);
+
+    ui.group(|ui| {
+        ui.label(egui::RichText::new("GPU Locked Clocks (Min/Max)").strong());
+        ui.label("Sets a fixed frequency range for the GPU core. Locking both Min and Max to the same value forces a static clock speed.");
+    });
+    ui.add_space(8.0);
+
+    ui.group(|ui| {
+        ui.label(egui::RichText::new("Memory Locked Clocks (Min/Max)").strong());
+        ui.label("Sets a fixed frequency range for the GPU video memory. Similar to core clocks, locking both forces a static frequency.");
+    });
+    ui.add_space(8.0);
+
+    ui.group(|ui| {
+        ui.label(egui::RichText::new("GPU Core Offset").strong());
+        ui.label("Adds a static offset (MHz) to the entire GPU core frequency curve. Available in Standard control mode.");
+    });
+    ui.add_space(8.0);
+
+    ui.group(|ui| {
+        ui.label(egui::RichText::new("GPU Memory Offset").strong());
+        ui.label("Adds a static offset (MHz) to the video memory frequency. Available in both Standard and Advanced modes.");
+    });
+    ui.add_space(12.0);
+
+    ui.heading("Advanced Dynamic Offset Parameters");
+    ui.add_space(4.0);
+
+    ui.group(|ui| {
+        ui.label(egui::RichText::new("Dynamic Offset Refresh Rate").strong());
+        ui.label("How frequently the daemon recalculates and applies offsets based on live telemetry (seconds).");
+    });
+    ui.add_space(8.0);
+
+    ui.group(|ui| {
+        ui.label(egui::RichText::new("Control Flags (Drain/Power/Critical Temp)").strong());
+        ui.label("Toggles specific dynamic adjustment logic on or off. Drain control adjusts for voltage drops, Power control for wattage usage, and Critical Temp for safety overrides.");
+    });
+    ui.add_space(8.0);
+
+    ui.group(|ui| {
+        ui.label(egui::RichText::new("Smart Rounding Threshold").strong());
+        ui.label("The step size (MHz) used when applying offsets. Ensures offsets align with hardware steps supported by NVML.");
+    });
+    ui.add_space(8.0);
 
     ui.group(|ui| {
         ui.label(egui::RichText::new("Temperature (°C)").strong());
