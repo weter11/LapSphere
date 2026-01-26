@@ -53,6 +53,7 @@ pub struct AppState {
     pub available_start_thresholds: Vec<u8>,
     pub available_end_thresholds: Vec<u8>,
     pub available_tdp_profiles: Vec<String>,
+    pub webcam_enabled: Option<bool>,
     
     // UI state
     pub current_page: Page,
@@ -102,6 +103,7 @@ impl AppState {
             available_start_thresholds: Vec::new(),
             available_end_thresholds: Vec::new(),
             available_tdp_profiles: Vec::new(),
+            webcam_enabled: None,
             keyboard_capabilities: None,
             current_page: Page::Statistics,
             settings_tab: SettingsTab::Main,
@@ -191,6 +193,7 @@ pub enum HardwareUpdate {
     StorageDeviceInfo(Vec<StorageDevice>),
     MountInfo(Vec<MountInfo>),
     HardwareInterface(String),
+    WebcamState(bool),
     GpuClockRanges(Result<(u32, u32), String>),
     GpuMemClockRanges(Result<Vec<u32>, String>),
     GpuCoreOffsetLimits(Result<(i32, i32), String>),
@@ -295,6 +298,12 @@ impl LapSphereApp {
                                     Err(e) => log::error!("DBus error getting Mount info: {}", e),
                                 }
                             }
+                            "webcam" => {
+                                match client.get_webcam_state().await {
+                                    Ok(Ok(state)) => { let _ = tx.send(HardwareUpdate::WebcamState(state)); }
+                                    _ => {}
+                                }
+                            }
                             _ => {}
                         }
                     });
@@ -311,6 +320,7 @@ impl LapSphereApp {
             let _ = handle.register("storage".to_string(), Duration::from_millis(state.config.statistics_sections.storage_poll_rate));
             let _ = handle.register("mount".to_string(), Duration::from_millis(state.config.statistics_sections.storage_poll_rate));
             let _ = handle.register("gpu_overclock".to_string(), Duration::from_millis(state.config.statistics_sections.gpu_overclock_poll_rate));
+            let _ = handle.register("webcam".to_string(), Duration::from_secs(5));
 
             // Sync legacy path to daemon
             if let Some(ref path) = state.config.nvidia_smi_legacy_path {
@@ -441,6 +451,9 @@ impl LapSphereApp {
                 }
                 HardwareUpdate::HardwareInterface(info) => {
                     self.state.hardware_interface = Some(info);
+                }
+                HardwareUpdate::WebcamState(state) => {
+                    self.state.webcam_enabled = Some(state);
                 }
                 HardwareUpdate::GpuClockRanges(result) => {
                     match result {

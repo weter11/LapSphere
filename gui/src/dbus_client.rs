@@ -43,6 +43,8 @@ pub enum DbusCommand {
     SetPrimeProfile { profile: String, reply: oneshot::Sender<Result<()>> },
     SetNvidiaSmiLegacyPath { path: String, reply: oneshot::Sender<Result<()>> },
     UpdatePollingInterval { component: String, interval_ms: u64, reply: oneshot::Sender<Result<()>> },
+    GetWebcamState { reply: oneshot::Sender<Result<bool>> },
+    SetWebcamState { enabled: bool, reply: oneshot::Sender<Result<()>> },
     ShutdownDaemon { reply: oneshot::Sender<Result<()>> },
 }
 
@@ -275,6 +277,18 @@ impl DbusClient {
         let _ = self.command_tx.send(DbusCommand::ShutdownDaemon { reply: tx });
         rx
     }
+
+    pub fn get_webcam_state(&self) -> oneshot::Receiver<Result<bool>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::GetWebcamState { reply: tx });
+        rx
+    }
+
+    pub fn set_webcam_state(&self, enabled: bool) -> oneshot::Receiver<Result<()>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::SetWebcamState { enabled, reply: tx });
+        rx
+    }
 }
 
 // Background worker - handles all DBus calls asynchronously
@@ -417,6 +431,14 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
             }
             DbusCommand::ShutdownDaemon { reply } => {
                 let result = shutdown_daemon_impl(&connection).await;
+                let _ = reply.send(result);
+            }
+            DbusCommand::GetWebcamState { reply } => {
+                let result = get_webcam_state_impl(&connection).await;
+                let _ = reply.send(result);
+            }
+            DbusCommand::SetWebcamState { enabled, reply } => {
+                let result = set_webcam_state_impl(&connection, enabled).await;
                 let _ = reply.send(result);
             }
         }
@@ -808,6 +830,28 @@ async fn update_polling_interval_impl(conn: &Connection, component: &str, interv
         "io.lapsphere.Control",
     ).await?;
     proxy.call::<_, _, ()>("UpdatePollingInterval", &(component, interval_ms)).await?;
+    Ok(())
+}
+
+async fn get_webcam_state_impl(conn: &Connection) -> Result<bool> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
+    ).await?;
+    let state: bool = proxy.call("GetWebcamState", &()).await?;
+    Ok(state)
+}
+
+async fn set_webcam_state_impl(conn: &Connection, enabled: bool) -> Result<()> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
+    ).await?;
+    proxy.call::<_, _, ()>("SetWebcamState", &(enabled,)).await?;
     Ok(())
 }
 

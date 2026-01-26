@@ -17,8 +17,8 @@ pub struct CpuInfo {
     pub median_load: f32,
     pub package_temp: f32,
     pub package_power: Option<f32>,
-    pub power_source: Option<String>,  // NEW: Shows source of power reading
-    pub all_power_sources: Vec<PowerSource>,  // NEW: All available power sources
+    pub power_source: Option<String>,
+    pub all_power_sources: Vec<PowerSource>,
     pub cores: Vec<CoreInfo>,
     pub physical_cores: u32,
     pub logical_cores: u32,
@@ -194,8 +194,8 @@ pub struct CpuSettings {
     pub boost: Option<bool>,
     pub smt: Option<bool>,
     pub performance_profile: Option<String>,
-    pub tdp_profile: Option<String>,              // ADD
-    pub energy_performance_preference: Option<String>,  // ADD
+    pub tdp_profile: Option<String>,
+    pub energy_performance_preference: Option<String>,
     pub tdp: Option<u32>,
     pub tdp0: Option<u32>,
     pub tdp1: Option<u32>,
@@ -501,8 +501,8 @@ impl Default for CpuSettings {
             tdp: None,
             amd_pstate_status: None,
             intel_pstate_status: None,
-            tdp_profile: None,                          // ADD
-            energy_performance_preference: None,        // ADD
+            tdp_profile: None,
+            energy_performance_preference: None,
             tdp0: None,
             tdp1: None,
             tdp2: None,
