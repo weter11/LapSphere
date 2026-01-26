@@ -14,6 +14,8 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTheme, ctx: 
         ui.selectable_value(&mut state.settings_tab, SettingsTab::Main, "Main");
         ui.selectable_value(&mut state.settings_tab, SettingsTab::StatsConfiguration, "Stats configuration");
         ui.selectable_value(&mut state.settings_tab, SettingsTab::Hardware, "Hardware info");
+        ui.selectable_value(&mut state.settings_tab, SettingsTab::Help, "Help");
+        ui.selectable_value(&mut state.settings_tab, SettingsTab::About, "About");
     });
 
     ui.add_space(6.0);
@@ -27,7 +29,84 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTheme, ctx: 
                 SettingsTab::Main => draw_main_settings(ui, state, theme, ctx, dbus_client),
                 SettingsTab::StatsConfiguration => draw_stats_configuration(ui, state, dbus_client),
                 SettingsTab::Hardware => draw_hardware_info(ui, state),
+                SettingsTab::Help => draw_help_info(ui, state),
+                SettingsTab::About => draw_about_info(ui),
             }
+        });
+}
+
+fn draw_help_info(ui: &mut Ui, state: &AppState) {
+    ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.label(RichText::new("Help").strong().heading());
+            ui.add_space(6.0);
+            ui.label("Shortcuts:");
+            ui.add_space(6.0);
+            Grid::new("help_shortcuts_grid")
+                .num_columns(2)
+                .spacing([36.0, 6.0])
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.label(RichText::new("Ctrl+1").monospace());
+                    ui.label("Statistics page");
+                    ui.end_row();
+
+                    ui.label(RichText::new("Ctrl+2").monospace());
+                    ui.label("Profiles page");
+                    ui.end_row();
+
+                    ui.label(RichText::new("Ctrl+3").monospace());
+                    ui.label("Tuning page");
+                    ui.end_row();
+
+                    ui.label(RichText::new("Ctrl+4").monospace());
+                    ui.label("Settings page");
+                    ui.end_row();
+
+                    ui.label(RichText::new("F1").monospace());
+                    ui.label("Toggle NVIDIA overclocking help window");
+                    ui.end_row();
+                });
+
+            ui.add_space(12.0);
+            ui.separator();
+            ui.add_space(12.0);
+
+            ui.label(RichText::new("Standard Mode").strong().heading());
+            ui.add_space(6.0);
+            ui.label("Standard mode controls apply locked clocks and memory offsets directly.");
+            ui.label("They are applied when you click Save in the Tuning tab.");
+
+            ui.add_space(12.0);
+            ui.separator();
+            ui.add_space(12.0);
+
+            ui.label(RichText::new("Advanced Mode").strong().heading());
+            ui.add_space(6.0);
+            let advanced_enabled = state
+                .current_profile()
+                .map(|profile| profile.gpu_settings.advanced_control)
+                .unwrap_or(false);
+            if advanced_enabled {
+                ui.label("Advanced dynamic offsets are enabled for the current profile.");
+            } else {
+                ui.label("Advanced dynamic offsets are disabled for the current profile.");
+            }
+            ui.label("Advanced mode uses its own locked clock and memory offset values.");
+            ui.label("Press F1 for the NVIDIA overclocking parameter reference.");
+        });
+}
+
+fn draw_about_info(ui: &mut Ui) {
+    ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.label(RichText::new("About").strong().heading());
+            ui.add_space(6.0);
+            ui.label("LapSphere provides hardware monitoring and tuning for Clevo/Tuxedo laptops.");
+            ui.label("Use the Profiles and Tuning tabs to customize performance, cooling, and lighting.");
+            ui.label("Statistics and Hardware Info show live system telemetry.");
         });
 }
 
@@ -500,17 +579,17 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
                 ui.label(format!("{:.2} GiB", memory.total_gib));
                 ui.end_row();
 
-                if let Some(mem_type) = &memory.memory_type {
-                    ui.label("Type:");
-                    ui.label(mem_type);
-                    ui.end_row();
-                }
+                ui.label("Type:");
+                ui.label(memory.memory_type.as_deref().unwrap_or("Unknown"));
+                ui.end_row();
 
+                ui.label("Frequency:");
                 if let Some(freq) = memory.memory_frequency {
-                    ui.label("Frequency:");
                     ui.label(format!("{} MT/s", freq));
-                    ui.end_row();
+                } else {
+                    ui.label(RichText::new("Unknown").weak());
                 }
+                ui.end_row();
             });
     } else {
         ui.label("Memory information unavailable.");

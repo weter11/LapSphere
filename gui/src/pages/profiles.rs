@@ -230,6 +230,11 @@ fn create_standard_profile() -> lapsphere_common::types::Profile {
             prime_profile: Some("on-demand".to_string()),
             advanced_control: false,
             advanced: GpuAdvancedSettings::default(),
+            advanced_min_gpu_clock: None,
+            advanced_max_gpu_clock: None,
+            advanced_min_mem_clock: None,
+            advanced_max_mem_clock: None,
+            advanced_memory_offset: Some(0),
         },
         keyboard_settings: KeyboardSettings {
             control_enabled: false,

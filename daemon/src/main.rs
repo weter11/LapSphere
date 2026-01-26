@@ -222,6 +222,15 @@ async fn main() -> Result<()> {
 
         if let Some(ref gpu_settings) = settings {
             apply_gpu_overclocking(gpu_settings)?;
+        } else {
+            {
+                let mut stats = CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
+                *stats = None;
+            }
+            {
+                let mut last = LAST_APPLIED_OFFSET.lock().unwrap();
+                *last = None;
+            }
         }
         Ok(())
     };
@@ -351,28 +360,34 @@ fn apply_fan_curves(io: &tuxedo_io::TuxedoIo, settings: &FanSettings, sorted_cur
 }
 
 fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -> Result<()> {
-    // Clear stats and last offset if advanced control or manual clocks are disabled
-    if !gpu_settings.advanced_control || !gpu_settings.manual_clocks {
-        {
-            let mut stats = CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
-            *stats = None;
-        }
-        {
-            let mut last = LAST_APPLIED_OFFSET.lock().unwrap();
-            *last = None;
-        }
-        return Ok(());
-    }
+     // Clear stats and last offset if advanced control or manual clocks are disabled
+     if !gpu_settings.advanced_control || !gpu_settings.manual_clocks {
+         {
+             let mut stats = CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
+             *stats = None;
+         }
+         {
+             let mut last = LAST_APPLIED_OFFSET.lock().unwrap();
+             *last = None;
+         }
+         if !gpu_settings.manual_clocks {
+             let _ = crate::hardware_control::set_gpu_core_offset(0, 0);
+         }
+         return Ok(());
+     }
 
     // 1. Get current GPU stats (temperature, power, frequency)
     let gpus = crate::hardware_detection::get_gpu_info()?;
     let nvidia_gpu = gpus.iter().find(|g| g.name.to_lowercase().contains("nvidia"));
 
-    if let Some(gpu) = nvidia_gpu {
-        // Check if GPU is suspended or not active
-        if gpu.status.to_lowercase().contains("suspended") {
-            return Ok(());
-        }
+        if let Some(gpu) = nvidia_gpu {
+            let status_lower = gpu.status.to_lowercase();
+            let is_suspended = status_lower.contains("suspended");
+            let is_pstate = status_lower.starts_with('p');
+            // Check if GPU is suspended or not active
+            if is_suspended || !is_pstate {
+                return Ok(());
+            }
 
 
         let temp = gpu.temperature.unwrap_or(0.0);
@@ -448,11 +463,20 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
         // Total Offset
         let total_offset = freq_offset + drain_offset + power_offset;
 
-        let nvml = crate::hardware_control::get_nvml()?;
-        let device = nvml.device_by_index(0)?; // Assuming device 0
-        let pstate = device.performance_state()?;
+        if status_lower != "p0" {
+            let mut last = LAST_APPLIED_OFFSET.lock().unwrap();
+            if *last != Some(0) {
+                crate::hardware_control::set_gpu_core_offset(0, 0)?;
+                *last = Some(0);
+                log::info!("Cleared dynamic GPU offset (P-state not 0)");
+            }
+            drop(last);
+            let mut stats = CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
+            *stats = None;
+            return Ok(());
+        }
 
-        let final_offset = if pstate == nvml_wrapper::enum_wrappers::device::PerformanceState::Zero {
+        let final_offset = {
              // SMART ROUNDING
              let threshold = adv.smart_rounding_threshold as f32;
              if threshold > 0.0 {
@@ -466,8 +490,6 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
              } else {
                  total_offset
              }
-        } else {
-            0.0 // Overclock only for P-state 0
         };
 
         let final_offset_i32 = final_offset as i32;
@@ -478,20 +500,22 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
             if *last != Some(final_offset_i32) {
                 crate::hardware_control::set_gpu_core_offset(0, final_offset_i32)?;
                 *last = Some(final_offset_i32);
-                log::info!("Applied new dynamic GPU offset: {} MHz", final_offset_i32);
+                if final_offset_i32 == 0 {
+                    log::info!("Cleared dynamic GPU offset (P-state not 0)");
+                } else {
+                    log::info!("Applied new dynamic GPU offset: {} MHz", final_offset_i32);
+                }
             }
         }
 
         // Update global stats for UI
-        {
-            let mut stats = CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
-            *stats = Some(GpuOverclockStats {
-                freq_offset: freq_offset as i32,
-                drain_offset: drain_offset as i32,
-                power_offset: power_offset as i32,
-                total_offset: final_offset as i32,
-            });
-        }
+        let mut stats = CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
+        *stats = Some(GpuOverclockStats {
+            freq_offset: freq_offset as i32,
+            drain_offset: drain_offset as i32,
+            power_offset: power_offset as i32,
+            total_offset: final_offset as i32,
+        });
     }
     Ok(())
 }

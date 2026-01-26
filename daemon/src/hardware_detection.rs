@@ -829,7 +829,8 @@ pub fn get_cpu_info() -> Result<CpuInfo> {
 }
 
 fn get_memory_type_and_freq() -> (Option<String>, Option<u64>) {
-    let output = std::process::Command::new("dmidecode")
+    let dmidecode_path = find_binary("dmidecode").unwrap_or_else(|| "dmidecode".to_string());
+    let output = std::process::Command::new(dmidecode_path)
         .args(["-t", "memory"])
         .output();
 
@@ -843,7 +844,11 @@ fn get_memory_type_and_freq() -> (Option<String>, Option<u64>) {
             if line.contains("Type: DDR") || line.contains("Type: LPDDR") {
                 mem_type = Some(line.split(':').nth(1).unwrap_or("").trim().to_string());
             }
-            if (line.starts_with("Speed:") || line.starts_with("Configured Memory Speed:")) && mem_speed.is_none() {
+            if (line.starts_with("Speed:")
+                || line.starts_with("Configured Memory Speed:")
+                || line.starts_with("Configured Clock Speed:"))
+                && mem_speed.is_none()
+            {
                 let speed_str = line.split(':').nth(1).unwrap_or("").trim();
                 if !speed_str.to_lowercase().contains("unknown") && !speed_str.is_empty() {
                     // Expecting something like "3200 MT/s" or "3200 MHz"
