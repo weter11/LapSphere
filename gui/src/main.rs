@@ -12,6 +12,9 @@ use app::LapSphereApp;
 fn main() -> Result<(), eframe::Error> {
     env_logger::init();
 
+    let args: Vec<String> = std::env::args().collect();
+    let start_in_tray = args.contains(&"--tray".to_string());
+
     // Create and enter a Tokio runtime context.
     // This is required for `tokio::spawn` to work in the `DbusClient`.
     let rt = tokio::runtime::Runtime::new().expect("Unable to create a Tokio runtime");
@@ -21,14 +24,15 @@ fn main() -> Result<(), eframe::Error> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([570.0, 620.0])
             .with_min_inner_size([440.0, 470.0])
-            .with_icon(load_icon()),
+            .with_icon(load_icon())
+            .with_visible(!start_in_tray),
         ..Default::default()
     };
     
     eframe::run_native(
         "LapSphere",
         options,
-        Box::new(|cc| Ok(Box::new(LapSphereApp::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(LapSphereApp::new(cc)))),
     )
 }
 

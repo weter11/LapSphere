@@ -449,12 +449,46 @@ pub fn set_gpu_memory_offset(device_index: u32, offset: i32) -> Result<()> {
     Ok(())
 }
 
+fn find_binary(cmd: &str) -> Option<String> {
+    let paths = ["/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin", "/sbin", "/bin"];
+    for path in paths {
+        let full_path = format!("{}/{}", path, cmd);
+        if Path::new(&full_path).exists() {
+            return Some(full_path);
+        }
+    }
+    None
+}
+
 pub fn set_prime_profile(profile: &str) -> Result<()> {
     let valid_profiles = ["on-demand", "nvidia", "intel"];
     if !valid_profiles.contains(&profile) {
         return Err(anyhow!("Invalid prime profile: {}", profile));
     }
 
+    // Check for optimus-manager first (common on Arch)
+    if let Some(path) = find_binary("optimus-manager") {
+        let opt_mode = match profile {
+            "on-demand" => "hybrid",
+            "intel" => "integrated",
+            "nvidia" => "nvidia",
+            _ => profile,
+        };
+
+        log::info!("Using optimus-manager to switch to {} mode", opt_mode);
+        let output = std::process::Command::new(path)
+            .arg("--switch")
+            .arg(opt_mode)
+            .arg("--no-confirm")
+            .output()?;
+
+        if !output.status.success() {
+            return Err(anyhow!("optimus-manager command failed: {}", String::from_utf8_lossy(&output.stderr)));
+        }
+        return Ok(());
+    }
+
+    // Fallback to prime-select (Ubuntu/Debian)
     let output = std::process::Command::new("prime-select")
         .arg(profile)
         .output()?;

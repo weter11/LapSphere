@@ -9,3 +9,4 @@ Type=Application
 Categories=System;Settings;HardwareSettings;
 Keywords=lapsphere;clevo;hardware;cpu;gpu;fan;power;performance;gaming;
 StartupNotify=true
+X-GNOME-Autostart-enabled=true

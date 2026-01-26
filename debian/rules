@@ -20,8 +20,12 @@ override_dh_auto_install:
 	# Install desktop file
 	install -D -m 644 debian/lapsphere.desktop debian/lapsphere/usr/share/applications/io.lapsphere.LapSphere.desktop
 	
+	# Install autostart file
+	install -D -m 644 debian/lapsphere.desktop debian/lapsphere/etc/xdg/autostart/io.lapsphere.LapSphere.desktop
+	sed -i 's/Exec=lapsphere/Exec=lapsphere --tray/' debian/lapsphere/etc/xdg/autostart/io.lapsphere.LapSphere.desktop
+
 	# Install icon
-	install -D -m 644 debian/icon.svg debian/lapsphere/usr/share/icons/hicolor/scalable/apps/lapsphere.svg
+	install -D -m 644 data/icon.svg debian/lapsphere/usr/share/icons/hicolor/scalable/apps/lapsphere.svg
 
 override_dh_auto_clean:
 	cargo clean || true
