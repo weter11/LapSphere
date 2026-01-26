@@ -102,7 +102,7 @@ fn draw_about_info(ui: &mut Ui) {
         .show(ui, |ui| {
             ui.label(RichText::new("About").strong().heading());
             ui.add_space(6.0);
-            ui.label("LapSphere provides hardware monitoring and tuning for Clevo/Tuxedo laptops.");
+            ui.label("LapSphere provides hardware monitoring and tuning for Clevo/Uniwill laptops.");
             ui.label("Use the Profiles and Tuning tabs to customize performance, cooling, and lighting.");
             ui.label("Statistics and Hardware Info show live system telemetry.");
         });

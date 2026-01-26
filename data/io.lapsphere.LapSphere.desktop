@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=LapSphere
 GenericName=Hardware Control
-Comment=Control hardware features on LapSphere/Clevo laptops
+Comment=Control hardware features on Clevo/Uniwill laptops
 Exec=lapsphere
 Icon=lapsphere
 Terminal=false
@@ -9,3 +9,4 @@ Type=Application
 Categories=System;Settings;HardwareSettings;
 Keywords=lapsphere;clevo;hardware;cpu;gpu;fan;power;performance;gaming;
 StartupNotify=true
+X-GNOME-Autostart-enabled=true

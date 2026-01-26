@@ -48,7 +48,7 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
     if args.contains(&"--help".to_string()) || args.contains(&"-h".to_string()) {
-        println!("LapSphere Daemon - Hardware Control for Laptops");
+        println!("LapSphere Daemon - Hardware Control for Clevo/Uniwill Laptops");
         println!("\nUsage: lapsphere-daemon [OPTIONS]");
         println!("\nOptions:");
         println!("  --gui       Launch the graphical user interface");
@@ -75,7 +75,7 @@ async fn main() -> Result<()> {
     // Check if running as root
     if unsafe { libc::geteuid() } != 0 {
         if !launch_gui && !launch_tray {
-            println!("--- LapSphere Hardware Statistics (Limited - non-root) ---");
+            println!("--- Hardware Statistics for Clevo/Uniwill Laptops (Limited - non-root) ---");
             match hardware_detection::get_cpu_info() {
                 Ok(cpu) => {
                     println!("CPU: {}", cpu.name);
@@ -99,7 +99,7 @@ async fn main() -> Result<()> {
     }
 
     if !launch_gui && !launch_tray {
-        println!("--- LapSphere Hardware Statistics ---");
+        println!("--- Hardware Statistics for Clevo/Uniwill Laptops ---");
         match hardware_detection::get_cpu_info() {
             Ok(cpu) => {
                 println!("CPU: {}", cpu.name);
