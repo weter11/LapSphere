@@ -2,11 +2,12 @@
 pkgname=lapsphere
 pkgver=0.1.0
 pkgrel=1
-pkgdesc="Hardware control application for LapSphere laptops"
+pkgdesc="Hardware control application for Clevo/Uniwill laptops"
 arch=('x86_64')
 url="https://github.com/weter11/lapsphere"
 license=('GPL2')
-depends=('dbus' 'polkit' 'libxkbcommon-x11' 'dmidecode' 'pciutils' 'ethtool' 'iw' 'gtk3' 'libadwaita' 'optimus-manager')
+depends=('dbus' 'polkit' 'libxkbcommon-x11' 'dmidecode' 'pciutils' 'ethtool' 'iw' 'gtk3' 'libadwaita')
+optdepends=('optimus-manager: GPU switching support on Arch Linux')
 makedepends=('cargo' 'pkgconf')
 source=("lapsphere-$pkgver.tar.gz") # This will be handled by the CI or manual packaging
 sha256sums=('SKIP')

@@ -73,14 +73,10 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Set up Rust
-      run: |
-          rustup default stable
-
     - name: Build Arch Linux package
       run: |
           # Create source tarball
-          tar -czf lapsphere-0.1.0.tar.gz --transform 's,^,lapsphere-0.1.0/,' --exclude=.git .
+          tar -czf lapsphere-0.1.0.tar.gz --transform 's,^,lapsphere-0.1.0/,' --exclude=.git --exclude=lapsphere-0.1.0.tar.gz .
 
           # makepkg doesn't like being root
           useradd -m builduser
@@ -91,7 +87,7 @@ jobs:
           # Run makepkg as builduser
           # --noconfirm: don't ask questions
           # -s: install dependencies
-          su builduser -c "makepkg --noconfirm -s"
+          su builduser -c "rustup default stable && makepkg --noconfirm -s"
 
     - name: Upload Arch package
       uses: actions/upload-artifact@v4
