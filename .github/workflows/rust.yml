@@ -76,7 +76,8 @@ jobs:
     - name: Build Arch Linux package
       run: |
           # Create source tarball
-          tar -czf lapsphere-0.1.0.tar.gz --transform 's,^,lapsphere-0.1.0/,' --exclude=.git --exclude=lapsphere-0.1.0.tar.gz .
+          tar -czf ../lapsphere-0.1.0.tar.gz --transform 's,^,lapsphere-0.1.0/,' --exclude=.git .
+          mv ../lapsphere-0.1.0.tar.gz .
 
           # makepkg doesn't like being root
           useradd -m builduser
