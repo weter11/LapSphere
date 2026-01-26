@@ -291,156 +291,251 @@ impl DbusClient {
     }
 }
 
-// Background worker - handles all DBus calls asynchronously
+// Background worker - handles all DBus calls asynchronously with reconnection logic
 async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Result<()> {
-    let connection = Connection::system().await?;
-    
-    while let Some(command) = command_rx.recv().await {
-        match command {
-            DbusCommand::GetSystemInfo { reply } => {
-                let result = get_system_info_impl(&connection).await;
-                let _ = reply.send(result);
+    loop {
+        let connection = match Connection::system().await {
+            Ok(conn) => {
+                log::info!("Successfully connected to system bus");
+                conn
             }
-            DbusCommand::GetMemoryInfo { reply } => {
-                let result = get_memory_info_impl(&connection).await;
-                let _ = reply.send(result);
+            Err(e) => {
+                log::error!("Failed to connect to system bus: {}. Retrying in 2 seconds...", e);
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                continue;
             }
-            DbusCommand::GetCpuInfo { reply } => {
-                let result = get_cpu_info_impl(&connection).await;
-                let _ = reply.send(result);
+        };
+
+        while let Some(command) = command_rx.recv().await {
+            let res: Result<(), anyhow::Error> = match command {
+                DbusCommand::GetSystemInfo { reply } => {
+                    let result = get_system_info_impl(&connection).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::GetMemoryInfo { reply } => {
+                    let result = get_memory_info_impl(&connection).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::GetCpuInfo { reply } => {
+                    let result = get_cpu_info_impl(&connection).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::GetGpuInfo { reply } => {
+                    let result = get_gpu_info_impl(&connection).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::GetFanInfo { reply } => {
+                    let result = get_fan_info_impl(&connection).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::GetBatteryInfo { reply } => {
+                    let result = get_battery_info_impl(&connection).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::GetStorageDeviceInfo { reply } => {
+                    let result = get_storage_device_info_impl(&connection).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::GetMountInfo { reply } => {
+                    let result = get_mount_info_impl(&connection).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::GetWifiInfo { reply } => {
+                    let result = get_wifi_info_impl(&connection).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::GetTdpProfiles { reply } => {
+                    let result = get_tdp_profiles_impl(&connection).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::GetHardwareInterfaceInfo { reply } => {
+                    let result = get_hardware_interface_info_impl(&connection).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::GetKeyboardCapabilities { reply } => {
+                    let result = get_keyboard_capabilities_impl(&connection).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::ApplyProfile { profile, reply } => {
+                    let result = apply_profile_impl(&connection, &profile).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::SetAmdPstateStatus { status, reply } => {
+                    let result = set_amd_pstate_status_impl(&connection, &status).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::SetIntelPstateStatus { status, reply } => {
+                    let result = set_intel_pstate_status_impl(&connection, &status).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::PreviewKeyboard { settings, reply } => {
+                    let result = preview_keyboard_impl(&connection, &settings).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::GetBatteryAvailableStartThresholds { reply } => {
+                    let result = get_battery_available_start_thresholds_impl(&connection).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::GetBatteryAvailableEndThresholds { reply } => {
+                    let result = get_battery_available_end_thresholds_impl(&connection).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::SetBatterySettings { settings, reply } => {
+                    let result = set_battery_settings_impl(&connection, settings).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::SetFanAuto { fan_id, reply } => {
+                    let result = set_fan_auto_impl(&connection, fan_id).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::SetGpuLockedClocks { device_index, min_clock, max_clock, reply } => {
+                    let result = set_gpu_locked_clocks_impl(&connection, device_index, min_clock, max_clock).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::ResetGpuClocks { device_index, reply } => {
+                    let result = reset_gpu_clocks_impl(&connection, device_index).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::GetGpuClockRanges { device_index, reply } => {
+                    let result = get_gpu_clock_ranges_impl(&connection, device_index).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::GetGpuMemClockRanges { device_index, reply } => {
+                    let result = get_gpu_mem_clock_ranges_impl(&connection, device_index).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::SetMemoryLockedClocks { device_index, min_clock, max_clock, reply } => {
+                    let result = set_memory_locked_clocks_impl(&connection, device_index, min_clock, max_clock).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::ResetMemoryLockedClocks { device_index, reply } => {
+                    let result = reset_memory_locked_clocks_impl(&connection, device_index).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::SetGpuCoreOffset { device_index, offset, reply } => {
+                    let result = set_gpu_core_offset_impl(&connection, device_index, offset).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::SetGpuMemoryOffset { device_index, offset, reply } => {
+                    let result = set_gpu_memory_offset_impl(&connection, device_index, offset).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::GetGpuCoreOffsetLimits { device_index, reply } => {
+                    let result = get_gpu_core_offset_limits_impl(&connection, device_index).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::GetGpuMemoryOffsetLimits { device_index, reply } => {
+                    let result = get_gpu_memory_offset_limits_impl(&connection, device_index).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::SetPrimeProfile { profile, reply } => {
+                    let result = set_prime_profile_impl(&connection, &profile).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::SetNvidiaSmiLegacyPath { path, reply } => {
+                    let result = set_nvidia_smi_legacy_path_impl(&connection, &path).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::UpdatePollingInterval { component, interval_ms, reply } => {
+                    let result = update_polling_interval_impl(&connection, &component, interval_ms).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::ShutdownDaemon { reply } => {
+                    let result = shutdown_daemon_impl(&connection).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::GetWebcamState { reply } => {
+                    let result = get_webcam_state_impl(&connection).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::SetWebcamState { enabled, reply } => {
+                    let result = set_webcam_state_impl(&connection, enabled).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+            };
+
+            if let Err(e) = res {
+                log::error!("DBus communication error: {}. Attempting to reconnect...", e);
+                // On error, break the inner loop to reconnect
+                break;
             }
-            DbusCommand::GetGpuInfo { reply } => {
-                let result = get_gpu_info_impl(&connection).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::GetFanInfo { reply } => {
-                let result = get_fan_info_impl(&connection).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::GetBatteryInfo { reply } => {
-                let result = get_battery_info_impl(&connection).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::GetStorageDeviceInfo { reply } => {
-                let result = get_storage_device_info_impl(&connection).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::GetMountInfo { reply } => {
-                let result = get_mount_info_impl(&connection).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::GetWifiInfo { reply } => {
-                let result = get_wifi_info_impl(&connection).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::GetTdpProfiles { reply } => {
-                let result = get_tdp_profiles_impl(&connection).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::GetHardwareInterfaceInfo { reply } => {
-                let result = get_hardware_interface_info_impl(&connection).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::GetKeyboardCapabilities { reply } => {
-                let result = get_keyboard_capabilities_impl(&connection).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::ApplyProfile { profile, reply } => {
-                let result = apply_profile_impl(&connection, &profile).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::SetAmdPstateStatus { status, reply } => {
-                let result = set_amd_pstate_status_impl(&connection, &status).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::SetIntelPstateStatus { status, reply } => {
-                let result = set_intel_pstate_status_impl(&connection, &status).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::PreviewKeyboard { settings, reply } => {
-                let result = preview_keyboard_impl(&connection, &settings).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::GetBatteryAvailableStartThresholds { reply } => {
-                let result = get_battery_available_start_thresholds_impl(&connection).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::GetBatteryAvailableEndThresholds { reply } => {
-                let result = get_battery_available_end_thresholds_impl(&connection).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::SetBatterySettings { settings, reply } => {
-                let result = set_battery_settings_impl(&connection, settings).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::SetFanAuto { fan_id, reply } => {
-                let result = set_fan_auto_impl(&connection, fan_id).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::SetGpuLockedClocks { device_index, min_clock, max_clock, reply } => {
-                let result = set_gpu_locked_clocks_impl(&connection, device_index, min_clock, max_clock).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::ResetGpuClocks { device_index, reply } => {
-                let result = reset_gpu_clocks_impl(&connection, device_index).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::GetGpuClockRanges { device_index, reply } => {
-                let result = get_gpu_clock_ranges_impl(&connection, device_index).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::GetGpuMemClockRanges { device_index, reply } => {
-                let result = get_gpu_mem_clock_ranges_impl(&connection, device_index).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::SetMemoryLockedClocks { device_index, min_clock, max_clock, reply } => {
-                let result = set_memory_locked_clocks_impl(&connection, device_index, min_clock, max_clock).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::ResetMemoryLockedClocks { device_index, reply } => {
-                let result = reset_memory_locked_clocks_impl(&connection, device_index).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::SetGpuCoreOffset { device_index, offset, reply } => {
-                let result = set_gpu_core_offset_impl(&connection, device_index, offset).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::SetGpuMemoryOffset { device_index, offset, reply } => {
-                let result = set_gpu_memory_offset_impl(&connection, device_index, offset).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::GetGpuCoreOffsetLimits { device_index, reply } => {
-                let result = get_gpu_core_offset_limits_impl(&connection, device_index).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::GetGpuMemoryOffsetLimits { device_index, reply } => {
-                let result = get_gpu_memory_offset_limits_impl(&connection, device_index).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::SetPrimeProfile { profile, reply } => {
-                let result = set_prime_profile_impl(&connection, &profile).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::SetNvidiaSmiLegacyPath { path, reply } => {
-                let result = set_nvidia_smi_legacy_path_impl(&connection, &path).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::UpdatePollingInterval { component, interval_ms, reply } => {
-                let result = update_polling_interval_impl(&connection, &component, interval_ms).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::ShutdownDaemon { reply } => {
-                let result = shutdown_daemon_impl(&connection).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::GetWebcamState { reply } => {
-                let result = get_webcam_state_impl(&connection).await;
-                let _ = reply.send(result);
-            }
-            DbusCommand::SetWebcamState { enabled, reply } => {
-                let result = set_webcam_state_impl(&connection, enabled).await;
-                let _ = reply.send(result);
-            }
+        }
+
+        // If command_rx is closed, exit the worker
+        if command_rx.is_closed() {
+            break;
         }
     }
     

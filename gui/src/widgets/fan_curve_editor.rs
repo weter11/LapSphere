@@ -44,6 +44,10 @@ impl FanCurveEditor {
                 if ui.button("➕ Add Point").clicked() {
                     self.add_point();
                 }
+
+                if ui.button("↕ Resort").clicked() {
+                    self.curve.points.sort_by_key(|p| p.0);
+                }
                 
                 if ui.button("↺ Reset to Default").clicked() {
                     self.reset_to_default();

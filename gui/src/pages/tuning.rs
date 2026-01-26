@@ -25,15 +25,34 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>,
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Save button - always visible
                 if ui.button("💾 Save").clicked() {
-                    let _ = state.save_profiles();
-                    
-                    // Also apply to hardware
-                    if let Some(client) = dbus_client {
-                        let profile_clone = state.config.profiles[idx].clone();
-                        let _rx = client.apply_profile(profile_clone.clone());
+                    // Validate fan curves
+                    let mut error_msg = None;
+                    for curve in &state.config.profiles[idx].fan_settings.curves {
+                        let mut temps = std::collections::HashMap::new();
+                        for (temp, speed) in &curve.points {
+                            if let Some(prev_speed) = temps.insert(*temp, *speed) {
+                                if prev_speed != *speed {
+                                    error_msg = Some(format!("Error: Fan {} has multiple speeds defined for {}°C. Use the Resort button to check your points.", curve.fan_id, temp));
+                                    break;
+                                }
+                            }
+                        }
+                        if error_msg.is_some() { break; }
+                    }
+
+                    if let Some(msg) = error_msg {
+                        state.show_message(msg, true);
+                    } else {
+                        let _ = state.save_profiles();
                         
-                        // Apply GPU settings on save
-                        apply_gpu_settings_on_save(client, &profile_clone.gpu_settings);
+                        // Also apply to hardware
+                        if let Some(client) = dbus_client {
+                            let profile_clone = state.config.profiles[idx].clone();
+                            let _rx = client.apply_profile(profile_clone.clone());
+
+                            // Apply GPU settings on save
+                            apply_gpu_settings_on_save(client, &profile_clone.gpu_settings);
+                        }
                     }
                 }
                 
