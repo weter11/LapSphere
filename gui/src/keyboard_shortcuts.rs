@@ -64,7 +64,7 @@ impl KeyboardShortcuts {
         let viewport_id = egui::ViewportId::from_hash_of("help_window");
         let viewport_builder = egui::ViewportBuilder::default()
             .with_title("Help")
-            .with_inner_size([420.0, 360.0])
+            .with_inner_size([550.0, 550.0])
             .with_min_inner_size([320.0, 260.0]);
 
         ctx.show_viewport_immediate(viewport_id, viewport_builder, |ctx, class| {
@@ -72,10 +72,14 @@ impl KeyboardShortcuts {
                 return;
             }
             if class == egui::ViewportClass::Embedded {
-                egui::Window::new("⌨ Keyboard Shortcuts")
+                egui::Window::new("NVIDIA Overclocking Help")
                     .open(&mut self.show_help)
-                    .default_width(420.0)
-                    .show(ctx, |ui| draw_help_contents(ui));
+                    .default_width(550.0)
+                    .show(ctx, |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            draw_help_contents(ui);
+                        });
+                    });
                 return;
             }
 
@@ -85,16 +89,141 @@ impl KeyboardShortcuts {
             }
 
             egui::CentralPanel::default().show(ctx, |ui| {
-                draw_help_contents(ui);
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    draw_help_contents(ui);
+                });
             });
         });
     }
 }
 
 fn draw_help_contents(ui: &mut egui::Ui) {
-    ui.heading("NVIDIA Overclocking");
+    ui.heading("NVIDIA Overclocking Parameter Reference");
     ui.add_space(8.0);
-    ui.monospace(
-        "DESCRIPTION:\n  This script dynamically adjusts GPU clock offsets based on temperature, power,\n  and frequency using NVIDIA Management Library (NVML). CONFIGURABLE PARAMETERS:\n  \n  Clock Frequency Limits:\n    min_clock              Minimum GPU clock frequency (MHz)\n    max_clock              Maximum GPU clock frequency (MHz)\n  \n  Temperature Thresholds:\n    temperature_min        Minimum temperature for offset calculations (°C)\n    temperature_max        Maximum temperature for offset calculations (°C)\n    critical_temp_min      Critical temperature range minimum (°C)\n    critical_temp_max      Critical temperature range maximum (°C)\n  \n  Power Limits:\n    plimit_min            Minimum power threshold (watts)\n    plimit_max            Maximum power threshold (watts)\n  \n  Frequency Thresholds:\n    frequency_min         Minimum frequency for offset calculations (MHz)\n    frequency_max         Maximum frequency for offset calculations (MHz)\n  \n  Base Frequency Offset:\n    freq_offset_max       Maximum frequency offset at frequency_min (MHz)\n    freq_offset_min       Minimum frequency offset at frequency_max (MHz)\n    \n    → Linearly interpolates between frequency_min and frequency_max\n    → Used for non-P0 states to prevent crashes\n  \n  Low Frequency Range (drain offset):\n    low_freq_min          Low frequency range start (MHz)\n    low_freq_max          Low frequency range end (MHz)\n    drain_offset_lmin     Drain offset at temperature_min (MHz)\n    drain_offset_lmax     Drain offset at temperature_max (MHz)\n    \n    → Applies when GPU frequency is between low_freq_min and low_freq_max\n    → Linearly increases with temperature\n    → GPU voltage should be below 700mV\n  \n  High Frequency Range (drain offset):\n    high_freq_min         High frequency range start (MHz)\n    high_freq_max         High frequency range end (MHz)\n    drain_offset_hmin     Drain offset at temperature_max (MHz)\n    drain_offset_hmax     Drain offset at temperature_min (MHz)\n    \n    → Applies when GPU frequency is between high_freq_min and high_freq_max\n    → Linearly decreases with temperature\n    → GPU voltage should be above 700mV\n  \n  Power-Based Offset:\n    power_offset_max      Maximum power offset at/below plimit_min (MHz)\n    power_offset_min      Minimum power offset at/above plimit_max (MHz)\n    \n    → Linearly interpolates between plimit_min and plimit_max\n  \n  Control Flags:\n    drain_offset_control          Enable/disable drain offset (True/False)\n    power_offset_control          Enable/disable power offset (True/False)\n    critical_temp_range_control   Enable/disable critical temp logic\n                                  (disable drain offset in temps where voltage fluctuates) (True/False)\n  \n  Voltage Monitoring (nvidia-smi 565 or earlier):\n    nvidia_smi_legacy_path        Path to nvidia-smi binary v565 or earlier\n                                  Example: '/opt/nvidia-565/bin/nvidia-smi'\n                                  Leave empty to use system nvidia-smi, if driver version 565 or earlier\n  \n  Refresh Settings:\n    refresh_interval      Update interval in seconds\n\nOFFSET CALCULATION:\n  \n  1. Base Frequency Offset (freq_offset):\n     - Linearly decreases from freq_offset_max to freq_offset_min\n     - Based on current GPU frequency between frequency_min and frequency_max\n  \n  2. Drain Offset (drain_offset):\n     - Applies different offsets for low and high frequency ranges\n     - Low range: Changes with temperature increase\n     - High range: Changes with temperature increase\n     - Critical temp range overrides if enabled to prevent crashes\n  \n  3. Power Offset (power_offset):\n     - Maximum offset at low power consumption\n     - Minimum offset at high power consumption\n     - Linear transition between thresholds\n  \n  4. Total Offset:\n     - P-state 0: Combines all enabled offsets using smart rounding\n     - Other P-states: do not calculate or apply offsets\n     - Applied to GPU using NVML\n\nSMART ROUNDING:\n  - Only increases to next threshold if offset is >= 2/3 of the way\n  - Example with threshold=15:\n    * 120.0 → 120 (8 × 15)\n    * 129.9 → 120 (not enough to round up)\n    * 130.0 → 135 (rounds up to 9 × 15)"
-    );
+
+    ui.label("This system provides both static clock locking and dynamic offset adjustment based on telemetry. Below are descriptions for all settings found in the Tuning UI:");
+    ui.add_space(12.0);
+
+    ui.heading("Standard & Common Controls");
+    ui.add_space(4.0);
+
+    ui.group(|ui| {
+        ui.label(egui::RichText::new("GPU Locked Clocks (Min/Max)").strong());
+        ui.label("Sets a fixed frequency range for the GPU core. Locking both Min and Max to the same value forces a static clock speed.");
+    });
+    ui.add_space(8.0);
+
+    ui.group(|ui| {
+        ui.label(egui::RichText::new("Memory Locked Clocks (Min/Max)").strong());
+        ui.label("Sets a fixed frequency range for the GPU video memory. Similar to core clocks, locking both forces a static frequency.");
+    });
+    ui.add_space(8.0);
+
+    ui.group(|ui| {
+        ui.label(egui::RichText::new("GPU Core Offset").strong());
+        ui.label("Adds a static offset (MHz) to the entire GPU core frequency curve. Available in Standard control mode.");
+    });
+    ui.add_space(8.0);
+
+    ui.group(|ui| {
+        ui.label(egui::RichText::new("GPU Memory Offset").strong());
+        ui.label("Adds a static offset (MHz) to the video memory frequency. Available in both Standard and Advanced modes.");
+    });
+    ui.add_space(12.0);
+
+    ui.heading("Advanced Dynamic Offset Parameters");
+    ui.add_space(4.0);
+
+    ui.group(|ui| {
+        ui.label(egui::RichText::new("Dynamic Offset Refresh Rate").strong());
+        ui.label("How frequently the daemon recalculates and applies offsets based on live telemetry (seconds).");
+    });
+    ui.add_space(8.0);
+
+    ui.group(|ui| {
+        ui.label(egui::RichText::new("Control Flags (Drain/Power/Critical Temp)").strong());
+        ui.label("Toggles specific dynamic adjustment logic on or off. Drain control adjusts for voltage drops, Power control for wattage usage, and Critical Temp for safety overrides.");
+    });
+    ui.add_space(8.0);
+
+    ui.group(|ui| {
+        ui.label(egui::RichText::new("Smart Rounding Threshold").strong());
+        ui.label("The step size (MHz) used when applying offsets. Ensures offsets align with hardware steps supported by NVML.");
+    });
+    ui.add_space(8.0);
+
+    ui.group(|ui| {
+        ui.label(egui::RichText::new("Temperature (°C)").strong());
+        ui.label("Defines the range for temperature-based offset scaling. Offsets are calculated relative to these min/max thresholds.");
+    });
+    ui.add_space(8.0);
+
+    ui.group(|ui| {
+        ui.label(egui::RichText::new("Power limits (W)").strong());
+        ui.label("Determines the power usage window. Used to scale the 'Power offset range' based on current GPU power draw.");
+    });
+    ui.add_space(8.0);
+
+    ui.group(|ui| {
+        ui.label(egui::RichText::new("Frequency thresholds (MHz)").strong());
+        ui.label("Defines the clock frequency range used for calculating the 'Base frequency offsets'.");
+    });
+    ui.add_space(8.0);
+
+    ui.group(|ui| {
+        ui.label(egui::RichText::new("Base frequency offsets (MHz)").strong());
+        ui.label("A static offset range that scales with current GPU frequency between the 'Frequency thresholds'. Used to maintain stability in non-boost states.");
+    });
+    ui.add_space(8.0);
+
+    ui.group(|ui| {
+        ui.label(egui::RichText::new("Low frequency range (MHz)").strong());
+        ui.label("Defines the frequency window for 'Low drain offsets' (typically when voltage is below 700mV).");
+    });
+    ui.add_space(8.0);
+
+    ui.group(|ui| {
+        ui.label(egui::RichText::new("Low drain offsets (MHz)").strong());
+        ui.label("Offset range applied when in the 'Low frequency range'. Increases linearly with temperature.");
+    });
+    ui.add_space(8.0);
+
+    ui.group(|ui| {
+        ui.label(egui::RichText::new("High frequency range (MHz)").strong());
+        ui.label("Defines the frequency window for 'High drain offsets' (typically when voltage is above 700mV).");
+    });
+    ui.add_space(8.0);
+
+    ui.group(|ui| {
+        ui.label(egui::RichText::new("High drain offsets (MHz)").strong());
+        ui.label("Offset range applied when in the 'High frequency range'. Decreases linearly with temperature.");
+    });
+    ui.add_space(8.0);
+
+    ui.group(|ui| {
+        ui.label(egui::RichText::new("Critical temperature (°C)").strong());
+        ui.label("Defines a specific temperature range where 'Critical Temperature Range Control' will override and disable drain offsets to prevent instability.");
+    });
+    ui.add_space(8.0);
+
+    ui.group(|ui| {
+        ui.label(egui::RichText::new("Power offset range (MHz)").strong());
+        ui.label("Additional offset added based on current power consumption. Higher at low power, lower at high power.");
+    });
+
+    ui.add_space(16.0);
+    ui.separator();
+    ui.add_space(12.0);
+
+    ui.heading("Implementation Details");
+    ui.label("• Offsets are only calculated and applied when the GPU is in P-state 0.");
+    ui.label("• Settings are applied to the GPU using the NVIDIA Management Library (NVML).");
+
+    ui.add_space(12.0);
+    ui.heading("Smart Rounding");
+    ui.label("Offsets are rounded to specific steps (default 15MHz) to ensure compatibility with NVML. A value only rounds up if it is at least 2/3 of the way to the next step.");
+    ui.label(egui::RichText::new("Example with threshold=15:").italics());
+    ui.label("• 120.0 → 120 (8 × 15)");
+    ui.label("• 129.9 → 120 (not enough to round up)");
+    ui.label("• 130.0 → 135 (rounds up to 9 × 15)");
 }

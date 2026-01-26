@@ -73,7 +73,6 @@ fn draw_help_info(ui: &mut Ui, state: &AppState) {
             ui.separator();
             ui.add_space(12.0);
 
-            ui.label(RichText::new("Standard Mode").strong().heading());
             ui.add_space(6.0);
             ui.label("Standard mode controls apply locked clocks and memory offsets directly.");
             ui.label("They are applied when you click Save in the Tuning tab.");
@@ -82,7 +81,6 @@ fn draw_help_info(ui: &mut Ui, state: &AppState) {
             ui.separator();
             ui.add_space(12.0);
 
-            ui.label(RichText::new("Advanced Mode").strong().heading());
             ui.add_space(6.0);
             let advanced_enabled = state
                 .current_profile()

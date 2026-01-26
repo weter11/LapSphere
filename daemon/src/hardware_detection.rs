@@ -17,6 +17,8 @@ static PREVIOUS_NET_STATS: Lazy<Mutex<HashMap<String, NetStats>>> =
 static PREVIOUS_STORAGE_STATS: Lazy<Mutex<HashMap<String, StorageStats>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+static NVIDIA_NAMES_CACHE: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
+
 const BITS_PER_BYTE: f64 = 8.0;
 const BITS_PER_MEGABIT: f64 = 1_000_000.0;
 
@@ -1189,27 +1191,7 @@ fn get_intel_gpu_name(device_id: &str) -> Option<String> {
 use crate::hardware_control::get_nvml;
 use nvml_wrapper::enum_wrappers::device::{Clock, PerformanceState};
 
-// Sysfs PCI domain identifiers use four hex digits (e.g. 0000). NVML can return
-// longer domain strings, so we truncate to the last 4 characters to map to sysfs.
-const PCI_DOMAIN_LEN: usize = 4;
 
-fn read_nvidia_runtime_status(device: &nvml_wrapper::Device) -> Option<String> {
-    let pci_info = device.pci_info().ok()?;
-    let bus_id = pci_info.bus_id.trim().to_string();
-    let sysfs_id = if let Some((domain, rest)) = bus_id.split_once(':') {
-        let domain = if domain.len() > PCI_DOMAIN_LEN {
-            &domain[domain.len() - PCI_DOMAIN_LEN..]
-        } else {
-            domain
-        };
-        format!("{}:{}", domain, rest)
-    } else {
-        bus_id
-    };
-
-    let status_path = format!("/sys/bus/pci/devices/{}/power/runtime_status", sysfs_id);
-    fs::read_to_string(status_path).ok().map(|s| s.trim().to_string())
-}
 
 pub fn get_gpu_clock_ranges(device_index: u32) -> Result<(u32, u32)> {
     let nvml = get_nvml()?;
@@ -1297,6 +1279,59 @@ fn get_nvidia_voltage(index: u32) -> Option<f32> {
 }
 
 fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
+    // 1. Check sysfs for NVIDIA devices and their status to avoid waking up suspended GPUs
+    let mut nvidia_pci_ids = Vec::new();
+    if let Ok(entries) = fs::read_dir("/sys/bus/pci/drivers/nvidia") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.contains(':') {
+                nvidia_pci_ids.push(name);
+            }
+        }
+    }
+    nvidia_pci_ids.sort();
+
+    if nvidia_pci_ids.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let mut all_suspended = true;
+    let mut statuses = Vec::new();
+    for id in &nvidia_pci_ids {
+        let status_path = format!("/sys/bus/pci/drivers/nvidia/{}/power/runtime_status", id);
+        let status = fs::read_to_string(status_path).unwrap_or_default().trim().to_lowercase();
+        if status != "suspended" {
+            all_suspended = false;
+        }
+        statuses.push(status);
+    }
+
+    // If all detected NVIDIA GPUs are suspended, bypass NVML completely to keep them asleep
+    if all_suspended {
+        let mut gpus = Vec::new();
+        let names = NVIDIA_NAMES_CACHE.lock().unwrap();
+        for (i, status) in statuses.into_iter().enumerate() {
+            let name = names.get(i).cloned().unwrap_or_else(|| "NVIDIA GPU".to_string());
+            gpus.push(GpuInfo {
+                name,
+                gpu_type: GpuType::Discrete,
+                status,
+                frequency: None,
+                memory_frequency: None,
+                temperature: None,
+                load: None,
+                power: None,
+                voltage: None,
+                freq_offset: None,
+                drain_offset: None,
+                power_offset: None,
+                total_offset: None,
+            });
+        }
+        return Ok(gpus);
+    }
+
+    // At least one GPU is active, proceed with NVML
     let nvml = get_nvml()?;
     let mut gpus = Vec::new();
 
@@ -1305,25 +1340,39 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         let device = nvml.device_by_index(i)?;
 
         let name = device.name()?;
+
+        // Update name cache
+        {
+            let mut cache = NVIDIA_NAMES_CACHE.lock().unwrap();
+            if cache.len() <= i as usize {
+                cache.push(name.clone());
+            } else {
+                cache[i as usize] = name.clone();
+            }
+        }
+
         let gpu_type = if i == 0 {
             GpuType::Integrated
         } else {
             GpuType::Discrete
         };
         
-        let runtime_status = read_nvidia_runtime_status(&device);
-        let is_suspended = runtime_status
+        // Use pre-read status to avoid waking up the GPU with PCI info requests
+        let status_from_sysfs = statuses.get(i as usize).cloned();
+        let is_suspended = status_from_sysfs
             .as_deref()
-            .map(|status| status.eq_ignore_ascii_case("suspended"))
+            .map(|s| s.eq_ignore_ascii_case("suspended"))
             .unwrap_or(false);
 
-        // Get performance state for status
-        let status = runtime_status.unwrap_or_else(|| {
+        // Get performance state for status if not suspended
+        let status = if is_suspended {
+            "suspended".to_string()
+        } else {
             match device.performance_state() {
                 Ok(state) => format!("{:?}", state),
-                Err(_) => "Active".to_string(),
+                Err(_) => status_from_sysfs.unwrap_or_else(|| "active".to_string()),
             }
-        });
+        };
 
         let (frequency, memory_frequency, temperature, load, power) = if is_suspended {
             (None, None, None, None, None)

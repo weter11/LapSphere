@@ -501,7 +501,6 @@ fn draw_gpu_standard_controls(
     gpu_core_offset_limits: Option<(i32, i32)>,
     gpu_mem_offset_limits: Option<(i32, i32)>,
 ) {
-    ui.label(RichText::new("Standard Mode").strong());
     ui.add_space(6.0);
     // GPU Locked Clocks section
     ui.label(RichText::new("GPU Locked Clocks:").strong());
@@ -511,12 +510,20 @@ fn draw_gpu_standard_controls(
 
         ui.horizontal(|ui| {
             ui.label("Min:");
-            ui.add(Slider::new(&mut min_gpu_clock, min_range..=max_range).suffix(" MHz"));
+            if ui.add(Slider::new(&mut min_gpu_clock, min_range..=max_range).suffix(" MHz")).changed() {
+                if min_gpu_clock > max_gpu_clock {
+                    max_gpu_clock = min_gpu_clock;
+                }
+            }
         });
 
         ui.horizontal(|ui| {
             ui.label("Max:");
-            ui.add(Slider::new(&mut max_gpu_clock, min_range..=max_range).suffix(" MHz"));
+            if ui.add(Slider::new(&mut max_gpu_clock, min_range..=max_range).suffix(" MHz")).changed() {
+                if max_gpu_clock < min_gpu_clock {
+                    min_gpu_clock = max_gpu_clock;
+                }
+            }
         });
 
         profile.gpu_settings.min_gpu_clock = Some(min_gpu_clock);
@@ -535,12 +542,20 @@ fn draw_gpu_standard_controls(
 
         ui.horizontal(|ui| {
             ui.label("Min:");
-            ui.add(Slider::new(&mut min_mem_clock, min_range..=max_range).suffix(" MHz"));
+            if ui.add(Slider::new(&mut min_mem_clock, min_range..=max_range).suffix(" MHz")).changed() {
+                if min_mem_clock > max_mem_clock {
+                    max_mem_clock = min_mem_clock;
+                }
+            }
         });
 
         ui.horizontal(|ui| {
             ui.label("Max:");
-            ui.add(Slider::new(&mut max_mem_clock, min_range..=max_range).suffix(" MHz"));
+            if ui.add(Slider::new(&mut max_mem_clock, min_range..=max_range).suffix(" MHz")).changed() {
+                if max_mem_clock < min_mem_clock {
+                    min_mem_clock = max_mem_clock;
+                }
+            }
         });
 
         profile.gpu_settings.min_mem_clock = Some(min_mem_clock);
@@ -586,7 +601,6 @@ fn draw_gpu_advanced_controls(
     gpu_mem_clock_ranges: Option<(u32, u32)>,
     gpu_mem_offset_limits: Option<(i32, i32)>,
 ) {
-    ui.label(RichText::new("Advanced Mode").strong());
     ui.add_space(6.0);
     ui.label(RichText::new("GPU Locked Clocks (Advanced):").strong());
         if let Some((min_range, max_range)) = gpu_clock_ranges {
@@ -594,12 +608,19 @@ fn draw_gpu_advanced_controls(
             let mut max_gpu_clock = profile.gpu_settings.advanced_max_gpu_clock.unwrap_or(max_range);
             ui.horizontal(|ui| {
                 ui.label("Min:");
-                ui.add(Slider::new(&mut min_gpu_clock, min_range..=max_range).suffix(" MHz"));
+                if ui.add(Slider::new(&mut min_gpu_clock, min_range..=max_range).suffix(" MHz")).changed() {
+                    if min_gpu_clock > max_gpu_clock {
+                        max_gpu_clock = min_gpu_clock;
+                    }
+                }
             });
             ui.horizontal(|ui| {
                 ui.label("Max:");
-                let max_limit = max_gpu_clock;
-                ui.add(Slider::new(&mut max_gpu_clock, min_gpu_clock..=max_limit).suffix(" MHz"));
+                if ui.add(Slider::new(&mut max_gpu_clock, min_range..=max_range).suffix(" MHz")).changed() {
+                    if max_gpu_clock < min_gpu_clock {
+                        min_gpu_clock = max_gpu_clock;
+                    }
+                }
             });
             profile.gpu_settings.advanced_min_gpu_clock = Some(min_gpu_clock);
             profile.gpu_settings.advanced_max_gpu_clock = Some(max_gpu_clock);
@@ -614,12 +635,19 @@ fn draw_gpu_advanced_controls(
             let mut max_mem_clock = profile.gpu_settings.advanced_max_mem_clock.unwrap_or(max_range);
             ui.horizontal(|ui| {
                 ui.label("Min:");
-                ui.add(Slider::new(&mut min_mem_clock, min_range..=max_range).suffix(" MHz"));
+                if ui.add(Slider::new(&mut min_mem_clock, min_range..=max_range).suffix(" MHz")).changed() {
+                    if min_mem_clock > max_mem_clock {
+                        max_mem_clock = min_mem_clock;
+                    }
+                }
             });
             ui.horizontal(|ui| {
                 ui.label("Max:");
-                let max_limit = max_mem_clock;
-                ui.add(Slider::new(&mut max_mem_clock, min_mem_clock..=max_limit).suffix(" MHz"));
+                if ui.add(Slider::new(&mut max_mem_clock, min_range..=max_range).suffix(" MHz")).changed() {
+                    if max_mem_clock < min_mem_clock {
+                        min_mem_clock = max_mem_clock;
+                    }
+                }
             });
             profile.gpu_settings.advanced_min_mem_clock = Some(min_mem_clock);
             profile.gpu_settings.advanced_max_mem_clock = Some(max_mem_clock);
