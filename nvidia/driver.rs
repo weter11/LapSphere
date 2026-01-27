@@ -42,6 +42,9 @@ const NV2080_CTRL_CMD_THERMAL_GET_TEMPERATURES: u32 = 0x20800501;
 const NV2080_CTRL_CMD_THERMAL_GET_THERMAL_SENSORS_INFO: u32 = 0x20800502;
 const NV2080_CTRL_THERMAL_SENSORS_MAX_COUNT: usize = 32;
 
+const NV2080_CTRL_CMD_VOLT_GET_VOLTAGE: u32 = 0x20803201;
+pub const NV2080_CTRL_VOLT_DOMAIN_CORE: u32 = 0x00000000;
+
 pub const NV2080_CTRL_THERMAL_SENSOR_TYPE_GPU: u32 = 0x00000001;
 pub const NV2080_CTRL_THERMAL_SENSOR_TYPE_MEMORY: u32 = 0x00000002;
 
@@ -68,6 +71,14 @@ struct NV2080_CTRL_THERMAL_SENSOR_INFO {
     sensorId: u32,
     sensorType: u32,
     controllerId: u32,
+}
+
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+struct NV2080_CTRL_VOLT_GET_VOLTAGE_PARAMS {
+    voltDomainId: u32,
+    voltageuV: u32,
 }
 
 pub struct DriverHandle {
@@ -257,6 +268,15 @@ impl DriverHandle {
             .collect();
 
         Ok(sensors)
+    }
+
+    pub fn get_voltage(&self, domain_id: u32) -> anyhow::Result<u32> {
+        let mut params = NV2080_CTRL_VOLT_GET_VOLTAGE_PARAMS {
+            voltDomainId: domain_id,
+            voltageuV: 0,
+        };
+        self.query_rm_control(NV2080_CTRL_CMD_VOLT_GET_VOLTAGE, &mut params)?;
+        Ok(params.voltageuV)
     }
 
     pub fn get_temperatures(&self, mask: u32) -> anyhow::Result<Vec<(u32, i32)>> {
