@@ -414,16 +414,15 @@ impl LapSphereApp {
             let current_version = env!("CARGO_PKG_VERSION");
             let url = "https://api.github.com/repos/weter11/lapsphere/releases/latest";
 
-            let agent = ureq::Agent::config_builder()
+            let agent = ureq::AgentBuilder::new()
                 .user_agent("LapSphere-Update-Checker")
-                .build()
-                .new_agent();
+                .build();
 
             match agent.get(url).call() {
-                Ok(mut response) => {
-                    if let Ok(json) = response.body_mut().read_json::<serde_json::Value>() {
+                Ok(response) => {
+                    if let Ok(json) = response.into_json::<serde_json::Value>() {
                         if let Some(tag) = json["tag_name"].as_str() {
-                            let latest: &str = tag.trim_start_matches('v');
+                            let latest = tag.trim_start_matches('v');
                             if latest != current_version {
                                 let body = json["body"].as_str().unwrap_or("No changelog provided.").to_string();
                                 let _ = tx_update.send(HardwareUpdate::UpdateInfo(latest.to_string(), body));

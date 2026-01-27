@@ -18,8 +18,8 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 log = "0.4"
 env_logger = "0.11"
-ureq = { version = "3", default-features = false, features = ["json", "gzip", "rustls-no-provider"] }
-rustls = { version = "0.23", features = ["aws-lc-rs"] }
+ureq = { version = "2.12", default-features = false, features = ["json", "gzip", "native-tls"] }
+rustls = { version = "0.23", default-features = false, features = ["std"] }
 webbrowser = "1.0"
 
 # Async for DBus

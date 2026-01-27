@@ -12,10 +12,6 @@ use app::LapSphereApp;
 fn main() -> Result<(), eframe::Error> {
     env_logger::init();
 
-    // Initialize rustls with aws-lc-rs as the default crypto provider.
-    // This is required when using ureq with the rustls-no-provider feature.
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-
     let args: Vec<String> = std::env::args().collect();
     let start_in_tray = args.contains(&"--tray".to_string());
 
