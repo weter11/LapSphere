@@ -223,7 +223,7 @@ fn draw_help_contents(ui: &mut egui::Ui) {
     ui.heading("Smart Rounding");
     ui.label("Offsets are rounded to specific steps (default 15MHz) to ensure compatibility with NVML. A value only rounds up if it is at least 2/3 of the way to the next step.");
     ui.label(egui::RichText::new("Example with threshold=15:").italics());
-    ui.label("• 120.0 ➡︎ 120 (8 × 15)");
-    ui.label("• 129.9 ➡︎ 120 (not enough to round up)");
-    ui.label("• 130.0 ➡︎ 135 (rounds up to 9 × 15)");
+    ui.label("• 120.0 ➡ 120 (8 × 15)");
+    ui.label("• 129.9 ➡ 120 (not enough to round up)");
+    ui.label("• 130.0 ➡ 135 (rounds up to 9 × 15)");
 }

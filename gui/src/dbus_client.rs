@@ -540,9 +540,20 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
             };
 
             if let Err(e) = res {
-                log::error!("DBus communication error: {}. Attempting to reconnect...", e);
-                // On error, break the inner loop to reconnect
-                break;
+                let err_str = e.to_string();
+                log::error!("DBus call failed: {}", err_str);
+
+                // Only reconnect on connection-level errors, not logical/method errors
+                // Method errors usually contain the interface name or "MethodError"
+                let is_connection_error = err_str.contains("connection")
+                    || err_str.contains("Closed")
+                    || err_str.contains("Broken pipe")
+                    || err_str.contains("io.lapsphere.Control not found");
+
+                if is_connection_error {
+                    log::warn!("DBus connection lost. Attempting to reconnect...");
+                    break;
+                }
             }
         }
 

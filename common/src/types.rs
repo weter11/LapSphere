@@ -125,6 +125,7 @@ pub struct BatteryInfo {
     pub current_ma: i64,
     pub charge_percent: u64,
     pub capacity_mah: u64,
+    pub battery_health: Option<f32>,
     pub manufacturer: String,
     pub model: String,
     pub charge_start_threshold: Option<u8>,

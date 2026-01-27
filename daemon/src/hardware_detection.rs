@@ -2029,12 +2029,26 @@ pub fn get_battery_info() -> Result<BatteryInfo> {
 
     let status = read_sysfs_string(&format!("{}/status", base)).unwrap_or_else(|_| "Unknown".to_string());
 
+    let charge_full = read_sysfs_u64(&format!("{}/charge_full", base)).or_else(|_| read_sysfs_u64(&format!("{}/energy_full", base))).ok();
+    let charge_full_design = read_sysfs_u64(&format!("{}/charge_full_design", base)).or_else(|_| read_sysfs_u64(&format!("{}/energy_full_design", base))).ok();
+
+    let battery_health = if let (Some(full), Some(design)) = (charge_full, charge_full_design) {
+        if design > 0 {
+            Some((full as f32 / design as f32) * 100.0)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     Ok(BatteryInfo {
         status,
         voltage_mv: read_sysfs_u64(&format!("{}/voltage_now", base))? / 1000,
         current_ma: read_sysfs_i64(&format!("{}/current_now", base))? / 1000,
         charge_percent: read_sysfs_u64(&format!("{}/capacity", base))?,
-        capacity_mah: read_sysfs_u64(&format!("{}/charge_full", base))? / 1000,
+        capacity_mah: charge_full.unwrap_or(0) / 1000,
+        battery_health,
         manufacturer: read_sysfs_string(&format!("{}/manufacturer", base))?,
         model: read_sysfs_string(&format!("{}/model_name", base))?,
         charge_start_threshold: read_sysfs_u64(&format!("{}/charge_control_start_threshold", base)).ok().map(|v| v as u8),

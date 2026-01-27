@@ -56,6 +56,8 @@ pub struct AppState {
     pub available_tdp_profiles: Vec<String>,
     pub webcam_enabled: Option<bool>,
     pub daemon_logs: Vec<LogEntry>,
+    pub new_version_available: Option<String>,
+    pub latest_changelog: Option<String>,
     pub log_filter_debug: bool,
     pub log_filter_info: bool,
     pub log_filter_warn: bool,
@@ -111,6 +113,8 @@ impl AppState {
             available_tdp_profiles: Vec::new(),
             webcam_enabled: None,
             daemon_logs: Vec::new(),
+            new_version_available: None,
+            latest_changelog: None,
             log_filter_debug: false,
             log_filter_info: true,
             log_filter_warn: true,
@@ -206,6 +210,7 @@ pub enum HardwareUpdate {
     HardwareInterface(String),
     WebcamState(bool),
     DaemonLogs(Vec<LogEntry>),
+    UpdateInfo(String, String),
     GpuClockRanges(Result<(u32, u32), String>),
     GpuMemClockRanges(Result<Vec<u32>, String>),
     GpuCoreOffsetLimits(Result<(i32, i32), String>),
@@ -402,6 +407,32 @@ impl LapSphereApp {
         } else {
             None
         };
+
+        // Check for updates
+        let tx_update = hw_update_tx.clone();
+        tokio::spawn(async move {
+            let current_version = env!("CARGO_PKG_VERSION");
+            let url = "https://api.github.com/repos/weter11/lapsphere/releases/latest";
+
+            let agent = ureq::AgentBuilder::new()
+                .user_agent("LapSphere-Update-Checker")
+                .build();
+
+            match agent.get(url).call() {
+                Ok(response) => {
+                    if let Ok(json) = response.into_json::<serde_json::Value>() {
+                        if let Some(tag) = json["tag_name"].as_str() {
+                            let latest = tag.trim_start_matches('v');
+                            if latest != current_version {
+                                let body = json["body"].as_str().unwrap_or("No changelog provided.").to_string();
+                                let _ = tx_update.send(HardwareUpdate::UpdateInfo(latest.to_string(), body));
+                            }
+                        }
+                    }
+                }
+                Err(e) => log::warn!("Failed to check for updates: {}", e),
+            }
+        });
         
         // Set coordinator handle in state
         state.coordinator_handle = coordinator_handle.clone();
@@ -477,6 +508,10 @@ impl LapSphereApp {
                 HardwareUpdate::DaemonLogs(logs) => {
                     self.state.daemon_logs = logs;
                 }
+                HardwareUpdate::UpdateInfo(version, changelog) => {
+                    self.state.new_version_available = Some(version);
+                    self.state.latest_changelog = Some(changelog);
+                }
                 HardwareUpdate::GpuClockRanges(result) => {
                     match result {
                         Ok(ranges) => self.state.gpu_clock_ranges = Some(ranges),
@@ -537,6 +572,30 @@ impl LapSphereApp {
     }
     
     fn draw_top_bar(&mut self, ctx: &Context) {
+        let mut dismiss_update = false;
+        if let Some(version) = &self.state.new_version_available {
+            let version = version.clone();
+            TopBottomPanel::top("update_banner").show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add_space(12.0);
+                    ui.label(RichText::new(format!("🚀 Update Available: v{}", version)).strong().color(egui::Color32::from_rgb(255, 200, 0)));
+                    if ui.link("View Details").clicked() {
+                        self.state.current_page = Page::Settings;
+                        self.state.settings_tab = crate::app::SettingsTab::About;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Dismiss").clicked() {
+                            dismiss_update = true;
+                        }
+                    });
+                });
+            });
+        }
+
+        if dismiss_update {
+            self.state.new_version_available = None;
+        }
+
         TopBottomPanel::top("top_bar").show(ctx, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {

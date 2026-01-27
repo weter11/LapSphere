@@ -396,11 +396,20 @@ pub fn set_webcam_state(enabled: bool) -> Result<()> {
 
 pub fn get_webcam_state() -> Result<bool> {
     if !TuxedoIo::is_available() {
-        return Err(anyhow!("Webcam state not available"));
+        // Return true as default if driver not present
+        return Ok(true);
     }
     
     let io = TuxedoIo::new()?;
-    io.get_webcam_state()
+    if io.get_interface() != HardwareInterface::Clevo {
+        // Return true for non-Clevo hardware (standard state)
+        return Ok(true);
+    }
+
+    match io.get_webcam_state() {
+        Ok(state) => Ok(state),
+        Err(_) => Ok(true), // Fallback to true on error
+    }
 }
 
 

@@ -32,7 +32,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTheme, ctx: 
                 SettingsTab::Hardware => draw_hardware_info(ui, state),
                 SettingsTab::Logs => draw_logs_view(ui, state, ctx),
                 SettingsTab::Help => draw_help_info(ui, state),
-                SettingsTab::About => draw_about_info(ui),
+                SettingsTab::About => draw_about_info(ui, state),
             }
         });
 }
@@ -154,7 +154,7 @@ fn draw_help_info(ui: &mut Ui, state: &AppState) {
         });
 }
 
-fn draw_about_info(ui: &mut Ui) {
+fn draw_about_info(ui: &mut Ui, state: &AppState) {
     ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -163,6 +163,34 @@ fn draw_about_info(ui: &mut Ui) {
             ui.label("LapSphere provides hardware monitoring and tuning for Clevo/Uniwill laptops.");
             ui.label("Use the Profiles and Tuning tabs to customize performance, cooling, and lighting.");
             ui.label("Statistics and Hardware Info show live system telemetry.");
+
+            ui.add_space(12.0);
+            ui.separator();
+            ui.add_space(12.0);
+
+            ui.label(RichText::new("Version Information").strong());
+            ui.label(format!("Current Version: v{}", env!("CARGO_PKG_VERSION")));
+
+            if let Some(version) = &state.new_version_available {
+                ui.add_space(6.0);
+                ui.label(RichText::new(format!("Latest Version: v{}", version)).color(egui::Color32::from_rgb(255, 200, 0)));
+
+                if let Some(changelog) = &state.latest_changelog {
+                    ui.add_space(12.0);
+                    ui.label(RichText::new("What's New:").strong());
+                    ui.group(|ui| {
+                        ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                            ui.label(changelog);
+                        });
+                    });
+                }
+
+                if ui.button("🌐 Open Download Page").clicked() {
+                    let _ = webbrowser::open("https://github.com/weter11/lapsphere/releases/latest");
+                }
+            } else {
+                ui.label("You are running the latest version.");
+            }
         });
 }
 
@@ -561,6 +589,14 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
                     ui.label("Webcam Status:");
                     ui.label(if enabled { "Enabled" } else { "Disabled" });
                     ui.end_row();
+                }
+
+                if let Some(battery) = &state.battery_info {
+                    if let Some(health) = battery.battery_health {
+                        ui.label("Battery Health:");
+                        ui.label(format!("{:.1}%", health));
+                        ui.end_row();
+                    }
                 }
 
                 ui.label("Kernel Modules:");
