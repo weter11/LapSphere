@@ -209,6 +209,13 @@ async fn set_tdp_profile(&self, profile: &str) -> Result<(), zbus::fdo::Error> {
         crate::hardware_control::set_webcam_state(enabled)
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
+
+    async fn get_daemon_logs(&self) -> Result<String, zbus::fdo::Error> {
+        let logs = crate::DAEMON_LOGS.lock().unwrap();
+        let logs_vec: Vec<LogEntry> = logs.iter().cloned().collect();
+        serde_json::to_string(&logs_vec)
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
     
     // Battery charge control methods
     async fn get_battery_charge_type(&self) -> Result<String, zbus::fdo::Error> {

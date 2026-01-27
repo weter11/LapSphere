@@ -14,6 +14,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTheme, ctx: 
         ui.selectable_value(&mut state.settings_tab, SettingsTab::Main, "Main");
         ui.selectable_value(&mut state.settings_tab, SettingsTab::StatsConfiguration, "Stats configuration");
         ui.selectable_value(&mut state.settings_tab, SettingsTab::Hardware, "Hardware info");
+        ui.selectable_value(&mut state.settings_tab, SettingsTab::Logs, "View Logs");
         ui.selectable_value(&mut state.settings_tab, SettingsTab::Help, "Help");
         ui.selectable_value(&mut state.settings_tab, SettingsTab::About, "About");
     });
@@ -29,8 +30,65 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTheme, ctx: 
                 SettingsTab::Main => draw_main_settings(ui, state, theme, ctx, dbus_client),
                 SettingsTab::StatsConfiguration => draw_stats_configuration(ui, state, dbus_client),
                 SettingsTab::Hardware => draw_hardware_info(ui, state),
+                SettingsTab::Logs => draw_logs_view(ui, state, ctx),
                 SettingsTab::Help => draw_help_info(ui, state),
-                SettingsTab::About => draw_about_info(ui),
+                SettingsTab::About => draw_about_info(ui, state),
+            }
+        });
+}
+
+fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
+    ui.label(RichText::new("Daemon Logs (last 100 lines)").strong().heading());
+    ui.add_space(8.0);
+
+    ui.horizontal(|ui| {
+        if ui.button("📋 Copy Logs to Clipboard").clicked() {
+            let log_text = state.daemon_logs.iter()
+                .map(|l| format!("[{}] {}: {}", l.timestamp, l.level, l.message))
+                .collect::<Vec<_>>()
+                .join("\n");
+            ctx.output_mut(|o| o.copied_text = log_text);
+        }
+    });
+
+    ui.add_space(8.0);
+
+    ui.horizontal(|ui| {
+        ui.label("Filter:");
+        ui.checkbox(&mut state.log_filter_error, "Error");
+        ui.checkbox(&mut state.log_filter_warn, "Warning");
+        ui.checkbox(&mut state.log_filter_info, "Info");
+        ui.checkbox(&mut state.log_filter_debug, "Debug");
+    });
+
+    ui.add_space(8.0);
+
+    ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for entry in state.daemon_logs.iter().rev() {
+                let show = match entry.level.as_str() {
+                    "ERROR" => state.log_filter_error,
+                    "WARN" => state.log_filter_warn,
+                    "INFO" => state.log_filter_info,
+                    "DEBUG" | "TRACE" => state.log_filter_debug,
+                    _ => true,
+                };
+
+                if show {
+                    let color = match entry.level.as_str() {
+                        "ERROR" => egui::Color32::from_rgb(255, 100, 100),
+                        "WARN" => egui::Color32::from_rgb(255, 200, 100),
+                        "DEBUG" | "TRACE" => egui::Color32::from_rgb(150, 150, 150),
+                        _ => ui.visuals().text_color(),
+                    };
+
+                    ui.horizontal_top(|ui| {
+                        ui.label(RichText::new(&entry.timestamp).weak().monospace());
+                        ui.label(RichText::new(&entry.level).color(color).strong().monospace());
+                        ui.label(RichText::new(&entry.message).monospace());
+                    });
+                }
             }
         });
 }
@@ -96,7 +154,7 @@ fn draw_help_info(ui: &mut Ui, state: &AppState) {
         });
 }
 
-fn draw_about_info(ui: &mut Ui) {
+fn draw_about_info(ui: &mut Ui, state: &AppState) {
     ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -105,10 +163,64 @@ fn draw_about_info(ui: &mut Ui) {
             ui.label("LapSphere provides hardware monitoring and tuning for Clevo/Uniwill laptops.");
             ui.label("Use the Profiles and Tuning tabs to customize performance, cooling, and lighting.");
             ui.label("Statistics and Hardware Info show live system telemetry.");
+
+            ui.add_space(12.0);
+            ui.separator();
+            ui.add_space(12.0);
+
+            ui.label(RichText::new("Version Information").strong());
+            ui.label(format!("Current Version: v{}", env!("CARGO_PKG_VERSION")));
+
+            if let Some(version) = &state.new_version_available {
+                ui.add_space(6.0);
+                ui.label(RichText::new(format!("Latest Version: v{}", version)).color(egui::Color32::from_rgb(255, 200, 0)));
+
+                if let Some(changelog) = &state.latest_changelog {
+                    ui.add_space(12.0);
+                    ui.label(RichText::new("What's New:").strong());
+                    ui.group(|ui| {
+                        ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                            ui.label(changelog);
+                        });
+                    });
+                }
+
+                if ui.button("🌐 Open Download Page").clicked() {
+                    let _ = webbrowser::open("https://github.com/weter11/lapsphere/releases/latest");
+                }
+            } else {
+                ui.label("You are running the latest version.");
+            }
         });
 }
 
 fn draw_main_settings(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTheme, ctx: &Context, dbus_client: Option<&DbusClient>) {
+    let is_clevo = state.hardware_interface.as_ref().map(|s| s.contains("Clevo")).unwrap_or(false);
+
+    if is_clevo {
+        // Laptop Features
+        ui.label(RichText::new("Laptop Features").strong().heading());
+        ui.add_space(6.0);
+
+        if let Some(mut enabled) = state.webcam_enabled {
+            if ui.checkbox(&mut enabled, "Webcam Enabled").changed() {
+                if let Some(client) = dbus_client {
+                    let client = client.clone();
+                    tokio::spawn(async move {
+                        let _ = client.set_webcam_state(enabled).await;
+                    });
+                    state.webcam_enabled = Some(enabled);
+                }
+            }
+        } else {
+            ui.label(RichText::new("Webcam control not available or detecting...").small().italics());
+        }
+
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(12.0);
+    }
+
     // Appearance
     ui.label(RichText::new("Appearance").strong().heading());
     ui.add_space(6.0);
@@ -476,6 +588,23 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
                 ui.label("Laptop Type:");
                 ui.label(interface_label);
                 ui.end_row();
+
+                let is_clevo = state.hardware_interface.as_ref().map(|s| s.contains("Clevo")).unwrap_or(false);
+                if is_clevo {
+                    if let Some(enabled) = state.webcam_enabled {
+                        ui.label("Webcam Status:");
+                        ui.label(if enabled { "Enabled" } else { "Disabled" });
+                        ui.end_row();
+                    }
+                }
+
+                if let Some(battery) = &state.battery_info {
+                    if let Some(health) = battery.battery_health {
+                        ui.label("Battery Health:");
+                        ui.label(format!("{:.1}%", health));
+                        ui.end_row();
+                    }
+                }
 
                 ui.label("Kernel Modules:");
                 ui.label(&info.kernel_modules);

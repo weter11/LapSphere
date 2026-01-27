@@ -11,14 +11,21 @@ pub struct SystemInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogEntry {
+    pub level: String,
+    pub message: String,
+    pub timestamp: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CpuInfo {
     pub name: String,
     pub median_frequency: u64,
     pub median_load: f32,
     pub package_temp: f32,
     pub package_power: Option<f32>,
-    pub power_source: Option<String>,  // NEW: Shows source of power reading
-    pub all_power_sources: Vec<PowerSource>,  // NEW: All available power sources
+    pub power_source: Option<String>,
+    pub all_power_sources: Vec<PowerSource>,
     pub cores: Vec<CoreInfo>,
     pub physical_cores: u32,
     pub logical_cores: u32,
@@ -37,6 +44,12 @@ pub struct CpuInfo {
     pub available_epp_options: Vec<String>,
     pub scheduler: String,
     pub available_schedulers: Vec<String>,
+    pub tdp0: Option<u32>,
+    pub tdp1: Option<u32>,
+    pub tdp2: Option<u32>,
+    pub tdp0_range: Option<(u32, u32)>,
+    pub tdp1_range: Option<(u32, u32)>,
+    pub tdp2_range: Option<(u32, u32)>,
     pub capabilities: CpuCapabilities,
 }
 
@@ -112,6 +125,7 @@ pub struct BatteryInfo {
     pub current_ma: i64,
     pub charge_percent: u64,
     pub capacity_mah: u64,
+    pub battery_health: Option<f32>,
     pub manufacturer: String,
     pub model: String,
     pub charge_start_threshold: Option<u8>,
@@ -188,9 +202,12 @@ pub struct CpuSettings {
     pub boost: Option<bool>,
     pub smt: Option<bool>,
     pub performance_profile: Option<String>,
-    pub tdp_profile: Option<String>,              // ADD
-    pub energy_performance_preference: Option<String>,  // ADD
+    pub tdp_profile: Option<String>,
+    pub energy_performance_preference: Option<String>,
     pub tdp: Option<u32>,
+    pub tdp0: Option<u32>,
+    pub tdp1: Option<u32>,
+    pub tdp2: Option<u32>,
     pub amd_pstate_status: Option<String>,
     pub intel_pstate_status: Option<String>,
 }
@@ -294,6 +311,7 @@ pub struct ZoneColor {
 pub enum KeyboardMode {
     SingleColor { r: u8, g: u8, b: u8, brightness: u8 },  // CUSTOM (0) - Static color
     MultipleZones { zones: Vec<ZoneColor>, brightness: u8 }, // Multiple zones (e.g. 3-zone, 4-zone)
+    PerKeyRGB { keys: Vec<ZoneColor>, brightness: u8 },
     Breathe { r: u8, g: u8, b: u8, brightness: u8, speed: u8 },  // BREATHE (1)
     Cycle { brightness: u8, speed: u8 },  // CYCLE (2) - Color cycle through spectrum
     Dance { brightness: u8, speed: u8 },  // DANCE (3)
@@ -491,8 +509,11 @@ impl Default for CpuSettings {
             tdp: None,
             amd_pstate_status: None,
             intel_pstate_status: None,
-            tdp_profile: None,                          // ADD
-            energy_performance_preference: None,        // ADD
+            tdp_profile: None,
+            energy_performance_preference: None,
+            tdp0: None,
+            tdp1: None,
+            tdp2: None,
         }
     }
 }

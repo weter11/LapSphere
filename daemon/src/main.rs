@@ -9,7 +9,8 @@ use anyhow::Result;
 use tokio::signal;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use lapsphere_common::types::FanSettings;
+use std::collections::VecDeque;
+use lapsphere_common::types::{FanSettings, LogEntry};
 use polling_scheduler::{PollingScheduler, PollJob};
 
 // Global fan daemon state
@@ -40,9 +41,53 @@ pub static NVIDIA_SMI_LEGACY_PATH: once_cell::sync::Lazy<Arc<Mutex<Option<String
 pub static LAST_APPLIED_OFFSET: once_cell::sync::Lazy<Arc<Mutex<Option<i32>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
 
+pub static DAEMON_LOGS: once_cell::sync::Lazy<Arc<Mutex<VecDeque<LogEntry>>>> =
+    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(VecDeque::with_capacity(100))));
+
+struct DaemonLogger {
+    inner: env_logger::Logger,
+}
+
+impl log::Log for DaemonLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        self.inner.enabled(metadata)
+    }
+
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            let entry = LogEntry {
+                level: record.level().to_string(),
+                message: record.args().to_string(),
+                timestamp: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            };
+
+            {
+                let mut logs = DAEMON_LOGS.lock().unwrap();
+                if logs.len() >= 100 {
+                    logs.pop_front();
+                }
+                logs.push_back(entry);
+            }
+
+            self.inner.log(record);
+        }
+    }
+
+    fn flush(&self) {
+        self.inner.flush();
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::init();
+    let mut builder = env_logger::Builder::from_default_env();
+    let inner = builder.build();
+    let max_level = inner.filter();
+    let logger = DaemonLogger { inner };
+
+    log::set_boxed_logger(Box::new(logger)).unwrap();
+    log::set_max_level(max_level);
+
     log::info!("Starting LapSphere Daemon");
 
     let args: Vec<String> = std::env::args().collect();

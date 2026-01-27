@@ -25,15 +25,34 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>,
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Save button - always visible
                 if ui.button("💾 Save").clicked() {
-                    let _ = state.save_profiles();
-                    
-                    // Also apply to hardware
-                    if let Some(client) = dbus_client {
-                        let profile_clone = state.config.profiles[idx].clone();
-                        let _rx = client.apply_profile(profile_clone.clone());
+                    // Validate fan curves
+                    let mut error_msg = None;
+                    for curve in &state.config.profiles[idx].fan_settings.curves {
+                        let mut temps = std::collections::HashMap::new();
+                        for (temp, speed) in &curve.points {
+                            if let Some(prev_speed) = temps.insert(*temp, *speed) {
+                                if prev_speed != *speed {
+                                    error_msg = Some(format!("Error: Fan {} has multiple speeds defined for {}°C. Use the Resort button to check your points.", curve.fan_id, temp));
+                                    break;
+                                }
+                            }
+                        }
+                        if error_msg.is_some() { break; }
+                    }
+
+                    if let Some(msg) = error_msg {
+                        state.show_message(msg, true);
+                    } else {
+                        let _ = state.save_profiles();
                         
-                        // Apply GPU settings on save
-                        apply_gpu_settings_on_save(client, &profile_clone.gpu_settings);
+                        // Also apply to hardware
+                        if let Some(client) = dbus_client {
+                            let profile_clone = state.config.profiles[idx].clone();
+                            let _rx = client.apply_profile(profile_clone.clone());
+
+                            // Apply GPU settings on save
+                            apply_gpu_settings_on_save(client, &profile_clone.gpu_settings);
+                        }
                     }
                 }
                 
@@ -95,7 +114,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>,
 
             // Keyboard tuning
             let keyboard_caps = state.keyboard_capabilities.clone();
-            draw_keyboard_tuning(ui, &mut state.config.profiles[idx], keyboard_caps.as_ref(), dbus_client);
+            draw_keyboard_tuning(ui, &mut state.config.profiles[idx], keyboard_caps.as_ref(), dbus_client, &mut state.keyboard_brush_color);
             ui.add_space(12.0);
             ui.separator();
             ui.add_space(12.0);
@@ -151,6 +170,47 @@ fn draw_performance_profile_tuning(
 
         profile.cpu_settings.tdp_profile = current_profile;
     });
+}
+
+fn draw_uniwill_tdp_tuning(ui: &mut Ui, profile: &mut Profile, cpu_info: &lapsphere_common::types::CpuInfo) {
+    if cpu_info.tdp0.is_some() || cpu_info.tdp1.is_some() || cpu_info.tdp2.is_some() {
+        ui.label(RichText::new("Uniwill TDP Control (Watts):").strong());
+        ui.add_space(4.0);
+
+        if let Some(current) = cpu_info.tdp0 {
+            if let Some((min, max)) = cpu_info.tdp0_range {
+                let mut val = profile.cpu_settings.tdp0.unwrap_or(current);
+                ui.horizontal(|ui| {
+                    ui.label("TDP0 (PL1):");
+                    ui.add(Slider::new(&mut val, min..=max).suffix(" W"));
+                });
+                profile.cpu_settings.tdp0 = Some(val);
+            }
+        }
+
+        if let Some(current) = cpu_info.tdp1 {
+            if let Some((min, max)) = cpu_info.tdp1_range {
+                let mut val = profile.cpu_settings.tdp1.unwrap_or(current);
+                ui.horizontal(|ui| {
+                    ui.label("TDP1 (PL2):");
+                    ui.add(Slider::new(&mut val, min..=max).suffix(" W"));
+                });
+                profile.cpu_settings.tdp1 = Some(val);
+            }
+        }
+
+        if let Some(current) = cpu_info.tdp2 {
+            if let Some((min, max)) = cpu_info.tdp2_range {
+                let mut val = profile.cpu_settings.tdp2.unwrap_or(current);
+                ui.horizontal(|ui| {
+                    ui.label("TDP2 (PL4):");
+                    ui.add(Slider::new(&mut val, min..=max).suffix(" W"));
+                });
+                profile.cpu_settings.tdp2 = Some(val);
+            }
+        }
+        ui.add_space(6.0);
+    }
 }
 
 fn draw_cpu_tuning(
@@ -251,6 +311,9 @@ fn draw_cpu_tuning(
         ui.add_space(6.0);
     }
     
+    // Uniwill TDP section
+    draw_uniwill_tdp_tuning(ui, profile, cpu_info);
+
     // Governor
     if caps.has_scaling_governor && !cpu_info.available_governors.is_empty() {
         ui.label(RichText::new("Governor:").strong());
@@ -829,6 +892,7 @@ fn draw_keyboard_tuning(
     profile: &mut Profile,
     caps: Option<&KeyboardCapabilities>,
     dbus_client: Option<&DbusClient>,
+    brush_color: &mut [u8; 3],
 ) {
     ui.heading("⌨ Keyboard Backlight");
     ui.add_space(8.0);
@@ -875,6 +939,7 @@ fn draw_keyboard_tuning(
             let current_mode_name = match &profile.keyboard_settings.mode {
                 KeyboardMode::SingleColor { .. } => "Single Color",
                 KeyboardMode::MultipleZones { .. } => "Multiple Zones",
+                KeyboardMode::PerKeyRGB { .. } => "Per-Key RGB",
                 KeyboardMode::Breathe { .. } => "Breathe",
                 KeyboardMode::Cycle { .. } => "Cycle",
                 KeyboardMode::Dance { .. } => "Dance",
@@ -897,6 +962,15 @@ fn draw_keyboard_tuning(
                                 zones.push(lapsphere_common::types::ZoneColor { r: 255, g: 255, b: 255 });
                             }
                             profile.keyboard_settings.mode = KeyboardMode::MultipleZones { zones, brightness: 50 };
+                        }
+                    }
+                    if caps.keyboard_type == lapsphere_common::types::KeyboardType::PerKeyRGB {
+                        if ui.selectable_label(current_mode_name == "Per-Key RGB", "Per-Key RGB").clicked() {
+                            let mut keys = Vec::new();
+                            for _ in 0..caps.num_zones {
+                                keys.push(lapsphere_common::types::ZoneColor { r: 255, g: 255, b: 255 });
+                            }
+                            profile.keyboard_settings.mode = KeyboardMode::PerKeyRGB { keys, brightness: 50 };
                         }
                     }
                     if caps.supports_effects {
@@ -975,6 +1049,46 @@ fn draw_keyboard_tuning(
                         });
                     });
                 }
+
+                if caps.supports_brightness {
+                    ui.horizontal(|ui| {
+                        ui.label("Overall Brightness:");
+                        ui.add(Slider::new(brightness, 0..=100).suffix("%"));
+                    });
+                }
+            }
+            KeyboardMode::PerKeyRGB { keys, brightness } => {
+                ui.label("Per-Key Color Grid:");
+                ui.label(RichText::new("Click a key to set its color to the global picker value below.").small().italics());
+
+                ui.horizontal(|ui| {
+                    ui.label("Set All / Brush Color:");
+                    ui.color_edit_button_srgb(brush_color);
+                    if ui.button("Apply to All").clicked() {
+                        for key in keys.iter_mut() {
+                            key.r = brush_color[0];
+                            key.g = brush_color[1];
+                            key.b = brush_color[2];
+                        }
+                    }
+                });
+
+                ui.add_space(4.0);
+
+                ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(2.0, 2.0);
+                        for key in keys.iter_mut() {
+                            let color = egui::Color32::from_rgb(key.r, key.g, key.b);
+                            let resp = ui.add(egui::Button::new(" ").fill(color).min_size(egui::vec2(20.0, 20.0)));
+                            if resp.clicked() {
+                                key.r = brush_color[0];
+                                key.g = brush_color[1];
+                                key.b = brush_color[2];
+                            }
+                        }
+                    });
+                });
 
                 if caps.supports_brightness {
                     ui.horizontal(|ui| {
@@ -1154,6 +1268,9 @@ fn create_default_profile_for_reset(is_standard: bool) -> Profile {
                 tdp_profile: None,
                 energy_performance_preference: Some("balance_performance".to_string()),
                 tdp: None,
+                tdp0: None,
+                tdp1: None,
+                tdp2: None,
                 amd_pstate_status: Some("active".to_string()),
                 intel_pstate_status: Some("active".to_string()),
             },

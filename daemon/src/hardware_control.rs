@@ -150,6 +150,20 @@ pub fn apply_profile(profile: &Profile) -> Result<()> {
     if let Some(ref tdp_profile) = profile.cpu_settings.tdp_profile {
         set_tdp_profile(tdp_profile)?;
     }
+
+    if let Ok(io) = TuxedoIo::new() {
+        if io.get_interface() == HardwareInterface::Uniwill {
+            if let Some(val) = profile.cpu_settings.tdp0 {
+                let _ = io.set_tdp(0, val);
+            }
+            if let Some(val) = profile.cpu_settings.tdp1 {
+                let _ = io.set_tdp(1, val);
+            }
+            if let Some(val) = profile.cpu_settings.tdp2 {
+                let _ = io.set_tdp(2, val);
+            }
+        }
+    }
     
     if let Some(ref amd_status) = profile.cpu_settings.amd_pstate_status {
         set_amd_pstate_status(amd_status)?;
@@ -382,11 +396,20 @@ pub fn set_webcam_state(enabled: bool) -> Result<()> {
 
 pub fn get_webcam_state() -> Result<bool> {
     if !TuxedoIo::is_available() {
-        return Err(anyhow!("Webcam state not available"));
+        // Return true as default if driver not present
+        return Ok(true);
     }
     
     let io = TuxedoIo::new()?;
-    io.get_webcam_state()
+    if io.get_interface() != HardwareInterface::Clevo {
+        // Return true for non-Clevo hardware (standard state)
+        return Ok(true);
+    }
+
+    match io.get_webcam_state() {
+        Ok(state) => Ok(state),
+        Err(_) => Ok(true), // Fallback to true on error
+    }
 }
 
 
@@ -649,6 +672,18 @@ impl RgbKeyboardControl {
                 let num_zones = self.paths.len().max(if self.tuxedo_io.is_some() { 3 } else { 0 });
                 for i in 0..num_zones {
                     let _ = self.set_zone_color(i, *r, *g, *b);
+                }
+                self.set_brightness(*brightness)?;
+            }
+            KeyboardMode::PerKeyRGB { keys, brightness } => {
+                if let Some(ref io) = self.tuxedo_io {
+                    if io.get_interface() == HardwareInterface::Clevo {
+                        let _ = io.set_clevo_keyboard_mode(0x00000000);
+                    }
+                }
+
+                for (i, color) in keys.iter().enumerate() {
+                    let _ = self.set_zone_color(i, color.r, color.g, color.b);
                 }
                 self.set_brightness(*brightness)?;
             }
