@@ -29,7 +29,7 @@
 #define MAGIC_READ_UW	IOCTL_MAGIC + 3
 #define MAGIC_WRITE_UW	IOCTL_MAGIC + 4
 
-#define MOD_API_MIN_VERSION "0.2.6" // IMPORTANT: Needs to be updated when a new ioctl is added
+#define MOD_API_MIN_VERSION "0.3.0" // IMPORTANT: Needs to be updated when a new ioctl is added
 
 // General
 #define R_MOD_VERSION		_IOR(IOCTL_MAGIC, 0x00, char*)
@@ -64,6 +64,7 @@
 #define W_CL_FLIGHTMODE_SW	_IOW(MAGIC_WRITE_CL, 0x13, int32_t*)
 #define W_CL_TOUCHPAD_SW	_IOW(MAGIC_WRITE_CL, 0x14, int32_t*)
 #define W_CL_PERF_PROFILE	_IOW(MAGIC_WRITE_CL, 0x15, int32_t*)
+#define W_CL_KBD_RGB		_IOW(MAGIC_WRITE_CL, 0x67, int32_t*)
 
 #ifdef DEBUG
 #define W_TF_BC			_IOW(MAGIC_WRITE_CL, 0x91, uint32_t*)

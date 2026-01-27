@@ -702,7 +702,7 @@ impl RgbKeyboardControl {
             KeyboardMode::Breathe { r, g, b, brightness, speed } => {
                 if let Some(ref io) = self.tuxedo_io {
                     if io.get_interface() == HardwareInterface::Clevo {
-                        let _ = io.set_clevo_keyboard_mode(0x00000001); // Mode 1
+                        let _ = io.set_clevo_keyboard_mode(0x1002a000); // BREATHE
                     }
                 }
                 self.write_effect_mode(1, "breathing")?;
@@ -716,7 +716,7 @@ impl RgbKeyboardControl {
             KeyboardMode::Wave { brightness, speed } => {
                 if let Some(ref io) = self.tuxedo_io {
                     if io.get_interface() == HardwareInterface::Clevo {
-                        let _ = io.set_clevo_keyboard_mode(0x00000007); // Mode 7
+                        let _ = io.set_clevo_keyboard_mode(0xB0000000); // WAVE
                     }
                 }
                 self.write_effect_mode(7, "wave")?;
@@ -727,7 +727,7 @@ impl RgbKeyboardControl {
             KeyboardMode::Cycle { brightness, speed } => {
                 if let Some(ref io) = self.tuxedo_io {
                     if io.get_interface() == HardwareInterface::Clevo {
-                        let _ = io.set_clevo_keyboard_mode(0x00000002); // Mode 2
+                        let _ = io.set_clevo_keyboard_mode(0x33010000); // CYCLE
                     }
                 }
                 self.write_effect_mode(2, "cycle")?;
@@ -738,7 +738,7 @@ impl RgbKeyboardControl {
             KeyboardMode::Dance { brightness, speed } => {
                 if let Some(ref io) = self.tuxedo_io {
                     if io.get_interface() == HardwareInterface::Clevo {
-                        let _ = io.set_clevo_keyboard_mode(0x00000003); // Mode 3
+                        let _ = io.set_clevo_keyboard_mode(0x80000000); // DANCE
                     }
                 }
                 self.write_effect_mode(3, "dance")?;
@@ -749,7 +749,7 @@ impl RgbKeyboardControl {
             KeyboardMode::Flash { r, g, b, brightness, speed } => {
                 if let Some(ref io) = self.tuxedo_io {
                     if io.get_interface() == HardwareInterface::Clevo {
-                        let _ = io.set_clevo_keyboard_mode(0x00000004); // Mode 4
+                        let _ = io.set_clevo_keyboard_mode(0xA0000000); // FLASH
                     }
                 }
                 self.write_effect_mode(4, "flash")?;
@@ -763,7 +763,7 @@ impl RgbKeyboardControl {
             KeyboardMode::RandomColor { brightness, speed } => {
                 if let Some(ref io) = self.tuxedo_io {
                     if io.get_interface() == HardwareInterface::Clevo {
-                        let _ = io.set_clevo_keyboard_mode(0x00000005); // Mode 5
+                        let _ = io.set_clevo_keyboard_mode(0x70000000); // RANDOM_COLOR
                     }
                 }
                 self.write_effect_mode(5, "random")?;
@@ -774,7 +774,7 @@ impl RgbKeyboardControl {
             KeyboardMode::Tempo { brightness, speed } => {
                 if let Some(ref io) = self.tuxedo_io {
                     if io.get_interface() == HardwareInterface::Clevo {
-                        let _ = io.set_clevo_keyboard_mode(0x00000006); // Mode 6
+                        let _ = io.set_clevo_keyboard_mode(0x90000000); // TEMPO
                     }
                 }
                 self.write_effect_mode(6, "tempo")?;
