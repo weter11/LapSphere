@@ -602,7 +602,8 @@ impl TuxedoIo {
             _ => return Err(anyhow!("Invalid Clevo keyboard zone: {}", zone)),
         };
 
-        let packed_color = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+        // Hardware expects 0xZZ BB RR GG
+        let packed_color = ((b as u32) << 16) | ((r as u32) << 8) | (g as u32);
         self.set_clevo_keyboard_mode(prefix | packed_color)
     }
 

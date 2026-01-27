@@ -382,6 +382,10 @@ static long clevo_ioctl_interface(struct file *file, unsigned int cmd, unsigned 
 			clevo_arg = (CLEVO_CMD_OPT_SUB_SET_PERF_PROF << 0x18) | (argument & 0xff);
 			clevo_evaluate_method(CLEVO_CMD_OPT, clevo_arg, &result);
 			break;
+		case W_CL_KBD_RGB:
+			copy_result = copy_from_user(&argument, (int32_t *) arg, sizeof(argument));
+			clevo_evaluate_method(CLEVO_CMD_SET_KB_RGB_LEDS, argument, &result);
+			break;
 	}
 
 	return 0;

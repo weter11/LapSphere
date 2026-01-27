@@ -951,6 +951,19 @@ fn get_tuxedo_kernel_modules() -> String {
     }
 }
 
+fn has_ite_keyboard() -> bool {
+    if let Ok(entries) = fs::read_dir("/sys/bus/hid/devices") {
+        for entry in entries.flatten() {
+            if let Ok(uevent) = fs::read_to_string(entry.path().join("uevent")) {
+                if uevent.contains("HID_ID=0003:0000048D:") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 pub fn get_keyboard_capabilities() -> KeyboardCapabilities {
     let mut capabilities = KeyboardCapabilities {
         keyboard_type: KeyboardType::None,
@@ -1042,8 +1055,13 @@ pub fn get_keyboard_capabilities() -> KeyboardCapabilities {
 
     // Per-key check - some ITE controllers might not show up as standard LEDs yet
     // or they might have a lot of them. If we see > 10 kbd_backlight leds, it might be per-key.
-    if capabilities.num_zones > 10 {
+    if capabilities.num_zones > 10 || (capabilities.keyboard_type == KeyboardType::None && has_ite_keyboard()) {
         capabilities.keyboard_type = KeyboardType::PerKeyRGB;
+        // If it's ITE, it usually supports brightness and color even if not yet fully detected via sysfs
+        if capabilities.num_zones == 0 {
+            capabilities.supports_brightness = true;
+            capabilities.supports_color = true;
+        }
     }
 
     capabilities
