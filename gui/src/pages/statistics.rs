@@ -387,10 +387,19 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                             }
                             
                             if let Some(temp) = gpu.temperature {
-                                ui.label("Temperature:");
+                                ui.label("Core Temperature:");
                                 ui.colored_label(
                                     temp_color(temp),
                                     format!("{:.1}°C", temp)
+                                );
+                                ui.end_row();
+                            }
+
+                            if let Some(mem_temp) = gpu.memory_temperature {
+                                ui.label("Memory Temperature:");
+                                ui.colored_label(
+                                    temp_color(mem_temp),
+                                    format!("{:.1}°C", mem_temp)
                                 );
                                 ui.end_row();
                             }
@@ -412,7 +421,7 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                             }
 
                             if let Some(voltage) = gpu.voltage {
-                                ui.label("Voltage:");
+                                ui.label("Core Voltage:");
                                 ui.label(format!("{:.3} V", voltage));
                                 ui.end_row();
                             }

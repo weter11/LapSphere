@@ -106,6 +106,7 @@ pub struct GpuInfo {
     pub load: Option<f32>,
     pub power: Option<f32>,
     pub voltage: Option<f32>,
+    pub memory_temperature: Option<f32>,
     pub freq_offset: Option<i32>,
     pub drain_offset: Option<i32>,
     pub power_offset: Option<i32>,

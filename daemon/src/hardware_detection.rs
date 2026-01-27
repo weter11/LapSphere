@@ -1194,6 +1194,7 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
                 load,
                 power,
                 voltage,
+                memory_temperature: None,
                 freq_offset: None,
                 drain_offset: None,
                 power_offset: None,
@@ -1380,6 +1381,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 load: None,
                 power: None,
                 voltage: None,
+                memory_temperature: None,
                 freq_offset: None,
                 drain_offset: None,
                 power_offset: None,
@@ -1450,7 +1452,44 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             )
         };
 
-        let voltage = if is_suspended { None } else { get_nvidia_voltage(i) };
+        let (ioctl_voltage, memory_temperature) = if is_suspended {
+            (None, None)
+        } else {
+            match crate::nvidia_driver::NvidiaDriverHandle::open(device.minor_number().unwrap_or(i)) {
+                Ok(handle) => {
+                    let voltage = handle.get_voltage(crate::nvidia_driver::NV2080_CTRL_VOLT_DOMAIN_CORE)
+                        .ok()
+                        .map(|uv| uv as f32 / 1_000_000.0);
+
+                    let mut vram_temp = None;
+                    if let Ok(sensors) = handle.get_thermal_sensors_info() {
+                        let mut vram_sensor_id = None;
+                        for (id, sensor_type) in sensors {
+                            if sensor_type == crate::nvidia_driver::NV2080_CTRL_THERMAL_SENSOR_TYPE_MEMORY || id == 15 {
+                                vram_sensor_id = Some(id);
+                                break;
+                            }
+                        }
+
+                        if let Some(id) = vram_sensor_id {
+                            if let Ok(temps) = handle.get_temperatures(1 << id) {
+                                if let Some((_, temp_raw)) = temps.first() {
+                                    vram_temp = Some(*temp_raw as f32 / 256.0);
+                                }
+                            }
+                        }
+                    }
+                    (voltage, vram_temp)
+                }
+                Err(_) => (None, None),
+            }
+        };
+
+        let voltage = if is_suspended {
+            None
+        } else {
+            ioctl_voltage.or_else(|| get_nvidia_voltage(i))
+        };
 
         let mut gpu_info = GpuInfo {
             name: name.clone(),
@@ -1462,6 +1501,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             load,
             power,
             voltage,
+            memory_temperature,
             freq_offset: None,
             drain_offset: None,
             power_offset: None,

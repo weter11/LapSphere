@@ -1,6 +1,7 @@
 mod dbus_interface;
 mod hardware_control;
 mod hardware_detection;
+mod nvidia_driver;
 mod tuxedo_io;
 mod battery_control;
 mod polling_scheduler;
