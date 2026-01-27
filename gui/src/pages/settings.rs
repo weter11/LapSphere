@@ -195,27 +195,31 @@ fn draw_about_info(ui: &mut Ui, state: &AppState) {
 }
 
 fn draw_main_settings(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTheme, ctx: &Context, dbus_client: Option<&DbusClient>) {
-    // Laptop Features
-    ui.label(RichText::new("Laptop Features").strong().heading());
-    ui.add_space(6.0);
+    let is_clevo = state.hardware_interface.as_ref().map(|s| s.contains("Clevo")).unwrap_or(false);
 
-    if let Some(mut enabled) = state.webcam_enabled {
-        if ui.checkbox(&mut enabled, "Webcam Enabled").changed() {
-            if let Some(client) = dbus_client {
-                let client = client.clone();
-                tokio::spawn(async move {
-                    let _ = client.set_webcam_state(enabled).await;
-                });
-                state.webcam_enabled = Some(enabled);
+    if is_clevo {
+        // Laptop Features
+        ui.label(RichText::new("Laptop Features").strong().heading());
+        ui.add_space(6.0);
+
+        if let Some(mut enabled) = state.webcam_enabled {
+            if ui.checkbox(&mut enabled, "Webcam Enabled").changed() {
+                if let Some(client) = dbus_client {
+                    let client = client.clone();
+                    tokio::spawn(async move {
+                        let _ = client.set_webcam_state(enabled).await;
+                    });
+                    state.webcam_enabled = Some(enabled);
+                }
             }
+        } else {
+            ui.label(RichText::new("Webcam control not available or detecting...").small().italics());
         }
-    } else {
-        ui.label(RichText::new("Webcam control not available or detecting...").small().italics());
-    }
 
-    ui.add_space(12.0);
-    ui.separator();
-    ui.add_space(12.0);
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(12.0);
+    }
 
     // Appearance
     ui.label(RichText::new("Appearance").strong().heading());
@@ -585,10 +589,13 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
                 ui.label(interface_label);
                 ui.end_row();
 
-                if let Some(enabled) = state.webcam_enabled {
-                    ui.label("Webcam Status:");
-                    ui.label(if enabled { "Enabled" } else { "Disabled" });
-                    ui.end_row();
+                let is_clevo = state.hardware_interface.as_ref().map(|s| s.contains("Clevo")).unwrap_or(false);
+                if is_clevo {
+                    if let Some(enabled) = state.webcam_enabled {
+                        ui.label("Webcam Status:");
+                        ui.label(if enabled { "Enabled" } else { "Disabled" });
+                        ui.end_row();
+                    }
                 }
 
                 if let Some(battery) = &state.battery_info {
