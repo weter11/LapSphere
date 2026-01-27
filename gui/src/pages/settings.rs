@@ -1,6 +1,5 @@
 use egui::{Ui, ScrollArea, RichText, Slider, ComboBox, Context, Grid};
 use crate::app::{AppState, SettingsTab};
-use webbrowser;
 use crate::dbus_client::DbusClient;
 use crate::theme::LapSphereTheme;
 use crate::pages::statistics::{normalize_section_order, STATISTICS_SECTIONS};

@@ -6,32 +6,32 @@ license.workspace = true
 
 [dependencies]
 # Core egui
-eframe = "0.29"
-egui = "0.29"
-egui_extras = { version = "0.29", features = ["svg", "image"] }
-egui_plot = "0.29.0"
+eframe.workspace = true
+egui.workspace = true
+egui_extras.workspace = true
+egui_plot.workspace = true
 
 # Your existing dependencies
-lapsphere-common = { path = "../common" }
-anyhow = "1.0"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-log = "0.4"
-env_logger = "0.11"
+lapsphere-common.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+env_logger.workspace = true
 ureq = { version = "2.12", default-features = false, features = ["json", "gzip", "native-tls"] }
 rustls = { version = "0.23", default-features = false, features = ["std"] }
-webbrowser = "1.0"
+webbrowser.workspace = true
 
 # Async for DBus
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
-zbus = "4.4.0"
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros"] }
+zbus.workspace = true
 
 # Time handling
-chrono = "0.4"
+chrono.workspace = true
 ksni = { version = "0.3.3", features = ["blocking"] }
 
 # System statistics
-systemstat = "0.2"
+systemstat.workspace = true
 
 [profile.release]
 opt-level = 3

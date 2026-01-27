@@ -875,8 +875,13 @@ fn load_profiles_from_disk(path: &str) -> anyhow::Result<ProfilesConfig> {
 }
 
 pub fn get_crash_dir() -> String {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    format!("{}/.config/lapsphere/crashes", home)
+    if cfg!(target_os = "windows") {
+        let app_data = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
+        format!("{}/lapsphere/crashes", app_data.replace("\\", "/"))
+    } else {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        format!("{}/.config/lapsphere/crashes", home)
+    }
 }
 
 fn load_config_from_disk() -> anyhow::Result<AppConfig> {

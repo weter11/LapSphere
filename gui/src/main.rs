@@ -52,6 +52,7 @@ fn setup_panic_hook() {
     }));
 }
 
+#[cfg(target_os = "linux")]
 fn check_single_instance(rt: &tokio::runtime::Runtime) -> Option<zbus::Connection> {
     rt.block_on(async {
         match zbus::Connection::session().await {
@@ -102,6 +103,7 @@ fn main() -> Result<(), eframe::Error> {
     let rt = tokio::runtime::Runtime::new().expect("Unable to create a Tokio runtime");
     let _enter = rt.enter();
 
+    #[cfg(target_os = "linux")]
     let _dbus_conn = match check_single_instance(&rt) {
         Some(conn) => conn,
         None => return Ok(()),
