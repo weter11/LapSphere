@@ -45,6 +45,7 @@ pub enum DbusCommand {
     UpdatePollingInterval { component: String, interval_ms: u64, reply: oneshot::Sender<Result<()>> },
     GetWebcamState { reply: oneshot::Sender<Result<bool>> },
     SetWebcamState { enabled: bool, reply: oneshot::Sender<Result<()>> },
+    GetDaemonLogs { reply: oneshot::Sender<Result<Vec<LogEntry>>> },
     ShutdownDaemon { reply: oneshot::Sender<Result<()>> },
 }
 
@@ -289,6 +290,12 @@ impl DbusClient {
         let _ = self.command_tx.send(DbusCommand::SetWebcamState { enabled, reply: tx });
         rx
     }
+
+    pub fn get_daemon_logs(&self) -> oneshot::Receiver<Result<Vec<LogEntry>>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::GetDaemonLogs { reply: tx });
+        rx
+    }
 }
 
 // Background worker - handles all DBus calls asynchronously with reconnection logic
@@ -520,6 +527,12 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
                 }
                 DbusCommand::SetWebcamState { enabled, reply } => {
                     let result = set_webcam_state_impl(&connection, enabled).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::GetDaemonLogs { reply } => {
+                    let result = get_daemon_logs_impl(&connection).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
@@ -948,6 +961,17 @@ async fn set_webcam_state_impl(conn: &Connection, enabled: bool) -> Result<()> {
     ).await?;
     proxy.call::<_, _, ()>("SetWebcamState", &(enabled,)).await?;
     Ok(())
+}
+
+async fn get_daemon_logs_impl(conn: &Connection) -> Result<Vec<LogEntry>> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
+    ).await?;
+    let json: String = proxy.call("GetDaemonLogs", &()).await?;
+    Ok(serde_json::from_str(&json)?)
 }
 
 async fn shutdown_daemon_impl(conn: &Connection) -> Result<()> {

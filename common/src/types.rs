@@ -11,6 +11,13 @@ pub struct SystemInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogEntry {
+    pub level: String,
+    pub message: String,
+    pub timestamp: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CpuInfo {
     pub name: String,
     pub median_frequency: u64,

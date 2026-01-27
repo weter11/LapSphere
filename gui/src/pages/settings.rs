@@ -14,6 +14,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTheme, ctx: 
         ui.selectable_value(&mut state.settings_tab, SettingsTab::Main, "Main");
         ui.selectable_value(&mut state.settings_tab, SettingsTab::StatsConfiguration, "Stats configuration");
         ui.selectable_value(&mut state.settings_tab, SettingsTab::Hardware, "Hardware info");
+        ui.selectable_value(&mut state.settings_tab, SettingsTab::Logs, "View Logs");
         ui.selectable_value(&mut state.settings_tab, SettingsTab::Help, "Help");
         ui.selectable_value(&mut state.settings_tab, SettingsTab::About, "About");
     });
@@ -29,8 +30,65 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTheme, ctx: 
                 SettingsTab::Main => draw_main_settings(ui, state, theme, ctx, dbus_client),
                 SettingsTab::StatsConfiguration => draw_stats_configuration(ui, state, dbus_client),
                 SettingsTab::Hardware => draw_hardware_info(ui, state),
+                SettingsTab::Logs => draw_logs_view(ui, state, ctx),
                 SettingsTab::Help => draw_help_info(ui, state),
                 SettingsTab::About => draw_about_info(ui),
+            }
+        });
+}
+
+fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
+    ui.label(RichText::new("Daemon Logs (last 100 lines)").strong().heading());
+    ui.add_space(8.0);
+
+    ui.horizontal(|ui| {
+        if ui.button("📋 Copy Logs to Clipboard").clicked() {
+            let log_text = state.daemon_logs.iter()
+                .map(|l| format!("[{}] {}: {}", l.timestamp, l.level, l.message))
+                .collect::<Vec<_>>()
+                .join("\n");
+            ctx.output_mut(|o| o.copied_text = log_text);
+        }
+    });
+
+    ui.add_space(8.0);
+
+    ui.horizontal(|ui| {
+        ui.label("Filter:");
+        ui.checkbox(&mut state.log_filter_error, "Error");
+        ui.checkbox(&mut state.log_filter_warn, "Warning");
+        ui.checkbox(&mut state.log_filter_info, "Info");
+        ui.checkbox(&mut state.log_filter_debug, "Debug");
+    });
+
+    ui.add_space(8.0);
+
+    ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for entry in state.daemon_logs.iter().rev() {
+                let show = match entry.level.as_str() {
+                    "ERROR" => state.log_filter_error,
+                    "WARN" => state.log_filter_warn,
+                    "INFO" => state.log_filter_info,
+                    "DEBUG" | "TRACE" => state.log_filter_debug,
+                    _ => true,
+                };
+
+                if show {
+                    let color = match entry.level.as_str() {
+                        "ERROR" => egui::Color32::from_rgb(255, 100, 100),
+                        "WARN" => egui::Color32::from_rgb(255, 200, 100),
+                        "DEBUG" | "TRACE" => egui::Color32::from_rgb(150, 150, 150),
+                        _ => ui.visuals().text_color(),
+                    };
+
+                    ui.horizontal_top(|ui| {
+                        ui.label(RichText::new(&entry.timestamp).weak().monospace());
+                        ui.label(RichText::new(&entry.level).color(color).strong().monospace());
+                        ui.label(RichText::new(&entry.message).monospace());
+                    });
+                }
             }
         });
 }
