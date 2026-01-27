@@ -48,12 +48,15 @@ fn setup_panic_hook() {
 
         let _ = fs::write(file_path, report);
 
+        #[cfg(target_os = "linux")]
         eprintln!("Application panicked! Crash report saved to ~/.config/lapsphere/crashes");
+        #[cfg(target_os = "windows")]
+        eprintln!("Application panicked! Crash report saved to %APPDATA%\\lapsphere\\crashes");
     }));
 }
 
 #[cfg(target_os = "linux")]
-fn check_single_instance(rt: &tokio::runtime::Runtime) -> Option<zbus::Connection> {
+fn check_single_instance_linux(rt: &tokio::runtime::Runtime) -> Option<zbus::Connection> {
     rt.block_on(async {
         match zbus::Connection::session().await {
             Ok(conn) => {
@@ -91,6 +94,27 @@ fn check_single_instance(rt: &tokio::runtime::Runtime) -> Option<zbus::Connectio
     })
 }
 
+#[cfg(target_os = "windows")]
+fn check_single_instance_windows() -> Option<isize> {
+    use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, HANDLE};
+    use windows_sys::Win32::System::Threading::CreateMutexA;
+    use std::ptr::null;
+
+    let name = b"Global\\io.lapsphere.Gui\0";
+    unsafe {
+        let handle: HANDLE = CreateMutexA(null(), 1, name.as_ptr());
+        if handle == 0 {
+            return Some(0);
+        }
+        let err = windows_sys::Win32::Foundation::GetLastError();
+        if err == ERROR_ALREADY_EXISTS {
+            eprintln!("Another instance of LapSphere GUI is already running.");
+            return None;
+        }
+        Some(handle)
+    }
+}
+
 fn main() -> Result<(), eframe::Error> {
     env_logger::init();
     setup_panic_hook();
@@ -104,8 +128,14 @@ fn main() -> Result<(), eframe::Error> {
     let _enter = rt.enter();
 
     #[cfg(target_os = "linux")]
-    let _dbus_conn = match check_single_instance(&rt) {
+    let _instance_guard = match check_single_instance_linux(&rt) {
         Some(conn) => conn,
+        None => return Ok(()),
+    };
+
+    #[cfg(target_os = "windows")]
+    let _instance_guard = match check_single_instance_windows() {
+        Some(mutex) => mutex,
         None => return Ok(()),
     };
     

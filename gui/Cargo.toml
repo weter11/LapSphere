@@ -6,9 +6,9 @@ license.workspace = true
 
 [dependencies]
 # Core egui
-eframe.workspace = true
-egui.workspace = true
-egui_extras.workspace = true
+eframe = { workspace = true, features = ["default_fonts", "glow", "wayland", "x11"] }
+egui = { workspace = true, features = ["default_fonts"] }
+egui_extras = { workspace = true, features = ["svg", "image"] }
 egui_plot.workspace = true
 
 # Your existing dependencies
@@ -32,6 +32,9 @@ ksni = { version = "0.3.3", features = ["blocking"] }
 
 # System statistics
 systemstat.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
 [profile.release]
 opt-level = 3

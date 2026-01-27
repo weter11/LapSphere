@@ -874,18 +874,22 @@ fn load_profiles_from_disk(path: &str) -> anyhow::Result<ProfilesConfig> {
     Ok(serde_json::from_str(&json)?)
 }
 
-pub fn get_crash_dir() -> String {
+pub fn get_config_dir() -> String {
     if cfg!(target_os = "windows") {
         let app_data = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
-        format!("{}/lapsphere/crashes", app_data.replace("\\", "/"))
+        format!("{}/lapsphere", app_data.replace("\\", "/"))
     } else {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        format!("{}/.config/lapsphere/crashes", home)
+        format!("{}/.config/lapsphere", home)
     }
 }
 
+pub fn get_crash_dir() -> String {
+    format!("{}/crashes", get_config_dir())
+}
+
 fn load_config_from_disk() -> anyhow::Result<AppConfig> {
-    let config_dir = std::env::var("HOME")? + "/.config/lapsphere";
+    let config_dir = get_config_dir();
     let settings_path = format!("{}/settings.json", config_dir);
     let profiles_path = format!("{}/profiles.json", config_dir);
     let legacy_path = format!("{}/config.json", config_dir);
@@ -935,37 +939,40 @@ fn load_config_from_disk() -> anyhow::Result<AppConfig> {
 }
 
 fn save_settings_to_disk(config: &AppConfig) -> anyhow::Result<()> {
-    let config_dir = std::env::var("HOME")? + "/.config/lapsphere";
+    let config_dir = get_config_dir();
     std::fs::create_dir_all(&config_dir)?;
     let settings_path = format!("{}/settings.json", config_dir);
     let json = serde_json::to_string_pretty(&SettingsConfig::from(config))?;
     std::fs::write(settings_path, json)?;
 
     // Handle autostart
-    let home = std::env::var("HOME")?;
-    let autostart_dir = format!("{}/.config/autostart", home);
+    #[cfg(target_os = "linux")]
+    {
+        let home = std::env::var("HOME")?;
+        let autostart_dir = format!("{}/.config/autostart", home);
     let desktop_file = format!("{}/io.lapsphere.LapSphere.desktop", autostart_dir);
 
-    if config.autostart {
-        std::fs::create_dir_all(&autostart_dir)?;
-        let content = format!(
-            "[Desktop Entry]\n\
-            Type=Application\n\
-            Name=LapSphere\n\
-            Exec=lapsphere --tray\n\
-            Icon=lapsphere\n\
-            X-GNOME-Autostart-enabled=true\n"
-        );
-        std::fs::write(&desktop_file, content)?;
-    } else if std::path::Path::new(&desktop_file).exists() {
-        std::fs::remove_file(&desktop_file)?;
+        if config.autostart {
+            std::fs::create_dir_all(&autostart_dir)?;
+            let content = format!(
+                "[Desktop Entry]\n\
+                Type=Application\n\
+                Name=LapSphere\n\
+                Exec=lapsphere --tray\n\
+                Icon=lapsphere\n\
+                X-GNOME-Autostart-enabled=true\n"
+            );
+            std::fs::write(&desktop_file, content)?;
+        } else if std::path::Path::new(&desktop_file).exists() {
+            std::fs::remove_file(&desktop_file)?;
+        }
     }
 
     Ok(())
 }
 
 fn save_profiles_to_disk(config: &AppConfig) -> anyhow::Result<()> {
-    let config_dir = std::env::var("HOME")? + "/.config/lapsphere";
+    let config_dir = get_config_dir();
     std::fs::create_dir_all(&config_dir)?;
     let profiles_path = format!("{}/profiles.json", config_dir);
     let json = serde_json::to_string_pretty(&ProfilesConfig::from(config))?;
