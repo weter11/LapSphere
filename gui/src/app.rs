@@ -874,6 +874,11 @@ fn load_profiles_from_disk(path: &str) -> anyhow::Result<ProfilesConfig> {
     Ok(serde_json::from_str(&json)?)
 }
 
+pub fn get_crash_dir() -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    format!("{}/.config/lapsphere/crashes", home)
+}
+
 fn load_config_from_disk() -> anyhow::Result<AppConfig> {
     let config_dir = std::env::var("HOME")? + "/.config/lapsphere";
     let settings_path = format!("{}/settings.json", config_dir);

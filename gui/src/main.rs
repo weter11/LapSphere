@@ -8,9 +8,91 @@ mod polling_scheduler;
 mod system_tray;
 
 use app::LapSphereApp;
+use chrono::Local;
+use std::fs;
+use std::panic;
+
+fn setup_panic_hook() {
+    panic::set_hook(Box::new(|panic_info| {
+        let timestamp = Local::now().format("%Y%m%d_%H%M%S");
+        let crash_dir = app::get_crash_dir();
+        let _ = fs::create_dir_all(&crash_dir);
+
+        let file_path = format!("{}/crash_{}.log", crash_dir, timestamp);
+
+        let mut message = String::new();
+        if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
+            message = s.to_string();
+        } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {
+            message = s.clone();
+        }
+
+        let location = panic_info.location()
+            .map(|l| format!(" at {}:{}", l.file(), l.line()))
+            .unwrap_or_default();
+
+        let backtrace = format!("{:?}", std::backtrace::Backtrace::capture());
+
+        let report = format!(
+            "LapSphere GUI Crash Report\n\
+             ==========================\n\
+             Time: {}\n\
+             Panic: {}{}\n\n\
+             Backtrace:\n\
+             {}",
+            Local::now().format("%Y-%m-%d %H:%M:%S"),
+            message,
+            location,
+            backtrace
+        );
+
+        let _ = fs::write(file_path, report);
+
+        eprintln!("Application panicked! Crash report saved to ~/.config/lapsphere/crashes");
+    }));
+}
+
+fn check_single_instance(rt: &tokio::runtime::Runtime) -> Option<zbus::Connection> {
+    rt.block_on(async {
+        match zbus::Connection::session().await {
+            Ok(conn) => {
+                // Use the explicit DBus proxy to request name and check the reply
+                let dbus = match zbus::fdo::DBusProxy::new(&conn).await {
+                    Ok(proxy) => proxy,
+                    Err(e) => {
+                        log::error!("Failed to create DBus proxy: {}", e);
+                        return Some(conn);
+                    }
+                };
+
+                let reply = dbus.request_name(
+                    "io.lapsphere.Gui".try_into().unwrap(),
+                    zbus::fdo::RequestNameFlags::DoNotQueue.into()
+                ).await;
+
+                match reply {
+                    Ok(zbus::fdo::RequestNameReply::PrimaryOwner) => Some(conn),
+                    Ok(_) => {
+                        eprintln!("Another instance of LapSphere GUI is already running.");
+                        None
+                    }
+                    Err(e) => {
+                        log::error!("DBus error requesting name: {}", e);
+                        Some(conn)
+                    }
+                }
+            }
+            Err(e) => {
+                log::error!("Failed to connect to session bus for single instance check: {}", e);
+                None
+            }
+        }
+    })
+}
 
 fn main() -> Result<(), eframe::Error> {
     env_logger::init();
+    setup_panic_hook();
 
     let args: Vec<String> = std::env::args().collect();
     let start_in_tray = args.contains(&"--tray".to_string());
@@ -19,6 +101,11 @@ fn main() -> Result<(), eframe::Error> {
     // This is required for `tokio::spawn` to work in the `DbusClient`.
     let rt = tokio::runtime::Runtime::new().expect("Unable to create a Tokio runtime");
     let _enter = rt.enter();
+
+    let _dbus_conn = match check_single_instance(&rt) {
+        Some(conn) => conn,
+        None => return Ok(()),
+    };
     
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
