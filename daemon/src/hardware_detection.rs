@@ -19,6 +19,11 @@ static PREVIOUS_STORAGE_STATS: Lazy<Mutex<HashMap<String, StorageStats>>> =
 
 static NVIDIA_NAMES_CACHE: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
+// Cache for NVAPI instance to avoid repeated initialization
+static NVAPI_INSTANCE: Lazy<Option<crate::nvapi::NvApi>> = Lazy::new(|| {
+    crate::nvapi::NvApi::new().ok()
+});
+
 const BITS_PER_BYTE: f64 = 8.0;
 const BITS_PER_MEGABIT: f64 = 1_000_000.0;
 
@@ -1340,50 +1345,44 @@ fn get_nvidia_voltage(index: u32) -> Option<f32> {
 
 // Get NVAPI thermal sensors (hotspot and VRAM temperatures)
 fn get_nvapi_thermals(index: u32) -> (Option<f32>, Option<f32>) {
-    // Try to use NVAPI for thermal data
-    match crate::nvapi::NvApi::new() {
-        Ok(nvapi) => {
-            match nvapi.find_gpu_by_index(index) {
-                Ok(Some(handle)) => {
-                    unsafe {
-                        // Calculate mask for available thermal sensors
-                        let mask = nvapi.calculate_thermals_mask(handle)
-                            .unwrap_or(0);
-                        
-                        if mask != 0 {
-                            // Get thermal readings
-                            if let Ok(thermals) = nvapi.get_thermals(handle, mask) {
-                                return (thermals.hotspot(), thermals.vram());
-                            }
+    // Use cached NVAPI instance
+    if let Some(ref nvapi) = *NVAPI_INSTANCE {
+        match nvapi.find_gpu_by_index(index) {
+            Ok(Some(handle)) => {
+                unsafe {
+                    // Calculate mask for available thermal sensors
+                    let mask = nvapi.calculate_thermals_mask(handle)
+                        .unwrap_or(0);
+                    
+                    if mask != 0 {
+                        // Get thermal readings
+                        if let Ok(thermals) = nvapi.get_thermals(handle, mask) {
+                            return (thermals.hotspot(), thermals.vram());
                         }
                     }
                 }
-                _ => {}
             }
+            _ => {}
         }
-        _ => {}
     }
     (None, None)
 }
 
 // Get NVAPI voltage reading
 fn get_nvapi_voltage(index: u32) -> Option<f32> {
-    // Try to use NVAPI for voltage data
-    match crate::nvapi::NvApi::new() {
-        Ok(nvapi) => {
-            match nvapi.find_gpu_by_index(index) {
-                Ok(Some(handle)) => {
-                    unsafe {
-                        if let Ok(voltage_uv) = nvapi.get_voltage(handle) {
-                            // Convert microvolts to volts
-                            return Some(voltage_uv as f32 / 1_000_000.0);
-                        }
+    // Use cached NVAPI instance
+    if let Some(ref nvapi) = *NVAPI_INSTANCE {
+        match nvapi.find_gpu_by_index(index) {
+            Ok(Some(handle)) => {
+                unsafe {
+                    if let Ok(voltage_uv) = nvapi.get_voltage(handle) {
+                        // Convert microvolts to volts
+                        return Some(voltage_uv as f32 / 1_000_000.0);
                     }
                 }
-                _ => {}
             }
+            _ => {}
         }
-        _ => {}
     }
     None
 }

@@ -116,15 +116,20 @@ impl NvApi {
             values: [0; 40],
         };
 
+        let mut result_mask = 0i32;
         for bit in 0..32 {
             sensors.mask = 1 << bit;
             let status = f(handle, &mut sensors);
-            if status != 0 {
-                return Ok(sensors.mask - 1);
+            if status == 0 {
+                result_mask |= 1 << bit;
             }
         }
 
-        bail!("Could not find suitable mask");
+        if result_mask == 0 {
+            bail!("Could not find any available thermal sensors");
+        }
+
+        Ok(result_mask)
     }
 
     unsafe fn enum_physical_gpus(&self) -> anyhow::Result<Vec<NvPhysicalGpuHandle>> {
@@ -191,7 +196,7 @@ impl NvApiThermals {
     fn get_value(&self, index: usize) -> Option<f32> {
         self.values
             .get(index)
-            .map(|&value| (value / 256) as f32)
+            .map(|&value| (value as f32) / 256.0)
             .filter(|&value| value > 0.0 && value < 255.0)
     }
 
