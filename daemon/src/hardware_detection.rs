@@ -11,7 +11,18 @@ use systemstat::{System, Platform};
 // use tuxedo_io::TuxedoIo;
 use lapsphere_common::types::*;
 
-static NVAPI: Lazy<Option<NvApi>> = Lazy::new(|| NvApi::new().ok());
+static NVAPI: Lazy<Option<NvApi>> = Lazy::new(|| {
+    match NvApi::new() {
+        Ok(api) => {
+            log::info!("NVIDIA API initialized successfully");
+            Some(api)
+        }
+        Err(e) => {
+            log::warn!("Failed to initialize NVIDIA API: {}", e);
+            None
+        }
+    }
+});
 
 // Thread-safe storage for previous CPU stats
 static PREVIOUS_CPU_STATS: Mutex<Option<HashMap<u32, CpuStats>>> = Mutex::new(None);
@@ -1195,6 +1206,7 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
                 memory_frequency,
                 temperature,
                 memory_temperature: None,
+                hotspot_temperature: None,
                 load,
                 power,
                 voltage,
@@ -1382,6 +1394,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 memory_frequency: None,
                 temperature: None,
                 memory_temperature: None,
+                hotspot_temperature: None,
                 load: None,
                 power: None,
                 voltage: None,
@@ -1440,19 +1453,22 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         let pci_info = device.pci_info().ok();
         let bus_id = pci_info.map(|p| p.bus);
 
-        let (frequency, memory_frequency, temperature, memory_temperature, load, power, voltage) = if is_suspended {
-            (None, None, None, None, None, None, None)
+        let (frequency, memory_frequency, temperature, memory_temperature, hotspot_temperature, load, power, voltage) = if is_suspended {
+            (None, None, None, None, None, None, None, None)
         } else {
-            let (nvapi_voltage, nvapi_temp, nvapi_mem_temp) = if let (Some(ref api), Some(bus_id)) = (&*NVAPI, bus_id) {
+            let (nvapi_voltage, nvapi_temp, nvapi_mem_temp, nvapi_hotspot_temp) = if let (Some(ref api), Some(bus_id)) = (&*NVAPI, bus_id) {
                 if let Ok(Some(handle)) = api.find_matching_gpu(bus_id) {
                     let v = unsafe { api.get_voltage(handle).ok().map(|v| v as f32 / 1_000_000.0) };
-                    let t = unsafe { api.get_thermals(handle).ok() };
-                    (v, t.as_ref().and_then(|t| t.core()), t.as_ref().and_then(|t| t.vram()))
+                    let t = unsafe { api.get_thermals(handle, -1).ok() };
+                    (v,
+                     t.as_ref().and_then(|t| t.core()),
+                     t.as_ref().and_then(|t| t.vram()),
+                     t.as_ref().and_then(|t| t.hotspot()))
                 } else {
-                    (None, None, None)
+                    (None, None, None, None)
                 }
             } else {
-                (None, None, None)
+                (None, None, None, None)
             };
 
             (
@@ -1466,6 +1482,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                     .ok()
                     .map(|t| t as f32)),
                 nvapi_mem_temp,
+                nvapi_hotspot_temp,
                 device.utilization_rates().ok().map(|u| u.gpu as f32),
                 device.power_usage().ok().map(|p| p as f32 / 1000.0),
                 nvapi_voltage.or_else(|| get_nvidia_voltage(i)),
@@ -1480,6 +1497,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             memory_frequency,
             temperature,
             memory_temperature,
+            hotspot_temperature,
             load,
             power,
             voltage,

@@ -32,6 +32,7 @@ pub struct NvApi {
 
 impl NvApi {
     pub fn new() -> anyhow::Result<Self> {
+        log::debug!("Loading NVIDIA API library: {}", LIBRARY_NAME);
         let lib = unsafe {
             libloading::Library::new(LIBRARY_NAME).context("Could not load nvidia API library")
         }?;
@@ -42,15 +43,17 @@ impl NvApi {
             let initialize = handle.query_interface(QUERY_NVAPI_INITIALIZE)?;
             let initialize: unsafe extern "C" fn() -> NvAPI_Status = transmute(initialize);
             let status = initialize();
-            handle.handle_status(status)?;
+            handle.handle_status(status).context("NvAPI_Initialize failed")?;
         }
 
+        log::debug!("NVIDIA API initialized successfully");
         Ok(handle)
     }
 
     pub fn find_matching_gpu(&self, bus_id: u32) -> anyhow::Result<Option<NvPhysicalGpuHandle>> {
         unsafe {
             let handles = self.enum_physical_gpus()?;
+            log::debug!("Found {} physical GPUs via NVAPI", handles.len());
             for handle in handles {
                 let f = self.query_interface(QUERY_NVAPI_GET_BUS_ID)?;
                 let f: unsafe extern "C" fn(
@@ -62,11 +65,13 @@ impl NvApi {
                 let status = f(handle, &mut id);
                 self.handle_status(status)?;
 
+                log::debug!("GPU handle {:?} has bus ID {}", handle, id);
                 if id == bus_id {
                     return Ok(Some(handle));
                 }
             }
 
+            log::warn!("No GPU matching bus ID {} found in NVAPI", bus_id);
             Ok(None)
         }
     }
@@ -74,6 +79,7 @@ impl NvApi {
     pub unsafe fn get_thermals(
         &self,
         handle: NvPhysicalGpuHandle,
+        mask: i32,
     ) -> anyhow::Result<NvApiThermals> {
         let f = self.query_interface(QUERY_NVAPI_THERMALS)?;
         let f: unsafe extern "C" fn(
@@ -84,12 +90,12 @@ impl NvApi {
         let mut sensors = NvApiThermals {
             #[allow(clippy::cast_possible_truncation)]
             version: (mem::size_of::<NvApiThermals>() | (2 << 16)) as u32,
-            count: 0,
-            sensors: [NvApiThermalSensor::default(); 8],
+            mask,
+            values: [0; 40],
         };
 
         let status = f(handle, &mut sensors);
-        self.handle_status(status)?;
+        self.handle_status(status).context("QUERY_NVAPI_THERMALS failed")?;
 
         Ok(sensors)
     }
@@ -105,11 +111,12 @@ impl NvApi {
             #[allow(clippy::cast_possible_truncation)]
             version: (mem::size_of::<NvApiVoltage>() | (1 << 16)) as u32,
             flags: 0,
+            padding_1: [0; 8],
             value_uv: 0,
-            padding: [0; 16],
+            padding_2: [0; 8],
         };
         let status = f(handle, &mut data);
-        self.handle_status(status)?;
+        self.handle_status(status).context("QUERY_NVAPI_VOLTAGE failed")?;
 
         Ok(data.value_uv)
     }
@@ -117,15 +124,15 @@ impl NvApi {
     unsafe fn enum_physical_gpus(&self) -> anyhow::Result<Vec<NvPhysicalGpuHandle>> {
         let f = self.query_interface(QUERY_NVAPI_ENUM_PHYSICAL_GPUS)?;
         let f: unsafe extern "C" fn(
-            handles: &mut [NvPhysicalGpuHandle; NVAPI_MAX_PHYSICAL_GPUS],
+            handles: *mut NvPhysicalGpuHandle,
             count: &mut u32,
         ) -> NvAPI_Status = transmute(f);
 
         let mut count = 0;
         let mut handles =
-            [(ptr::null_mut() as NvPhysicalGpuHandle); NVAPI_MAX_PHYSICAL_GPUS];
+            [ptr::null_mut(); NVAPI_MAX_PHYSICAL_GPUS];
 
-        let status = f(&mut handles, &mut count);
+        let status = f(handles.as_mut_ptr(), &mut count);
         self.handle_status(status)?;
 
         Ok(handles.into_iter().take(count as usize).collect())
@@ -135,12 +142,12 @@ impl NvApi {
         let query_interface = self
             .lib
             .get::<unsafe extern "C" fn(u32) -> *const ()>(QUERY_INTERFACE_FN)
-            .context("Could not get main symbol")?;
+            .context("Could not get nvapi_QueryInterface symbol")?;
 
         let f = query_interface(id);
 
         if f.is_null() {
-            bail!("Got null response for query id {id:x}");
+            bail!("Got null response from nvapi_QueryInterface for query id {id:x}");
         }
 
         Ok(f)
@@ -184,55 +191,31 @@ impl Drop for NvApi {
 }
 
 #[repr(C)]
-#[derive(Debug, Copy, Clone, Default)]
-pub struct NvApiThermalSensor {
-    pub controller: i32,
-    pub default_min: i32,
-    pub default_max: i32,
-    pub current_temp: i32,
-    pub target: i32,
-}
-
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug)]
 pub struct NvApiThermals {
-    pub version: u32,
-    pub count: u32,
-    pub sensors: [NvApiThermalSensor; 8],
+    version: u32,
+    mask: i32,
+    values: [i32; 40],
 }
 
 impl NvApiThermals {
-    pub fn get_temp(&self, target_id: i32) -> Option<f32> {
-        for i in 0..(self.count as usize).min(8) {
-            if self.sensors[i].target == target_id {
-                let t = self.sensors[i].current_temp;
-                // Standard NVAPI returns degrees Celsius as NvS32.
-                // We check for reasonable values.
-                if t > 0 && t < 150 {
-                    return Some(t as f32);
-                }
-                // Some undocumented implementations might return 8.8 fixed point.
-                if t > 1000 && t < 40000 {
-                    let tf = t as f32 / 256.0;
-                    if tf > 0.0 && tf < 150.0 {
-                        return Some(tf);
-                    }
-                }
-            }
-        }
-        None
+    fn get_value(&self, index: usize) -> Option<f32> {
+        self.values
+            .get(index)
+            .map(|&value| value as f32 / 256.0)
+            .filter(|&value| value > 0.0 && value < 255.0)
     }
 
     pub fn core(&self) -> Option<f32> {
-        self.get_temp(1) // NVAPI_THERMAL_TARGET_GPU
-    }
-
-    pub fn vram(&self) -> Option<f32> {
-        self.get_temp(2) // NVAPI_THERMAL_TARGET_MEMORY
+        self.get_value(0)
     }
 
     pub fn hotspot(&self) -> Option<f32> {
-        self.get_temp(9) // NVAPI_THERMAL_TARGET_HOTSPOT
+        self.get_value(9)
+    }
+
+    pub fn vram(&self) -> Option<f32> {
+        self.get_value(15)
     }
 }
 
@@ -241,6 +224,7 @@ impl NvApiThermals {
 struct NvApiVoltage {
     version: u32,
     flags: u32,
+    padding_1: [u32; 8],
     value_uv: u32,
-    padding: [u32; 16], // Generous padding to match suspected structure size
+    padding_2: [u32; 8],
 }
