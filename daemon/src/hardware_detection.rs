@@ -23,6 +23,7 @@ struct NvApiState {
     api: NvApi,
     gpu_handle: crate::bindings::nvidia::NvPhysicalGpuHandle,
     thermals_mask: i32,
+    bus_id: u32,
 }
 
 thread_local! {
