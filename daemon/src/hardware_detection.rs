@@ -1402,13 +1402,26 @@ fn get_nvidia_extended_stats(gpu_index: u32) -> (Option<f32>, Option<f32>, Optio
                 sensors: &mut NvApiThermals,
             ) -> NvApiStatus = mem::transmute(thermals_fn);
             
-            // Query all thermal sensors
+            // Calculate mask by probing (some GPUs fail if unsupported bits are set)
+            let mut mask = 1;
             let mut sensors = NvApiThermals {
                 version: (mem::size_of::<NvApiThermals>() | (2 << 16)) as u32,
-                mask: !0, // Query all sensors
+                mask: 1,
                 values: [0; 40],
             };
-            
+
+            if get_thermals(handle, &mut sensors) == 0 {
+                for bit in 0..32 {
+                    sensors.mask = 1 << bit;
+                    if get_thermals(handle, &mut sensors) != 0 {
+                        mask = sensors.mask - 1;
+                        break;
+                    }
+                    if bit == 31 { mask = !0; }
+                }
+            }
+
+            sensors.mask = mask;
             if get_thermals(handle, &mut sensors) == 0 {
                 // Hotspot is at index 9
                 let hotspot_raw = sensors.values[9] as f32 / 256.0;
@@ -1530,11 +1543,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             }
         }
 
-        let gpu_type = if i == 0 {
-            GpuType::Integrated
-        } else {
-            GpuType::Discrete
-        };
+        let gpu_type = GpuType::Discrete;
         
         // Use pre-read status to avoid waking up the GPU with PCI info requests
         let status_from_sysfs = statuses.get(i as usize).cloned();
