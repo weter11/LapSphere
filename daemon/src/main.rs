@@ -1,3 +1,4 @@
+mod bindings;
 mod dbus_interface;
 mod hardware_control;
 mod hardware_detection;

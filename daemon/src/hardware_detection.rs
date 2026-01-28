@@ -19,6 +19,16 @@ static PREVIOUS_STORAGE_STATS: Lazy<Mutex<HashMap<String, StorageStats>>> =
 
 static NVIDIA_NAMES_CACHE: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
+struct NvApiState {
+    api: NvApi,
+    gpu_handle: crate::bindings::nvidia::NvPhysicalGpuHandle,
+    thermals_mask: i32,
+}
+
+thread_local! {
+    static NVAPI_STATE: RefCell<Option<NvApiState>> = const { RefCell::new(None) };
+}
+
 const BITS_PER_BYTE: f64 = 8.0;
 const BITS_PER_MEGABIT: f64 = 1_000_000.0;
 
@@ -1191,6 +1201,8 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
                 frequency,
                 memory_frequency,
                 temperature,
+                hotspot_temperature: None,
+                memory_temperature: None,
                 load,
                 power,
                 voltage,
@@ -1247,6 +1259,10 @@ fn get_intel_gpu_name(device_id: &str) -> Option<String> {
 }
 
 use crate::hardware_control::get_nvml;
+use std::cell::RefCell;
+#[path = "../../nvidia/nvapi.rs"]
+mod nvapi;
+use nvapi::NvApi;
 use nvml_wrapper::enum_wrappers::device::{Clock, PerformanceState};
 
 
@@ -1336,6 +1352,80 @@ fn get_nvidia_voltage(index: u32) -> Option<f32> {
     None
 }
 
+fn get_nvapi_info(
+    device: &nvml_wrapper::Device<'_>,
+    is_suspended: bool,
+) -> (Option<f32>, Option<f32>, Option<f32>) {
+    if is_suspended {
+        return (None, None, None);
+    }
+
+    let pci_info = device.pci_info().ok();
+    let bus_id = pci_info
+        .as_ref()
+        .and_then(|info| info.bus_id.split(':').nth(1))
+        .and_then(|segment| segment.split('.').next())
+        .and_then(|hex| u32::from_str_radix(hex, 16).ok());
+
+    if bus_id.is_none() {
+        NVAPI_STATE.with(|state| {
+            if state.borrow().is_some() {
+                state.borrow_mut().take();
+            }
+        });
+        return (None, None, None);
+    }
+
+    let bus_id = bus_id.unwrap();
+
+    let mut state_result = None;
+    NVAPI_STATE.with(|state_cell| {
+        let mut state = state_cell.borrow_mut();
+        let needs_refresh = match state.as_ref() {
+            Some(existing) => {
+                let current = existing.api.find_matching_gpu(bus_id).ok().flatten();
+                current.map_or(true, |handle| handle != existing.gpu_handle)
+            }
+            None => true,
+        };
+
+        if needs_refresh {
+            *state = None;
+            if let Ok(api) = NvApi::new() {
+                if let Ok(Some(handle)) = api.find_matching_gpu(bus_id) {
+                    let mask = unsafe { api.calculate_thermals_mask(handle) }.unwrap_or(0);
+                    *state = Some(NvApiState {
+                        api,
+                        gpu_handle: handle,
+                        thermals_mask: mask,
+                    });
+                }
+            }
+        }
+
+        if let Some(existing) = state.as_ref() {
+            let voltage = unsafe { existing.api.get_voltage(existing.gpu_handle) }
+                .ok()
+                .map(|value_uv| value_uv as f32 / 1_000_000.0);
+            let thermals = if existing.thermals_mask != 0 {
+                unsafe {
+                    existing
+                        .api
+                        .get_thermals(existing.gpu_handle, existing.thermals_mask)
+                        .ok()
+                }
+            } else {
+                None
+            };
+            let hotspot = thermals.as_ref().and_then(|t| t.hotspot()).map(|v| v as f32);
+            let vram = thermals.as_ref().and_then(|t| t.vram()).map(|v| v as f32);
+            state_result = Some((voltage, hotspot, vram));
+        }
+    });
+
+    state_result.unwrap_or((None, None, None))
+}
+
 fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
     // 1. Check sysfs for NVIDIA devices and their status to avoid waking up suspended GPUs
     let mut nvidia_pci_ids = Vec::new();
@@ -1377,6 +1467,8 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 frequency: None,
                 memory_frequency: None,
                 temperature: None,
+                hotspot_temperature: None,
+                memory_temperature: None,
                 load: None,
                 power: None,
                 voltage: None,
@@ -1450,7 +1542,9 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             )
         };
 
-        let voltage = if is_suspended { None } else { get_nvidia_voltage(i) };
+        let (nvapi_voltage, hotspot_temperature, memory_temperature) =
+            get_nvapi_info(&device, is_suspended);
+        let voltage = nvapi_voltage.or_else(|| if is_suspended { None } else { get_nvidia_voltage(i) });
 
         let mut gpu_info = GpuInfo {
             name: name.clone(),
@@ -1459,6 +1553,8 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             frequency,
             memory_frequency,
             temperature,
+            hotspot_temperature,
+            memory_temperature,
             load,
             power,
             voltage,
