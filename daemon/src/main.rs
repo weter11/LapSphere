@@ -4,6 +4,7 @@ mod hardware_detection;
 mod tuxedo_io;
 mod battery_control;
 mod polling_scheduler;
+mod nvapi;
 
 use anyhow::Result;
 use tokio::signal;

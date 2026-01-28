@@ -1191,6 +1191,8 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
                 frequency,
                 memory_frequency,
                 temperature,
+                hotspot_temperature: None,
+                memory_temperature: None,
                 load,
                 power,
                 voltage,
@@ -1336,6 +1338,56 @@ fn get_nvidia_voltage(index: u32) -> Option<f32> {
     None
 }
 
+// Get NVAPI thermal sensors (hotspot and VRAM temperatures)
+fn get_nvapi_thermals(index: u32) -> (Option<f32>, Option<f32>) {
+    // Try to use NVAPI for thermal data
+    match crate::nvapi::NvApi::new() {
+        Ok(nvapi) => {
+            match nvapi.find_gpu_by_index(index) {
+                Ok(Some(handle)) => {
+                    unsafe {
+                        // Calculate mask for available thermal sensors
+                        let mask = nvapi.calculate_thermals_mask(handle)
+                            .unwrap_or(0);
+                        
+                        if mask != 0 {
+                            // Get thermal readings
+                            if let Ok(thermals) = nvapi.get_thermals(handle, mask) {
+                                return (thermals.hotspot(), thermals.vram());
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+    (None, None)
+}
+
+// Get NVAPI voltage reading
+fn get_nvapi_voltage(index: u32) -> Option<f32> {
+    // Try to use NVAPI for voltage data
+    match crate::nvapi::NvApi::new() {
+        Ok(nvapi) => {
+            match nvapi.find_gpu_by_index(index) {
+                Ok(Some(handle)) => {
+                    unsafe {
+                        if let Ok(voltage_uv) = nvapi.get_voltage(handle) {
+                            // Convert microvolts to volts
+                            return Some(voltage_uv as f32 / 1_000_000.0);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+    None
+}
+
 fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
     // 1. Check sysfs for NVIDIA devices and their status to avoid waking up suspended GPUs
     let mut nvidia_pci_ids = Vec::new();
@@ -1377,6 +1429,8 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 frequency: None,
                 memory_frequency: None,
                 temperature: None,
+                hotspot_temperature: None,
+                memory_temperature: None,
                 load: None,
                 power: None,
                 voltage: None,
@@ -1450,7 +1504,19 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             )
         };
 
-        let voltage = if is_suspended { None } else { get_nvidia_voltage(i) };
+        let voltage = if is_suspended { 
+            None 
+        } else { 
+            // Try NVAPI first for voltage, fallback to nvidia-smi
+            get_nvapi_voltage(i).or_else(|| get_nvidia_voltage(i))
+        };
+
+        // Get NVAPI thermal data (hotspot and VRAM temperatures)
+        let (hotspot_temperature, memory_temperature) = if is_suspended {
+            (None, None)
+        } else {
+            get_nvapi_thermals(i)
+        };
 
         let mut gpu_info = GpuInfo {
             name: name.clone(),
@@ -1459,6 +1525,8 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             frequency,
             memory_frequency,
             temperature,
+            hotspot_temperature,
+            memory_temperature,
             load,
             power,
             voltage,

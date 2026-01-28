@@ -19,3 +19,4 @@ nix = { workspace = true, features = ["ioctl", "signal"] }
 nvml-wrapper = "0.11.0"
 once_cell.workspace = true
 systemstat.workspace = true
+libloading = "0.8"
