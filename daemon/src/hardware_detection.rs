@@ -1457,15 +1457,30 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             (None, None, None, None, None, None, None, None)
         } else {
             let (nvapi_voltage, nvapi_temp, nvapi_mem_temp, nvapi_hotspot_temp) = if let (Some(ref api), Some(bus_id)) = (&*NVAPI, bus_id) {
-                if let Ok(Some(handle)) = api.find_matching_gpu(bus_id) {
-                    let v = unsafe { api.get_voltage(handle).ok().map(|v| v as f32 / 1_000_000.0) };
-                    let t = unsafe { api.get_thermals(handle, -1).ok() };
-                    (v,
-                     t.as_ref().and_then(|t| t.core()),
-                     t.as_ref().and_then(|t| t.vram()),
-                     t.as_ref().and_then(|t| t.hotspot()))
-                } else {
-                    (None, None, None, None)
+                match api.find_matching_gpu(bus_id) {
+                    Ok(Some(handle)) => {
+                        let v = unsafe { api.get_voltage(handle).ok() }
+                            .map(|v| v as f32 / 1_000_000.0)
+                            .filter(|&v| v > 0.1);
+
+                        let t = unsafe { api.get_thermals(handle, -1).ok() };
+                        let core = t.as_ref().and_then(|t| t.core());
+                        let vram = t.as_ref().and_then(|t| t.vram());
+                        let hotspot = t.as_ref().and_then(|t| t.hotspot());
+
+                        log::debug!("NVAPI stats for GPU {}: voltage={:?}, core={:?}, vram={:?}, hotspot={:?}",
+                                   bus_id, v, core, vram, hotspot);
+
+                        (v, core, vram, hotspot)
+                    }
+                    Ok(None) => {
+                        log::debug!("No NVAPI handle for GPU bus ID {}", bus_id);
+                        (None, None, None, None)
+                    }
+                    Err(e) => {
+                        log::warn!("NVAPI error for GPU bus ID {}: {}", bus_id, e);
+                        (None, None, None, None)
+                    }
                 }
             } else {
                 (None, None, None, None)

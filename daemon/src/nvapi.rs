@@ -32,7 +32,6 @@ pub struct NvApi {
 
 impl NvApi {
     pub fn new() -> anyhow::Result<Self> {
-        log::debug!("Loading NVIDIA API library: {}", LIBRARY_NAME);
         let lib = unsafe {
             libloading::Library::new(LIBRARY_NAME).context("Could not load nvidia API library")
         }?;
@@ -43,17 +42,15 @@ impl NvApi {
             let initialize = handle.query_interface(QUERY_NVAPI_INITIALIZE)?;
             let initialize: unsafe extern "C" fn() -> NvAPI_Status = transmute(initialize);
             let status = initialize();
-            handle.handle_status(status).context("NvAPI_Initialize failed")?;
+            handle.handle_status(status)?;
         }
 
-        log::debug!("NVIDIA API initialized successfully");
         Ok(handle)
     }
 
     pub fn find_matching_gpu(&self, bus_id: u32) -> anyhow::Result<Option<NvPhysicalGpuHandle>> {
         unsafe {
             let handles = self.enum_physical_gpus()?;
-            log::debug!("Found {} physical GPUs via NVAPI", handles.len());
             for handle in handles {
                 let f = self.query_interface(QUERY_NVAPI_GET_BUS_ID)?;
                 let f: unsafe extern "C" fn(
@@ -65,13 +62,11 @@ impl NvApi {
                 let status = f(handle, &mut id);
                 self.handle_status(status)?;
 
-                log::debug!("GPU handle {:?} has bus ID {}", handle, id);
                 if id == bus_id {
                     return Ok(Some(handle));
                 }
             }
 
-            log::warn!("No GPU matching bus ID {} found in NVAPI", bus_id);
             Ok(None)
         }
     }
@@ -95,7 +90,7 @@ impl NvApi {
         };
 
         let status = f(handle, &mut sensors);
-        self.handle_status(status).context("QUERY_NVAPI_THERMALS failed")?;
+        self.handle_status(status)?;
 
         Ok(sensors)
     }
@@ -116,7 +111,7 @@ impl NvApi {
             padding_2: [0; 8],
         };
         let status = f(handle, &mut data);
-        self.handle_status(status).context("QUERY_NVAPI_VOLTAGE failed")?;
+        self.handle_status(status)?;
 
         Ok(data.value_uv)
     }
@@ -142,12 +137,12 @@ impl NvApi {
         let query_interface = self
             .lib
             .get::<unsafe extern "C" fn(u32) -> *const ()>(QUERY_INTERFACE_FN)
-            .context("Could not get nvapi_QueryInterface symbol")?;
+            .context("Could not get main symbol")?;
 
         let f = query_interface(id);
 
         if f.is_null() {
-            bail!("Got null response from nvapi_QueryInterface for query id {id:x}");
+            bail!("Got null response for query id {id:x}");
         }
 
         Ok(f)
@@ -203,11 +198,7 @@ impl NvApiThermals {
         self.values
             .get(index)
             .map(|&value| value as f32 / 256.0)
-            .filter(|&value| value > 0.0 && value < 255.0)
-    }
-
-    pub fn core(&self) -> Option<f32> {
-        self.get_value(0)
+            .filter(|&value| value > 1.0 && value < 255.0)
     }
 
     pub fn hotspot(&self) -> Option<f32> {
@@ -216,6 +207,10 @@ impl NvApiThermals {
 
     pub fn vram(&self) -> Option<f32> {
         self.get_value(15)
+    }
+
+    pub fn core(&self) -> Option<f32> {
+        self.get_value(0)
     }
 }
 
