@@ -1192,8 +1192,8 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
                 frequency,
                 memory_frequency,
                 temperature,
-                hotspot_temperature: None,  // AMD GPUs don't have NVAPI
-                memory_temperature: None,    // AMD GPUs don't have NVAPI
+                hotspot_temperature: None,  // Not available for AMD GPUs
+                memory_temperature: None,    // Not available for AMD GPUs
                 load,
                 power,
                 voltage,
@@ -1330,9 +1330,11 @@ struct NvApiVoltage {
 // Function to get NVIDIA extended stats (hotspot, memory temp, voltage)
 fn get_nvidia_extended_stats(gpu_index: u32) -> (Option<f32>, Option<f32>, Option<f32>) {
     // Returns (hotspot_temp, memory_temp, voltage_v)
+    // Note: This loads and initializes NVAPI on each call. This is acceptable for 
+    // polling intervals of 1+ seconds but may need optimization for higher frequencies.
     
     unsafe {
-        // Load library
+        // Load library - must be kept alive until after unload is called
         let lib = match libloading::Library::new(NVAPI_LIBRARY) {
             Ok(l) => l,
             Err(_) => return (None, None, None),
@@ -1349,11 +1351,27 @@ fn get_nvidia_extended_stats(gpu_index: u32) -> (Option<f32>, Option<f32>, Optio
         let init_fn = query_interface(QUERY_NVAPI_INITIALIZE);
         if init_fn.is_null() { return (None, None, None); }
         let init: unsafe extern "C" fn() -> NvApiStatus = mem::transmute(init_fn);
-        if init() != 0 { return (None, None, None); }
+        let init_result = init();
+        
+        // Helper to safely unload NVAPI before returning
+        let safe_unload = || {
+            let unload_fn = query_interface(QUERY_NVAPI_UNLOAD);
+            if !unload_fn.is_null() {
+                let unload: unsafe extern "C" fn() -> NvApiStatus = mem::transmute(unload_fn);
+                let _ = unload();
+            }
+        };
+        
+        if init_result != 0 {
+            return (None, None, None);
+        }
         
         // Enumerate GPUs
         let enum_fn = query_interface(QUERY_NVAPI_ENUM_PHYSICAL_GPUS);
-        if enum_fn.is_null() { return (None, None, None); }
+        if enum_fn.is_null() {
+            safe_unload();
+            return (None, None, None);
+        }
         let enum_gpus: unsafe extern "C" fn(
             handles: &mut [NvPhysicalGpuHandle; NVAPI_MAX_PHYSICAL_GPUS],
             count: &mut u32,
@@ -1361,9 +1379,15 @@ fn get_nvidia_extended_stats(gpu_index: u32) -> (Option<f32>, Option<f32>, Optio
         
         let mut handles = [std::ptr::null_mut(); NVAPI_MAX_PHYSICAL_GPUS];
         let mut count = 0u32;
-        if enum_gpus(&mut handles, &mut count) != 0 { return (None, None, None); }
+        if enum_gpus(&mut handles, &mut count) != 0 {
+            safe_unload();
+            return (None, None, None);
+        }
         
-        if gpu_index >= count { return (None, None, None); }
+        if gpu_index >= count {
+            safe_unload();
+            return (None, None, None);
+        }
         let handle = handles[gpu_index as usize];
         
         let mut hotspot_temp = None;
@@ -1378,7 +1402,7 @@ fn get_nvidia_extended_stats(gpu_index: u32) -> (Option<f32>, Option<f32>, Optio
                 sensors: &mut NvApiThermals,
             ) -> NvApiStatus = mem::transmute(thermals_fn);
             
-            // Calculate mask - try with full mask first
+            // Query all thermal sensors
             let mut sensors = NvApiThermals {
                 version: (mem::size_of::<NvApiThermals>() | (2 << 16)) as u32,
                 mask: 0xFFFF, // Query all sensors
@@ -1386,16 +1410,20 @@ fn get_nvidia_extended_stats(gpu_index: u32) -> (Option<f32>, Option<f32>, Optio
             };
             
             if get_thermals(handle, &mut sensors) == 0 {
-                // Hotspot is at index 9
-                let hotspot_raw = sensors.values[9] / 256;
-                if hotspot_raw > 0 && hotspot_raw < 255 {
-                    hotspot_temp = Some(hotspot_raw as f32);
+                // Hotspot is at index 9 (with bounds check)
+                if sensors.values.len() > 9 {
+                    let hotspot_raw = sensors.values[9] / 256;
+                    if hotspot_raw > 0 && hotspot_raw < 255 {
+                        hotspot_temp = Some(hotspot_raw as f32);
+                    }
                 }
                 
-                // VRAM/Memory is at index 15
-                let vram_raw = sensors.values[15] / 256;
-                if vram_raw > 0 && vram_raw < 255 {
-                    memory_temp = Some(vram_raw as f32);
+                // VRAM/Memory is at index 15 (with bounds check)
+                if sensors.values.len() > 15 {
+                    let vram_raw = sensors.values[15] / 256;
+                    if vram_raw > 0 && vram_raw < 255 {
+                        memory_temp = Some(vram_raw as f32);
+                    }
                 }
             }
         }
@@ -1421,12 +1449,11 @@ fn get_nvidia_extended_stats(gpu_index: u32) -> (Option<f32>, Option<f32>, Optio
             }
         }
         
-        // Unload NVAPI
-        let unload_fn = query_interface(QUERY_NVAPI_UNLOAD);
-        if !unload_fn.is_null() {
-            let unload: unsafe extern "C" fn() -> NvApiStatus = mem::transmute(unload_fn);
-            unload();
-        }
+        // Unload NVAPI before library is dropped
+        safe_unload();
+        
+        // Keep library alive until after all NVAPI calls and unload
+        drop(lib);
         
         (hotspot_temp, memory_temp, voltage)
     }
