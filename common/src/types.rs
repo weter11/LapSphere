@@ -103,6 +103,8 @@ pub struct GpuInfo {
     pub frequency: Option<u64>,
     pub memory_frequency: Option<u64>,
     pub temperature: Option<f32>,
+    pub hotspot_temperature: Option<f32>,  // GPU hotspot/junction temperature
+    pub memory_temperature: Option<f32>,   // VRAM temperature
     pub load: Option<f32>,
     pub power: Option<f32>,
     pub voltage: Option<f32>,
@@ -355,8 +357,6 @@ pub struct AppConfig {
     pub autostart: bool,
     pub cpu_scheduler: String,
     pub font_size: FontSize,
-    #[serde(default)]
-    pub nvidia_smi_legacy_path: Option<String>,
     pub statistics_sections: StatisticsSections,
     pub tuning_section_order: Vec<String>,
     pub profiles: Vec<Profile>,
@@ -424,7 +424,6 @@ impl Default for AppConfig {
             autostart: false,
             cpu_scheduler: "CFS".to_string(),
             font_size: FontSize::Medium,
-            nvidia_smi_legacy_path: None,
             statistics_sections: StatisticsSections::default(),
             tuning_section_order: vec![
                 "Keyboard".to_string(),

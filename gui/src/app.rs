@@ -346,15 +346,6 @@ impl LapSphereApp {
             let _ = handle.register("webcam".to_string(), Duration::from_secs(5));
             let _ = handle.register("logs".to_string(), Duration::from_secs(2));
 
-            // Sync legacy path to daemon
-            if let Some(ref path) = state.config.nvidia_smi_legacy_path {
-                let client_clone = client.clone();
-                let path_clone = path.clone();
-                tokio::spawn(async move {
-                    let _ = client_clone.set_nvidia_smi_legacy_path(&path_clone).await;
-                });
-            }
-
             // Initial system info load
             let client_clone = client.clone();
             let tx_clone = hw_update_tx.clone();
@@ -775,7 +766,6 @@ struct SettingsConfig {
     autostart: bool,
     cpu_scheduler: String,
     font_size: FontSize,
-    nvidia_smi_legacy_path: Option<String>,
     statistics_sections: StatisticsSections,
     tuning_section_order: Vec<String>,
     battery_settings: BatterySettings,
@@ -791,7 +781,6 @@ impl Default for SettingsConfig {
             autostart: config.autostart,
             cpu_scheduler: config.cpu_scheduler,
             font_size: config.font_size,
-            nvidia_smi_legacy_path: config.nvidia_smi_legacy_path.clone(),
             statistics_sections: config.statistics_sections,
             tuning_section_order: config.tuning_section_order,
             battery_settings: config.battery_settings,
@@ -808,7 +797,6 @@ impl From<&AppConfig> for SettingsConfig {
             autostart: config.autostart,
             cpu_scheduler: config.cpu_scheduler.clone(),
             font_size: config.font_size.clone(),
-            nvidia_smi_legacy_path: config.nvidia_smi_legacy_path.clone(),
             statistics_sections: config.statistics_sections.clone(),
             tuning_section_order: config.tuning_section_order.clone(),
             battery_settings: config.battery_settings.clone(),
@@ -824,7 +812,6 @@ impl SettingsConfig {
         config.autostart = self.autostart;
         config.cpu_scheduler = self.cpu_scheduler.clone();
         config.font_size = self.font_size.clone();
-        config.nvidia_smi_legacy_path = self.nvidia_smi_legacy_path.clone();
         config.statistics_sections = self.statistics_sections.clone();
         config.tuning_section_order = self.tuning_section_order.clone();
         config.battery_settings = self.battery_settings.clone();

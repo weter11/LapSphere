@@ -41,7 +41,6 @@ pub enum DbusCommand {
     GetGpuCoreOffsetLimits { device_index: u32, reply: oneshot::Sender<Result<(i32, i32)>> },
     GetGpuMemoryOffsetLimits { device_index: u32, reply: oneshot::Sender<Result<(i32, i32)>> },
     SetPrimeProfile { profile: String, reply: oneshot::Sender<Result<()>> },
-    SetNvidiaSmiLegacyPath { path: String, reply: oneshot::Sender<Result<()>> },
     UpdatePollingInterval { component: String, interval_ms: u64, reply: oneshot::Sender<Result<()>> },
     GetWebcamState { reply: oneshot::Sender<Result<bool>> },
     SetWebcamState { enabled: bool, reply: oneshot::Sender<Result<()>> },
@@ -254,12 +253,6 @@ impl DbusClient {
     pub fn set_prime_profile(&self, profile: &str) -> oneshot::Receiver<Result<()>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.command_tx.send(DbusCommand::SetPrimeProfile { profile: profile.to_string(), reply: tx });
-        rx
-    }
-
-    pub fn set_nvidia_smi_legacy_path(&self, path: &str) -> oneshot::Receiver<Result<()>> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self.command_tx.send(DbusCommand::SetNvidiaSmiLegacyPath { path: path.to_string(), reply: tx });
         rx
     }
 
@@ -497,12 +490,6 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
                 }
                 DbusCommand::SetPrimeProfile { profile, reply } => {
                     let result = set_prime_profile_impl(&connection, &profile).await;
-                    let is_err = result.is_err();
-                    let _ = reply.send(result);
-                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
-                }
-                DbusCommand::SetNvidiaSmiLegacyPath { path, reply } => {
-                    let result = set_nvidia_smi_legacy_path_impl(&connection, &path).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
@@ -927,17 +914,6 @@ async fn set_prime_profile_impl(conn: &Connection, profile: &str) -> Result<()> 
         "io.lapsphere.Control",
     ).await?;
     proxy.call::<_, _, ()>("SetPrimeProfile", &(profile,)).await?;
-    Ok(())
-}
-
-async fn set_nvidia_smi_legacy_path_impl(conn: &Connection, path: &str) -> Result<()> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
-    proxy.call::<_, _, ()>("SetNvidiaSmiLegacyPath", &(path,)).await?;
     Ok(())
 }
 
