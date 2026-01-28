@@ -346,15 +346,6 @@ impl LapSphereApp {
             let _ = handle.register("webcam".to_string(), Duration::from_secs(5));
             let _ = handle.register("logs".to_string(), Duration::from_secs(2));
 
-            // Sync legacy path to daemon
-            if let Some(ref path) = state.config.nvidia_smi_legacy_path {
-                let client_clone = client.clone();
-                let path_clone = path.clone();
-                tokio::spawn(async move {
-                    let _ = client_clone.set_nvidia_smi_legacy_path(&path_clone).await;
-                });
-            }
-
             // Initial system info load
             let client_clone = client.clone();
             let tx_clone = hw_update_tx.clone();

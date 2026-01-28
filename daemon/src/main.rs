@@ -35,9 +35,6 @@ pub struct GpuOverclockStats {
 pub static CURRENT_GPU_OVERCLOCK_STATS: once_cell::sync::Lazy<Arc<Mutex<Option<GpuOverclockStats>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
 
-pub static NVIDIA_SMI_LEGACY_PATH: once_cell::sync::Lazy<Arc<Mutex<Option<String>>>> =
-    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
-
 pub static LAST_APPLIED_OFFSET: once_cell::sync::Lazy<Arc<Mutex<Option<i32>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
 

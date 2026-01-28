@@ -391,16 +391,6 @@ async fn set_tdp_profile(&self, profile: &str) -> Result<(), zbus::fdo::Error> {
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
 
-    async fn set_nvidia_smi_legacy_path(&self, path: &str) -> Result<(), zbus::fdo::Error> {
-        let mut path_lock = crate::NVIDIA_SMI_LEGACY_PATH.lock().unwrap();
-        if path.is_empty() {
-            *path_lock = None;
-        } else {
-            *path_lock = Some(path.to_string());
-        }
-        Ok(())
-    }
-
     // Polling scheduler methods
     async fn update_polling_interval(&self, component: &str, interval_ms: u64) -> Result<(), zbus::fdo::Error> {
         if let Some(handle) = crate::SCHEDULER_HANDLE.get() {

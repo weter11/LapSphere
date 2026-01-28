@@ -395,6 +395,24 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                                 ui.end_row();
                             }
                             
+                            if let Some(hotspot_temp) = gpu.hotspot_temperature {
+                                ui.label("Hotspot Temperature:");
+                                ui.colored_label(
+                                    temp_color(hotspot_temp),
+                                    format!("{:.1}°C", hotspot_temp)
+                                );
+                                ui.end_row();
+                            }
+
+                            if let Some(mem_temp) = gpu.memory_temperature {
+                                ui.label("Memory Temperature:");
+                                ui.colored_label(
+                                    temp_color(mem_temp),
+                                    format!("{:.1}°C", mem_temp)
+                                );
+                                ui.end_row();
+                            }
+                            
                             if let Some(load) = gpu.load {
                                 ui.label("Load:");
                                 ui.add(ProgressBar::new(load / 100.0)

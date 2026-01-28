@@ -325,31 +325,6 @@ fn draw_main_settings(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTh
     ui.add_space(12.0);
     ui.separator();
     ui.add_space(12.0);
-
-    // NVIDIA Advanced Settings
-    draw_nvidia_advanced_settings(ui, state, dbus_client);
-}
-
-fn draw_nvidia_advanced_settings(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>) {
-    ui.heading("🎮 NVIDIA Advanced Settings");
-    ui.add_space(6.0);
-
-    ui.label(RichText::new("Voltage Monitoring (nvidia-smi 565 or earlier):").strong());
-    ui.horizontal(|ui| {
-        let mut path = state.config.nvidia_smi_legacy_path.clone().unwrap_or_default();
-        if ui.text_edit_singleline(&mut path).changed() {
-            state.config.nvidia_smi_legacy_path = if path.is_empty() { None } else { Some(path.clone()) };
-            let _ = state.save_settings();
-            if let Some(client) = dbus_client {
-                let client = client.clone();
-                let path_clone = path.clone();
-                tokio::spawn(async move {
-                    let _ = client.set_nvidia_smi_legacy_path(&path_clone).await;
-                });
-            }
-        }
-    });
-    ui.label(RichText::new("Path to nvidia-smi binary v565 or earlier. Example: '/opt/nvidia-565/bin/nvidia-smi'").small().italics());
 }
 
 fn draw_stats_configuration(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>) {

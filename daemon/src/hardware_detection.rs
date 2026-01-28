@@ -4,6 +4,7 @@ use std::path::Path;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Instant;
+use std::mem;
 use once_cell::sync::Lazy;
 use crate::tuxedo_io::{TuxedoIo, HardwareInterface};
 use systemstat::{System, Platform};
@@ -1295,45 +1296,138 @@ pub fn get_gpu_memory_offset_limits(device_index: u32) -> Result<(i32, i32)> {
     Ok((offset_info.min_clock_offset_mhz, offset_info.max_clock_offset_mhz))
 }
 
-fn get_nvidia_voltage(index: u32) -> Option<f32> {
-    let path_lock = crate::NVIDIA_SMI_LEGACY_PATH.lock().unwrap();
-    if let Some(ref path) = *path_lock {
-        if Path::new(path).exists() {
-            // Try -q -d VOLTAGE format first as requested by user
-            if let Ok(output) = std::process::Command::new(path)
-                .args(["-i", &index.to_string(), "-q", "-d", "VOLTAGE"])
-                .output()
-            {
-                if output.status.success() {
-                    let s = String::from_utf8_lossy(&output.stdout);
-                    for line in s.lines() {
-                        if line.contains("Graphics") && line.contains(':') {
-                            if let Some(val_part) = line.split(':').nth(1) {
-                                let parts: Vec<&str> = val_part.trim().split_whitespace().collect();
-                                if let Some(num_str) = parts.get(0) {
-                                    if let Ok(val) = num_str.parse::<f32>() {
-                                        return Some(val / 1000.0);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+// NVAPI Constants
+const NVAPI_LIBRARY: &str = "libnvidia-api.so.1";
+const QUERY_NVAPI_INITIALIZE: u32 = 0x0150e828;
+const QUERY_NVAPI_UNLOAD: u32 = 0xd22bdd7e;
+const QUERY_NVAPI_ENUM_PHYSICAL_GPUS: u32 = 0xe5ac921f;
+const QUERY_NVAPI_THERMALS: u32 = 0x65fe3aad;  // Undocumented - thermal sensors
+const QUERY_NVAPI_VOLTAGE: u32 = 0x465f9bcf;   // Undocumented - voltage
 
-            // Fallback to query-gpu
-            if let Ok(output) = std::process::Command::new(path)
-                .args(["-i", &index.to_string(), "--query-gpu=voltage.graphics", "--format=csv,noheader,nounits"])
-                .output()
-            {
-                if output.status.success() {
-                    let s = String::from_utf8_lossy(&output.stdout);
-                    return s.trim().parse::<f32>().ok().map(|v| v / 1000.0);
+const NVAPI_MAX_PHYSICAL_GPUS: usize = 64;
+
+type NvPhysicalGpuHandle = *mut std::ffi::c_void;
+type NvAPI_Status = i32;
+
+#[repr(C)]
+struct NvApiThermals {
+    version: u32,
+    mask: i32,
+    values: [i32; 40],
+}
+
+#[repr(C)]
+struct NvApiVoltage {
+    version: u32,
+    flags: u32,
+    padding_1: [u32; 8],
+    value_uv: u32,
+    padding_2: [u32; 8],
+}
+
+// Function to get NVIDIA extended stats (hotspot, memory temp, voltage)
+fn get_nvidia_extended_stats(gpu_index: u32) -> (Option<f32>, Option<f32>, Option<f32>) {
+    // Returns (hotspot_temp, memory_temp, voltage_v)
+    
+    unsafe {
+        // Load library
+        let lib = match libloading::Library::new(NVAPI_LIBRARY) {
+            Ok(l) => l,
+            Err(_) => return (None, None, None),
+        };
+        
+        // Get query interface function
+        let query_interface: libloading::Symbol<unsafe extern "C" fn(u32) -> *const ()> = 
+            match lib.get(b"nvapi_QueryInterface\0") {
+                Ok(f) => f,
+                Err(_) => return (None, None, None),
+            };
+        
+        // Initialize NVAPI
+        let init_fn = query_interface(QUERY_NVAPI_INITIALIZE);
+        if init_fn.is_null() { return (None, None, None); }
+        let init: unsafe extern "C" fn() -> NvAPI_Status = mem::transmute(init_fn);
+        if init() != 0 { return (None, None, None); }
+        
+        // Enumerate GPUs
+        let enum_fn = query_interface(QUERY_NVAPI_ENUM_PHYSICAL_GPUS);
+        if enum_fn.is_null() { return (None, None, None); }
+        let enum_gpus: unsafe extern "C" fn(
+            handles: &mut [NvPhysicalGpuHandle; NVAPI_MAX_PHYSICAL_GPUS],
+            count: &mut u32,
+        ) -> NvAPI_Status = mem::transmute(enum_fn);
+        
+        let mut handles = [std::ptr::null_mut(); NVAPI_MAX_PHYSICAL_GPUS];
+        let mut count = 0u32;
+        if enum_gpus(&mut handles, &mut count) != 0 { return (None, None, None); }
+        
+        if gpu_index >= count { return (None, None, None); }
+        let handle = handles[gpu_index as usize];
+        
+        let mut hotspot_temp = None;
+        let mut memory_temp = None;
+        let mut voltage = None;
+        
+        // Get thermals
+        let thermals_fn = query_interface(QUERY_NVAPI_THERMALS);
+        if !thermals_fn.is_null() {
+            let get_thermals: unsafe extern "C" fn(
+                handle: NvPhysicalGpuHandle,
+                sensors: &mut NvApiThermals,
+            ) -> NvAPI_Status = mem::transmute(thermals_fn);
+            
+            // Calculate mask - try with full mask first
+            let mut sensors = NvApiThermals {
+                version: (mem::size_of::<NvApiThermals>() | (2 << 16)) as u32,
+                mask: 0xFFFF, // Query all sensors
+                values: [0; 40],
+            };
+            
+            if get_thermals(handle, &mut sensors) == 0 {
+                // Hotspot is at index 9
+                let hotspot_raw = sensors.values[9] / 256;
+                if hotspot_raw > 0 && hotspot_raw < 255 {
+                    hotspot_temp = Some(hotspot_raw as f32);
+                }
+                
+                // VRAM/Memory is at index 15
+                let vram_raw = sensors.values[15] / 256;
+                if vram_raw > 0 && vram_raw < 255 {
+                    memory_temp = Some(vram_raw as f32);
                 }
             }
         }
+        
+        // Get voltage
+        let voltage_fn = query_interface(QUERY_NVAPI_VOLTAGE);
+        if !voltage_fn.is_null() {
+            let get_voltage: unsafe extern "C" fn(
+                handle: NvPhysicalGpuHandle,
+                data: &mut NvApiVoltage,
+            ) -> NvAPI_Status = mem::transmute(voltage_fn);
+            
+            let mut volt_data = NvApiVoltage {
+                version: (mem::size_of::<NvApiVoltage>() | (1 << 16)) as u32,
+                flags: 0,
+                padding_1: [0; 8],
+                value_uv: 0,
+                padding_2: [0; 8],
+            };
+            
+            if get_voltage(handle, &mut volt_data) == 0 && volt_data.value_uv > 0 {
+                voltage = Some(volt_data.value_uv as f32 / 1_000_000.0); // Convert µV to V
+            }
+        }
+        
+        // Unload NVAPI
+        let unload_fn = query_interface(QUERY_NVAPI_UNLOAD);
+        if !unload_fn.is_null() {
+            let unload: unsafe extern "C" fn() -> NvAPI_Status = mem::transmute(unload_fn);
+            unload();
+        }
+        
+        (hotspot_temp, memory_temp, voltage)
     }
-    None
 }
 
 fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
@@ -1377,6 +1471,8 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 frequency: None,
                 memory_frequency: None,
                 temperature: None,
+                hotspot_temperature: None,
+                memory_temperature: None,
                 load: None,
                 power: None,
                 voltage: None,
@@ -1450,7 +1546,14 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             )
         };
 
-        let voltage = if is_suspended { None } else { get_nvidia_voltage(i) };
+        // Get extended stats via NVAPI
+        let (hotspot_temp, memory_temp, nvapi_voltage) = if is_suspended {
+            (None, None, None)
+        } else {
+            get_nvidia_extended_stats(i)
+        };
+
+        let voltage = nvapi_voltage;
 
         let mut gpu_info = GpuInfo {
             name: name.clone(),
@@ -1459,6 +1562,8 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             frequency,
             memory_frequency,
             temperature,
+            hotspot_temperature: hotspot_temp,
+            memory_temperature: memory_temp,
             load,
             power,
             voltage,
