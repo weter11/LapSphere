@@ -1192,6 +1192,8 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
                 frequency,
                 memory_frequency,
                 temperature,
+                hotspot_temperature: None,  // AMD GPUs don't have NVAPI
+                memory_temperature: None,    // AMD GPUs don't have NVAPI
                 load,
                 power,
                 voltage,
@@ -1307,7 +1309,7 @@ const QUERY_NVAPI_VOLTAGE: u32 = 0x465f9bcf;   // Undocumented - voltage
 const NVAPI_MAX_PHYSICAL_GPUS: usize = 64;
 
 type NvPhysicalGpuHandle = *mut std::ffi::c_void;
-type NvAPI_Status = i32;
+type NvApiStatus = i32;
 
 #[repr(C)]
 struct NvApiThermals {
@@ -1346,7 +1348,7 @@ fn get_nvidia_extended_stats(gpu_index: u32) -> (Option<f32>, Option<f32>, Optio
         // Initialize NVAPI
         let init_fn = query_interface(QUERY_NVAPI_INITIALIZE);
         if init_fn.is_null() { return (None, None, None); }
-        let init: unsafe extern "C" fn() -> NvAPI_Status = mem::transmute(init_fn);
+        let init: unsafe extern "C" fn() -> NvApiStatus = mem::transmute(init_fn);
         if init() != 0 { return (None, None, None); }
         
         // Enumerate GPUs
@@ -1355,7 +1357,7 @@ fn get_nvidia_extended_stats(gpu_index: u32) -> (Option<f32>, Option<f32>, Optio
         let enum_gpus: unsafe extern "C" fn(
             handles: &mut [NvPhysicalGpuHandle; NVAPI_MAX_PHYSICAL_GPUS],
             count: &mut u32,
-        ) -> NvAPI_Status = mem::transmute(enum_fn);
+        ) -> NvApiStatus = mem::transmute(enum_fn);
         
         let mut handles = [std::ptr::null_mut(); NVAPI_MAX_PHYSICAL_GPUS];
         let mut count = 0u32;
@@ -1374,7 +1376,7 @@ fn get_nvidia_extended_stats(gpu_index: u32) -> (Option<f32>, Option<f32>, Optio
             let get_thermals: unsafe extern "C" fn(
                 handle: NvPhysicalGpuHandle,
                 sensors: &mut NvApiThermals,
-            ) -> NvAPI_Status = mem::transmute(thermals_fn);
+            ) -> NvApiStatus = mem::transmute(thermals_fn);
             
             // Calculate mask - try with full mask first
             let mut sensors = NvApiThermals {
@@ -1404,7 +1406,7 @@ fn get_nvidia_extended_stats(gpu_index: u32) -> (Option<f32>, Option<f32>, Optio
             let get_voltage: unsafe extern "C" fn(
                 handle: NvPhysicalGpuHandle,
                 data: &mut NvApiVoltage,
-            ) -> NvAPI_Status = mem::transmute(voltage_fn);
+            ) -> NvApiStatus = mem::transmute(voltage_fn);
             
             let mut volt_data = NvApiVoltage {
                 version: (mem::size_of::<NvApiVoltage>() | (1 << 16)) as u32,
@@ -1422,7 +1424,7 @@ fn get_nvidia_extended_stats(gpu_index: u32) -> (Option<f32>, Option<f32>, Optio
         // Unload NVAPI
         let unload_fn = query_interface(QUERY_NVAPI_UNLOAD);
         if !unload_fn.is_null() {
-            let unload: unsafe extern "C" fn() -> NvAPI_Status = mem::transmute(unload_fn);
+            let unload: unsafe extern "C" fn() -> NvApiStatus = mem::transmute(unload_fn);
             unload();
         }
         
