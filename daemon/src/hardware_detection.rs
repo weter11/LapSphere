@@ -1399,6 +1399,7 @@ fn get_nvapi_info(
                         api,
                         gpu_handle: handle,
                         thermals_mask: mask,
+                        bus_id,
                     });
                 }
             }
