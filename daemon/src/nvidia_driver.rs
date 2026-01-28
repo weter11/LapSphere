@@ -18,9 +18,11 @@ pub const NV20_SUBDEVICE_0: u32 = 0x00002080;
 
 pub const NV2080_CTRL_CMD_THERMAL_GET_TEMPERATURES: u32 = 0x20800501;
 pub const NV2080_CTRL_CMD_THERMAL_GET_THERMAL_SENSORS_INFO: u32 = 0x20800502;
+pub const NV2080_CTRL_CMD_THERMAL_GET_ALL_THERMAL_SENSORS_INFO: u32 = 0x65fe3aad;
 pub const NV2080_THERMAL_SENSORS_MAX_COUNT: usize = 32;
 
 pub const NV2080_CTRL_CMD_VOLT_GET_VOLTAGE: u32 = 0x20803201;
+pub const NV2080_CTRL_CMD_VOLT_GET_VOLTAGE_EX: u32 = 0x465f9bcf;
 pub const NV2080_CTRL_VOLT_DOMAIN_CORE: u32 = 0x00000000;
 
 pub const NV2080_CTRL_THERMAL_SENSOR_TYPE_MEMORY: u32 = 0x00000002;
@@ -109,6 +111,27 @@ struct NV2080_CTRL_THERMAL_SENSOR_INFO {
     sensorId: u32,
     sensorType: u32,
     controllerId: u32,
+}
+
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+struct NV2080_CTRL_THERMAL_GET_ALL_THERMAL_SENSORS_INFO_PARAMS {
+    sensorCount: u32,
+    sensorInfo: [NV2080_CTRL_THERMAL_ALL_SENSOR_INFO; NV2080_THERMAL_SENSORS_MAX_COUNT],
+}
+
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Default)]
+struct NV2080_CTRL_THERMAL_ALL_SENSOR_INFO {
+    sensorId: u32,
+    sensorType: u32,
+    controllerId: u32,
+    currentTemp: i32,
+    warnTemp: i32,
+    critTemp: i32,
+    unknown: u32,
 }
 
 #[allow(non_snake_case)]
@@ -269,7 +292,24 @@ impl NvidiaDriverHandle {
             voltDomainId: domain_id,
             voltageuV: 0,
         };
-        self.query_rm_control(NV2080_CTRL_CMD_VOLT_GET_VOLTAGE, &mut params)?;
+        // Try standard first, then EX
+        if let Err(_) = self.query_rm_control(NV2080_CTRL_CMD_VOLT_GET_VOLTAGE, &mut params) {
+             self.query_rm_control(NV2080_CTRL_CMD_VOLT_GET_VOLTAGE_EX, &mut params)?;
+        }
         Ok(params.voltageuV)
+    }
+
+    pub fn get_all_thermals(&self) -> Result<Vec<(u32, u32, f32)>> {
+        let mut params: NV2080_CTRL_THERMAL_GET_ALL_THERMAL_SENSORS_INFO_PARAMS = unsafe { mem::zeroed() };
+        self.query_rm_control(NV2080_CTRL_CMD_THERMAL_GET_ALL_THERMAL_SENSORS_INFO, &mut params)?;
+
+        let mut results = Vec::new();
+        for i in 0..params.sensorCount as usize {
+            if i < NV2080_THERMAL_SENSORS_MAX_COUNT {
+                let entry = &params.sensorInfo[i];
+                results.push((entry.sensorId, entry.sensorType, entry.currentTemp as f32 / 256.0));
+            }
+        }
+        Ok(results)
     }
 }

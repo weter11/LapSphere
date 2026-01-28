@@ -1462,19 +1462,31 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                         .map(|uv| uv as f32 / 1_000_000.0);
 
                     let mut vram_temp = None;
-                    if let Ok(sensors) = handle.get_thermal_sensors_info() {
-                        let mut vram_sensor_id = None;
-                        for (id, sensor_type) in sensors {
-                            if sensor_type == crate::nvidia_driver::NV2080_CTRL_THERMAL_SENSOR_TYPE_MEMORY || id == 15 {
-                                vram_sensor_id = Some(id);
-                                break;
-                            }
+                    // Try get_all_thermals first (one-shot call)
+                    if let Ok(thermals) = handle.get_all_thermals() {
+                        for (_id, sensor_type, temp) in thermals {
+                             if sensor_type == crate::nvidia_driver::NV2080_CTRL_THERMAL_SENSOR_TYPE_MEMORY {
+                                 vram_temp = Some(temp);
+                                 break;
+                             }
                         }
+                    }
 
-                        if let Some(id) = vram_sensor_id {
-                            if let Ok(temps) = handle.get_temperatures(1 << id) {
-                                if let Some((_, temp_raw)) = temps.first() {
-                                    vram_temp = Some(*temp_raw as f32 / 256.0);
+                    if vram_temp.is_none() {
+                        if let Ok(sensors) = handle.get_thermal_sensors_info() {
+                            let mut vram_sensor_id = None;
+                            for (id, sensor_type) in sensors {
+                                if sensor_type == crate::nvidia_driver::NV2080_CTRL_THERMAL_SENSOR_TYPE_MEMORY || id == 15 {
+                                    vram_sensor_id = Some(id);
+                                    break;
+                                }
+                            }
+
+                            if let Some(id) = vram_sensor_id {
+                                if let Ok(temps) = handle.get_temperatures(1 << id) {
+                                    if let Some((_, temp_raw)) = temps.first() {
+                                        vram_temp = Some(*temp_raw as f32 / 256.0);
+                                    }
                                 }
                             }
                         }
