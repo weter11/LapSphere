@@ -387,7 +387,16 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                             }
                             
                             if let Some(temp) = gpu.temperature {
-                                ui.label("Temperature:");
+                                ui.label("Core Temperature:");
+                                ui.colored_label(
+                                    temp_color(temp),
+                                    format!("{:.1}°C", temp)
+                                );
+                                ui.end_row();
+                            }
+
+                            if let Some(temp) = gpu.memory_temperature {
+                                ui.label("Memory Temperature:");
                                 ui.colored_label(
                                     temp_color(temp),
                                     format!("{:.1}°C", temp)

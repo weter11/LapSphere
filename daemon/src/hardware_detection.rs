@@ -6,9 +6,12 @@ use std::sync::Mutex;
 use std::time::Instant;
 use once_cell::sync::Lazy;
 use crate::tuxedo_io::{TuxedoIo, HardwareInterface};
+use crate::nvapi::NvApi;
 use systemstat::{System, Platform};
 // use tuxedo_io::TuxedoIo;
 use lapsphere_common::types::*;
+
+static NVAPI: Lazy<Option<NvApi>> = Lazy::new(|| NvApi::new().ok());
 
 // Thread-safe storage for previous CPU stats
 static PREVIOUS_CPU_STATS: Mutex<Option<HashMap<u32, CpuStats>>> = Mutex::new(None);
@@ -1191,6 +1194,7 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
                 frequency,
                 memory_frequency,
                 temperature,
+                memory_temperature: None,
                 load,
                 power,
                 voltage,
@@ -1377,6 +1381,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 frequency: None,
                 memory_frequency: None,
                 temperature: None,
+                memory_temperature: None,
                 load: None,
                 power: None,
                 voltage: None,
@@ -1432,9 +1437,24 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             }
         };
 
-        let (frequency, memory_frequency, temperature, load, power) = if is_suspended {
-            (None, None, None, None, None)
+        let pci_info = device.pci_info().ok();
+        let bus_id = pci_info.map(|p| p.bus);
+
+        let (frequency, memory_frequency, temperature, memory_temperature, load, power, voltage) = if is_suspended {
+            (None, None, None, None, None, None, None)
         } else {
+            let (nvapi_voltage, nvapi_temp, nvapi_mem_temp) = if let (Some(ref api), Some(bus_id)) = (&*NVAPI, bus_id) {
+                if let Ok(Some(handle)) = api.find_matching_gpu(bus_id) {
+                    let v = unsafe { api.get_voltage(handle).ok().map(|v| v as f32 / 1_000_000.0) };
+                    let t = unsafe { api.get_thermals(handle).ok() };
+                    (v, t.as_ref().and_then(|t| t.core()), t.as_ref().and_then(|t| t.vram()))
+                } else {
+                    (None, None, None)
+                }
+            } else {
+                (None, None, None)
+            };
+
             (
                 device.clock_info(nvml_wrapper::enum_wrappers::device::Clock::Graphics)
                     .ok()
@@ -1442,15 +1462,15 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 device.clock_info(nvml_wrapper::enum_wrappers::device::Clock::Memory)
                     .ok()
                     .map(|c| c as u64),
-                device.temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu)
+                nvapi_temp.or_else(|| device.temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu)
                     .ok()
-                    .map(|t| t as f32),
+                    .map(|t| t as f32)),
+                nvapi_mem_temp,
                 device.utilization_rates().ok().map(|u| u.gpu as f32),
                 device.power_usage().ok().map(|p| p as f32 / 1000.0),
+                nvapi_voltage.or_else(|| get_nvidia_voltage(i)),
             )
         };
-
-        let voltage = if is_suspended { None } else { get_nvidia_voltage(i) };
 
         let mut gpu_info = GpuInfo {
             name: name.clone(),
@@ -1459,6 +1479,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             frequency,
             memory_frequency,
             temperature,
+            memory_temperature,
             load,
             power,
             voltage,

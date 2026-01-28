@@ -17,5 +17,6 @@ tokio = { workspace = true, features = ["full"] }
 libc = "0.2"
 nix = { workspace = true, features = ["ioctl", "signal"] }
 nvml-wrapper = "0.11.0"
+libloading.workspace = true
 once_cell.workspace = true
 systemstat.workspace = true

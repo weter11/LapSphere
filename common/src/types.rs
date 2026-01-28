@@ -103,6 +103,7 @@ pub struct GpuInfo {
     pub frequency: Option<u64>,
     pub memory_frequency: Option<u64>,
     pub temperature: Option<f32>,
+    pub memory_temperature: Option<f32>,
     pub load: Option<f32>,
     pub power: Option<f32>,
     pub voltage: Option<f32>,

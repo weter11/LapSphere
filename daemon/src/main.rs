@@ -1,4 +1,5 @@
 mod dbus_interface;
+mod nvapi;
 mod hardware_control;
 mod hardware_detection;
 mod tuxedo_io;
