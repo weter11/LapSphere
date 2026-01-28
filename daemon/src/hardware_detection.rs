@@ -1405,25 +1405,21 @@ fn get_nvidia_extended_stats(gpu_index: u32) -> (Option<f32>, Option<f32>, Optio
             // Query all thermal sensors
             let mut sensors = NvApiThermals {
                 version: (mem::size_of::<NvApiThermals>() | (2 << 16)) as u32,
-                mask: 0xFFFF, // Query all sensors
+                mask: !0, // Query all sensors
                 values: [0; 40],
             };
             
             if get_thermals(handle, &mut sensors) == 0 {
-                // Hotspot is at index 9 (with bounds check)
-                if sensors.values.len() > 9 {
-                    let hotspot_raw = sensors.values[9] / 256;
-                    if hotspot_raw > 0 && hotspot_raw < 255 {
-                        hotspot_temp = Some(hotspot_raw as f32);
-                    }
+                // Hotspot is at index 9
+                let hotspot_raw = sensors.values[9] as f32 / 256.0;
+                if hotspot_raw > 0.0 && hotspot_raw < 255.0 {
+                    hotspot_temp = Some(hotspot_raw);
                 }
                 
-                // VRAM/Memory is at index 15 (with bounds check)
-                if sensors.values.len() > 15 {
-                    let vram_raw = sensors.values[15] / 256;
-                    if vram_raw > 0 && vram_raw < 255 {
-                        memory_temp = Some(vram_raw as f32);
-                    }
+                // VRAM/Memory is at index 15
+                let vram_raw = sensors.values[15] as f32 / 256.0;
+                if vram_raw > 0.0 && vram_raw < 255.0 {
+                    memory_temp = Some(vram_raw);
                 }
             }
         }
@@ -1548,11 +1544,33 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             .unwrap_or(false);
 
         // Get performance state for status if not suspended
+        use nvml_wrapper::enum_wrappers::device::PerformanceState;
         let status = if is_suspended {
             "suspended".to_string()
         } else {
             match device.performance_state() {
-                Ok(state) => format!("{:?}", state),
+                Ok(state) => {
+                    // Map nvml_wrapper::PerformanceState to "PX" format for GUI
+                    match state {
+                        PerformanceState::Zero => "P0".to_string(),
+                        PerformanceState::One => "P1".to_string(),
+                        PerformanceState::Two => "P2".to_string(),
+                        PerformanceState::Three => "P3".to_string(),
+                        PerformanceState::Four => "P4".to_string(),
+                        PerformanceState::Five => "P5".to_string(),
+                        PerformanceState::Six => "P6".to_string(),
+                        PerformanceState::Seven => "P7".to_string(),
+                        PerformanceState::Eight => "P8".to_string(),
+                        PerformanceState::Nine => "P9".to_string(),
+                        PerformanceState::Ten => "P10".to_string(),
+                        PerformanceState::Eleven => "P11".to_string(),
+                        PerformanceState::Twelve => "P12".to_string(),
+                        PerformanceState::Thirteen => "P13".to_string(),
+                        PerformanceState::Fourteen => "P14".to_string(),
+                        PerformanceState::Fifteen => "P15".to_string(),
+                        PerformanceState::Unknown => "unknown".to_string(),
+                    }
+                }
                 Err(_) => status_from_sysfs.unwrap_or_else(|| "active".to_string()),
             }
         };
@@ -1575,11 +1593,25 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             )
         };
 
-        // Get extended stats via NVAPI
-        let (hotspot_temp, memory_temp, nvapi_voltage) = if is_suspended {
-            (None, None, None)
+        // Determine if we should poll extended stats (to allow GPU to suspend)
+        let should_poll_extended = if is_suspended {
+            false
         } else {
+            match device.performance_state() {
+                Ok(state) => {
+                    // Skip extended stats for low-power states (typically P8 and P12)
+                    // to allow the GPU to enter suspended mode.
+                    !matches!(state, PerformanceState::Eight | PerformanceState::Twelve | PerformanceState::Fifteen)
+                }
+                Err(_) => true, // Fallback to poll if state unknown but not suspended
+            }
+        };
+
+        // Get extended stats via NVAPI
+        let (hotspot_temp, memory_temp, nvapi_voltage) = if should_poll_extended {
             get_nvidia_extended_stats(i)
+        } else {
+            (None, None, None)
         };
 
         let voltage = nvapi_voltage;
