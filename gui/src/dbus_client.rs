@@ -46,6 +46,8 @@ pub enum DbusCommand {
     SetWebcamState { enabled: bool, reply: oneshot::Sender<Result<()>> },
     GetDaemonLogs { reply: oneshot::Sender<Result<Vec<LogEntry>>> },
     ShutdownDaemon { reply: oneshot::Sender<Result<()>> },
+    SetGpuFanSpeed { device_index: u32, fan_index: u32, speed: u32, reply: oneshot::Sender<Result<()>> },
+    SetGpuFanAuto { device_index: u32, fan_index: u32, reply: oneshot::Sender<Result<()>> },
 }
 
 impl DbusClient {
@@ -289,6 +291,18 @@ impl DbusClient {
         let _ = self.command_tx.send(DbusCommand::GetDaemonLogs { reply: tx });
         rx
     }
+
+    pub fn set_gpu_fan_speed(&self, device_index: u32, fan_index: u32, speed: u32) -> oneshot::Receiver<Result<()>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::SetGpuFanSpeed { device_index, fan_index, speed, reply: tx });
+        rx
+    }
+
+    pub fn set_gpu_fan_auto(&self, device_index: u32, fan_index: u32) -> oneshot::Receiver<Result<()>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::SetGpuFanAuto { device_index, fan_index, reply: tx });
+        rx
+    }
 }
 
 // Background worker - handles all DBus calls asynchronously with reconnection logic
@@ -520,6 +534,18 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
                 }
                 DbusCommand::GetDaemonLogs { reply } => {
                     let result = get_daemon_logs_impl(&connection).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::SetGpuFanSpeed { device_index, fan_index, speed, reply } => {
+                    let result = set_gpu_fan_speed_impl(&connection, device_index, fan_index, speed).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::SetGpuFanAuto { device_index, fan_index, reply } => {
+                    let result = set_gpu_fan_auto_impl(&connection, device_index, fan_index).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
@@ -969,5 +995,27 @@ async fn shutdown_daemon_impl(conn: &Connection) -> Result<()> {
         "io.lapsphere.Control",
     ).await?;
     proxy.call::<_, _, ()>("ShutdownDaemon", &()).await?;
+    Ok(())
+}
+
+async fn set_gpu_fan_speed_impl(conn: &Connection, device_index: u32, fan_index: u32, speed: u32) -> Result<()> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
+    ).await?;
+    proxy.call::<_, _, ()>("SetGpuFanSpeed", &(device_index, fan_index, speed)).await?;
+    Ok(())
+}
+
+async fn set_gpu_fan_auto_impl(conn: &Connection, device_index: u32, fan_index: u32) -> Result<()> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
+    ).await?;
+    proxy.call::<_, _, ()>("SetGpuFanAuto", &(device_index, fan_index)).await?;
     Ok(())
 }

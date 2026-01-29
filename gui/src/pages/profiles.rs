@@ -238,6 +238,7 @@ fn create_standard_profile() -> lapsphere_common::types::Profile {
             advanced_min_mem_clock: None,
             advanced_max_mem_clock: None,
             advanced_memory_offset: Some(0),
+            nvidia_fans: vec![],
         },
         keyboard_settings: KeyboardSettings {
             control_enabled: false,

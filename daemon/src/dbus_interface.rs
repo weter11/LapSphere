@@ -151,29 +151,9 @@ async fn set_tdp_profile(&self, profile: &str) -> Result<(), zbus::fdo::Error> {
 }
 
     async fn get_fan_info(&self) -> Result<String, zbus::fdo::Error> {
-        if !crate::tuxedo_io::TuxedoIo::is_available() {
-            return Ok("[]".to_string());
-        }
-        
-        match crate::tuxedo_io::TuxedoIo::new() {
-            Ok(io) => {
-                let mut fans_info = Vec::new();
-                for fan_id in 0..io.get_fan_count() {
-                    let speed = io.get_fan_speed(fan_id).ok();
-                    let temperature = io.get_fan_temperature(fan_id).ok().map(|t| t as f32);
-                    
-                    let info = FanInfo {
-                        id: fan_id,
-                        name: format!("Fan {}", fan_id),
-                        rpm_or_percent: speed.unwrap_or(0),
-                        temperature,
-                        is_rpm: false,  // Currently returning percentage
-                    };
-                    fans_info.push(info);
-                }
-                serde_json::to_string(&fans_info)
-                    .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
-            }
+        match crate::hardware_detection::get_all_fan_info() {
+            Ok(info) => serde_json::to_string(&info)
+                .map_err(|e| zbus::fdo::Error::Failed(e.to_string())),
             Err(e) => Err(zbus::fdo::Error::Failed(e.to_string())),
         }
     }
@@ -202,6 +182,16 @@ async fn set_tdp_profile(&self, profile: &str) -> Result<(), zbus::fdo::Error> {
 
     async fn set_all_fans_auto(&self) -> Result<(), zbus::fdo::Error> {
         crate::hardware_control::set_fan_auto(0)
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
+
+    async fn set_gpu_fan_speed(&self, device_index: u32, fan_index: u32, speed: u32) -> Result<(), zbus::fdo::Error> {
+        crate::hardware_control::set_gpu_fan_speed(device_index, fan_index, speed)
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
+
+    async fn set_gpu_fan_auto(&self, device_index: u32, fan_index: u32) -> Result<(), zbus::fdo::Error> {
+        crate::hardware_control::set_gpu_fan_auto(device_index, fan_index)
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
     

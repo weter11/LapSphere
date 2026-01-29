@@ -51,7 +51,8 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>,
                             let _rx = client.apply_profile(profile_clone.clone());
 
                             // Apply GPU settings on save
-                            apply_gpu_settings_on_save(client, &profile_clone.gpu_settings);
+                            let gpu_info = state.gpu_info.clone();
+                            apply_gpu_settings_on_save(client, &profile_clone.gpu_settings, &gpu_info);
                         }
                     }
                 }
@@ -514,7 +515,14 @@ fn draw_gpu_tuning(
         }
 
     if state.config.profiles[profile_idx].gpu_settings.manual_clocks {
+        let fan_info = state.fan_info.clone();
         let profile = &mut state.config.profiles[profile_idx];
+
+        draw_nvidia_fan_tuning(ui, profile, gpu_info, &fan_info);
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(8.0);
+
         if !tuning_mode_advanced {
             draw_gpu_standard_controls(
                 ui,
@@ -837,18 +845,78 @@ fn add_range_row(ui: &mut Ui, label: &str, min_value: &mut i32, max_value: &mut 
     ui.end_row();
 }
 
+fn draw_nvidia_fan_tuning(
+    ui: &mut Ui,
+    profile: &mut Profile,
+    gpu_info: &[lapsphere_common::types::GpuInfo],
+    fan_info: &[FanInfo],
+) {
+    for (gpu_idx, gpu) in gpu_info.iter().enumerate() {
+        if gpu.is_desktop && gpu.name.contains("NVIDIA") {
+            ui.add_space(8.0);
+            ui.label(RichText::new(format!("🎮 {} Fan Control", gpu.name)).strong());
+
+            let gpu_fans: Vec<&FanInfo> = fan_info.iter()
+                .filter(|f| f.id >= 100 + (gpu_idx as u32) * 10 && f.id < 100 + (gpu_idx as u32 + 1) * 10)
+                .collect();
+
+            if gpu_fans.is_empty() {
+                ui.label("No controllable fans detected for this GPU via NVML.");
+                continue;
+            }
+
+            for fan in gpu_fans {
+                let fan_id_local = fan.id % 10;
+                let device_idx = gpu_idx as u32;
+
+                let mut found = false;
+                for s in profile.gpu_settings.nvidia_fans.iter_mut() {
+                    if s.device_index == device_idx && s.fan_id == fan_id_local {
+                        found = true;
+                        ui.group(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(format!("Fan {}:", fan_id_local));
+                                ui.checkbox(&mut s.manual, "Manual");
+
+                                if s.manual {
+                                    ui.add(Slider::new(&mut s.speed, 0..=100).suffix("%"));
+                                } else {
+                                    ui.label(format!("Auto (Current: {}%)", fan.rpm_or_percent));
+                                }
+                            });
+                        });
+                        break;
+                    }
+                }
+
+                if !found {
+                    let new_setting = lapsphere_common::types::NvidiaFanSettings {
+                        device_index: device_idx,
+                        fan_id: fan_id_local,
+                        speed: fan.rpm_or_percent,
+                        manual: false,
+                    };
+                    profile.gpu_settings.nvidia_fans.push(new_setting);
+                }
+            }
+        }
+    }
+}
+
 /// Apply GPU settings when the save button is clicked
-fn apply_gpu_settings_on_save(client: &DbusClient, gpu_settings: &lapsphere_common::types::GpuSettings) {
+fn apply_gpu_settings_on_save(client: &DbusClient, gpu_settings: &lapsphere_common::types::GpuSettings, gpu_info: &[lapsphere_common::types::GpuInfo]) {
+    let nvidia_gpu_idx = gpu_info.iter().position(|g| g.name.contains("NVIDIA")).map(|i| i as u32).unwrap_or(0);
+
     if gpu_settings.manual_clocks {
         // Apply GPU locked clocks if set
         if gpu_settings.advanced_control {
             if let (Some(min_clock), Some(max_clock)) =
                 (gpu_settings.advanced_min_gpu_clock, gpu_settings.advanced_max_gpu_clock)
             {
-                let _ = client.set_gpu_locked_clocks(0, min_clock, max_clock);
+                let _ = client.set_gpu_locked_clocks(nvidia_gpu_idx, min_clock, max_clock);
             }
         } else if let (Some(min_clock), Some(max_clock)) = (gpu_settings.min_gpu_clock, gpu_settings.max_gpu_clock) {
-            let _ = client.set_gpu_locked_clocks(0, min_clock, max_clock);
+            let _ = client.set_gpu_locked_clocks(nvidia_gpu_idx, min_clock, max_clock);
         }
         
         // Apply memory locked clocks if set
@@ -856,34 +924,43 @@ fn apply_gpu_settings_on_save(client: &DbusClient, gpu_settings: &lapsphere_comm
             if let (Some(min_mem), Some(max_mem)) =
                 (gpu_settings.advanced_min_mem_clock, gpu_settings.advanced_max_mem_clock)
             {
-                let _ = client.set_memory_locked_clocks(0, min_mem, max_mem);
+                let _ = client.set_memory_locked_clocks(nvidia_gpu_idx, min_mem, max_mem);
             }
         } else if let (Some(min_mem), Some(max_mem)) = (gpu_settings.min_mem_clock, gpu_settings.max_mem_clock) {
-            let _ = client.set_memory_locked_clocks(0, min_mem, max_mem);
+            let _ = client.set_memory_locked_clocks(nvidia_gpu_idx, min_mem, max_mem);
         }
         
         // Apply core offset if set and not in advanced mode (advanced mode is handled by daemon loop)
         if !gpu_settings.advanced_control {
             if let Some(core_offset) = gpu_settings.core_offset {
-                let _ = client.set_gpu_core_offset(0, core_offset);
+                let _ = client.set_gpu_core_offset(nvidia_gpu_idx, core_offset);
             }
         }
         
         // Apply memory offset if set
         if gpu_settings.advanced_control {
             if let Some(advanced_offset) = gpu_settings.advanced_memory_offset {
-                let _ = client.set_gpu_memory_offset(0, advanced_offset);
+                let _ = client.set_gpu_memory_offset(nvidia_gpu_idx, advanced_offset);
             }
         } else if let Some(memory_offset) = gpu_settings.memory_offset {
-            let _ = client.set_gpu_memory_offset(0, memory_offset);
+            let _ = client.set_gpu_memory_offset(nvidia_gpu_idx, memory_offset);
         }
     } else {
         // Reset to factory settings when manual control is disabled
-        let _ = client.reset_gpu_clocks(0);
-        let _ = client.reset_memory_locked_clocks(0);
+        let _ = client.reset_gpu_clocks(nvidia_gpu_idx);
+        let _ = client.reset_memory_locked_clocks(nvidia_gpu_idx);
         // Reset offsets to 0
-        let _ = client.set_gpu_core_offset(0, 0);
-        let _ = client.set_gpu_memory_offset(0, 0);
+        let _ = client.set_gpu_core_offset(nvidia_gpu_idx, 0);
+        let _ = client.set_gpu_memory_offset(nvidia_gpu_idx, 0);
+    }
+
+    // Apply NVIDIA fan settings
+    for fan_setting in &gpu_settings.nvidia_fans {
+        if fan_setting.manual {
+            let _ = client.set_gpu_fan_speed(fan_setting.device_index, fan_setting.fan_id, fan_setting.speed);
+        } else {
+            let _ = client.set_gpu_fan_auto(fan_setting.device_index, fan_setting.fan_id);
+        }
     }
 }
 
@@ -1291,6 +1368,7 @@ fn create_default_profile_for_reset(is_standard: bool) -> Profile {
                 advanced_min_mem_clock: None,
                 advanced_max_mem_clock: None,
                 advanced_memory_offset: Some(0),
+                nvidia_fans: vec![],
             },
             keyboard_settings: KeyboardSettings {
                 control_enabled: false,

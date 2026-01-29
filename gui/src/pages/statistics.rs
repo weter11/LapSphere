@@ -376,13 +376,35 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                             
                             if let Some(freq) = gpu.frequency {
                                 ui.label("Core Frequency:");
-                                ui.label(format!("{} MHz", freq));
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("{} MHz", freq));
+                                    if let Some((min, max)) = gpu.core_clock_range {
+                                        ui.label(RichText::new(format!(" (Range: {} - {} MHz)", min, max)).small().italics());
+                                    }
+                                });
+                                ui.end_row();
+                            }
+
+                            if let (Some(min), Some(max)) = (gpu.min_core_clock, gpu.max_core_clock) {
+                                ui.label("Locked Core Clocks:");
+                                ui.label(RichText::new(format!("{} - {} MHz", min, max)).strong());
                                 ui.end_row();
                             }
                             
                             if let Some(mem_freq) = gpu.memory_frequency {
                                 ui.label("Memory Frequency:");
-                                ui.label(format!("{} MHz", mem_freq));
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("{} MHz", mem_freq));
+                                    if let Some((min, max)) = gpu.memory_clock_range {
+                                        ui.label(RichText::new(format!(" (Range: {} - {} MHz)", min, max)).small().italics());
+                                    }
+                                });
+                                ui.end_row();
+                            }
+
+                            if let (Some(min), Some(max)) = (gpu.min_memory_clock, gpu.max_memory_clock) {
+                                ui.label("Locked Memory Clocks:");
+                                ui.label(RichText::new(format!("{} - {} MHz", min, max)).strong());
                                 ui.end_row();
                             }
                             
@@ -764,13 +786,14 @@ fn draw_fan_info(ui: &mut Ui, state: &AppState) {
         .show(ui, |ui| {
             if !state.fan_info.is_empty() {
                 Grid::new("fans_grid")
-                    .num_columns(3)
+                    .num_columns(4)
                     .spacing([36.0, 6.0])
                     .striped(true)
                     .show(ui, |ui| {
                         ui.label(RichText::new("Fan").strong());
                         ui.label(RichText::new("Speed").strong());
                         ui.label(RichText::new("Temperature").strong());
+                        ui.label(RichText::new("Mode").strong());
                         ui.end_row();
                         
                         for fan in &state.fan_info {
@@ -801,6 +824,12 @@ fn draw_fan_info(ui: &mut Ui, state: &AppState) {
                                 );
                             } else {
                                 ui.label("—");
+                            }
+
+                            if let Some(ref mode) = fan.mode {
+                                ui.label(mode);
+                            } else {
+                                ui.label("Auto");
                             }
                             
                             ui.end_row();

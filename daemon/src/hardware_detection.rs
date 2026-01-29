@@ -693,6 +693,66 @@ pub fn get_fan_speeds() -> Result<Vec<(u32, u32)>> {
     Ok(fans)
 }
 
+pub fn get_all_fan_info() -> Result<Vec<FanInfo>> {
+    let mut all_fans = Vec::new();
+
+    // 1. Get system fans (Tuxedo/Uniwill/Clevo)
+    if TuxedoIo::is_available() {
+        if let Ok(io) = TuxedoIo::new() {
+            for fan_id in 0..io.get_fan_count() {
+                if let Ok(speed) = io.get_fan_speed(fan_id) {
+                    let temperature = io.get_fan_temperature(fan_id).ok().map(|t| t as f32);
+                    all_fans.push(FanInfo {
+                        id: fan_id,
+                        name: format!("System Fan {}", fan_id),
+                        rpm_or_percent: speed,
+                        temperature,
+                        is_rpm: false,
+                        mode: None,
+                    });
+                }
+            }
+        }
+    }
+
+    // 2. Get NVIDIA GPU fans
+    let gpu_settings = crate::GPU_DAEMON_STATE.lock().unwrap();
+    if let Ok(nvml) = get_nvml() {
+        if let Ok(device_count) = nvml.device_count() {
+            for i in 0..device_count {
+                if let Ok(device) = nvml.device_by_index(i) {
+                    if let Ok(num_fans) = device.num_fans() {
+                        for f in 0..num_fans {
+                            let speed = device.fan_speed(f).unwrap_or(0);
+
+                            let mode = if let Some(settings) = &*gpu_settings {
+                                if settings.nvidia_fans.iter().any(|s| s.device_index == i && s.fan_id == f && s.manual) {
+                                    "Manual".to_string()
+                                } else {
+                                    "Auto".to_string()
+                                }
+                            } else {
+                                "Auto".to_string()
+                            };
+
+                            all_fans.push(FanInfo {
+                                id: 100 + i * 10 + f, // Unique ID for GPU fans
+                                name: format!("NVIDIA GPU {} Fan {}", i, f),
+                                rpm_or_percent: speed,
+                                temperature: device.temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu).ok().map(|t| t as f32),
+                                is_rpm: false,
+                                mode: Some(mode),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(all_fans)
+}
+
 
 pub fn get_cpu_info() -> Result<CpuInfo> {
     let name = get_cpu_name();
@@ -1201,6 +1261,13 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
                 drain_offset: None,
                 power_offset: None,
                 total_offset: None,
+                min_core_clock: None,
+                max_core_clock: None,
+                min_memory_clock: None,
+                max_memory_clock: None,
+                core_clock_range: None,
+                memory_clock_range: None,
+                is_desktop: false,
             });
         }
     }
@@ -1518,6 +1585,13 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 drain_offset: None,
                 power_offset: None,
                 total_offset: None,
+                min_core_clock: None,
+                max_core_clock: None,
+                min_memory_clock: None,
+                max_memory_clock: None,
+                core_clock_range: None,
+                memory_clock_range: None,
+                is_desktop: false,
             });
         }
         return Ok(gpus);
@@ -1625,6 +1699,18 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
 
         let voltage = nvapi_voltage;
 
+        let core_clock_range = get_gpu_clock_ranges(i).ok();
+        let memory_clock_range = device.supported_memory_clocks().ok().and_then(|clocks| {
+            if clocks.is_empty() { None }
+            else { Some((*clocks.iter().min().unwrap(), *clocks.iter().max().unwrap())) }
+        });
+
+        let (min_core_clock, max_core_clock) = (None, None); // NVML wrapper 0.11 doesn't have a getter
+
+        // Heuristic for desktop GPU: has fans reported via NVML
+        let num_fans = device.num_fans().unwrap_or(0);
+        let is_desktop = num_fans > 0;
+
         let mut gpu_info = GpuInfo {
             name: name.clone(),
             gpu_type,
@@ -1641,6 +1727,13 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             drain_offset: None,
             power_offset: None,
             total_offset: None,
+            min_core_clock,
+            max_core_clock,
+            min_memory_clock: None,
+            max_memory_clock: None,
+            core_clock_range,
+            memory_clock_range,
+            is_desktop,
         };
 
         // Fill in offsets if they exist in global state (assuming first NVIDIA GPU for now)
