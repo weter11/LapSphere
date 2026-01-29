@@ -295,6 +295,9 @@ fn draw_main_settings(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTh
     ui.add_space(6.0);
     
     if ui.checkbox(&mut state.config.start_minimized, "Start minimized").changed() {
+        if state.config.start_minimized {
+            state.config.tray_enabled = true;
+        }
         let _ = state.save_settings();
     }
 

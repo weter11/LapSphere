@@ -194,6 +194,8 @@ pub struct LapSphereApp {
     
     // Keyboard shortcuts
     shortcuts: KeyboardShortcuts,
+
+    startup_frames: u32,
 }
 
 #[derive(Debug)]
@@ -456,6 +458,7 @@ impl LapSphereApp {
             hw_update_tx,
             hw_update_rx,
             shortcuts: KeyboardShortcuts::new(),
+            startup_frames: 10,
         }
     }
     
@@ -693,6 +696,14 @@ impl LapSphereApp {
 
 impl eframe::App for LapSphereApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        if self.startup_frames > 0 {
+            let start_in_tray = std::env::args().any(|arg| arg == "--tray");
+            if self.state.config.start_minimized || start_in_tray {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
+            self.startup_frames -= 1;
+        }
+
         // Handle keyboard shortcuts
         self.shortcuts.handle_shortcuts(ctx, &mut self.state);
         
@@ -749,10 +760,14 @@ impl eframe::App for LapSphereApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         if let Some(client) = &self.dbus_client {
             let client = client.clone();
-            tokio::spawn(async move {
-                let _ = tokio::time::timeout(Duration::from_secs(2), client.set_fan_auto(0)).await;
-                let _ = tokio::time::timeout(Duration::from_secs(2), client.shutdown_daemon()).await;
-            });
+            // Use a fresh runtime for shutdown to avoid potential nesting issues
+            // and ensure commands are processed before the main runtime closes.
+            if let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                let _ = rt.block_on(async move {
+                    let _ = tokio::time::timeout(Duration::from_secs(2), client.set_all_fans_auto()).await;
+                    let _ = tokio::time::timeout(Duration::from_secs(2), client.shutdown_daemon()).await;
+                });
+            }
         }
     }
 }
@@ -875,7 +890,7 @@ pub fn get_crash_dir() -> String {
     format!("{}/crashes", get_config_dir())
 }
 
-fn load_config_from_disk() -> anyhow::Result<AppConfig> {
+pub fn load_config_from_disk() -> anyhow::Result<AppConfig> {
     let config_dir = get_config_dir();
     let settings_path = format!("{}/settings.json", config_dir);
     let profiles_path = format!("{}/profiles.json", config_dir);
@@ -906,6 +921,10 @@ fn load_config_from_disk() -> anyhow::Result<AppConfig> {
     }
     if let Some(profiles) = profiles {
         profiles.apply_to(&mut config);
+    }
+
+    if config.start_minimized {
+        config.tray_enabled = true;
     }
 
     config.statistics_sections.section_order =
@@ -950,8 +969,20 @@ fn save_settings_to_disk(config: &AppConfig) -> anyhow::Result<()> {
                 X-GNOME-Autostart-enabled=true\n"
             );
             std::fs::write(&desktop_file, content)?;
-        } else if std::path::Path::new(&desktop_file).exists() {
-            std::fs::remove_file(&desktop_file)?;
+        } else {
+            // Write a desktop file that explicitly disables autostart to override system-wide one
+            std::fs::create_dir_all(&autostart_dir)?;
+            let content = format!(
+                "[Desktop Entry]\n\
+                Type=Application\n\
+                Name=LapSphere\n\
+                Exec=lapsphere --tray\n\
+                Icon=lapsphere\n\
+                X-GNOME-Autostart-enabled=false\n\
+                NoDisplay=true\n\
+                Hidden=true\n"
+            );
+            std::fs::write(&desktop_file, content)?;
         }
     }
 

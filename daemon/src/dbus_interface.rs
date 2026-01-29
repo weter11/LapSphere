@@ -199,6 +199,11 @@ async fn set_tdp_profile(&self, profile: &str) -> Result<(), zbus::fdo::Error> {
         crate::hardware_control::set_fan_auto(fan_id)
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
+
+    async fn set_all_fans_auto(&self) -> Result<(), zbus::fdo::Error> {
+        crate::hardware_control::set_fan_auto(0)
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
     
     async fn get_webcam_state(&self) -> Result<bool, zbus::fdo::Error> {
         crate::hardware_control::get_webcam_state()
