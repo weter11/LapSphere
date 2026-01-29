@@ -203,25 +203,6 @@ fn draw_cpu_info(ui: &mut Ui, state: &AppState) {
                         );
                         ui.end_row();
                         
-                        if let Some(power) = cpu.package_power {
-                            ui.label("Package Power:");
-                            ui.horizontal(|ui| {
-                                ui.colored_label(
-                                    power_color(power),
-                                    RichText::new(format!("{:.1} W", power))
-                                        .strong()
-                                        .monospace()
-                                );
-                                
-                                if let Some(ref source) = cpu.power_source {
-                                    ui.label(RichText::new(format!("({})", source))
-                                        .small()
-                                        .italics());
-                                }
-                            });
-                            ui.end_row();
-                        }
-                        
                         if !cpu.all_power_sources.is_empty() && cpu.all_power_sources.len() > 1 {
                             ui.label("All Power Sources:");
                             ui.vertical(|ui| {
@@ -346,30 +327,17 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                             });
                             ui.end_row();
                             
-                            ui.label("Status:");
-                            // Display performance state with better formatting
                             let is_suspended = gpu.status.to_lowercase().contains("suspended");
-                            let status_display = match gpu.status.as_str() {
-                                "P0" => "P0 (Maximum Performance)",
-                                "P1" => "P1 (High Performance)",
-                                "P2" => "P2 (Performance)",
-                                "P3" => "P3 (Balanced)",
-                                "P5" => "P5 (Balanced)",
-                                "P8" => "P8 (Power Saving)",
-                                "P12" => "P12 (Deep Power Saving)",
-                                "active" => "Active",
-                                "suspended" => "Suspended",
-                                "unknown" => "Unknown",
-                                other => other,
-                            };
-                            ui.label(status_display);
-                            ui.end_row();
-
-                            if gpu.name.contains("NVIDIA")
-                                && !is_suspended
-                                && gpu.status.starts_with('P')
-                            {
+                            if is_suspended {
+                                ui.label("Status:");
+                                ui.label("Suspended");
+                                ui.end_row();
+                            } else if gpu.name.contains("NVIDIA") && gpu.status.starts_with('P') {
                                 ui.label("P-State:");
+                                ui.label(&gpu.status);
+                                ui.end_row();
+                            } else {
+                                ui.label("Status:");
                                 ui.label(&gpu.status);
                                 ui.end_row();
                             }

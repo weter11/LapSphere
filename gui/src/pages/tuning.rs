@@ -5,7 +5,7 @@ use lapsphere_common::types::{KeyboardMode, Profile, FanCurve, KeyboardCapabilit
 use crate::widgets::fan_curve_editor::FanCurveEditor;
 
 pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>, hw_update_tx: tokio::sync::mpsc::UnboundedSender<crate::app::HardwareUpdate>) {
-    ui.spacing_mut().slider_width = 400.0;
+    ui.spacing_mut().slider_width = 300.0;
     let profile_idx = state.current_profile_index();
     
     if profile_idx.is_none() {
@@ -662,10 +662,13 @@ fn draw_gpu_standard_controls(
                 15.0
             };
 
-            // Use min_limit.min(0) to ensure 0 is in range if possible, or just use 0 as base if user wants to start from 0
-            // User says "so it should start with 0mhz for offsets, not from 5mhz"
-            // I interpret this as the default value should be 0, and the slider should allow 0.
-            ui.add(Slider::new(&mut core_offset, (min_limit as f32)..=(max_limit as f32)).suffix(" MHz").step_by(step as f64));
+            // Snap range to multiples of step relative to 0 to ensure 0 MHz is a valid step
+            let steps_below = (min_limit.abs() as f32 / step).floor();
+            let snapped_min = -steps_below * step;
+            let steps_above = (max_limit as f32 / step).floor();
+            let snapped_max = steps_above * step;
+
+            ui.add(Slider::new(&mut core_offset, snapped_min..=snapped_max).suffix(" MHz").step_by(step as f64));
             profile.gpu_settings.core_offset = Some(core_offset);
         }
 

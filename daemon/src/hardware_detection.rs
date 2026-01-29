@@ -1897,11 +1897,67 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
 
     let driver_version = nvml.sys_driver_version().ok();
 
-    let device_count = nvml.device_count()?;
+    let device_count = nvml.device_count().unwrap_or(0);
     for i in 0..device_count {
-        let device = nvml.device_by_index(i)?;
+        // Use pre-read status to avoid waking up the GPU
+        let status_from_sysfs = statuses.get(i as usize).cloned();
+        let is_suspended = status_from_sysfs
+            .as_deref()
+            .map(|s| s.eq_ignore_ascii_case("suspended"))
+            .unwrap_or(false);
 
-        let name = device.name()?;
+        if is_suspended {
+            let name = {
+                let cache = NVIDIA_NAMES_CACHE.lock().unwrap();
+                cache.get(i as usize).cloned().unwrap_or_else(|| "NVIDIA GPU".to_string())
+            };
+            gpus.push(GpuInfo {
+                name,
+                gpu_type: GpuType::Discrete,
+                status: "suspended".to_string(),
+                frequency: None,
+                memory_frequency: None,
+                temperature: None,
+                hotspot_temperature: None,
+                memory_temperature: None,
+                load: None,
+                power: None,
+                voltage: None,
+                freq_offset: None,
+                drain_offset: None,
+                power_offset: None,
+                total_offset: None,
+                min_core_clock: None,
+                max_core_clock: None,
+                min_memory_clock: None,
+                max_memory_clock: None,
+                core_clock_range: None,
+                memory_clock_range: None,
+                is_desktop: false,
+                architecture: None,
+                nvml_index: Some(i),
+                driver_version: driver_version.clone(),
+                supported_p_states: vec![],
+                supports_power_limit: false,
+                power_limit_range: None,
+                supports_gpu_offset: false,
+                supports_mem_offset: false,
+                fan_speed_range: None,
+                vram_type: None,
+                vram_vendor: None,
+                vram_bus_width: None,
+                vram_bandwidth: None,
+            });
+            continue;
+        }
+
+        // Active GPU - proceed with NVML
+        let device = match nvml.device_by_index(i) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        let name = device.name().unwrap_or_else(|_| "NVIDIA GPU".to_string());
 
         // Update name cache
         {
@@ -1914,47 +1970,47 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         }
 
         let gpu_type = GpuType::Discrete;
-        
-        // Use pre-read status to avoid waking up the GPU with PCI info requests
-        let status_from_sysfs = statuses.get(i as usize).cloned();
-        let is_suspended = status_from_sysfs
-            .as_deref()
-            .map(|s| s.eq_ignore_ascii_case("suspended"))
-            .unwrap_or(false);
 
-        // Get performance state for status if not suspended
+        // Get performance state
         use nvml_wrapper::enum_wrappers::device::PerformanceState;
-        let status = if is_suspended {
-            "suspended".to_string()
-        } else {
-            match device.performance_state() {
-                Ok(state) => {
-                    // Map nvml_wrapper::PerformanceState to "PX" format for GUI
-                    match state {
-                        PerformanceState::Zero => "P0".to_string(),
-                        PerformanceState::One => "P1".to_string(),
-                        PerformanceState::Two => "P2".to_string(),
-                        PerformanceState::Three => "P3".to_string(),
-                        PerformanceState::Four => "P4".to_string(),
-                        PerformanceState::Five => "P5".to_string(),
-                        PerformanceState::Six => "P6".to_string(),
-                        PerformanceState::Seven => "P7".to_string(),
-                        PerformanceState::Eight => "P8".to_string(),
-                        PerformanceState::Nine => "P9".to_string(),
-                        PerformanceState::Ten => "P10".to_string(),
-                        PerformanceState::Eleven => "P11".to_string(),
-                        PerformanceState::Twelve => "P12".to_string(),
-                        PerformanceState::Thirteen => "P13".to_string(),
-                        PerformanceState::Fourteen => "P14".to_string(),
-                        PerformanceState::Fifteen => "P15".to_string(),
-                        PerformanceState::Unknown => "unknown".to_string(),
-                    }
+        let pstate = device.performance_state().ok();
+
+        let status = match pstate {
+            Some(state) => {
+                // Map nvml_wrapper::PerformanceState to "PX" format for GUI
+                match state {
+                    PerformanceState::Zero => "P0".to_string(),
+                    PerformanceState::One => "P1".to_string(),
+                    PerformanceState::Two => "P2".to_string(),
+                    PerformanceState::Three => "P3".to_string(),
+                    PerformanceState::Four => "P4".to_string(),
+                    PerformanceState::Five => "P5".to_string(),
+                    PerformanceState::Six => "P6".to_string(),
+                    PerformanceState::Seven => "P7".to_string(),
+                    PerformanceState::Eight => "P8".to_string(),
+                    PerformanceState::Nine => "P9".to_string(),
+                    PerformanceState::Ten => "P10".to_string(),
+                    PerformanceState::Eleven => "P11".to_string(),
+                    PerformanceState::Twelve => "P12".to_string(),
+                    PerformanceState::Thirteen => "P13".to_string(),
+                    PerformanceState::Fourteen => "P14".to_string(),
+                    PerformanceState::Fifteen => "P15".to_string(),
+                    PerformanceState::Unknown => "unknown".to_string(),
                 }
-                Err(_) => status_from_sysfs.unwrap_or_else(|| "active".to_string()),
             }
+            None => status_from_sysfs.unwrap_or_else(|| "active".to_string()),
         };
 
-        let (frequency, memory_frequency, temperature, load, power) = if is_suspended {
+        // Determine if we should poll monitoring stats (to allow GPU to suspend)
+        // If P-state is high (P8, P12, P15), it's likely idle.
+        let is_idle_pstate = pstate.map_or(false, |s| matches!(s,
+            PerformanceState::Eight |
+            PerformanceState::Twelve |
+            PerformanceState::Fifteen
+        ));
+
+        let (frequency, memory_frequency, temperature, load, power) = if is_idle_pstate {
+            // Skip heavy monitoring calls for idle GPUs to allow them to enter suspended mode
             (None, None, None, None, None)
         } else {
             (
