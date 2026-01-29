@@ -876,7 +876,7 @@ pub fn get_crash_dir() -> String {
     format!("{}/crashes", get_config_dir())
 }
 
-fn load_config_from_disk() -> anyhow::Result<AppConfig> {
+pub fn load_config_from_disk() -> anyhow::Result<AppConfig> {
     let config_dir = get_config_dir();
     let settings_path = format!("{}/settings.json", config_dir);
     let profiles_path = format!("{}/profiles.json", config_dir);
