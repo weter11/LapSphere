@@ -465,19 +465,19 @@ pub fn reset_gpu_clocks(device_index: u32) -> Result<()> {
     Ok(())
 }
 
-pub fn set_gpu_core_offset(device_index: u32, offset: i32) -> Result<()> {
+pub fn set_gpu_core_offset(device_index: u32, offset: f32) -> Result<()> {
     let nvml = get_nvml()?;
     let mut device = nvml.device_by_index(device_index)?;
-    device.set_clock_offset(Clock::Graphics, PerformanceState::Zero, offset)?;
-    log::info!("Set GPU core offset to {} MHz for device {}", offset, device_index);
+    device.set_clock_offset(Clock::Graphics, PerformanceState::Zero, offset.round() as i32)?;
+    log::info!("Set GPU core offset to {} MHz (rounded to {}) for device {}", offset, offset.round(), device_index);
     Ok(())
 }
 
-pub fn set_gpu_memory_offset(device_index: u32, offset: i32) -> Result<()> {
+pub fn set_gpu_memory_offset(device_index: u32, offset: f32) -> Result<()> {
     let nvml = get_nvml()?;
     let mut device = nvml.device_by_index(device_index)?;
-    device.set_clock_offset(Clock::Memory, PerformanceState::Zero, offset)?;
-    log::info!("Set GPU memory offset to {} MHz for device {}", offset, device_index);
+    device.set_clock_offset(Clock::Memory, PerformanceState::Zero, offset.round() as i32)?;
+    log::info!("Set GPU memory offset to {} MHz (rounded to {}) for device {}", offset, offset.round(), device_index);
     Ok(())
 }
 

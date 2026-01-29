@@ -119,6 +119,8 @@ pub struct GpuInfo {
     pub core_clock_range: Option<(u32, u32)>,
     pub memory_clock_range: Option<(u32, u32)>,
     pub is_desktop: bool,
+    pub architecture: Option<String>,
+    pub nvml_index: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -230,8 +232,8 @@ pub struct GpuSettings {
     pub min_mem_clock: Option<u32>,
     pub max_mem_clock: Option<u32>,
     pub manual_clocks: bool,
-    pub core_offset: Option<i32>,
-    pub memory_offset: Option<i32>,
+    pub core_offset: Option<f32>,
+    pub memory_offset: Option<f32>,
     pub prime_profile: Option<String>,
     #[serde(default)]
     pub advanced_control: bool,
@@ -544,8 +546,8 @@ impl Default for GpuSettings {
             min_mem_clock: None,
             max_mem_clock: None,
             manual_clocks: false,
-            core_offset: Some(0),
-            memory_offset: Some(0),
+            core_offset: Some(0.0),
+            memory_offset: Some(0.0),
             prime_profile: Some("on-demand".to_string()),
             advanced_control: false,
             advanced: GpuAdvancedSettings::default(),

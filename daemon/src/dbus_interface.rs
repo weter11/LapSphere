@@ -361,12 +361,12 @@ async fn set_tdp_profile(&self, profile: &str) -> Result<(), zbus::fdo::Error> {
         }
     }
 
-    async fn set_gpu_core_offset(&self, device_index: u32, offset: i32) -> Result<(), zbus::fdo::Error> {
+    async fn set_gpu_core_offset(&self, device_index: u32, offset: f32) -> Result<(), zbus::fdo::Error> {
         crate::hardware_control::set_gpu_core_offset(device_index, offset)
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
 
-    async fn set_gpu_memory_offset(&self, device_index: u32, offset: i32) -> Result<(), zbus::fdo::Error> {
+    async fn set_gpu_memory_offset(&self, device_index: u32, offset: f32) -> Result<(), zbus::fdo::Error> {
         crate::hardware_control::set_gpu_memory_offset(device_index, offset)
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }

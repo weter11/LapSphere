@@ -464,13 +464,16 @@ fn draw_gpu_tuning(
     ui.label(RichText::new("GPU settings will be applied when you click Save. Disabling manual control will reset to factory settings.").small().italics());
 
     if state.config.profiles[profile_idx].gpu_settings.manual_clocks {
+        let nvidia_gpu = gpu_info.iter().find(|g| g.name.contains("NVIDIA"));
+        let nvml_index = nvidia_gpu.and_then(|g| g.nvml_index).unwrap_or(0);
+
         // Fetch ranges if they haven't been fetched yet
         if state.gpu_clock_ranges.is_none() {
             if let Some(client) = dbus_client {
                 let client = client.clone();
                 let tx = hw_update_tx.clone();
                 tokio::spawn(async move {
-                    let res = client.get_gpu_clock_ranges(0).await
+                    let res = client.get_gpu_clock_ranges(nvml_index).await
                         .map(|r| r.map_err(|e| e.to_string()))
                         .unwrap_or_else(|e| Err(e.to_string()));
                     let _ = tx.send(crate::app::HardwareUpdate::GpuClockRanges(res));
@@ -482,7 +485,7 @@ fn draw_gpu_tuning(
                 let client = client.clone();
                 let tx = hw_update_tx.clone();
                 tokio::spawn(async move {
-                    let res = client.get_gpu_mem_clock_ranges(0).await
+                    let res = client.get_gpu_mem_clock_ranges(nvml_index).await
                         .map(|r| r.map_err(|e| e.to_string()))
                         .unwrap_or_else(|e| Err(e.to_string()));
                     let _ = tx.send(crate::app::HardwareUpdate::GpuMemClockRanges(res));
@@ -494,7 +497,7 @@ fn draw_gpu_tuning(
                 let client = client.clone();
                 let tx = hw_update_tx.clone();
                 tokio::spawn(async move {
-                    let res = client.get_gpu_core_offset_limits(0).await
+                    let res = client.get_gpu_core_offset_limits(nvml_index).await
                         .map(|r| r.map_err(|e| e.to_string()))
                         .unwrap_or_else(|e| Err(e.to_string()));
                     let _ = tx.send(crate::app::HardwareUpdate::GpuCoreOffsetLimits(res));
@@ -506,7 +509,7 @@ fn draw_gpu_tuning(
                 let client = client.clone();
                 let tx = hw_update_tx.clone();
                 tokio::spawn(async move {
-                    let res = client.get_gpu_memory_offset_limits(0).await
+                    let res = client.get_gpu_memory_offset_limits(nvml_index).await
                         .map(|r| r.map_err(|e| e.to_string()))
                         .unwrap_or_else(|e| Err(e.to_string()));
                     let _ = tx.send(crate::app::HardwareUpdate::GpuMemOffsetLimits(res));
@@ -514,8 +517,8 @@ fn draw_gpu_tuning(
             }
         }
 
-    if state.config.profiles[profile_idx].gpu_settings.manual_clocks {
         let fan_info = state.fan_info.clone();
+        let architecture = nvidia_gpu.and_then(|g| g.architecture.clone());
         let profile = &mut state.config.profiles[profile_idx];
 
         draw_nvidia_fan_tuning(ui, profile, gpu_info, &fan_info);
@@ -531,6 +534,7 @@ fn draw_gpu_tuning(
                 state.gpu_mem_clock_ranges,
                 state.gpu_core_offset_limits,
                 state.gpu_mem_offset_limits,
+                architecture,
             );
         }
         if tuning_mode_advanced {
@@ -561,7 +565,7 @@ fn draw_gpu_tuning(
 
         ui.add_space(16.0);
         ui.label(RichText::new("Clock and offset controls are applied when you click Save. They are managed by NVML.").small().italics());
-    }}
+    }
 }
 
 fn draw_gpu_standard_controls(
@@ -571,6 +575,7 @@ fn draw_gpu_standard_controls(
     gpu_mem_clock_ranges: Option<(u32, u32)>,
     gpu_core_offset_limits: Option<(i32, i32)>,
     gpu_mem_offset_limits: Option<(i32, i32)>,
+    architecture: Option<String>,
 ) {
     ui.add_space(6.0);
     // GPU Locked Clocks section
@@ -641,8 +646,20 @@ fn draw_gpu_standard_controls(
     if !profile.gpu_settings.advanced_control {
         ui.label(RichText::new("GPU Core Offset:").strong());
         if let Some((min_limit, max_limit)) = gpu_core_offset_limits {
-            let mut core_offset = profile.gpu_settings.core_offset.unwrap_or(0);
-            ui.add(Slider::new(&mut core_offset, min_limit..=max_limit).suffix(" MHz"));
+            let mut core_offset = profile.gpu_settings.core_offset.unwrap_or(0.0);
+
+            let step = if let Some(arch) = architecture {
+                let arch_l = arch.to_lowercase();
+                if arch_l.contains("ada") || arch_l.contains("blackwell") {
+                    7.5
+                } else {
+                    15.0
+                }
+            } else {
+                15.0
+            };
+
+            ui.add(Slider::new(&mut core_offset, (min_limit as f32)..=(max_limit as f32)).suffix(" MHz").step_by(step as f64));
             profile.gpu_settings.core_offset = Some(core_offset);
         }
 
@@ -653,14 +670,14 @@ fn draw_gpu_standard_controls(
     if !profile.gpu_settings.advanced_control {
         ui.label(RichText::new("GPU Memory Offset:").strong());
         if let Some((min_limit, max_limit)) = gpu_mem_offset_limits {
-            let mut memory_offset = profile.gpu_settings.memory_offset.unwrap_or(0);
-            ui.add(Slider::new(&mut memory_offset, min_limit..=max_limit).suffix(" MHz"));
+            let mut memory_offset = profile.gpu_settings.memory_offset.unwrap_or(0.0);
+            ui.add(Slider::new(&mut memory_offset, (min_limit as f32)..=(max_limit as f32)).suffix(" MHz"));
             profile.gpu_settings.memory_offset = Some(memory_offset);
         } else {
             ui.label("Fetching GPU memory offset limits...");
         }
     } else {
-        profile.gpu_settings.memory_offset = Some(0);
+        profile.gpu_settings.memory_offset = Some(0.0);
     }
 }
 
@@ -851,52 +868,53 @@ fn draw_nvidia_fan_tuning(
     gpu_info: &[lapsphere_common::types::GpuInfo],
     fan_info: &[FanInfo],
 ) {
-    for (gpu_idx, gpu) in gpu_info.iter().enumerate() {
-        if gpu.is_desktop && gpu.name.contains("NVIDIA") {
-            ui.add_space(8.0);
-            ui.label(RichText::new(format!("🎮 {} Fan Control", gpu.name)).strong());
+    for gpu in gpu_info {
+        if let Some(nvml_index) = gpu.nvml_index {
+            if gpu.is_desktop && gpu.name.contains("NVIDIA") {
+                ui.add_space(8.0);
+                ui.label(RichText::new(format!("🎮 {} Fan Control", gpu.name)).strong());
 
-            let gpu_fans: Vec<&FanInfo> = fan_info.iter()
-                .filter(|f| f.id >= 100 + (gpu_idx as u32) * 10 && f.id < 100 + (gpu_idx as u32 + 1) * 10)
-                .collect();
+                let gpu_fans: Vec<&FanInfo> = fan_info.iter()
+                    .filter(|f| f.id >= 100 + nvml_index * 10 && f.id < 100 + (nvml_index + 1) * 10)
+                    .collect();
 
-            if gpu_fans.is_empty() {
-                ui.label("No controllable fans detected for this GPU via NVML.");
-                continue;
-            }
-
-            for fan in gpu_fans {
-                let fan_id_local = fan.id % 10;
-                let device_idx = gpu_idx as u32;
-
-                let mut found = false;
-                for s in profile.gpu_settings.nvidia_fans.iter_mut() {
-                    if s.device_index == device_idx && s.fan_id == fan_id_local {
-                        found = true;
-                        ui.group(|ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(format!("Fan {}:", fan_id_local));
-                                ui.checkbox(&mut s.manual, "Manual");
-
-                                if s.manual {
-                                    ui.add(Slider::new(&mut s.speed, 0..=100).suffix("%"));
-                                } else {
-                                    ui.label(format!("Auto (Current: {}%)", fan.rpm_or_percent));
-                                }
-                            });
-                        });
-                        break;
-                    }
+                if gpu_fans.is_empty() {
+                    ui.label("No controllable fans detected for this GPU via NVML.");
+                    continue;
                 }
 
-                if !found {
-                    let new_setting = lapsphere_common::types::NvidiaFanSettings {
-                        device_index: device_idx,
-                        fan_id: fan_id_local,
-                        speed: fan.rpm_or_percent,
-                        manual: false,
-                    };
-                    profile.gpu_settings.nvidia_fans.push(new_setting);
+                for fan in gpu_fans {
+                    let fan_id_local = fan.id % 10;
+
+                    let mut found = false;
+                    for s in profile.gpu_settings.nvidia_fans.iter_mut() {
+                        if s.device_index == nvml_index && s.fan_id == fan_id_local {
+                            found = true;
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("Fan {}:", fan_id_local));
+                                    ui.checkbox(&mut s.manual, "Manual");
+
+                                    if s.manual {
+                                        ui.add(Slider::new(&mut s.speed, 0..=100).suffix("%"));
+                                    } else {
+                                        ui.label(format!("Auto (Current: {}%)", fan.rpm_or_percent));
+                                    }
+                                });
+                            });
+                            break;
+                        }
+                    }
+
+                    if !found {
+                        let new_setting = lapsphere_common::types::NvidiaFanSettings {
+                            device_index: nvml_index,
+                            fan_id: fan_id_local,
+                            speed: fan.rpm_or_percent,
+                            manual: false,
+                        };
+                        profile.gpu_settings.nvidia_fans.push(new_setting);
+                    }
                 }
             }
         }
@@ -905,7 +923,8 @@ fn draw_nvidia_fan_tuning(
 
 /// Apply GPU settings when the save button is clicked
 fn apply_gpu_settings_on_save(client: &DbusClient, gpu_settings: &lapsphere_common::types::GpuSettings, gpu_info: &[lapsphere_common::types::GpuInfo]) {
-    let nvidia_gpu_idx = gpu_info.iter().position(|g| g.name.contains("NVIDIA")).map(|i| i as u32).unwrap_or(0);
+    let nvidia_gpu = gpu_info.iter().find(|g| g.name.contains("NVIDIA"));
+    let nvidia_gpu_idx = nvidia_gpu.and_then(|g| g.nvml_index).unwrap_or(0);
 
     if gpu_settings.manual_clocks {
         // Apply GPU locked clocks if set
@@ -940,7 +959,7 @@ fn apply_gpu_settings_on_save(client: &DbusClient, gpu_settings: &lapsphere_comm
         // Apply memory offset if set
         if gpu_settings.advanced_control {
             if let Some(advanced_offset) = gpu_settings.advanced_memory_offset {
-                let _ = client.set_gpu_memory_offset(nvidia_gpu_idx, advanced_offset);
+                let _ = client.set_gpu_memory_offset(nvidia_gpu_idx, advanced_offset as f32);
             }
         } else if let Some(memory_offset) = gpu_settings.memory_offset {
             let _ = client.set_gpu_memory_offset(nvidia_gpu_idx, memory_offset);
@@ -950,8 +969,8 @@ fn apply_gpu_settings_on_save(client: &DbusClient, gpu_settings: &lapsphere_comm
         let _ = client.reset_gpu_clocks(nvidia_gpu_idx);
         let _ = client.reset_memory_locked_clocks(nvidia_gpu_idx);
         // Reset offsets to 0
-        let _ = client.set_gpu_core_offset(nvidia_gpu_idx, 0);
-        let _ = client.set_gpu_memory_offset(nvidia_gpu_idx, 0);
+        let _ = client.set_gpu_core_offset(nvidia_gpu_idx, 0.0);
+        let _ = client.set_gpu_memory_offset(nvidia_gpu_idx, 0.0);
     }
 
     // Apply NVIDIA fan settings
@@ -1358,8 +1377,8 @@ fn create_default_profile_for_reset(is_standard: bool) -> Profile {
                 min_mem_clock: None,
                 max_mem_clock: None,
                 manual_clocks: false,
-                core_offset: Some(0),
-                memory_offset: Some(0),
+                core_offset: Some(0.0),
+                memory_offset: Some(0.0),
                 prime_profile: Some("on-demand".to_string()),
                 advanced_control: false,
                 advanced: GpuAdvancedSettings::default(),

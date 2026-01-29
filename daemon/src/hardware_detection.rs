@@ -1268,6 +1268,8 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
                 core_clock_range: None,
                 memory_clock_range: None,
                 is_desktop: false,
+                architecture: None,
+                nvml_index: None,
             });
         }
     }
@@ -1325,22 +1327,37 @@ pub fn get_gpu_clock_ranges(device_index: u32) -> Result<(u32, u32)> {
     let nvml = get_nvml()?;
     let device = nvml.device_by_index(device_index)?;
 
-    // First, get the memory clocks to pass to supported_graphics_clocks
-    let mut mem_clocks = device.supported_memory_clocks()?;
-    if mem_clocks.is_empty() {
-        return Err(anyhow!("No supported memory clocks found, cannot determine graphics clock ranges"));
-    }
-    mem_clocks.sort_unstable();
-    // Use the highest memory clock to get the widest range of graphics clocks
-    let target_mem_clock = *mem_clocks.last().unwrap();
+    let mut min_clock = u32::MAX;
+    let mut max_clock = 0;
 
-    let mut clocks = device.supported_graphics_clocks(target_mem_clock)?;
-    if clocks.is_empty() {
-        return Err(anyhow!("No supported graphics clocks found for locking"));
+    // Iterate through all performance states to find absolute min/max
+    if let Ok(supported_states) = device.supported_performance_states() {
+        for pstate in supported_states {
+            if let Ok((p_min, p_max)) = device.min_max_clock_of_pstate(Clock::Graphics, pstate) {
+                if p_min < min_clock { min_clock = p_min; }
+                if p_max > max_clock { max_clock = p_max; }
+            }
+        }
     }
-    clocks.sort_unstable();
-    let min_clock = *clocks.first().unwrap();
-    let max_clock = *clocks.last().unwrap();
+
+    // Fallback to supported_graphics_clocks if min_clock is still MAX
+    if min_clock == u32::MAX {
+        if let Ok(mem_clocks) = device.supported_memory_clocks() {
+            if let Some(&target_mem_clock) = mem_clocks.iter().max() {
+                if let Ok(clocks) = device.supported_graphics_clocks(target_mem_clock) {
+                    if let (Some(&c_min), Some(&c_max)) = (clocks.iter().min(), clocks.iter().max()) {
+                        min_clock = c_min;
+                        max_clock = c_max;
+                    }
+                }
+            }
+        }
+    }
+
+    if min_clock == u32::MAX {
+        return Err(anyhow!("Could not determine graphics clock ranges"));
+    }
+
     Ok((min_clock, max_clock))
 }
 
@@ -1592,6 +1609,8 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 core_clock_range: None,
                 memory_clock_range: None,
                 is_desktop: false,
+                architecture: None,
+                nvml_index: Some(i as u32),
             });
         }
         return Ok(gpus);
@@ -1700,16 +1719,36 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         let voltage = nvapi_voltage;
 
         let core_clock_range = get_gpu_clock_ranges(i).ok();
-        let memory_clock_range = device.supported_memory_clocks().ok().and_then(|clocks| {
-            if clocks.is_empty() { None }
-            else { Some((*clocks.iter().min().unwrap(), *clocks.iter().max().unwrap())) }
-        });
+
+        let mut memory_clock_range = None;
+        if let Ok(supported_states) = device.supported_performance_states() {
+            let mut m_min = u32::MAX;
+            let mut m_max = 0;
+            for pstate in supported_states {
+                if let Ok((p_min, p_max)) = device.min_max_clock_of_pstate(Clock::Memory, pstate) {
+                    if p_min < m_min { m_min = p_min; }
+                    if p_max > m_max { m_max = p_max; }
+                }
+            }
+            if m_min != u32::MAX {
+                memory_clock_range = Some((m_min, m_max));
+            }
+        }
+
+        if memory_clock_range.is_none() {
+            memory_clock_range = device.supported_memory_clocks().ok().and_then(|clocks| {
+                if clocks.is_empty() { None }
+                else { Some((*clocks.iter().min().unwrap(), *clocks.iter().max().unwrap())) }
+            });
+        }
 
         let (min_core_clock, max_core_clock) = (None, None); // NVML wrapper 0.11 doesn't have a getter
 
         // Heuristic for desktop GPU: has fans reported via NVML
         let num_fans = device.num_fans().unwrap_or(0);
         let is_desktop = num_fans > 0;
+
+        let architecture = device.architecture().ok().map(|arch| arch.to_string());
 
         let mut gpu_info = GpuInfo {
             name: name.clone(),
@@ -1734,6 +1773,8 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             core_clock_range,
             memory_clock_range,
             is_desktop,
+            architecture,
+            nvml_index: Some(i),
         };
 
         // Fill in offsets if they exist in global state (assuming first NVIDIA GPU for now)

@@ -346,6 +346,12 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                             });
                             ui.end_row();
                             
+                            if let Some(ref arch) = gpu.architecture {
+                                ui.label("Architecture:");
+                                ui.label(arch);
+                                ui.end_row();
+                            }
+
                             ui.label("Status:");
                             // Display performance state with better formatting
                             let is_suspended = gpu.status.to_lowercase().contains("suspended");

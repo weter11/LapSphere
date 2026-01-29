@@ -413,7 +413,7 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
              *last = None;
          }
          if !gpu_settings.manual_clocks {
-             let _ = crate::hardware_control::set_gpu_core_offset(0, 0);
+             let _ = crate::hardware_control::set_gpu_core_offset(0, 0.0);
          }
          return Ok(());
      }
@@ -508,7 +508,7 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
         if status_lower != "p0" {
             let mut last = LAST_APPLIED_OFFSET.lock().unwrap();
             if *last != Some(0) {
-                crate::hardware_control::set_gpu_core_offset(0, 0)?;
+                crate::hardware_control::set_gpu_core_offset(0, 0.0)?;
                 *last = Some(0);
                 log::info!("Cleared dynamic GPU offset (P-state not 0)");
             }
@@ -540,7 +540,7 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
         {
             let mut last = LAST_APPLIED_OFFSET.lock().unwrap();
             if *last != Some(final_offset_i32) {
-                crate::hardware_control::set_gpu_core_offset(0, final_offset_i32)?;
+                crate::hardware_control::set_gpu_core_offset(0, final_offset_i32 as f32)?;
                 *last = Some(final_offset_i32);
                 if final_offset_i32 == 0 {
                     log::info!("Cleared dynamic GPU offset (P-state not 0)");

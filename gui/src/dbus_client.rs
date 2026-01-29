@@ -36,8 +36,8 @@ pub enum DbusCommand {
     GetGpuMemClockRanges { device_index: u32, reply: oneshot::Sender<Result<Vec<u32>>> },
     SetMemoryLockedClocks { device_index: u32, min_clock: u32, max_clock: u32, reply: oneshot::Sender<Result<()>> },
     ResetMemoryLockedClocks { device_index: u32, reply: oneshot::Sender<Result<()>> },
-    SetGpuCoreOffset { device_index: u32, offset: i32, reply: oneshot::Sender<Result<()>> },
-    SetGpuMemoryOffset { device_index: u32, offset: i32, reply: oneshot::Sender<Result<()>> },
+    SetGpuCoreOffset { device_index: u32, offset: f32, reply: oneshot::Sender<Result<()>> },
+    SetGpuMemoryOffset { device_index: u32, offset: f32, reply: oneshot::Sender<Result<()>> },
     GetGpuCoreOffsetLimits { device_index: u32, reply: oneshot::Sender<Result<(i32, i32)>> },
     GetGpuMemoryOffsetLimits { device_index: u32, reply: oneshot::Sender<Result<(i32, i32)>> },
     SetPrimeProfile { profile: String, reply: oneshot::Sender<Result<()>> },
@@ -228,13 +228,13 @@ impl DbusClient {
         rx
     }
 
-    pub fn set_gpu_core_offset(&self, device_index: u32, offset: i32) -> oneshot::Receiver<Result<()>> {
+    pub fn set_gpu_core_offset(&self, device_index: u32, offset: f32) -> oneshot::Receiver<Result<()>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.command_tx.send(DbusCommand::SetGpuCoreOffset { device_index, offset, reply: tx });
         rx
     }
 
-    pub fn set_gpu_memory_offset(&self, device_index: u32, offset: i32) -> oneshot::Receiver<Result<()>> {
+    pub fn set_gpu_memory_offset(&self, device_index: u32, offset: f32) -> oneshot::Receiver<Result<()>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.command_tx.send(DbusCommand::SetGpuMemoryOffset { device_index, offset, reply: tx });
         rx
@@ -888,7 +888,7 @@ async fn reset_memory_locked_clocks_impl(conn: &Connection, device_index: u32) -
     Ok(())
 }
 
-async fn set_gpu_core_offset_impl(conn: &Connection, device_index: u32, offset: i32) -> Result<()> {
+async fn set_gpu_core_offset_impl(conn: &Connection, device_index: u32, offset: f32) -> Result<()> {
     let proxy = zbus::Proxy::new(
         conn,
         "io.lapsphere.Control",
@@ -899,7 +899,7 @@ async fn set_gpu_core_offset_impl(conn: &Connection, device_index: u32, offset: 
     Ok(())
 }
 
-async fn set_gpu_memory_offset_impl(conn: &Connection, device_index: u32, offset: i32) -> Result<()> {
+async fn set_gpu_memory_offset_impl(conn: &Connection, device_index: u32, offset: f32) -> Result<()> {
     let proxy = zbus::Proxy::new(
         conn,
         "io.lapsphere.Control",
