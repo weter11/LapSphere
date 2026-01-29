@@ -9,6 +9,7 @@ const STORAGE_POLL_MAX_SECONDS: f32 = 10.0;
 
 pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTheme, ctx: &Context, dbus_client: Option<&DbusClient>) {
     ui.add_space(6.0);
+    ui.spacing_mut().slider_width = ui.available_width() * 0.4;
 
     ui.horizontal(|ui| {
         ui.selectable_value(&mut state.settings_tab, SettingsTab::Main, "Main");

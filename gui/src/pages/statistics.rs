@@ -327,20 +327,9 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                             });
                             ui.end_row();
                             
-                            let is_suspended = gpu.status.to_lowercase().contains("suspended");
-                            if is_suspended {
-                                ui.label("Status:");
-                                ui.label("Suspended");
-                                ui.end_row();
-                            } else if gpu.name.contains("NVIDIA") && gpu.status.starts_with('P') {
-                                ui.label("P-State:");
-                                ui.label(&gpu.status);
-                                ui.end_row();
-                            } else {
-                                ui.label("Status:");
-                                ui.label(&gpu.status);
-                                ui.end_row();
-                            }
+                            ui.label("Status:");
+                            ui.label(&gpu.status);
+                            ui.end_row();
                             
                             if let Some(freq) = gpu.frequency {
                                 ui.label("Core Frequency:");

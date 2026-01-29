@@ -5,7 +5,7 @@ use lapsphere_common::types::{KeyboardMode, Profile, FanCurve, KeyboardCapabilit
 use crate::widgets::fan_curve_editor::FanCurveEditor;
 
 pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>, hw_update_tx: tokio::sync::mpsc::UnboundedSender<crate::app::HardwareUpdate>) {
-    ui.spacing_mut().slider_width = 300.0;
+    ui.spacing_mut().slider_width = ui.available_width() * 0.4;
     let profile_idx = state.current_profile_index();
     
     if profile_idx.is_none() {
@@ -529,15 +529,17 @@ fn draw_gpu_tuning(
         ui.add_space(8.0);
 
         if !tuning_mode_advanced {
-            draw_gpu_standard_controls(
-                ui,
-                profile,
-                state.gpu_clock_ranges,
-                state.gpu_mem_clock_ranges,
-                state.gpu_core_offset_limits,
-                state.gpu_mem_offset_limits,
-                nvidia_gpu.unwrap(), // Safe because manual_clocks is true and we found it above
-            );
+            if let Some(gpu) = nvidia_gpu {
+                draw_gpu_standard_controls(
+                    ui,
+                    profile,
+                    state.gpu_clock_ranges,
+                    state.gpu_mem_clock_ranges,
+                    state.gpu_core_offset_limits,
+                    state.gpu_mem_offset_limits,
+                    gpu,
+                );
+            }
         }
         if tuning_mode_advanced {
             ui.add_space(16.0);

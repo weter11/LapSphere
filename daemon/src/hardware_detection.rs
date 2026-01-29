@@ -2001,16 +2001,32 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             None => status_from_sysfs.unwrap_or_else(|| "active".to_string()),
         };
 
-        // Determine if we should poll monitoring stats (to allow GPU to suspend)
-        // If P-state is high (P8, P12, P15), it's likely idle.
-        let is_idle_pstate = pstate.map_or(false, |s| matches!(s,
-            PerformanceState::Eight |
-            PerformanceState::Twelve |
-            PerformanceState::Fifteen
-        ));
+        let pstate_val = pstate.map(|s| match s {
+            PerformanceState::Zero => 0,
+            PerformanceState::One => 1,
+            PerformanceState::Two => 2,
+            PerformanceState::Three => 3,
+            PerformanceState::Four => 4,
+            PerformanceState::Five => 5,
+            PerformanceState::Six => 6,
+            PerformanceState::Seven => 7,
+            PerformanceState::Eight => 8,
+            PerformanceState::Nine => 9,
+            PerformanceState::Ten => 10,
+            PerformanceState::Eleven => 11,
+            PerformanceState::Twelve => 12,
+            PerformanceState::Thirteen => 13,
+            PerformanceState::Fourteen => 14,
+            PerformanceState::Fifteen => 15,
+            PerformanceState::Unknown => 99,
+        }).unwrap_or(0);
 
-        let (frequency, memory_frequency, temperature, load, power) = if is_idle_pstate {
-            // Skip heavy monitoring calls for idle GPUs to allow them to enter suspended mode
+        // Determine if we should poll monitoring stats
+        // NVML stats up to P8, skip NVAPI if P5 or higher
+        let should_poll_nvml = pstate_val <= 8;
+        let should_poll_nvapi = pstate_val <= 4;
+
+        let (frequency, memory_frequency, temperature, load, power) = if !should_poll_nvml {
             (None, None, None, None, None)
         } else {
             (
@@ -2028,22 +2044,8 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             )
         };
 
-        // Determine if we should poll extended stats (to allow GPU to suspend)
-        let should_poll_extended = if is_suspended {
-            false
-        } else {
-            match device.performance_state() {
-                Ok(state) => {
-                    // Skip extended stats for low-power states (typically P8 and P12)
-                    // to allow the GPU to enter suspended mode.
-                    !matches!(state, PerformanceState::Eight | PerformanceState::Twelve | PerformanceState::Fifteen)
-                }
-                Err(_) => true, // Fallback to poll if state unknown but not suspended
-            }
-        };
-
         // Get extended stats via NVAPI
-        let (hotspot_temp, memory_temp, nvapi_voltage) = if should_poll_extended {
+        let (hotspot_temp, memory_temp, nvapi_voltage) = if !is_suspended && should_poll_nvapi {
             get_nvidia_extended_stats(i)
         } else {
             (None, None, None)
