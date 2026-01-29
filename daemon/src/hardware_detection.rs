@@ -1277,6 +1277,10 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
                 supports_gpu_offset: false,
                 supports_mem_offset: false,
                 fan_speed_range: None,
+                vram_type: None,
+                vram_vendor: None,
+                vram_bus_width: None,
+                vram_bandwidth: None,
             });
         }
     }
@@ -1419,6 +1423,31 @@ struct NvApiVoltage {
 }
 
 // Function to get NVIDIA extended stats (hotspot, memory temp, voltage)
+fn get_vram_info(index: u32) -> (Option<String>, Option<String>, Option<u32>, Option<f32>) {
+    // Returns (type, vendor, bus_width, bandwidth)
+    let output = std::process::Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=memory.type,memory.vendor,memory.bus_width,memory.bandwidth",
+            "--format=csv,noheader,nounits",
+            "-i",
+            &index.to_string(),
+        ])
+        .output();
+
+    if let Ok(out) = output {
+        let s = String::from_utf8_lossy(&out.stdout);
+        let parts: Vec<&str> = s.trim().split(',').map(|p| p.trim()).collect();
+        if parts.len() == 4 {
+            let v_type = if parts[0] != "[Not Supported]" { Some(parts[0].to_string()) } else { None };
+            let v_vendor = if parts[1] != "[Not Supported]" { Some(parts[1].to_string()) } else { None };
+            let v_bus = parts[2].parse::<u32>().ok();
+            let v_bw = parts[3].parse::<f32>().ok();
+            return (v_type, v_vendor, v_bus, v_bw);
+        }
+    }
+    (None, None, None, None)
+}
+
 fn get_nvidia_extended_stats(gpu_index: u32) -> (Option<f32>, Option<f32>, Option<f32>) {
     // Returns (hotspot_temp, memory_temp, voltage_v)
     // Note: This loads and initializes NVAPI on each call. This is acceptable for 
@@ -1625,6 +1654,10 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 supports_gpu_offset: false,
                 supports_mem_offset: false,
                 fan_speed_range: None,
+                vram_type: None,
+                vram_vendor: None,
+                vram_bus_width: None,
+                vram_bandwidth: None,
             });
         }
         return Ok(gpus);
@@ -1760,9 +1793,31 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
 
         let (min_core_clock, max_core_clock) = (None, None); // NVML wrapper 0.11 doesn't have a getter
 
-        // Heuristic for desktop GPU: has fans reported via NVML
+        // Probe logic for desktop GPU detection
         let num_fans = device.num_fans().unwrap_or(0);
-        let is_desktop = num_fans > 0;
+        let mut is_desktop = num_fans > 0;
+
+        if let Ok(pci_info) = device.pci_info() {
+            let sub_vendor = (pci_info.pci_sub_system_id.unwrap_or(0) & 0xFFFF) as u16;
+            // Desktop-associated vendors
+            let desktop_vendors = [0x10de, 0x1043, 0x1458, 0x1462, 0x3842, 0x19da, 0x14af, 0x196e, 0x1bc5];
+            // Mobile-associated vendors
+            let mobile_vendors = [0x1028, 0x17aa, 0x103c, 0x1558, 0x106b, 0x144d, 0x104d, 0x10cf];
+
+            if desktop_vendors.contains(&sub_vendor) {
+                is_desktop = true;
+            } else if mobile_vendors.contains(&sub_vendor) {
+                is_desktop = false;
+            }
+
+            // Check for runtime status presence as a laptop-only pattern (Optimus/Hybrid)
+            if let Some(pci_id) = nvidia_pci_ids.get(i as usize) {
+                let status_path = format!("/sys/bus/pci/devices/{}/power/runtime_status", pci_id);
+                if Path::new(&status_path).exists() {
+                    is_desktop = false;
+                }
+            }
+        }
 
         let architecture = device.architecture().ok().map(|arch| arch.to_string());
 
@@ -1777,6 +1832,8 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
 
         let supports_gpu_offset = device.clock_offset(Clock::Graphics, PerformanceState::Zero).is_ok();
         let supports_mem_offset = device.clock_offset(Clock::Memory, PerformanceState::Zero).is_ok();
+
+        let (v_type, v_vendor, v_bus, v_bw) = get_vram_info(i);
 
         let mut gpu_info = GpuInfo {
             name: name.clone(),
@@ -1810,6 +1867,10 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             supports_gpu_offset,
             supports_mem_offset,
             fan_speed_range: if is_desktop { Some((0, 100)) } else { None },
+            vram_type: v_type,
+            vram_vendor: v_vendor,
+            vram_bus_width: v_bus,
+            vram_bandwidth: v_bw,
         };
 
         // Fill in offsets if they exist in global state (assuming first NVIDIA GPU for now)

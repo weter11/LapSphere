@@ -128,6 +128,10 @@ pub struct GpuInfo {
     pub supports_gpu_offset: bool,
     pub supports_mem_offset: bool,
     pub fan_speed_range: Option<(u32, u32)>, // in %
+    pub vram_type: Option<String>,
+    pub vram_vendor: Option<String>,
+    pub vram_bus_width: Option<u32>, // bits
+    pub vram_bandwidth: Option<f32>, // GB/s
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
