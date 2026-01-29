@@ -180,6 +180,11 @@ pub fn apply_profile(profile: &Profile) -> Result<()> {
     if let (Some(min), Some(max)) = (profile.cpu_settings.min_frequency, profile.cpu_settings.max_frequency) {
         set_cpu_frequency_limits(min, max)?;
     }
+
+    if let Some(limit) = profile.gpu_settings.power_limit {
+        let nvidia_gpu_idx = profile.gpu_settings.nvidia_fans.get(0).map(|f| f.device_index).unwrap_or(0);
+        let _ = set_gpu_power_limit(nvidia_gpu_idx, limit);
+    }
     
     if let Some(boost) = profile.cpu_settings.boost {
         set_cpu_boost(boost)?;
@@ -469,6 +474,11 @@ pub fn set_gpu_core_offset(device_index: u32, offset: f32) -> Result<()> {
     let nvml = get_nvml()?;
     let mut device = nvml.device_by_index(device_index)?;
     device.set_clock_offset(Clock::Graphics, PerformanceState::Zero, offset.round() as i32)?;
+    {
+        let mut map = crate::MANUAL_GPU_OFFSETS.lock().unwrap();
+        let entry = map.entry(device_index).or_insert((0.0, 0.0));
+        entry.0 = offset;
+    }
     log::info!("Set GPU core offset to {} MHz (rounded to {}) for device {}", offset, offset.round(), device_index);
     Ok(())
 }
@@ -477,7 +487,20 @@ pub fn set_gpu_memory_offset(device_index: u32, offset: f32) -> Result<()> {
     let nvml = get_nvml()?;
     let mut device = nvml.device_by_index(device_index)?;
     device.set_clock_offset(Clock::Memory, PerformanceState::Zero, offset.round() as i32)?;
+    {
+        let mut map = crate::MANUAL_GPU_OFFSETS.lock().unwrap();
+        let entry = map.entry(device_index).or_insert((0.0, 0.0));
+        entry.1 = offset;
+    }
     log::info!("Set GPU memory offset to {} MHz (rounded to {}) for device {}", offset, offset.round(), device_index);
+    Ok(())
+}
+
+pub fn set_gpu_power_limit(device_index: u32, limit_watts: u32) -> Result<()> {
+    let nvml = get_nvml()?;
+    let mut device = nvml.device_by_index(device_index)?;
+    device.set_power_management_limit(limit_watts * 1000)?; // Watts to mW
+    log::info!("Set NVIDIA GPU {} power limit to {} W", device_index, limit_watts);
     Ok(())
 }
 

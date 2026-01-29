@@ -346,9 +346,21 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                             });
                             ui.end_row();
                             
+                            if let Some(ref driver) = gpu.driver_version {
+                                ui.label("Driver Version:");
+                                ui.label(driver);
+                                ui.end_row();
+                            }
+
                             if let Some(ref arch) = gpu.architecture {
                                 ui.label("Architecture:");
                                 ui.label(arch);
+                                ui.end_row();
+                            }
+
+                            if !gpu.supported_p_states.is_empty() {
+                                ui.label("Supported P-States:");
+                                ui.label(gpu.supported_p_states.join(", "));
                                 ui.end_row();
                             }
 
@@ -460,6 +472,24 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                             if let Some(voltage) = gpu.voltage {
                                 ui.label("Voltage:");
                                 ui.label(format!("{:.3} V", voltage));
+                                ui.end_row();
+                            }
+
+                            if gpu.supports_power_limit {
+                                ui.label("Power Limit Support:");
+                                ui.label("✅ Supported");
+                                ui.end_row();
+
+                                if let Some((min, max)) = gpu.power_limit_range {
+                                    ui.label("Power Limit Range:");
+                                    ui.label(format!("{} - {} W", min, max));
+                                    ui.end_row();
+                                }
+                            }
+
+                            if let Some((min, max)) = gpu.fan_speed_range {
+                                ui.label("Fan Speed Range:");
+                                ui.label(format!("{} - {}%", min, max));
                                 ui.end_row();
                             }
 

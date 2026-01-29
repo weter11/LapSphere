@@ -371,6 +371,11 @@ async fn set_tdp_profile(&self, profile: &str) -> Result<(), zbus::fdo::Error> {
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
 
+    async fn set_gpu_power_limit(&self, device_index: u32, limit_watts: u32) -> Result<(), zbus::fdo::Error> {
+        crate::hardware_control::set_gpu_power_limit(device_index, limit_watts)
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
+
     async fn get_gpu_core_offset_limits(&self, device_index: u32) -> Result<(i32, i32), zbus::fdo::Error> {
         crate::hardware_detection::get_gpu_core_offset_limits(device_index)
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))

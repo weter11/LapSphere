@@ -230,6 +230,7 @@ fn create_standard_profile() -> lapsphere_common::types::Profile {
             manual_clocks: false,
             core_offset: Some(0.0),
             memory_offset: Some(0.0),
+            power_limit: None,
             prime_profile: Some("on-demand".to_string()),
             advanced_control: false,
             advanced: GpuAdvancedSettings::default(),

@@ -48,6 +48,7 @@ pub enum DbusCommand {
     ShutdownDaemon { reply: oneshot::Sender<Result<()>> },
     SetGpuFanSpeed { device_index: u32, fan_index: u32, speed: u32, reply: oneshot::Sender<Result<()>> },
     SetGpuFanAuto { device_index: u32, fan_index: u32, reply: oneshot::Sender<Result<()>> },
+    SetGpuPowerLimit { device_index: u32, limit_watts: u32, reply: oneshot::Sender<Result<()>> },
 }
 
 impl DbusClient {
@@ -303,6 +304,12 @@ impl DbusClient {
         let _ = self.command_tx.send(DbusCommand::SetGpuFanAuto { device_index, fan_index, reply: tx });
         rx
     }
+
+    pub fn set_gpu_power_limit(&self, device_index: u32, limit_watts: u32) -> oneshot::Receiver<Result<()>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::SetGpuPowerLimit { device_index, limit_watts, reply: tx });
+        rx
+    }
 }
 
 // Background worker - handles all DBus calls asynchronously with reconnection logic
@@ -546,6 +553,12 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
                 }
                 DbusCommand::SetGpuFanAuto { device_index, fan_index, reply } => {
                     let result = set_gpu_fan_auto_impl(&connection, device_index, fan_index).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::SetGpuPowerLimit { device_index, limit_watts, reply } => {
+                    let result = set_gpu_power_limit_impl(&connection, device_index, limit_watts).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
@@ -1017,5 +1030,16 @@ async fn set_gpu_fan_auto_impl(conn: &Connection, device_index: u32, fan_index: 
         "io.lapsphere.Control",
     ).await?;
     proxy.call::<_, _, ()>("SetGpuFanAuto", &(device_index, fan_index)).await?;
+    Ok(())
+}
+
+async fn set_gpu_power_limit_impl(conn: &Connection, device_index: u32, limit_watts: u32) -> Result<()> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
+    ).await?;
+    proxy.call::<_, _, ()>("SetGpuPowerLimit", &(device_index, limit_watts)).await?;
     Ok(())
 }

@@ -518,7 +518,6 @@ fn draw_gpu_tuning(
         }
 
         let fan_info = state.fan_info.clone();
-        let architecture = nvidia_gpu.and_then(|g| g.architecture.clone());
         let profile = &mut state.config.profiles[profile_idx];
 
         draw_nvidia_fan_tuning(ui, profile, gpu_info, &fan_info);
@@ -534,7 +533,7 @@ fn draw_gpu_tuning(
                 state.gpu_mem_clock_ranges,
                 state.gpu_core_offset_limits,
                 state.gpu_mem_offset_limits,
-                architecture,
+                nvidia_gpu.unwrap(), // Safe because manual_clocks is true and we found it above
             );
         }
         if tuning_mode_advanced {
@@ -575,8 +574,9 @@ fn draw_gpu_standard_controls(
     gpu_mem_clock_ranges: Option<(u32, u32)>,
     gpu_core_offset_limits: Option<(i32, i32)>,
     gpu_mem_offset_limits: Option<(i32, i32)>,
-    architecture: Option<String>,
+    gpu_info: &lapsphere_common::types::GpuInfo,
 ) {
+    let architecture = &gpu_info.architecture;
     ui.add_space(6.0);
     // GPU Locked Clocks section
     ui.label(RichText::new("GPU Locked Clocks:").strong());
@@ -643,7 +643,7 @@ fn draw_gpu_standard_controls(
     ui.add_space(16.0);
 
     // GPU Core Offset - only for Standard control
-    if !profile.gpu_settings.advanced_control {
+    if !profile.gpu_settings.advanced_control && gpu_info.supports_gpu_offset {
         ui.label(RichText::new("GPU Core Offset:").strong());
         if let Some((min_limit, max_limit)) = gpu_core_offset_limits {
             let mut core_offset = profile.gpu_settings.core_offset.unwrap_or(0.0);
@@ -659,6 +659,9 @@ fn draw_gpu_standard_controls(
                 15.0
             };
 
+            // Use min_limit.min(0) to ensure 0 is in range if possible, or just use 0 as base if user wants to start from 0
+            // User says "so it should start with 0mhz for offsets, not from 5mhz"
+            // I interpret this as the default value should be 0, and the slider should allow 0.
             ui.add(Slider::new(&mut core_offset, (min_limit as f32)..=(max_limit as f32)).suffix(" MHz").step_by(step as f64));
             profile.gpu_settings.core_offset = Some(core_offset);
         }
@@ -667,7 +670,7 @@ fn draw_gpu_standard_controls(
     }
 
     // GPU Memory Offset (Standard mode only)
-    if !profile.gpu_settings.advanced_control {
+    if !profile.gpu_settings.advanced_control && gpu_info.supports_mem_offset {
         ui.label(RichText::new("GPU Memory Offset:").strong());
         if let Some((min_limit, max_limit)) = gpu_mem_offset_limits {
             let mut memory_offset = profile.gpu_settings.memory_offset.unwrap_or(0.0);
@@ -676,8 +679,22 @@ fn draw_gpu_standard_controls(
         } else {
             ui.label("Fetching GPU memory offset limits...");
         }
-    } else {
+        ui.add_space(16.0);
+    } else if !profile.gpu_settings.advanced_control {
         profile.gpu_settings.memory_offset = Some(0.0);
+    }
+
+    // GPU Power Limit (Desktop GPUs with support)
+    if gpu_info.is_desktop && gpu_info.supports_power_limit {
+        ui.label(RichText::new("GPU Power Limit:").strong());
+        if let Some((min_w, max_w)) = gpu_info.power_limit_range {
+            let mut power_limit = profile.gpu_settings.power_limit.unwrap_or(max_w);
+            ui.add(Slider::new(&mut power_limit, min_w..=max_w).suffix(" W"));
+            profile.gpu_settings.power_limit = Some(power_limit);
+        } else {
+            ui.label("Could not determine power limit range.");
+        }
+        ui.add_space(16.0);
     }
 }
 
@@ -963,6 +980,11 @@ fn apply_gpu_settings_on_save(client: &DbusClient, gpu_settings: &lapsphere_comm
             }
         } else if let Some(memory_offset) = gpu_settings.memory_offset {
             let _ = client.set_gpu_memory_offset(nvidia_gpu_idx, memory_offset);
+        }
+
+        // Apply power limit if set
+        if let Some(limit) = gpu_settings.power_limit {
+            let _ = client.set_gpu_power_limit(nvidia_gpu_idx, limit);
         }
     } else {
         // Reset to factory settings when manual control is disabled
@@ -1379,6 +1401,7 @@ fn create_default_profile_for_reset(is_standard: bool) -> Profile {
                 manual_clocks: false,
                 core_offset: Some(0.0),
                 memory_offset: Some(0.0),
+                power_limit: None,
                 prime_profile: Some("on-demand".to_string()),
                 advanced_control: false,
                 advanced: GpuAdvancedSettings::default(),

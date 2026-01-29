@@ -1270,6 +1270,13 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
                 is_desktop: false,
                 architecture: None,
                 nvml_index: None,
+                driver_version: None,
+                supported_p_states: vec![],
+                supports_power_limit: false,
+                power_limit_range: None,
+                supports_gpu_offset: false,
+                supports_mem_offset: false,
+                fan_speed_range: None,
             });
         }
     }
@@ -1611,6 +1618,13 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 is_desktop: false,
                 architecture: None,
                 nvml_index: Some(i as u32),
+                driver_version: None,
+                supported_p_states: vec![],
+                supports_power_limit: false,
+                power_limit_range: None,
+                supports_gpu_offset: false,
+                supports_mem_offset: false,
+                fan_speed_range: None,
             });
         }
         return Ok(gpus);
@@ -1619,6 +1633,8 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
     // At least one GPU is active, proceed with NVML
     let nvml = get_nvml()?;
     let mut gpus = Vec::new();
+
+    let driver_version = nvml.sys_driver_version().ok();
 
     let device_count = nvml.device_count()?;
     for i in 0..device_count {
@@ -1750,6 +1766,18 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
 
         let architecture = device.architecture().ok().map(|arch| arch.to_string());
 
+        let supported_p_states = device.supported_performance_states().ok()
+            .map(|states| states.iter().map(|s| format!("{:?}", s)).collect())
+            .unwrap_or_default();
+
+        let (supports_power_limit, power_limit_range) = match device.power_management_limit_constraints() {
+            Ok(constraints) => (true, Some((constraints.min_limit / 1000, constraints.max_limit / 1000))), // mW to W
+            Err(_) => (false, None),
+        };
+
+        let supports_gpu_offset = device.clock_offset(Clock::Graphics, PerformanceState::Zero).is_ok();
+        let supports_mem_offset = device.clock_offset(Clock::Memory, PerformanceState::Zero).is_ok();
+
         let mut gpu_info = GpuInfo {
             name: name.clone(),
             gpu_type,
@@ -1775,6 +1803,13 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             is_desktop,
             architecture,
             nvml_index: Some(i),
+            driver_version: driver_version.clone(),
+            supported_p_states,
+            supports_power_limit,
+            power_limit_range,
+            supports_gpu_offset,
+            supports_mem_offset,
+            fan_speed_range: if is_desktop { Some((0, 100)) } else { None },
         };
 
         // Fill in offsets if they exist in global state (assuming first NVIDIA GPU for now)
@@ -1785,6 +1820,13 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 gpu_info.drain_offset = Some(stats.drain_offset);
                 gpu_info.power_offset = Some(stats.power_offset);
                 gpu_info.total_offset = Some(stats.total_offset);
+            } else {
+                // Fallback to manual offsets if dynamic is not active
+                let manual_map = crate::MANUAL_GPU_OFFSETS.lock().unwrap();
+                if let Some(offsets) = manual_map.get(&i) {
+                    let core: f32 = offsets.0;
+                    gpu_info.total_offset = Some(core.round() as i32);
+                }
             }
         }
 

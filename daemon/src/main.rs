@@ -9,7 +9,7 @@ use anyhow::Result;
 use tokio::signal;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use std::collections::VecDeque;
+use std::collections::{VecDeque, HashMap};
 use lapsphere_common::types::{FanSettings, LogEntry};
 use polling_scheduler::{PollingScheduler, PollJob};
 
@@ -37,6 +37,9 @@ pub static CURRENT_GPU_OVERCLOCK_STATS: once_cell::sync::Lazy<Arc<Mutex<Option<G
 
 pub static LAST_APPLIED_OFFSET: once_cell::sync::Lazy<Arc<Mutex<Option<i32>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
+
+pub static MANUAL_GPU_OFFSETS: once_cell::sync::Lazy<Arc<Mutex<HashMap<u32, (f32, f32)>>>> =
+    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
 pub static DAEMON_LOGS: once_cell::sync::Lazy<Arc<Mutex<VecDeque<LogEntry>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(VecDeque::with_capacity(100))));
@@ -414,6 +417,11 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
          }
          if !gpu_settings.manual_clocks {
              let _ = crate::hardware_control::set_gpu_core_offset(0, 0.0);
+             let _ = crate::hardware_control::set_gpu_memory_offset(0, 0.0);
+             {
+                 let mut map = MANUAL_GPU_OFFSETS.lock().unwrap();
+                 map.remove(&0);
+             }
          }
          return Ok(());
      }
