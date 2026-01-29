@@ -749,8 +749,9 @@ impl eframe::App for LapSphereApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         if let Some(client) = &self.dbus_client {
             let client = client.clone();
-            tokio::spawn(async move {
-                let _ = tokio::time::timeout(Duration::from_secs(2), client.set_fan_auto(0)).await;
+            let rt = tokio::runtime::Handle::current();
+            let _ = rt.block_on(async move {
+                let _ = tokio::time::timeout(Duration::from_secs(2), client.set_all_fans_auto()).await;
                 let _ = tokio::time::timeout(Duration::from_secs(2), client.shutdown_daemon()).await;
             });
         }
@@ -950,8 +951,20 @@ fn save_settings_to_disk(config: &AppConfig) -> anyhow::Result<()> {
                 X-GNOME-Autostart-enabled=true\n"
             );
             std::fs::write(&desktop_file, content)?;
-        } else if std::path::Path::new(&desktop_file).exists() {
-            std::fs::remove_file(&desktop_file)?;
+        } else {
+            // Write a desktop file that explicitly disables autostart to override system-wide one
+            std::fs::create_dir_all(&autostart_dir)?;
+            let content = format!(
+                "[Desktop Entry]\n\
+                Type=Application\n\
+                Name=LapSphere\n\
+                Exec=lapsphere --tray\n\
+                Icon=lapsphere\n\
+                X-GNOME-Autostart-enabled=false\n\
+                NoDisplay=true\n\
+                Hidden=true\n"
+            );
+            std::fs::write(&desktop_file, content)?;
         }
     }
 

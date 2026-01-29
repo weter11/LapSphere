@@ -30,6 +30,7 @@ pub enum DbusCommand {
     GetBatteryAvailableEndThresholds { reply: oneshot::Sender<Result<Vec<u8>>> },
     SetBatterySettings { settings: BatterySettings, reply: oneshot::Sender<Result<()>> },
     SetFanAuto { fan_id: u32, reply: oneshot::Sender<Result<()>> },
+    SetAllFansAuto { reply: oneshot::Sender<Result<()>> },
     SetGpuLockedClocks { device_index: u32, min_clock: u32, max_clock: u32, reply: oneshot::Sender<Result<()>> },
     ResetGpuClocks { device_index: u32, reply: oneshot::Sender<Result<()>> },
     GetGpuClockRanges { device_index: u32, reply: oneshot::Sender<Result<(u32, u32)>> },
@@ -187,6 +188,12 @@ impl DbusClient {
     pub fn set_fan_auto(&self, fan_id: u32) -> oneshot::Receiver<Result<()>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.command_tx.send(DbusCommand::SetFanAuto { fan_id, reply: tx });
+        rx
+    }
+
+    pub fn set_all_fans_auto(&self) -> oneshot::Receiver<Result<()>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::SetAllFansAuto { reply: tx });
         rx
     }
 
@@ -424,6 +431,12 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
                 }
                 DbusCommand::SetFanAuto { fan_id, reply } => {
                     let result = set_fan_auto_impl(&connection, fan_id).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::SetAllFansAuto { reply } => {
+                    let result = set_all_fans_auto_impl(&connection).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
@@ -793,6 +806,17 @@ async fn set_fan_auto_impl(conn: &Connection, fan_id: u32) -> Result<()> {
         "io.lapsphere.Control",
     ).await?;
     proxy.call::<_, _, ()>("SetFanAuto", &(fan_id,)).await?;
+    Ok(())
+}
+
+async fn set_all_fans_auto_impl(conn: &Connection) -> Result<()> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
+    ).await?;
+    proxy.call::<_, _, ()>("SetAllFansAuto", &()).await?;
     Ok(())
 }
 
