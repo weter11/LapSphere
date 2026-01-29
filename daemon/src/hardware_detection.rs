@@ -10,6 +10,8 @@ use crate::tuxedo_io::{TuxedoIo, HardwareInterface};
 use systemstat::{System, Platform};
 // use tuxedo_io::TuxedoIo;
 use lapsphere_common::types::*;
+use nix::ioctl_readwrite;
+use std::os::fd::{AsRawFd, RawFd};
 
 // Thread-safe storage for previous CPU stats
 static PREVIOUS_CPU_STATS: Mutex<Option<HashMap<u32, CpuStats>>> = Mutex::new(None);
@@ -1393,6 +1395,202 @@ pub fn get_gpu_memory_offset_limits(device_index: u32) -> Result<(i32, i32)> {
     Ok((offset_info.min_clock_offset_mhz, offset_info.max_clock_offset_mhz))
 }
 
+// NVIDIA Direct Driver Constants and Structs
+const NV_IOCTL_MAGIC: u8 = b'F';
+const NV_ESC_RM_ALLOC: u8 = 0x23;
+const NV_ESC_RM_CONTROL: u8 = 0x2B;
+const NV_ESC_REGISTER_FD: u8 = 0x27;
+
+const NV01_DEVICE_0: u32 = 0x00000080;
+const NV20_SUBDEVICE_0: u32 = 0x00002080;
+
+const NV2080_CTRL_CMD_FB_GET_INFO: u32 = 0x20800101;
+const NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE: u32 = 0x01;
+const NV2080_CTRL_FB_INFO_INDEX_BUS_WIDTH: u32 = 0x02;
+const NV2080_CTRL_FB_INFO_INDEX_MEMORYINFO_VENDOR_ID: u32 = 0x06;
+
+type NvHandle = u32;
+
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+struct NVOS21_PARAMETERS {
+    hRoot: NvHandle,
+    hObjectParent: NvHandle,
+    hObjectNew: NvHandle,
+    hClass: u32,
+    pAllocParms: *mut std::ffi::c_void,
+    status: u32,
+}
+
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+struct NVOS64_PARAMETERS {
+    hRoot: NvHandle,
+    hObjectParent: NvHandle,
+    hObjectNew: NvHandle,
+    hClass: u32,
+    pAllocParms: *mut std::ffi::c_void,
+    pRightsRequested: *mut std::ffi::c_void,
+    paramsSize: u32,
+    flags: u32,
+    status: u32,
+}
+
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+struct NVOS54_PARAMETERS {
+    hClient: NvHandle,
+    hObject: NvHandle,
+    cmd: u32,
+    flags: u32,
+    params: *mut std::ffi::c_void,
+    paramsSize: u32,
+    status: u32,
+}
+
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+struct NV0080_ALLOC_PARAMETERS {
+    deviceId: u32,
+    hClientShare: NvHandle,
+    hTargetClient: NvHandle,
+    hTargetDevice: NvHandle,
+    flags: u32,
+    pad: [u32; 2],
+}
+
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+struct NV2080_ALLOC_PARAMETERS {
+    subdeviceNumber: u32,
+}
+
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+struct NV2080_CTRL_FB_GET_INFO_PARAMS {
+    fbInfoListSize: u32,
+    fbInfoList: *mut NV2080_CTRL_FB_INFO,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+struct NV2080_CTRL_FB_INFO {
+    index: u32,
+    data: u32,
+}
+
+ioctl_readwrite!(rm_alloc_nvos21, NV_IOCTL_MAGIC, NV_ESC_RM_ALLOC, NVOS21_PARAMETERS);
+ioctl_readwrite!(rm_alloc_nvos64, NV_IOCTL_MAGIC, NV_ESC_RM_ALLOC, NVOS64_PARAMETERS);
+ioctl_readwrite!(register_fd, NV_IOCTL_MAGIC, NV_ESC_REGISTER_FD, RawFd);
+ioctl_readwrite!(rm_control_nvos54, NV_IOCTL_MAGIC, NV_ESC_RM_CONTROL, NVOS54_PARAMETERS);
+
+struct NvidiaDriverHandle {
+    nvidiactl_fd: std::fs::File,
+    client_handle: NvHandle,
+    subdevice_handle: NvHandle,
+}
+
+impl NvidiaDriverHandle {
+    fn open(minor_number: u32) -> Result<Self> {
+        let nvidiactl_fd = fs::File::options()
+            .read(true)
+            .write(true)
+            .open("/dev/nvidiactl")?;
+
+        let mut client_params: NVOS21_PARAMETERS = unsafe { std::mem::zeroed() };
+        unsafe {
+            rm_alloc_nvos21(nvidiactl_fd.as_raw_fd(), &mut client_params)?;
+        }
+        let client_handle = client_params.hObjectNew;
+
+        let device_fd = fs::File::options()
+            .read(true)
+            .write(true)
+            .open(format!("/dev/nvidia{}", minor_number))?;
+
+        let mut dev_fd_raw = device_fd.as_raw_fd();
+        unsafe {
+            register_fd(device_fd.as_raw_fd(), &mut dev_fd_raw)?;
+        }
+
+        let mut alloc_params: NV0080_ALLOC_PARAMETERS = unsafe { std::mem::zeroed() };
+        alloc_params.deviceId = minor_number;
+        let mut device_request = NVOS64_PARAMETERS {
+            hRoot: client_handle,
+            hObjectParent: client_handle,
+            hObjectNew: 0,
+            hClass: NV01_DEVICE_0,
+            pAllocParms: &mut alloc_params as *mut _ as *mut _,
+            pRightsRequested: std::ptr::null_mut(),
+            paramsSize: std::mem::size_of::<NV0080_ALLOC_PARAMETERS>() as u32,
+            flags: 0,
+            status: 0,
+        };
+        unsafe {
+            rm_alloc_nvos64(nvidiactl_fd.as_raw_fd(), &mut device_request)?;
+        }
+        if device_request.status != 0 {
+            return Err(anyhow!("Failed to alloc device handle: {:x}", device_request.status));
+        }
+        let device_handle = device_request.hObjectNew;
+
+        let mut subdevice_alloc: NV2080_ALLOC_PARAMETERS = Default::default();
+        let mut subdevice_request = NVOS64_PARAMETERS {
+            hRoot: client_handle,
+            hObjectParent: device_handle,
+            hObjectNew: 0,
+            hClass: NV20_SUBDEVICE_0,
+            pAllocParms: &mut subdevice_alloc as *mut _ as *mut _,
+            pRightsRequested: std::ptr::null_mut(),
+            paramsSize: std::mem::size_of::<NV2080_ALLOC_PARAMETERS>() as u32,
+            flags: 0,
+            status: 0,
+        };
+        unsafe {
+            rm_alloc_nvos64(nvidiactl_fd.as_raw_fd(), &mut subdevice_request)?;
+        }
+        if subdevice_request.status != 0 {
+            return Err(anyhow!("Failed to alloc subdevice handle: {:x}", subdevice_request.status));
+        }
+
+        Ok(Self {
+            nvidiactl_fd,
+            client_handle,
+            subdevice_handle: subdevice_request.hObjectNew,
+        })
+    }
+
+    fn get_fb_info(&self, index: u32) -> Result<u32> {
+        let mut info = NV2080_CTRL_FB_INFO { index, data: 0 };
+        let mut params = NV2080_CTRL_FB_GET_INFO_PARAMS {
+            fbInfoListSize: 1,
+            fbInfoList: &mut info,
+        };
+        let mut request = NVOS54_PARAMETERS {
+            hClient: self.client_handle,
+            hObject: self.subdevice_handle,
+            cmd: NV2080_CTRL_CMD_FB_GET_INFO,
+            flags: 0,
+            params: &mut params as *mut _ as *mut _,
+            paramsSize: std::mem::size_of::<NV2080_CTRL_FB_GET_INFO_PARAMS>() as u32,
+            status: 0,
+        };
+        unsafe {
+            rm_control_nvos54(self.nvidiactl_fd.as_raw_fd(), &mut request)?;
+        }
+        if request.status != 0 {
+            return Err(anyhow!("RM control failed: {:x}", request.status));
+        }
+        Ok(info.data)
+    }
+}
+
 // NVAPI Constants
 const NVAPI_LIBRARY: &str = "libnvidia-api.so.1";
 const QUERY_NVAPI_INITIALIZE: u32 = 0x0150e828;
@@ -1423,29 +1621,59 @@ struct NvApiVoltage {
 }
 
 // Function to get NVIDIA extended stats (hotspot, memory temp, voltage)
-fn get_vram_info(index: u32) -> (Option<String>, Option<String>, Option<u32>, Option<f32>) {
+fn get_vram_info(minor_number: u32) -> (Option<String>, Option<String>, Option<u32>, Option<f32>) {
     // Returns (type, vendor, bus_width, bandwidth)
-    let output = std::process::Command::new("nvidia-smi")
-        .args([
-            "--query-gpu=memory.type,memory.vendor,memory.bus_width,memory.bandwidth",
-            "--format=csv,noheader,nounits",
-            "-i",
-            &index.to_string(),
-        ])
-        .output();
+    match NvidiaDriverHandle::open(minor_number) {
+        Ok(handle) => {
+            let ram_type_val = handle.get_fb_info(NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE).ok();
+            let bus_width = handle.get_fb_info(NV2080_CTRL_FB_INFO_INDEX_BUS_WIDTH).ok();
+            let vendor_id = handle.get_fb_info(NV2080_CTRL_FB_INFO_INDEX_MEMORYINFO_VENDOR_ID).ok();
 
-    if let Ok(out) = output {
-        let s = String::from_utf8_lossy(&out.stdout);
-        let parts: Vec<&str> = s.trim().split(',').map(|p| p.trim()).collect();
-        if parts.len() == 4 {
-            let v_type = if parts[0] != "[Not Supported]" { Some(parts[0].to_string()) } else { None };
-            let v_vendor = if parts[1] != "[Not Supported]" { Some(parts[1].to_string()) } else { None };
-            let v_bus = parts[2].parse::<u32>().ok();
-            let v_bw = parts[3].parse::<f32>().ok();
-            return (v_type, v_vendor, v_bus, v_bw);
+            let ram_type = ram_type_val.map(|v| match v {
+                0x00000001 => "SDRAM",
+                0x00000002 => "DDR1",
+                0x00000003 => "DDR2",
+                0x00000004 => "DDR3",
+                0x00000005 => "GDDR2",
+                0x00000006 => "GDDR3",
+                0x00000007 => "GDDR4",
+                0x00000008 => "GDDR5",
+                0x00000009 => "LPDDR2",
+                0x0000000A => "GDDR5X",
+                0x0000000B => "GDDR6",
+                0x0000000C => "GDDR6X",
+                0x0000000D => "HBM1",
+                0x0000000E => "HBM2",
+                0x0000000F => "HBM3",
+                0x00000010 => "LPDDR4",
+                0x00000011 => "LPDDR5",
+                0x00000012 => "GDDR7",
+                _ => "Unknown",
+            }.to_string());
+
+            let vendor = vendor_id.map(|v| match v {
+                0x00000001 => "Micron",
+                0x00000002 => "Samsung",
+                0x00000003 => "Qimonda",
+                0x00000004 => "Elpida",
+                0x00000005 => "Etron",
+                0x00000006 => "Nanya",
+                0x00000007 => "Hynix",
+                0x00000008 => "Mosel",
+                0x00000009 => "Winbond",
+                0x0000000A => "ESMT",
+                _ => "Unknown",
+            }.to_string());
+
+            // Bandwidth calculation: (Clock * 2 (for DDR) * BusWidth) / 8 / 1000?
+            // Actually bandwidth is complex to calculate without current clock.
+            // NVML already provides memory bandwidth in some versions but not all.
+            // nvidia/nvidia.rs doesn't seem to calculate it, just returns None.
+
+            (ram_type, vendor, bus_width, None)
         }
+        Err(_) => (None, None, None, None),
     }
-    (None, None, None, None)
 }
 
 fn get_nvidia_extended_stats(gpu_index: u32) -> (Option<f32>, Option<f32>, Option<f32>) {
@@ -1793,31 +2021,8 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
 
         let (min_core_clock, max_core_clock) = (None, None); // NVML wrapper 0.11 doesn't have a getter
 
-        // Probe logic for desktop GPU detection
         let num_fans = device.num_fans().unwrap_or(0);
-        let mut is_desktop = num_fans > 0;
-
-        if let Ok(pci_info) = device.pci_info() {
-            let sub_vendor = (pci_info.pci_sub_system_id.unwrap_or(0) & 0xFFFF) as u16;
-            // Desktop-associated vendors
-            let desktop_vendors = [0x10de, 0x1043, 0x1458, 0x1462, 0x3842, 0x19da, 0x14af, 0x196e, 0x1bc5];
-            // Mobile-associated vendors
-            let mobile_vendors = [0x1028, 0x17aa, 0x103c, 0x1558, 0x106b, 0x144d, 0x104d, 0x10cf];
-
-            if desktop_vendors.contains(&sub_vendor) {
-                is_desktop = true;
-            } else if mobile_vendors.contains(&sub_vendor) {
-                is_desktop = false;
-            }
-
-            // Check for runtime status presence as a laptop-only pattern (Optimus/Hybrid)
-            if let Some(pci_id) = nvidia_pci_ids.get(i as usize) {
-                let status_path = format!("/sys/bus/pci/devices/{}/power/runtime_status", pci_id);
-                if Path::new(&status_path).exists() {
-                    is_desktop = false;
-                }
-            }
-        }
+        let is_desktop = false; // Deprecated, using capability flags instead
 
         let architecture = device.architecture().ok().map(|arch| arch.to_string());
 
@@ -1833,7 +2038,15 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         let supports_gpu_offset = device.clock_offset(Clock::Graphics, PerformanceState::Zero).is_ok();
         let supports_mem_offset = device.clock_offset(Clock::Memory, PerformanceState::Zero).is_ok();
 
-        let (v_type, v_vendor, v_bus, v_bw) = get_vram_info(i);
+        let minor_number = device.minor_number().unwrap_or(i);
+        let (v_type, v_vendor, v_bus, mut v_bw) = get_vram_info(minor_number);
+
+        if v_bw.is_none() {
+            if let (Some(bus), Some((_, max_mem))) = (v_bus, memory_clock_range) {
+                // Approximate max bandwidth: (Max Clock * 2 (DDR) * Bus Width) / 8 / 1000
+                v_bw = Some((max_mem as f32 * 2.0 * bus as f32) / 8000.0);
+            }
+        }
 
         let mut gpu_info = GpuInfo {
             name: name.clone(),
@@ -1866,7 +2079,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             power_limit_range,
             supports_gpu_offset,
             supports_mem_offset,
-            fan_speed_range: if is_desktop { Some((0, 100)) } else { None },
+            fan_speed_range: if num_fans > 0 { Some((0, 100)) } else { None },
             vram_type: v_type,
             vram_vendor: v_vendor,
             vram_bus_width: v_bus,

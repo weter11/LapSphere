@@ -346,24 +346,6 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                             });
                             ui.end_row();
                             
-                            if let Some(ref driver) = gpu.driver_version {
-                                ui.label("Driver Version:");
-                                ui.label(driver);
-                                ui.end_row();
-                            }
-
-                            if let Some(ref arch) = gpu.architecture {
-                                ui.label("Architecture:");
-                                ui.label(arch);
-                                ui.end_row();
-                            }
-
-                            if !gpu.supported_p_states.is_empty() {
-                                ui.label("Supported P-States:");
-                                ui.label(gpu.supported_p_states.join(", "));
-                                ui.end_row();
-                            }
-
                             ui.label("Status:");
                             // Display performance state with better formatting
                             let is_suspended = gpu.status.to_lowercase().contains("suspended");
@@ -409,44 +391,37 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                                 ui.end_row();
                             }
 
-                            if let Some(ref v_type) = gpu.vram_type {
-                                ui.label("VRAM Type:");
-                                ui.label(v_type);
-                                ui.end_row();
-                            }
-
-                            if let Some(ref v_vendor) = gpu.vram_vendor {
-                                ui.label("VRAM Vendor:");
-                                ui.label(v_vendor);
-                                ui.end_row();
-                            }
-
-                            if let Some(v_bus) = gpu.vram_bus_width {
-                                ui.label("Bus Width:");
-                                ui.label(format!("{}-bit", v_bus));
-                                ui.end_row();
-                            }
-
-                            if let Some(v_bw) = gpu.vram_bandwidth {
-                                ui.label("VRAM Bandwidth:");
-                                ui.label(format!("{:.1} GB/s", v_bw));
-                                ui.end_row();
-                            }
-                            
-                            if let Some(mem_freq) = gpu.memory_frequency {
+                            if let Some(mut mem_freq) = gpu.memory_frequency {
                                 ui.label("Memory Frequency:");
                                 ui.horizontal(|ui| {
+                                    if let Some(ref v_type) = gpu.vram_type {
+                                        if v_type.to_lowercase().contains("gddr6") {
+                                            mem_freq *= 2;
+                                        }
+                                    }
                                     ui.label(format!("{} MHz", mem_freq));
                                     if let Some((min, max)) = gpu.memory_clock_range {
-                                        ui.label(RichText::new(format!(" (Range: {} - {} MHz)", min, max)).small().italics());
+                                        let mut mult = 1;
+                                        if let Some(ref v_type) = gpu.vram_type {
+                                            if v_type.to_lowercase().contains("gddr6") {
+                                                mult = 2;
+                                            }
+                                        }
+                                        ui.label(RichText::new(format!(" (Range: {} - {} MHz)", min * mult, max * mult)).small().italics());
                                     }
                                 });
                                 ui.end_row();
                             }
 
                             if let (Some(min), Some(max)) = (gpu.min_memory_clock, gpu.max_memory_clock) {
+                                let mut mult = 1;
+                                if let Some(ref v_type) = gpu.vram_type {
+                                    if v_type.to_lowercase().contains("gddr6") {
+                                        mult = 2;
+                                    }
+                                }
                                 ui.label("Locked Memory Clocks:");
-                                ui.label(RichText::new(format!("{} - {} MHz", min, max)).strong());
+                                ui.label(RichText::new(format!("{} - {} MHz", min * mult, max * mult)).strong());
                                 ui.end_row();
                             }
                             
@@ -499,23 +474,6 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                                 ui.end_row();
                             }
 
-                            if gpu.supports_power_limit {
-                                ui.label("Power Limit Support:");
-                                ui.label("✅ Supported");
-                                ui.end_row();
-
-                                if let Some((min, max)) = gpu.power_limit_range {
-                                    ui.label("Power Limit Range:");
-                                    ui.label(format!("{} - {} W", min, max));
-                                    ui.end_row();
-                                }
-                            }
-
-                            if let Some((min, max)) = gpu.fan_speed_range {
-                                ui.label("Fan Speed Range:");
-                                ui.label(format!("{} - {}%", min, max));
-                                ui.end_row();
-                            }
 
                             if let Some(fo) = gpu.freq_offset {
                                 ui.label("Freq Offset:");
