@@ -391,37 +391,20 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                                 ui.end_row();
                             }
 
-                            if let Some(mut mem_freq) = gpu.memory_frequency {
+                            if let Some(mem_freq) = gpu.memory_frequency {
                                 ui.label("Memory Frequency:");
                                 ui.horizontal(|ui| {
-                                    if let Some(ref v_type) = gpu.vram_type {
-                                        if v_type.to_lowercase().contains("gddr6") {
-                                            mem_freq *= 2;
-                                        }
-                                    }
                                     ui.label(format!("{} MHz", mem_freq));
                                     if let Some((min, max)) = gpu.memory_clock_range {
-                                        let mut mult = 1;
-                                        if let Some(ref v_type) = gpu.vram_type {
-                                            if v_type.to_lowercase().contains("gddr6") {
-                                                mult = 2;
-                                            }
-                                        }
-                                        ui.label(RichText::new(format!(" (Range: {} - {} MHz)", min * mult, max * mult)).small().italics());
+                                        ui.label(RichText::new(format!(" (Range: {} - {} MHz)", min, max)).small().italics());
                                     }
                                 });
                                 ui.end_row();
                             }
 
                             if let (Some(min), Some(max)) = (gpu.min_memory_clock, gpu.max_memory_clock) {
-                                let mut mult = 1;
-                                if let Some(ref v_type) = gpu.vram_type {
-                                    if v_type.to_lowercase().contains("gddr6") {
-                                        mult = 2;
-                                    }
-                                }
                                 ui.label("Locked Memory Clocks:");
-                                ui.label(RichText::new(format!("{} - {} MHz", min * mult, max * mult)).strong());
+                                ui.label(RichText::new(format!("{} - {} MHz", min, max)).strong());
                                 ui.end_row();
                             }
                             

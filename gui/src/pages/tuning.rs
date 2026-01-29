@@ -5,6 +5,7 @@ use lapsphere_common::types::{KeyboardMode, Profile, FanCurve, KeyboardCapabilit
 use crate::widgets::fan_curve_editor::FanCurveEditor;
 
 pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>, hw_update_tx: tokio::sync::mpsc::UnboundedSender<crate::app::HardwareUpdate>) {
+    ui.spacing_mut().slider_width = 400.0;
     let profile_idx = state.current_profile_index();
     
     if profile_idx.is_none() {
@@ -381,7 +382,8 @@ fn draw_cpu_tuning(
                 ui.label("Min:");
                 if ui.add(Slider::new(&mut min_freq,
                     (hw_min / 1000) as f64..=(hw_max / 1000) as f64)
-                    .suffix(" MHz")).changed() {
+                    .suffix(" MHz")
+                    ).changed() {
                     // Ensure min doesn't exceed max
                     if min_freq > max_freq {
                         max_freq = min_freq;
@@ -393,7 +395,8 @@ fn draw_cpu_tuning(
                 ui.label("Max:");
                 if ui.add(Slider::new(&mut max_freq,
                     (hw_min / 1000) as f64..=(hw_max / 1000) as f64)
-                    .suffix(" MHz")).changed() {
+                    .suffix(" MHz")
+                    ).changed() {
                     // Ensure max doesn't go below min
                     if max_freq < min_freq {
                         min_freq = max_freq;
@@ -580,11 +583,7 @@ fn draw_gpu_standard_controls(
     ui.add_space(6.0);
     // GPU Locked Clocks section
     ui.label(RichText::new("GPU Locked Clocks:").strong());
-    if let Some((mut min_range, mut max_range)) = gpu_clock_ranges {
-        if let Some(offset) = profile.gpu_settings.core_offset {
-            min_range = (min_range as f32 + offset).round() as u32;
-            max_range = (max_range as f32 + offset).round() as u32;
-        }
+    if let Some((min_range, max_range)) = gpu_clock_ranges {
         let mut min_gpu_clock = profile.gpu_settings.min_gpu_clock.unwrap_or(min_range);
         let mut max_gpu_clock = profile.gpu_settings.max_gpu_clock.unwrap_or(max_range);
 
@@ -616,43 +615,24 @@ fn draw_gpu_standard_controls(
 
     // Memory Locked Clocks section
     ui.label(RichText::new("Memory Locked Clocks:").strong());
-    if let Some((mut min_range, mut max_range)) = gpu_mem_clock_ranges {
-        if let Some(offset) = profile.gpu_settings.memory_offset {
-            min_range = (min_range as f32 + offset).round() as u32;
-            max_range = (max_range as f32 + offset).round() as u32;
-        }
-
-        let mut multiplier = 1;
-        if let Some(ref v_type) = gpu_info.vram_type {
-            if v_type.to_lowercase().contains("gddr6") {
-                multiplier = 2;
-            }
-        }
-
+    if let Some((min_range, max_range)) = gpu_mem_clock_ranges {
         let mut min_mem_clock = profile.gpu_settings.min_mem_clock.unwrap_or(min_range);
         let mut max_mem_clock = profile.gpu_settings.max_mem_clock.unwrap_or(max_range);
 
-        let mut min_mem_clock_disp = min_mem_clock * multiplier;
-        let mut max_mem_clock_disp = max_mem_clock * multiplier;
-
         ui.horizontal(|ui| {
             ui.label("Min:");
-            if ui.add(Slider::new(&mut min_mem_clock_disp, (min_range * multiplier)..=(max_range * multiplier)).suffix(" MHz")).changed() {
-                min_mem_clock = min_mem_clock_disp / multiplier;
+            if ui.add(Slider::new(&mut min_mem_clock, min_range..=max_range).suffix(" MHz")).changed() {
                 if min_mem_clock > max_mem_clock {
                     max_mem_clock = min_mem_clock;
-                    max_mem_clock_disp = max_mem_clock * multiplier;
                 }
             }
         });
 
         ui.horizontal(|ui| {
             ui.label("Max:");
-            if ui.add(Slider::new(&mut max_mem_clock_disp, (min_range * multiplier)..=(max_range * multiplier)).suffix(" MHz")).changed() {
-                max_mem_clock = max_mem_clock_disp / multiplier;
+            if ui.add(Slider::new(&mut max_mem_clock, min_range..=max_range).suffix(" MHz")).changed() {
                 if max_mem_clock < min_mem_clock {
                     min_mem_clock = max_mem_clock;
-                    min_mem_clock_disp = min_mem_clock * multiplier;
                 }
             }
         });
