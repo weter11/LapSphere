@@ -1556,26 +1556,31 @@ struct NvidiaDriverHandle {
 
 impl NvidiaDriverHandle {
     fn open(minor_number: u32) -> Result<Self> {
+        log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Attempting to open for minor {}", minor_number);
         let nvidiactl_fd = fs::File::options()
             .read(true)
             .write(true)
             .open("/dev/nvidiactl")?;
+        log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Opened /dev/nvidiactl");
 
         let mut client_params: NVOS21_PARAMETERS = unsafe { std::mem::zeroed() };
         unsafe {
             rm_alloc_nvos21(nvidiactl_fd.as_raw_fd(), &mut client_params)?;
         }
         let client_handle = client_params.hObjectNew;
+        log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Got client_handle={}", client_handle);
 
         let device_fd = fs::File::options()
             .read(true)
             .write(true)
             .open(format!("/dev/nvidia{}", minor_number))?;
+        log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Opened /dev/nvidia{}", minor_number);
 
         let mut dev_fd_raw = device_fd.as_raw_fd();
         unsafe {
             register_fd(device_fd.as_raw_fd(), &mut dev_fd_raw)?;
         }
+        log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Registered device FD");
 
         let mut alloc_params: NV0080_ALLOC_PARAMETERS = unsafe { std::mem::zeroed() };
         alloc_params.deviceId = minor_number;
@@ -1594,9 +1599,11 @@ impl NvidiaDriverHandle {
             rm_alloc_nvos64(nvidiactl_fd.as_raw_fd(), &mut device_request)?;
         }
         if device_request.status != 0 {
+            log::error!(target: "hw.detect", "NvidiaDriverHandle::open: Failed to alloc device handle: {:x}", device_request.status);
             return Err(anyhow!("Failed to alloc device handle: {:x}", device_request.status));
         }
         let device_handle = device_request.hObjectNew;
+        log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Got device_handle={}", device_handle);
 
         let mut subdevice_alloc: NV2080_ALLOC_PARAMETERS = Default::default();
         let mut subdevice_request = NVOS64_PARAMETERS {
@@ -1614,8 +1621,10 @@ impl NvidiaDriverHandle {
             rm_alloc_nvos64(nvidiactl_fd.as_raw_fd(), &mut subdevice_request)?;
         }
         if subdevice_request.status != 0 {
+            log::error!(target: "hw.detect", "NvidiaDriverHandle::open: Failed to alloc subdevice handle: {:x}", subdevice_request.status);
             return Err(anyhow!("Failed to alloc subdevice handle: {:x}", subdevice_request.status));
         }
+        log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Got subdevice_handle={}, successfully opened", subdevice_request.hObjectNew);
 
         Ok(Self {
             nvidiactl_fd,
@@ -1639,9 +1648,13 @@ impl NvidiaDriverHandle {
             paramsSize: std::mem::size_of::<NV2080_CTRL_FB_GET_INFO_PARAMS>() as u32,
             status: 0,
         };
+        log::debug!(target: "hw.detect", "get_fb_info: index={}, hClient={}, hObject={}, cmd={:x}, paramsSize={}",
+            index, self.client_handle, self.subdevice_handle, request.cmd, request.paramsSize);
         unsafe {
             rm_control_nvos54(self.nvidiactl_fd.as_raw_fd(), &mut request)?;
         }
+        log::debug!(target: "hw.detect", "get_fb_info: request.status={:x}, info.data={:x}", 
+            request.status, info.data);
         if request.status != 0 {
             return Err(anyhow!("RM control failed: {:x}", request.status));
         }
