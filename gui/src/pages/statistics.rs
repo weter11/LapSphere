@@ -1,7 +1,6 @@
 use egui::{Ui, ScrollArea, CollapsingHeader, Grid, ProgressBar, RichText};
 use egui::Color32;
 use crate::app::AppState;
-use webbrowser;
 use crate::theme::{temp_color, load_color, power_color};
 
 pub const STATISTICS_SECTIONS: [(&str, &str); 8] = [
@@ -36,16 +35,7 @@ pub fn normalize_section_order(order: &[String]) -> Vec<String> {
 
 pub fn draw(ui: &mut Ui, state: &mut AppState) {
     ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        ui.heading("📊 Statistics");
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("📂 Crash Reports").on_hover_text("Open folder with crash reports").clicked() {
-                let crash_dir = crate::app::get_crash_dir();
-                let _ = std::fs::create_dir_all(&crash_dir);
-                let _ = webbrowser::open(&crash_dir);
-            }
-        });
-    });
+    ui.heading("📊 Statistics");
     ui.add_space(6.0);
     ui.separator();
 
@@ -413,6 +403,7 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                                 ui.label(format!("{:.3} V", voltage));
                                 ui.end_row();
                             }
+
 
 
                             if let Some(fo) = gpu.freq_offset {

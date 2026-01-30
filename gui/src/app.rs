@@ -62,6 +62,7 @@ pub struct AppState {
     pub log_filter_info: bool,
     pub log_filter_warn: bool,
     pub log_filter_error: bool,
+    pub log_paused: bool,
     
     // UI state
     pub current_page: Page,
@@ -119,6 +120,7 @@ impl AppState {
             log_filter_info: true,
             log_filter_warn: true,
             log_filter_error: true,
+            log_paused: false,
             keyboard_capabilities: None,
             current_page: Page::Statistics,
             settings_tab: SettingsTab::Main,
@@ -500,7 +502,9 @@ impl LapSphereApp {
                     self.state.webcam_enabled = Some(state);
                 }
                 HardwareUpdate::DaemonLogs(logs) => {
-                    self.state.daemon_logs = logs;
+                    if !self.state.log_paused {
+                        self.state.daemon_logs = logs;
+                    }
                 }
                 HardwareUpdate::UpdateInfo(version, changelog) => {
                     self.state.new_version_available = Some(version);

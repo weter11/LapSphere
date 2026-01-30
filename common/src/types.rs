@@ -13,6 +13,7 @@ pub struct SystemInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry {
     pub level: String,
+    pub target: String,
     pub message: String,
     pub timestamp: String,
 }

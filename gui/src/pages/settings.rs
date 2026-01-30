@@ -39,7 +39,16 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTheme, ctx: 
 }
 
 fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
-    ui.label(RichText::new("Daemon Logs (last 100 lines)").strong().heading());
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Daemon Logs (last 1000 lines)").strong().heading());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("📂 Crash Reports").on_hover_text("Open folder with crash reports").clicked() {
+                let crash_dir = crate::app::get_crash_dir();
+                let _ = std::fs::create_dir_all(&crash_dir);
+                let _ = webbrowser::open(&crash_dir);
+            }
+        });
+    });
     ui.add_space(8.0);
 
     ui.horizontal(|ui| {
@@ -50,12 +59,20 @@ fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
                 .join("\n");
             ctx.output_mut(|o| o.copied_text = log_text);
         }
+
+        if ui.button(if state.log_paused { "▶ Resume Output" } else { "⏸ Pause Output" }).clicked() {
+            state.log_paused = !state.log_paused;
+        }
+
+        if state.log_paused {
+            ui.label(RichText::new("Output Paused").color(egui::Color32::from_rgb(255, 200, 0)).strong());
+        }
     });
 
     ui.add_space(8.0);
 
     ui.horizontal(|ui| {
-        ui.label("Filter:");
+        ui.label("Filter Level:");
         ui.checkbox(&mut state.log_filter_error, "Error");
         ui.checkbox(&mut state.log_filter_warn, "Warning");
         ui.checkbox(&mut state.log_filter_info, "Info");
@@ -68,18 +85,19 @@ fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for entry in state.daemon_logs.iter().rev() {
-                let show = match entry.level.as_str() {
+                let level_upper = entry.level.to_uppercase();
+                let show = match level_upper.as_str() {
                     "ERROR" => state.log_filter_error,
-                    "WARN" => state.log_filter_warn,
+                    "WARN" | "WARNING" => state.log_filter_warn,
                     "INFO" => state.log_filter_info,
                     "DEBUG" | "TRACE" => state.log_filter_debug,
                     _ => true,
                 };
 
                 if show {
-                    let color = match entry.level.as_str() {
+                    let color = match level_upper.as_str() {
                         "ERROR" => egui::Color32::from_rgb(255, 100, 100),
-                        "WARN" => egui::Color32::from_rgb(255, 200, 100),
+                        "WARN" | "WARNING" => egui::Color32::from_rgb(255, 200, 100),
                         "DEBUG" | "TRACE" => egui::Color32::from_rgb(150, 150, 150),
                         _ => ui.visuals().text_color(),
                     };
@@ -87,6 +105,7 @@ fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
                     ui.horizontal_top(|ui| {
                         ui.label(RichText::new(&entry.timestamp).weak().monospace());
                         ui.label(RichText::new(&entry.level).color(color).strong().monospace());
+                        ui.label(RichText::new(&entry.target).color(egui::Color32::from_rgb(100, 150, 255)).monospace());
                         ui.label(RichText::new(&entry.message).monospace());
                     });
                 }
@@ -721,25 +740,25 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
                     ui.label(format!("{:?}", gpu.gpu_type));
                     ui.end_row();
 
-                    if gpu.name.contains("NVIDIA") {
-                        if let Some(ref driver) = gpu.driver_version {
-                            ui.label("Driver Version:");
-                            ui.label(driver);
-                            ui.end_row();
-                        }
+                    if let Some(ref driver) = gpu.driver_version {
+                        ui.label("Driver Version:");
+                        ui.label(driver);
+                        ui.end_row();
+                    }
 
-                        if let Some(ref arch) = gpu.architecture {
-                            ui.label("Architecture:");
-                            ui.label(arch);
-                            ui.end_row();
-                        }
+                    if let Some(ref arch) = gpu.architecture {
+                        ui.label("Architecture:");
+                        ui.label(arch);
+                        ui.end_row();
+                    }
 
-                        if !gpu.supported_p_states.is_empty() {
-                            ui.label("Supported P-States:");
-                            ui.label(gpu.supported_p_states.join(", "));
-                            ui.end_row();
-                        }
+                    if !gpu.supported_p_states.is_empty() {
+                        ui.label("Supported P-States:");
+                        ui.label(gpu.supported_p_states.join(", "));
+                        ui.end_row();
+                    }
 
+                    if gpu.gpu_type == lapsphere_common::types::GpuType::Discrete {
                         ui.label("Power Limit Support:");
                         ui.label(if gpu.supports_power_limit { "✅ Supported" } else { "❌ Not Supported" });
                         ui.end_row();
@@ -749,30 +768,30 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
                             ui.label(format!("{} - {} W", min, max));
                             ui.end_row();
                         }
+                    }
 
-                        if let Some(ref v_type) = gpu.vram_type {
-                            ui.label("VRAM Type:");
-                            ui.label(v_type);
-                            ui.end_row();
-                        }
+                    if let Some(ref v_type) = gpu.vram_type {
+                        ui.label("VRAM Type:");
+                        ui.label(v_type);
+                        ui.end_row();
+                    }
 
-                        if let Some(ref v_vendor) = gpu.vram_vendor {
-                            ui.label("VRAM Vendor:");
-                            ui.label(v_vendor);
-                            ui.end_row();
-                        }
+                    if let Some(ref v_vendor) = gpu.vram_vendor {
+                        ui.label("VRAM Vendor:");
+                        ui.label(v_vendor);
+                        ui.end_row();
+                    }
 
-                        if let Some(v_bus) = gpu.vram_bus_width {
-                            ui.label("Bus Width:");
-                            ui.label(format!("{}-bit", v_bus));
-                            ui.end_row();
-                        }
+                    if let Some(v_bus) = gpu.vram_bus_width {
+                        ui.label("Bus Width:");
+                        ui.label(format!("{}-bit", v_bus));
+                        ui.end_row();
+                    }
 
-                        if let Some(v_bw) = gpu.vram_bandwidth {
-                            ui.label("VRAM Bandwidth:");
-                            ui.label(format!("{:.1} GB/s", v_bw));
-                            ui.end_row();
-                        }
+                    if let Some(v_bw) = gpu.vram_bandwidth {
+                        ui.label("VRAM Bandwidth:");
+                        ui.label(format!("{:.1} GB/s", v_bw));
+                        ui.end_row();
                     }
                 });
 

@@ -641,7 +641,7 @@ fn read_available_epp_options() -> Vec<String> {
 
 pub fn get_tdp_profiles() -> Result<Vec<String>> {
     if !TuxedoIo::is_available() {
-        log::info!("TDP profiles not available (/dev/tuxedo_io not present)");
+        log::debug!(target: "hw.detect", "TDP profiles not available (/dev/tuxedo_io not present)");
         return Ok(vec![]);
     }
     
@@ -649,17 +649,22 @@ pub fn get_tdp_profiles() -> Result<Vec<String>> {
         Ok(io) => {
             match io.get_available_profiles() {
                 Ok(profiles) => {
-                    log::info!("Available TDP profiles: {:?}", profiles);
+                    static LOGGED_ONCE: Mutex<bool> = Mutex::new(false);
+                    let mut logged = LOGGED_ONCE.lock().unwrap();
+                    if !*logged {
+                        log::info!(target: "hw.detect", "Available TDP profiles: {:?}", profiles);
+                        *logged = true;
+                    }
                     Ok(profiles)
                 }
                 Err(e) => {
-                    log::warn!("Failed to get TDP profiles: {}", e);
+                    log::warn!(target: "hw.detect", "Failed to get TDP profiles: {}", e);
                     Ok(vec![])
                 }
             }
         }
         Err(e) => {
-            log::warn!("Failed to open /dev/tuxedo_io: {}", e);
+            log::warn!(target: "hw.detect", "Failed to open /dev/tuxedo_io: {}", e);
             Ok(vec![])
         }
     }
@@ -1676,11 +1681,15 @@ struct NvApiVoltage {
 // Function to get NVIDIA extended stats (hotspot, memory temp, voltage)
 fn get_vram_info(minor_number: u32) -> (Option<String>, Option<String>, Option<u32>, Option<f32>) {
     // Returns (type, vendor, bus_width, bandwidth)
+    log::debug!(target: "hw.detect", "Attempting to get VRAM info for NVIDIA device minor {}", minor_number);
     match NvidiaDriverHandle::open(minor_number) {
         Ok(handle) => {
             let ram_type_val = handle.get_fb_info(NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE).ok();
             let bus_width = handle.get_fb_info(NV2080_CTRL_FB_INFO_INDEX_BUS_WIDTH).ok();
             let vendor_id = handle.get_fb_info(NV2080_CTRL_FB_INFO_INDEX_MEMORYINFO_VENDOR_ID).ok();
+
+            log::debug!(target: "hw.detect", "VRAM raw info for minor {}: type={:?}, bus={:?}, vendor={:?}",
+                minor_number, ram_type_val, bus_width, vendor_id);
 
             let ram_type = ram_type_val.map(|v| match v {
                 0x00000001 => "SDRAM",
@@ -1725,7 +1734,10 @@ fn get_vram_info(minor_number: u32) -> (Option<String>, Option<String>, Option<u
 
             (ram_type, vendor, bus_width, None)
         }
-        Err(_) => (None, None, None, None),
+        Err(e) => {
+            log::warn!(target: "hw.detect", "Failed to open NvidiaDriverHandle for minor {}: {}", minor_number, e);
+            (None, None, None, None)
+        }
     }
 }
 
@@ -2148,6 +2160,15 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                     }
                 }
 
+                // Fallback for memory clock range
+                if mem_range.is_none() {
+                    if let Ok(clocks) = device.supported_memory_clocks() {
+                        if let (Some(&c_min), Some(&c_max)) = (clocks.iter().min(), clocks.iter().max()) {
+                            mem_range = Some((c_min, c_max));
+                        }
+                    }
+                }
+
                 let meta = NvidiaMetadata {
                     architecture: arch,
                     supported_p_states: p_states,
@@ -2179,8 +2200,18 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         let mut v_bw = None;
 
         if let (Some(bus), Some((_, max_mem))) = (v_bus, memory_clock_range) {
-            // Approximate max bandwidth: (Max Clock * 2 (DDR) * Bus Width) / 8 / 1000
-            v_bw = Some((max_mem as f32 * 2.0 * bus as f32) / 8000.0);
+            let mut multiplier = 2.0; // Default for DDR
+            if let Some(ref t) = v_type {
+                if t.contains("GDDR6X") {
+                    multiplier = 16.0;
+                } else if t.contains("GDDR6") {
+                    multiplier = 8.0;
+                } else if t.contains("GDDR5") {
+                    multiplier = 4.0;
+                }
+            }
+            // Bandwidth (GB/s) = (Clock * Multiplier * Bus Width) / 8 bits / 1000 MHz
+            v_bw = Some((max_mem as f32 * multiplier * bus as f32) / 8000.0);
         }
 
         let mut gpu_info = GpuInfo {
@@ -2468,7 +2499,7 @@ pub fn get_wifi_info() -> Result<Vec<WiFiInfo>> {
         // Calculate actual throughput
         let (tx_rate, rx_rate) = read_wifi_rates(&interface, final_tx_bytes, final_rx_bytes);
         
-        log::info!("WiFi {} details: SSID={:?}, Signal={:?}, Channel={:?}, Rates={:?}/{:?}",
+        log::debug!(target: "hw.detect", "WiFi {} details: SSID={:?}, Signal={:?}, Channel={:?}, Rates={:?}/{:?}",
                    interface, ssid, signal_level, channel, tx_rate, rx_rate);
 
         wifi_devices.push(WiFiInfo {
