@@ -81,6 +81,9 @@ impl log::Log for DaemonLogger {
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut builder = env_logger::Builder::from_default_env();
+    if std::env::var("RUST_LOG").is_err() {
+        builder.filter_level(log::LevelFilter::Info);
+    }
     let inner = builder.build();
     let max_level = inner.filter();
     let logger = DaemonLogger { inner };
