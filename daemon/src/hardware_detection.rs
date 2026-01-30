@@ -2216,7 +2216,32 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         let metadata = {
             let mut cache = NVIDIA_METADATA_CACHE.lock().unwrap();
             if let Some(meta) = cache.get(&i) {
-                meta.clone()
+                // Check if cached VRAM info is None - if so, retry getting it
+                // This handles cases where initial detection failed (GPU suspended, driver not ready, etc.)
+                if meta.vram_type.is_none() && meta.vram_vendor.is_none() && meta.vram_bus_width.is_none() {
+                    log::info!(target: "hw.detect", "GPU {}: Cached VRAM is None, retrying detection", i);
+                    let minor_number = device.minor_number().unwrap_or(i);
+                    let (vram_type, vram_vendor, vram_bus_width, _) = get_vram_info(minor_number);
+                    
+                    // If we successfully got VRAM info, update the cache
+                    if vram_type.is_some() || vram_vendor.is_some() || vram_bus_width.is_some() {
+                        log::info!(target: "hw.detect", "GPU {}: Successfully detected VRAM on retry - Type: {:?}, Vendor: {:?}, Bus: {:?}",
+                            i, vram_type, vram_vendor, vram_bus_width);
+                        let updated_meta = NvidiaMetadata {
+                            vram_type,
+                            vram_vendor,
+                            vram_bus_width,
+                            ..meta.clone()
+                        };
+                        cache.insert(i, updated_meta.clone());
+                        updated_meta
+                    } else {
+                        log::debug!(target: "hw.detect", "GPU {}: VRAM detection retry also returned None", i);
+                        meta.clone()
+                    }
+                } else {
+                    meta.clone()
+                }
             } else {
                 let arch = device.architecture().ok().map(|arch| arch.to_string());
                 let p_states = device.supported_performance_states().ok()
