@@ -59,6 +59,7 @@ impl log::Log for DaemonLogger {
         if record.level() <= log::Level::Info || self.inner.enabled(record.metadata()) {
             let entry = LogEntry {
                 level: record.level().to_string(),
+                target: record.target().to_string(),
                 message: record.args().to_string(),
                 timestamp: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
             };
@@ -88,6 +89,7 @@ async fn main() -> Result<()> {
     let mut builder = env_logger::Builder::from_default_env();
     if std::env::var("RUST_LOG").is_err() {
         builder.filter_level(log::LevelFilter::Info);
+        builder.filter(Some("zbus"), log::LevelFilter::Warn);
     }
     let inner = builder.build();
     let _max_level = inner.filter();
@@ -97,8 +99,6 @@ async fn main() -> Result<()> {
     log::set_max_level(log::LevelFilter::Debug); // Allow up to Debug to reach our logger for buffer
 
     log::info!("Starting LapSphere Daemon");
-    log::warn!("Test Warning Log: Log system initialized");
-    log::error!("Test Error Log: System ready");
 
     let args: Vec<String> = std::env::args().collect();
 
@@ -296,7 +296,7 @@ async fn main() -> Result<()> {
         move || {
             let tick = log_tick.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
             if tick % 60 == 0 {
-                log::warn!("Daemon heartbeat. Uptime tick: {}", tick);
+                log::warn!(target: "daemon", "heartbeat uptime_tick={}", tick);
             }
             gpu_poll_fn()
         }

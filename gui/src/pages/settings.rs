@@ -40,7 +40,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTheme, ctx: 
 
 fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Daemon Logs (last 500 lines)").strong().heading());
+        ui.label(RichText::new("Daemon Logs (last 1000 lines)").strong().heading());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button("📂 Crash Reports").on_hover_text("Open folder with crash reports").clicked() {
                 let crash_dir = crate::app::get_crash_dir();
@@ -72,7 +72,7 @@ fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
     ui.add_space(8.0);
 
     ui.horizontal(|ui| {
-        ui.label("Filter:");
+        ui.label("Filter Level:");
         ui.checkbox(&mut state.log_filter_error, "Error");
         ui.checkbox(&mut state.log_filter_warn, "Warning");
         ui.checkbox(&mut state.log_filter_info, "Info");
@@ -105,6 +105,7 @@ fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
                     ui.horizontal_top(|ui| {
                         ui.label(RichText::new(&entry.timestamp).weak().monospace());
                         ui.label(RichText::new(&entry.level).color(color).strong().monospace());
+                        ui.label(RichText::new(&entry.target).color(egui::Color32::from_rgb(100, 150, 255)).monospace());
                         ui.label(RichText::new(&entry.message).monospace());
                     });
                 }
