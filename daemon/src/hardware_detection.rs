@@ -1679,10 +1679,28 @@ struct NvApiVoltage {
 }
 
 // Helper function to calculate VRAM bandwidth from metadata
-fn calculate_vram_bandwidth(vram_type: &Option<String>, vram_bus_width: Option<u32>, memory_clock_range: Option<(u32, u32)>) -> Option<f32> {
+/// Calculates VRAM bandwidth in GB/s based on memory type, bus width, and clock speed.
+///
+/// # Arguments
+/// * `vram_type` - The type of VRAM (e.g., "GDDR6", "GDDR6X", "GDDR5")
+/// * `vram_bus_width` - Bus width in bits (e.g., 256)
+/// * `memory_clock_range` - Range of memory clock speeds in MHz (min, max)
+///
+/// # Returns
+/// Bandwidth in GB/s, or None if required parameters are missing
+///
+/// # Formula
+/// Bandwidth (GB/s) = (Max Clock MHz × Multiplier × Bus Width bits) / 8000
+///
+/// Where multiplier depends on memory type:
+/// - GDDR6X: 16.0 (due to PAM4 signaling)
+/// - GDDR6: 8.0 (quad data rate)
+/// - GDDR5: 4.0 (quad data rate)
+/// - Others: 2.0 (default DDR)
+fn calculate_vram_bandwidth(vram_type: Option<&String>, vram_bus_width: Option<u32>, memory_clock_range: Option<(u32, u32)>) -> Option<f32> {
     if let (Some(bus), Some((_, max_mem))) = (vram_bus_width, memory_clock_range) {
         let mut multiplier = 2.0; // Default for DDR
-        if let Some(ref t) = vram_type {
+        if let Some(t) = vram_type {
             if t.contains("GDDR6X") {
                 multiplier = 16.0;
             } else if t.contains("GDDR6") {
@@ -1944,7 +1962,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             
             let (vram_type, vram_vendor, vram_bus_width, vram_bandwidth) = 
                 if let Some(ref meta) = cached_metadata {
-                    let bandwidth = calculate_vram_bandwidth(&meta.vram_type, meta.vram_bus_width, meta.memory_clock_range);
+                    let bandwidth = calculate_vram_bandwidth(meta.vram_type.as_ref(), meta.vram_bus_width, meta.memory_clock_range);
                     (meta.vram_type.clone(), meta.vram_vendor.clone(), meta.vram_bus_width, bandwidth)
                 } else {
                     (None, None, None, None)
@@ -2020,7 +2038,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             
             let (vram_type, vram_vendor, vram_bus_width, vram_bandwidth) = 
                 if let Some(ref meta) = cached_metadata {
-                    let bandwidth = calculate_vram_bandwidth(&meta.vram_type, meta.vram_bus_width, meta.memory_clock_range);
+                    let bandwidth = calculate_vram_bandwidth(meta.vram_type.as_ref(), meta.vram_bus_width, meta.memory_clock_range);
                     (meta.vram_type.clone(), meta.vram_vendor.clone(), meta.vram_bus_width, bandwidth)
                 } else {
                     (None, None, None, None)
@@ -2247,7 +2265,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         let v_bus = metadata.vram_bus_width;
         let core_clock_range = metadata.core_clock_range;
         let memory_clock_range = metadata.memory_clock_range;
-        let v_bw = calculate_vram_bandwidth(&v_type, v_bus, memory_clock_range);
+        let v_bw = calculate_vram_bandwidth(v_type.as_ref(), v_bus, memory_clock_range);
 
         let mut gpu_info = GpuInfo {
             name: name.clone(),
