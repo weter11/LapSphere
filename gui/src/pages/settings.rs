@@ -81,12 +81,32 @@ fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
 
     ui.add_space(8.0);
 
+    ui.horizontal(|ui| {
+        ui.label("🔍 Search:");
+        ui.add(
+            egui::TextEdit::singleline(&mut state.log_search_text)
+                .hint_text("Filter logs by text (case-insensitive)")
+                .desired_width(300.0)
+        );
+        if ui.button("✖ Clear").clicked() {
+            state.log_search_text.clear();
+        }
+        if !state.log_search_text.is_empty() {
+            ui.label(egui::RichText::new(format!("Filtering...")).weak());
+        }
+    });
+
+    ui.add_space(8.0);
+
     ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            let search_lower = state.log_search_text.to_lowercase();
+            let has_search = !search_lower.is_empty();
+            
             for entry in state.daemon_logs.iter().rev() {
                 let level_upper = entry.level.to_uppercase();
-                let show = match level_upper.as_str() {
+                let show_level = match level_upper.as_str() {
                     "ERROR" => state.log_filter_error,
                     "WARN" | "WARNING" => state.log_filter_warn,
                     "INFO" => state.log_filter_info,
@@ -94,7 +114,16 @@ fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
                     _ => true,
                 };
 
-                if show {
+                // Apply search filter
+                let show_search = if has_search {
+                    entry.message.to_lowercase().contains(&search_lower) ||
+                    entry.target.to_lowercase().contains(&search_lower) ||
+                    entry.level.to_lowercase().contains(&search_lower)
+                } else {
+                    true
+                };
+
+                if show_level && show_search {
                     let color = match level_upper.as_str() {
                         "ERROR" => egui::Color32::from_rgb(255, 100, 100),
                         "WARN" | "WARNING" => egui::Color32::from_rgb(255, 200, 100),

@@ -1963,8 +1963,12 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             let (vram_type, vram_vendor, vram_bus_width, vram_bandwidth) = 
                 if let Some(ref meta) = cached_metadata {
                     let bandwidth = calculate_vram_bandwidth(meta.vram_type.as_ref(), meta.vram_bus_width, meta.memory_clock_range);
+                    log::debug!(target: "hw.detect", 
+                        "GPU {} (all suspended): Using cached VRAM - Type: {:?}, Vendor: {:?}, Bus: {:?} bits, BW: {:?} GB/s",
+                        i, meta.vram_type, meta.vram_vendor, meta.vram_bus_width, bandwidth);
                     (meta.vram_type.clone(), meta.vram_vendor.clone(), meta.vram_bus_width, bandwidth)
                 } else {
+                    log::debug!(target: "hw.detect", "GPU {} (all suspended): No cached VRAM info available", i);
                     (None, None, None, None)
                 };
             
@@ -2039,8 +2043,12 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             let (vram_type, vram_vendor, vram_bus_width, vram_bandwidth) = 
                 if let Some(ref meta) = cached_metadata {
                     let bandwidth = calculate_vram_bandwidth(meta.vram_type.as_ref(), meta.vram_bus_width, meta.memory_clock_range);
+                    log::debug!(target: "hw.detect", 
+                        "GPU {} (suspended): Using cached VRAM - Type: {:?}, Vendor: {:?}, Bus: {:?} bits, BW: {:?} GB/s",
+                        i, meta.vram_type, meta.vram_vendor, meta.vram_bus_width, bandwidth);
                     (meta.vram_type.clone(), meta.vram_vendor.clone(), meta.vram_bus_width, bandwidth)
                 } else {
+                    log::debug!(target: "hw.detect", "GPU {} (suspended): No cached VRAM info available", i);
                     (None, None, None, None)
                 };
             
@@ -2266,6 +2274,17 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         let core_clock_range = metadata.core_clock_range;
         let memory_clock_range = metadata.memory_clock_range;
         let v_bw = calculate_vram_bandwidth(v_type.as_ref(), v_bus, memory_clock_range);
+
+        // Log VRAM info for diagnostics
+        if v_type.is_some() || v_vendor.is_some() || v_bus.is_some() {
+            log::info!(target: "hw.detect", 
+                "GPU {}: VRAM detected - Type: {:?}, Vendor: {:?}, Bus Width: {:?} bits, Bandwidth: {:?} GB/s",
+                i, v_type, v_vendor, v_bus, v_bw);
+        } else {
+            log::warn!(target: "hw.detect", 
+                "GPU {}: VRAM info not available - Type: None, Vendor: None, Bus Width: None, Bandwidth: None",
+                i);
+        }
 
         let mut gpu_info = GpuInfo {
             name: name.clone(),

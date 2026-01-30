@@ -63,6 +63,7 @@ pub struct AppState {
     pub log_filter_warn: bool,
     pub log_filter_error: bool,
     pub log_paused: bool,
+    pub log_search_text: String,
     
     // UI state
     pub current_page: Page,
@@ -121,6 +122,7 @@ impl AppState {
             log_filter_warn: true,
             log_filter_error: true,
             log_paused: false,
+            log_search_text: String::new(),
             keyboard_capabilities: None,
             current_page: Page::Statistics,
             settings_tab: SettingsTab::Main,
