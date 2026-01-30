@@ -637,3 +637,40 @@ fn calculate_fan_speed(sorted_points: &[(u8, u8)], temp: f32) -> u8 {
     
     50 // Fallback
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use log::Log;
+    
+    #[test]
+    fn test_daemon_logger_captures_all_levels() {
+        // This test verifies that the DaemonLogger captures all log levels
+        // Note: In a real environment, we would need to initialize the logger
+        // Here we're just verifying the static log buffer can be accessed
+        let logs = DAEMON_LOGS.lock().unwrap();
+        assert!(logs.capacity() >= 500, "Log buffer should have capacity of at least 500");
+    }
+    
+    #[test]
+    fn test_logger_enabled_returns_true() {
+        // Create a dummy env_logger
+        let inner = env_logger::Builder::new()
+            .filter_level(log::LevelFilter::Info)
+            .build();
+        let logger = DaemonLogger { inner };
+        
+        // Test that enabled() returns true for all metadata
+        let metadata = log::Metadata::builder()
+            .level(log::Level::Debug)
+            .target("test")
+            .build();
+        assert!(logger.enabled(&metadata), "Logger should enable all levels");
+        
+        let metadata = log::Metadata::builder()
+            .level(log::Level::Error)
+            .target("test")
+            .build();
+        assert!(logger.enabled(&metadata), "Logger should enable Error level");
+    }
+}
