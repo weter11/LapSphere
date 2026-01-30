@@ -1556,26 +1556,31 @@ struct NvidiaDriverHandle {
 
 impl NvidiaDriverHandle {
     fn open(minor_number: u32) -> Result<Self> {
+        log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Attempting to open for minor {}", minor_number);
         let nvidiactl_fd = fs::File::options()
             .read(true)
             .write(true)
             .open("/dev/nvidiactl")?;
+        log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Opened /dev/nvidiactl");
 
         let mut client_params: NVOS21_PARAMETERS = unsafe { std::mem::zeroed() };
         unsafe {
             rm_alloc_nvos21(nvidiactl_fd.as_raw_fd(), &mut client_params)?;
         }
         let client_handle = client_params.hObjectNew;
+        log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Got client_handle={}", client_handle);
 
         let device_fd = fs::File::options()
             .read(true)
             .write(true)
             .open(format!("/dev/nvidia{}", minor_number))?;
+        log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Opened /dev/nvidia{}", minor_number);
 
         let mut dev_fd_raw = device_fd.as_raw_fd();
         unsafe {
             register_fd(device_fd.as_raw_fd(), &mut dev_fd_raw)?;
         }
+        log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Registered device FD");
 
         let mut alloc_params: NV0080_ALLOC_PARAMETERS = unsafe { std::mem::zeroed() };
         alloc_params.deviceId = minor_number;
@@ -1594,9 +1599,11 @@ impl NvidiaDriverHandle {
             rm_alloc_nvos64(nvidiactl_fd.as_raw_fd(), &mut device_request)?;
         }
         if device_request.status != 0 {
+            log::error!(target: "hw.detect", "NvidiaDriverHandle::open: Failed to alloc device handle: {:x}", device_request.status);
             return Err(anyhow!("Failed to alloc device handle: {:x}", device_request.status));
         }
         let device_handle = device_request.hObjectNew;
+        log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Got device_handle={}", device_handle);
 
         let mut subdevice_alloc: NV2080_ALLOC_PARAMETERS = Default::default();
         let mut subdevice_request = NVOS64_PARAMETERS {
@@ -1614,8 +1621,10 @@ impl NvidiaDriverHandle {
             rm_alloc_nvos64(nvidiactl_fd.as_raw_fd(), &mut subdevice_request)?;
         }
         if subdevice_request.status != 0 {
+            log::error!(target: "hw.detect", "NvidiaDriverHandle::open: Failed to alloc subdevice handle: {:x}", subdevice_request.status);
             return Err(anyhow!("Failed to alloc subdevice handle: {:x}", subdevice_request.status));
         }
+        log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Got subdevice_handle={}, successfully opened", subdevice_request.hObjectNew);
 
         Ok(Self {
             nvidiactl_fd,
@@ -1639,9 +1648,13 @@ impl NvidiaDriverHandle {
             paramsSize: std::mem::size_of::<NV2080_CTRL_FB_GET_INFO_PARAMS>() as u32,
             status: 0,
         };
+        log::debug!(target: "hw.detect", "get_fb_info: index={}, hClient={}, hObject={}, cmd={:x}, paramsSize={}",
+            index, self.client_handle, self.subdevice_handle, request.cmd, request.paramsSize);
         unsafe {
             rm_control_nvos54(self.nvidiactl_fd.as_raw_fd(), &mut request)?;
         }
+        log::debug!(target: "hw.detect", "get_fb_info: request.status={:x}, info.data={:x}", 
+            request.status, info.data);
         if request.status != 0 {
             return Err(anyhow!("RM control failed: {:x}", request.status));
         }
@@ -1676,6 +1689,44 @@ struct NvApiVoltage {
     padding_1: [u32; 8],
     value_uv: u32,
     padding_2: [u32; 8],
+}
+
+// Helper function to calculate VRAM bandwidth from metadata
+/// Calculates VRAM bandwidth in GB/s based on memory type, bus width, and clock speed.
+///
+/// # Arguments
+/// * `vram_type` - The type of VRAM (e.g., "GDDR6", "GDDR6X", "GDDR5")
+/// * `vram_bus_width` - Bus width in bits (e.g., 256)
+/// * `memory_clock_range` - Range of memory clock speeds in MHz (min, max)
+///
+/// # Returns
+/// Bandwidth in GB/s, or None if required parameters are missing
+///
+/// # Formula
+/// Bandwidth (GB/s) = (Max Clock MHz × Multiplier × Bus Width bits) / 8000
+///
+/// Where multiplier depends on memory type:
+/// - GDDR6X: 16.0 (due to PAM4 signaling)
+/// - GDDR6: 8.0 (quad data rate)
+/// - GDDR5: 4.0 (quad data rate)
+/// - Others: 2.0 (default DDR)
+fn calculate_vram_bandwidth(vram_type: Option<&String>, vram_bus_width: Option<u32>, memory_clock_range: Option<(u32, u32)>) -> Option<f32> {
+    if let (Some(bus), Some((_, max_mem))) = (vram_bus_width, memory_clock_range) {
+        let mut multiplier = 2.0; // Default for DDR
+        if let Some(t) = vram_type {
+            if t.contains("GDDR6X") {
+                multiplier = 16.0;
+            } else if t.contains("GDDR6") {
+                multiplier = 8.0;
+            } else if t.contains("GDDR5") {
+                multiplier = 4.0;
+            }
+        }
+        // Bandwidth (GB/s) = (Clock * Multiplier * Bus Width) / 8 bits / 1000 MHz
+        Some((max_mem as f32 * multiplier * bus as f32) / 8000.0)
+    } else {
+        None
+    }
 }
 
 // Function to get NVIDIA extended stats (hotspot, memory temp, voltage)
@@ -1915,6 +1966,25 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         let names = NVIDIA_NAMES_CACHE.lock().unwrap();
         for (i, status) in statuses.into_iter().enumerate() {
             let name = names.get(i).cloned().unwrap_or_else(|| "NVIDIA GPU".to_string());
+            
+            // Retrieve cached metadata (including VRAM info) if available
+            let cached_metadata = {
+                let cache = NVIDIA_METADATA_CACHE.lock().unwrap();
+                cache.get(&(i as u32)).cloned()
+            };
+            
+            let (vram_type, vram_vendor, vram_bus_width, vram_bandwidth) = 
+                if let Some(ref meta) = cached_metadata {
+                    let bandwidth = calculate_vram_bandwidth(meta.vram_type.as_ref(), meta.vram_bus_width, meta.memory_clock_range);
+                    log::debug!(target: "hw.detect", 
+                        "GPU {} (all suspended): Using cached VRAM - Type: {:?}, Vendor: {:?}, Bus: {:?} bits, BW: {:?} GB/s",
+                        i, meta.vram_type, meta.vram_vendor, meta.vram_bus_width, bandwidth);
+                    (meta.vram_type.clone(), meta.vram_vendor.clone(), meta.vram_bus_width, bandwidth)
+                } else {
+                    log::debug!(target: "hw.detect", "GPU {} (all suspended): No cached VRAM info available", i);
+                    (None, None, None, None)
+                };
+            
             gpus.push(GpuInfo {
                 name,
                 gpu_type: GpuType::Discrete,
@@ -1935,22 +2005,22 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 max_core_clock: None,
                 min_memory_clock: None,
                 max_memory_clock: None,
-                core_clock_range: None,
-                memory_clock_range: None,
+                core_clock_range: cached_metadata.as_ref().and_then(|m| m.core_clock_range),
+                memory_clock_range: cached_metadata.as_ref().and_then(|m| m.memory_clock_range),
                 is_desktop: false,
-                architecture: None,
+                architecture: cached_metadata.as_ref().and_then(|m| m.architecture.clone()),
                 nvml_index: Some(i as u32),
                 driver_version: None,
-                supported_p_states: vec![],
-                supports_power_limit: false,
-                power_limit_range: None,
-                supports_gpu_offset: false,
-                supports_mem_offset: false,
+                supported_p_states: cached_metadata.as_ref().map(|m| m.supported_p_states.clone()).unwrap_or_default(),
+                supports_power_limit: cached_metadata.as_ref().and_then(|m| m.power_limit_range).is_some(),
+                power_limit_range: cached_metadata.as_ref().and_then(|m| m.power_limit_range),
+                supports_gpu_offset: cached_metadata.as_ref().map(|m| m.supports_gpu_offset).unwrap_or(false),
+                supports_mem_offset: cached_metadata.as_ref().map(|m| m.supports_mem_offset).unwrap_or(false),
                 fan_speed_range: None,
-                vram_type: None,
-                vram_vendor: None,
-                vram_bus_width: None,
-                vram_bandwidth: None,
+                vram_type,
+                vram_vendor,
+                vram_bus_width,
+                vram_bandwidth,
             });
         }
         return Ok(gpus);
@@ -1976,6 +2046,25 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 let cache = NVIDIA_NAMES_CACHE.lock().unwrap();
                 cache.get(i as usize).cloned().unwrap_or_else(|| "NVIDIA GPU".to_string())
             };
+            
+            // Retrieve cached metadata (including VRAM info) if available
+            let cached_metadata = {
+                let cache = NVIDIA_METADATA_CACHE.lock().unwrap();
+                cache.get(&i).cloned()
+            };
+            
+            let (vram_type, vram_vendor, vram_bus_width, vram_bandwidth) = 
+                if let Some(ref meta) = cached_metadata {
+                    let bandwidth = calculate_vram_bandwidth(meta.vram_type.as_ref(), meta.vram_bus_width, meta.memory_clock_range);
+                    log::debug!(target: "hw.detect", 
+                        "GPU {} (suspended): Using cached VRAM - Type: {:?}, Vendor: {:?}, Bus: {:?} bits, BW: {:?} GB/s",
+                        i, meta.vram_type, meta.vram_vendor, meta.vram_bus_width, bandwidth);
+                    (meta.vram_type.clone(), meta.vram_vendor.clone(), meta.vram_bus_width, bandwidth)
+                } else {
+                    log::debug!(target: "hw.detect", "GPU {} (suspended): No cached VRAM info available", i);
+                    (None, None, None, None)
+                };
+            
             gpus.push(GpuInfo {
                 name,
                 gpu_type: GpuType::Discrete,
@@ -1996,22 +2085,22 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 max_core_clock: None,
                 min_memory_clock: None,
                 max_memory_clock: None,
-                core_clock_range: None,
-                memory_clock_range: None,
+                core_clock_range: cached_metadata.as_ref().and_then(|m| m.core_clock_range),
+                memory_clock_range: cached_metadata.as_ref().and_then(|m| m.memory_clock_range),
                 is_desktop: false,
-                architecture: None,
+                architecture: cached_metadata.as_ref().and_then(|m| m.architecture.clone()),
                 nvml_index: Some(i),
                 driver_version: driver_version.clone(),
-                supported_p_states: vec![],
-                supports_power_limit: false,
-                power_limit_range: None,
-                supports_gpu_offset: false,
-                supports_mem_offset: false,
+                supported_p_states: cached_metadata.as_ref().map(|m| m.supported_p_states.clone()).unwrap_or_default(),
+                supports_power_limit: cached_metadata.as_ref().and_then(|m| m.power_limit_range).is_some(),
+                power_limit_range: cached_metadata.as_ref().and_then(|m| m.power_limit_range),
+                supports_gpu_offset: cached_metadata.as_ref().map(|m| m.supports_gpu_offset).unwrap_or(false),
+                supports_mem_offset: cached_metadata.as_ref().map(|m| m.supports_mem_offset).unwrap_or(false),
                 fan_speed_range: None,
-                vram_type: None,
-                vram_vendor: None,
-                vram_bus_width: None,
-                vram_bandwidth: None,
+                vram_type,
+                vram_vendor,
+                vram_bus_width,
+                vram_bandwidth,
             });
             continue;
         }
@@ -2127,7 +2216,32 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         let metadata = {
             let mut cache = NVIDIA_METADATA_CACHE.lock().unwrap();
             if let Some(meta) = cache.get(&i) {
-                meta.clone()
+                // Check if cached VRAM info is None - if so, retry getting it
+                // This handles cases where initial detection failed (GPU suspended, driver not ready, etc.)
+                if meta.vram_type.is_none() && meta.vram_vendor.is_none() && meta.vram_bus_width.is_none() {
+                    log::info!(target: "hw.detect", "GPU {}: Cached VRAM is None, retrying detection", i);
+                    let minor_number = device.minor_number().unwrap_or(i);
+                    let (vram_type, vram_vendor, vram_bus_width, _) = get_vram_info(minor_number);
+                    
+                    // If we successfully got VRAM info, update the cache
+                    if vram_type.is_some() || vram_vendor.is_some() || vram_bus_width.is_some() {
+                        log::info!(target: "hw.detect", "GPU {}: Successfully detected VRAM on retry - Type: {:?}, Vendor: {:?}, Bus: {:?}",
+                            i, vram_type, vram_vendor, vram_bus_width);
+                        let updated_meta = NvidiaMetadata {
+                            vram_type,
+                            vram_vendor,
+                            vram_bus_width,
+                            ..meta.clone()
+                        };
+                        cache.insert(i, updated_meta.clone());
+                        updated_meta
+                    } else {
+                        log::debug!(target: "hw.detect", "GPU {}: VRAM detection retry also returned None", i);
+                        meta.clone()
+                    }
+                } else {
+                    meta.clone()
+                }
             } else {
                 let arch = device.architecture().ok().map(|arch| arch.to_string());
                 let p_states = device.supported_performance_states().ok()
@@ -2197,21 +2311,17 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         let v_bus = metadata.vram_bus_width;
         let core_clock_range = metadata.core_clock_range;
         let memory_clock_range = metadata.memory_clock_range;
-        let mut v_bw = None;
+        let v_bw = calculate_vram_bandwidth(v_type.as_ref(), v_bus, memory_clock_range);
 
-        if let (Some(bus), Some((_, max_mem))) = (v_bus, memory_clock_range) {
-            let mut multiplier = 2.0; // Default for DDR
-            if let Some(ref t) = v_type {
-                if t.contains("GDDR6X") {
-                    multiplier = 16.0;
-                } else if t.contains("GDDR6") {
-                    multiplier = 8.0;
-                } else if t.contains("GDDR5") {
-                    multiplier = 4.0;
-                }
-            }
-            // Bandwidth (GB/s) = (Clock * Multiplier * Bus Width) / 8 bits / 1000 MHz
-            v_bw = Some((max_mem as f32 * multiplier * bus as f32) / 8000.0);
+        // Log VRAM info for diagnostics
+        if v_type.is_some() || v_vendor.is_some() || v_bus.is_some() {
+            log::info!(target: "hw.detect", 
+                "GPU {}: VRAM detected - Type: {:?}, Vendor: {:?}, Bus Width: {:?} bits, Bandwidth: {:?} GB/s",
+                i, v_type, v_vendor, v_bus, v_bw);
+        } else {
+            log::warn!(target: "hw.detect", 
+                "GPU {}: VRAM info not available - Type: None, Vendor: None, Bus Width: None, Bandwidth: None",
+                i);
         }
 
         let mut gpu_info = GpuInfo {
