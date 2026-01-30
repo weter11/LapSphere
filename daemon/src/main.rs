@@ -49,28 +49,28 @@ struct DaemonLogger {
 }
 
 impl log::Log for DaemonLogger {
-    fn enabled(&self, metadata: &log::Metadata) -> bool {
-        // Operational levels are always enabled for internal buffer
-        metadata.level() <= log::Level::Info || self.inner.enabled(metadata)
+    fn enabled(&self, _metadata: &log::Metadata) -> bool {
+        // All levels are enabled for internal buffer (up to Debug per set_max_level)
+        // Also allow env_logger to control its own filtering
+        true
     }
 
     fn log(&self, record: &log::Record) {
-        // Always capture operational logs into the buffer
-        if record.level() <= log::Level::Info || self.inner.enabled(record.metadata()) {
-            let entry = LogEntry {
-                level: record.level().to_string(),
-                target: record.target().to_string(),
-                message: record.args().to_string(),
-                timestamp: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-            };
+        // Always capture all log levels into the buffer (Error, Warn, Info, Debug)
+        // The global max level (Debug) controls what reaches this logger
+        let entry = LogEntry {
+            level: record.level().to_string(),
+            target: record.target().to_string(),
+            message: record.args().to_string(),
+            timestamp: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        };
 
-            {
-                let mut logs = DAEMON_LOGS.lock().unwrap();
-                if logs.len() >= 1000 {
-                    logs.pop_front();
-                }
-                logs.push_back(entry);
+        {
+            let mut logs = DAEMON_LOGS.lock().unwrap();
+            if logs.len() >= 1000 {
+                logs.pop_front();
             }
+            logs.push_back(entry);
         }
 
         // Only log to console if env_logger allows it

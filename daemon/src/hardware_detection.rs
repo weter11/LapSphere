@@ -1915,6 +1915,35 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         let names = NVIDIA_NAMES_CACHE.lock().unwrap();
         for (i, status) in statuses.into_iter().enumerate() {
             let name = names.get(i).cloned().unwrap_or_else(|| "NVIDIA GPU".to_string());
+            
+            // Retrieve cached metadata (including VRAM info) if available
+            let cached_metadata = {
+                let cache = NVIDIA_METADATA_CACHE.lock().unwrap();
+                cache.get(&(i as u32)).cloned()
+            };
+            
+            let (vram_type, vram_vendor, vram_bus_width, vram_bandwidth) = 
+                if let Some(ref meta) = cached_metadata {
+                    let bandwidth = if let (Some(bus), Some((_, max_mem))) = (meta.vram_bus_width, meta.memory_clock_range) {
+                        let mut multiplier = 2.0;
+                        if let Some(ref t) = meta.vram_type {
+                            if t.contains("GDDR6X") {
+                                multiplier = 16.0;
+                            } else if t.contains("GDDR6") {
+                                multiplier = 8.0;
+                            } else if t.contains("GDDR5") {
+                                multiplier = 4.0;
+                            }
+                        }
+                        Some((max_mem as f32 * multiplier * bus as f32) / 8000.0)
+                    } else {
+                        None
+                    };
+                    (meta.vram_type.clone(), meta.vram_vendor.clone(), meta.vram_bus_width, bandwidth)
+                } else {
+                    (None, None, None, None)
+                };
+            
             gpus.push(GpuInfo {
                 name,
                 gpu_type: GpuType::Discrete,
@@ -1935,22 +1964,22 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 max_core_clock: None,
                 min_memory_clock: None,
                 max_memory_clock: None,
-                core_clock_range: None,
-                memory_clock_range: None,
+                core_clock_range: cached_metadata.as_ref().and_then(|m| m.core_clock_range),
+                memory_clock_range: cached_metadata.as_ref().and_then(|m| m.memory_clock_range),
                 is_desktop: false,
-                architecture: None,
+                architecture: cached_metadata.as_ref().and_then(|m| m.architecture.clone()),
                 nvml_index: Some(i as u32),
                 driver_version: None,
-                supported_p_states: vec![],
-                supports_power_limit: false,
-                power_limit_range: None,
-                supports_gpu_offset: false,
-                supports_mem_offset: false,
+                supported_p_states: cached_metadata.as_ref().map(|m| m.supported_p_states.clone()).unwrap_or_default(),
+                supports_power_limit: cached_metadata.as_ref().and_then(|m| m.power_limit_range).is_some(),
+                power_limit_range: cached_metadata.as_ref().and_then(|m| m.power_limit_range),
+                supports_gpu_offset: cached_metadata.as_ref().map(|m| m.supports_gpu_offset).unwrap_or(false),
+                supports_mem_offset: cached_metadata.as_ref().map(|m| m.supports_mem_offset).unwrap_or(false),
                 fan_speed_range: None,
-                vram_type: None,
-                vram_vendor: None,
-                vram_bus_width: None,
-                vram_bandwidth: None,
+                vram_type,
+                vram_vendor,
+                vram_bus_width,
+                vram_bandwidth,
             });
         }
         return Ok(gpus);
@@ -1976,6 +2005,35 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 let cache = NVIDIA_NAMES_CACHE.lock().unwrap();
                 cache.get(i as usize).cloned().unwrap_or_else(|| "NVIDIA GPU".to_string())
             };
+            
+            // Retrieve cached metadata (including VRAM info) if available
+            let cached_metadata = {
+                let cache = NVIDIA_METADATA_CACHE.lock().unwrap();
+                cache.get(&i).cloned()
+            };
+            
+            let (vram_type, vram_vendor, vram_bus_width, vram_bandwidth) = 
+                if let Some(ref meta) = cached_metadata {
+                    let bandwidth = if let (Some(bus), Some((_, max_mem))) = (meta.vram_bus_width, meta.memory_clock_range) {
+                        let mut multiplier = 2.0;
+                        if let Some(ref t) = meta.vram_type {
+                            if t.contains("GDDR6X") {
+                                multiplier = 16.0;
+                            } else if t.contains("GDDR6") {
+                                multiplier = 8.0;
+                            } else if t.contains("GDDR5") {
+                                multiplier = 4.0;
+                            }
+                        }
+                        Some((max_mem as f32 * multiplier * bus as f32) / 8000.0)
+                    } else {
+                        None
+                    };
+                    (meta.vram_type.clone(), meta.vram_vendor.clone(), meta.vram_bus_width, bandwidth)
+                } else {
+                    (None, None, None, None)
+                };
+            
             gpus.push(GpuInfo {
                 name,
                 gpu_type: GpuType::Discrete,
@@ -1996,22 +2054,22 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 max_core_clock: None,
                 min_memory_clock: None,
                 max_memory_clock: None,
-                core_clock_range: None,
-                memory_clock_range: None,
+                core_clock_range: cached_metadata.as_ref().and_then(|m| m.core_clock_range),
+                memory_clock_range: cached_metadata.as_ref().and_then(|m| m.memory_clock_range),
                 is_desktop: false,
-                architecture: None,
+                architecture: cached_metadata.as_ref().and_then(|m| m.architecture.clone()),
                 nvml_index: Some(i),
                 driver_version: driver_version.clone(),
-                supported_p_states: vec![],
-                supports_power_limit: false,
-                power_limit_range: None,
-                supports_gpu_offset: false,
-                supports_mem_offset: false,
+                supported_p_states: cached_metadata.as_ref().map(|m| m.supported_p_states.clone()).unwrap_or_default(),
+                supports_power_limit: cached_metadata.as_ref().and_then(|m| m.power_limit_range).is_some(),
+                power_limit_range: cached_metadata.as_ref().and_then(|m| m.power_limit_range),
+                supports_gpu_offset: cached_metadata.as_ref().map(|m| m.supports_gpu_offset).unwrap_or(false),
+                supports_mem_offset: cached_metadata.as_ref().map(|m| m.supports_mem_offset).unwrap_or(false),
                 fan_speed_range: None,
-                vram_type: None,
-                vram_vendor: None,
-                vram_bus_width: None,
-                vram_bandwidth: None,
+                vram_type,
+                vram_vendor,
+                vram_bus_width,
+                vram_bandwidth,
             });
             continue;
         }
