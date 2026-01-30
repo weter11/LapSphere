@@ -9,7 +9,7 @@ use anyhow::Result;
 use tokio::signal;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use std::collections::VecDeque;
+use std::collections::{VecDeque, HashMap};
 use lapsphere_common::types::{FanSettings, LogEntry};
 use polling_scheduler::{PollingScheduler, PollJob};
 
@@ -37,6 +37,9 @@ pub static CURRENT_GPU_OVERCLOCK_STATS: once_cell::sync::Lazy<Arc<Mutex<Option<G
 
 pub static LAST_APPLIED_OFFSET: once_cell::sync::Lazy<Arc<Mutex<Option<i32>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
+
+pub static MANUAL_GPU_OFFSETS: once_cell::sync::Lazy<Arc<Mutex<HashMap<u32, (f32, f32)>>>> =
+    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
 pub static DAEMON_LOGS: once_cell::sync::Lazy<Arc<Mutex<VecDeque<LogEntry>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(VecDeque::with_capacity(100))));
@@ -402,35 +405,55 @@ fn apply_fan_curves(io: &tuxedo_io::TuxedoIo, settings: &FanSettings, sorted_cur
 }
 
 fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -> Result<()> {
-     // Clear stats and last offset if advanced control or manual clocks are disabled
-     if !gpu_settings.advanced_control || !gpu_settings.manual_clocks {
-         {
-             let mut stats = CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
-             *stats = None;
-         }
-         {
-             let mut last = LAST_APPLIED_OFFSET.lock().unwrap();
-             *last = None;
-         }
-         if !gpu_settings.manual_clocks {
-             let _ = crate::hardware_control::set_gpu_core_offset(0, 0);
-         }
-         return Ok(());
-     }
-
     // 1. Get current GPU stats (temperature, power, frequency)
+    // We do this first to check for suspension
     let gpus = crate::hardware_detection::get_gpu_info()?;
     let nvidia_gpu = gpus.iter().find(|g| g.name.to_lowercase().contains("nvidia"));
 
-        if let Some(gpu) = nvidia_gpu {
-            let status_lower = gpu.status.to_lowercase();
-            let is_suspended = status_lower.contains("suspended");
-            let is_pstate = status_lower.starts_with('p');
-            // Check if GPU is suspended or not active
-            if is_suspended || !is_pstate {
-                return Ok(());
-            }
+    if let Some(gpu) = nvidia_gpu {
+        let status_lower = gpu.status.to_lowercase();
+        let is_suspended = status_lower.contains("suspended");
+        let is_pstate = status_lower.starts_with('p');
 
+        // If suspended, don't do anything (definitely don't call NVML)
+        if is_suspended {
+            return Ok(());
+        }
+
+        // Clear stats and last offset if advanced control or manual clocks are disabled
+        if !gpu_settings.advanced_control || !gpu_settings.manual_clocks {
+            {
+                let mut stats = CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
+                *stats = None;
+            }
+            {
+                let mut last = LAST_APPLIED_OFFSET.lock().unwrap();
+                *last = None;
+            }
+            if !gpu_settings.manual_clocks {
+                // Only clear if not already cleared to avoid waking up GPU unnecessarily
+                let needs_clear = {
+                    let map = MANUAL_GPU_OFFSETS.lock().unwrap();
+                    map.get(&0).map_or(true, |offsets| offsets.0 != 0.0 || offsets.1 != 0.0)
+                };
+
+                if needs_clear {
+                    log::info!("Manual clocks disabled, resetting GPU offsets to 0");
+                    let _ = crate::hardware_control::set_gpu_core_offset(0, 0.0);
+                    let _ = crate::hardware_control::set_gpu_memory_offset(0, 0.0);
+                    {
+                        let mut map = MANUAL_GPU_OFFSETS.lock().unwrap();
+                        map.insert(0, (0.0, 0.0));
+                    }
+                }
+            }
+            return Ok(());
+        }
+
+        // Check if GPU is in an active state for overclocking (typically P0)
+        if !is_pstate {
+            return Ok(());
+        }
 
         let temp = gpu.temperature.unwrap_or(0.0);
         let power = gpu.power.unwrap_or(0.0);
@@ -508,7 +531,7 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
         if status_lower != "p0" {
             let mut last = LAST_APPLIED_OFFSET.lock().unwrap();
             if *last != Some(0) {
-                crate::hardware_control::set_gpu_core_offset(0, 0)?;
+                crate::hardware_control::set_gpu_core_offset(0, 0.0)?;
                 *last = Some(0);
                 log::info!("Cleared dynamic GPU offset (P-state not 0)");
             }
@@ -540,7 +563,7 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
         {
             let mut last = LAST_APPLIED_OFFSET.lock().unwrap();
             if *last != Some(final_offset_i32) {
-                crate::hardware_control::set_gpu_core_offset(0, final_offset_i32)?;
+                crate::hardware_control::set_gpu_core_offset(0, final_offset_i32 as f32)?;
                 *last = Some(final_offset_i32);
                 if final_offset_i32 == 0 {
                     log::info!("Cleared dynamic GPU offset (P-state not 0)");

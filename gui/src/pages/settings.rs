@@ -9,6 +9,7 @@ const STORAGE_POLL_MAX_SECONDS: f32 = 10.0;
 
 pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTheme, ctx: &Context, dbus_client: Option<&DbusClient>) {
     ui.add_space(6.0);
+    ui.spacing_mut().slider_width = ui.available_width() * 0.4;
 
     ui.horizontal(|ui| {
         ui.selectable_value(&mut state.settings_tab, SettingsTab::Main, "Main");
@@ -719,6 +720,60 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
                     ui.label("Type:");
                     ui.label(format!("{:?}", gpu.gpu_type));
                     ui.end_row();
+
+                    if gpu.name.contains("NVIDIA") {
+                        if let Some(ref driver) = gpu.driver_version {
+                            ui.label("Driver Version:");
+                            ui.label(driver);
+                            ui.end_row();
+                        }
+
+                        if let Some(ref arch) = gpu.architecture {
+                            ui.label("Architecture:");
+                            ui.label(arch);
+                            ui.end_row();
+                        }
+
+                        if !gpu.supported_p_states.is_empty() {
+                            ui.label("Supported P-States:");
+                            ui.label(gpu.supported_p_states.join(", "));
+                            ui.end_row();
+                        }
+
+                        ui.label("Power Limit Support:");
+                        ui.label(if gpu.supports_power_limit { "✅ Supported" } else { "❌ Not Supported" });
+                        ui.end_row();
+
+                        if let Some((min, max)) = gpu.power_limit_range {
+                            ui.label("Power Limit Range:");
+                            ui.label(format!("{} - {} W", min, max));
+                            ui.end_row();
+                        }
+
+                        if let Some(ref v_type) = gpu.vram_type {
+                            ui.label("VRAM Type:");
+                            ui.label(v_type);
+                            ui.end_row();
+                        }
+
+                        if let Some(ref v_vendor) = gpu.vram_vendor {
+                            ui.label("VRAM Vendor:");
+                            ui.label(v_vendor);
+                            ui.end_row();
+                        }
+
+                        if let Some(v_bus) = gpu.vram_bus_width {
+                            ui.label("Bus Width:");
+                            ui.label(format!("{}-bit", v_bus));
+                            ui.end_row();
+                        }
+
+                        if let Some(v_bw) = gpu.vram_bandwidth {
+                            ui.label("VRAM Bandwidth:");
+                            ui.label(format!("{:.1} GB/s", v_bw));
+                            ui.end_row();
+                        }
+                    }
                 });
 
             if idx + 1 < state.gpu_info.len() {

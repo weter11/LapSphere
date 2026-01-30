@@ -36,8 +36,8 @@ pub enum DbusCommand {
     GetGpuMemClockRanges { device_index: u32, reply: oneshot::Sender<Result<Vec<u32>>> },
     SetMemoryLockedClocks { device_index: u32, min_clock: u32, max_clock: u32, reply: oneshot::Sender<Result<()>> },
     ResetMemoryLockedClocks { device_index: u32, reply: oneshot::Sender<Result<()>> },
-    SetGpuCoreOffset { device_index: u32, offset: i32, reply: oneshot::Sender<Result<()>> },
-    SetGpuMemoryOffset { device_index: u32, offset: i32, reply: oneshot::Sender<Result<()>> },
+    SetGpuCoreOffset { device_index: u32, offset: f32, reply: oneshot::Sender<Result<()>> },
+    SetGpuMemoryOffset { device_index: u32, offset: f32, reply: oneshot::Sender<Result<()>> },
     GetGpuCoreOffsetLimits { device_index: u32, reply: oneshot::Sender<Result<(i32, i32)>> },
     GetGpuMemoryOffsetLimits { device_index: u32, reply: oneshot::Sender<Result<(i32, i32)>> },
     SetPrimeProfile { profile: String, reply: oneshot::Sender<Result<()>> },
@@ -46,6 +46,9 @@ pub enum DbusCommand {
     SetWebcamState { enabled: bool, reply: oneshot::Sender<Result<()>> },
     GetDaemonLogs { reply: oneshot::Sender<Result<Vec<LogEntry>>> },
     ShutdownDaemon { reply: oneshot::Sender<Result<()>> },
+    SetGpuFanSpeed { device_index: u32, fan_index: u32, speed: u32, reply: oneshot::Sender<Result<()>> },
+    SetGpuFanAuto { device_index: u32, fan_index: u32, reply: oneshot::Sender<Result<()>> },
+    SetGpuPowerLimit { device_index: u32, limit_watts: u32, reply: oneshot::Sender<Result<()>> },
 }
 
 impl DbusClient {
@@ -226,13 +229,13 @@ impl DbusClient {
         rx
     }
 
-    pub fn set_gpu_core_offset(&self, device_index: u32, offset: i32) -> oneshot::Receiver<Result<()>> {
+    pub fn set_gpu_core_offset(&self, device_index: u32, offset: f32) -> oneshot::Receiver<Result<()>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.command_tx.send(DbusCommand::SetGpuCoreOffset { device_index, offset, reply: tx });
         rx
     }
 
-    pub fn set_gpu_memory_offset(&self, device_index: u32, offset: i32) -> oneshot::Receiver<Result<()>> {
+    pub fn set_gpu_memory_offset(&self, device_index: u32, offset: f32) -> oneshot::Receiver<Result<()>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.command_tx.send(DbusCommand::SetGpuMemoryOffset { device_index, offset, reply: tx });
         rx
@@ -287,6 +290,24 @@ impl DbusClient {
     pub fn get_daemon_logs(&self) -> oneshot::Receiver<Result<Vec<LogEntry>>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.command_tx.send(DbusCommand::GetDaemonLogs { reply: tx });
+        rx
+    }
+
+    pub fn set_gpu_fan_speed(&self, device_index: u32, fan_index: u32, speed: u32) -> oneshot::Receiver<Result<()>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::SetGpuFanSpeed { device_index, fan_index, speed, reply: tx });
+        rx
+    }
+
+    pub fn set_gpu_fan_auto(&self, device_index: u32, fan_index: u32) -> oneshot::Receiver<Result<()>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::SetGpuFanAuto { device_index, fan_index, reply: tx });
+        rx
+    }
+
+    pub fn set_gpu_power_limit(&self, device_index: u32, limit_watts: u32) -> oneshot::Receiver<Result<()>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::SetGpuPowerLimit { device_index, limit_watts, reply: tx });
         rx
     }
 }
@@ -520,6 +541,24 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
                 }
                 DbusCommand::GetDaemonLogs { reply } => {
                     let result = get_daemon_logs_impl(&connection).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::SetGpuFanSpeed { device_index, fan_index, speed, reply } => {
+                    let result = set_gpu_fan_speed_impl(&connection, device_index, fan_index, speed).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::SetGpuFanAuto { device_index, fan_index, reply } => {
+                    let result = set_gpu_fan_auto_impl(&connection, device_index, fan_index).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::SetGpuPowerLimit { device_index, limit_watts, reply } => {
+                    let result = set_gpu_power_limit_impl(&connection, device_index, limit_watts).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
@@ -862,7 +901,7 @@ async fn reset_memory_locked_clocks_impl(conn: &Connection, device_index: u32) -
     Ok(())
 }
 
-async fn set_gpu_core_offset_impl(conn: &Connection, device_index: u32, offset: i32) -> Result<()> {
+async fn set_gpu_core_offset_impl(conn: &Connection, device_index: u32, offset: f32) -> Result<()> {
     let proxy = zbus::Proxy::new(
         conn,
         "io.lapsphere.Control",
@@ -873,7 +912,7 @@ async fn set_gpu_core_offset_impl(conn: &Connection, device_index: u32, offset: 
     Ok(())
 }
 
-async fn set_gpu_memory_offset_impl(conn: &Connection, device_index: u32, offset: i32) -> Result<()> {
+async fn set_gpu_memory_offset_impl(conn: &Connection, device_index: u32, offset: f32) -> Result<()> {
     let proxy = zbus::Proxy::new(
         conn,
         "io.lapsphere.Control",
@@ -969,5 +1008,38 @@ async fn shutdown_daemon_impl(conn: &Connection) -> Result<()> {
         "io.lapsphere.Control",
     ).await?;
     proxy.call::<_, _, ()>("ShutdownDaemon", &()).await?;
+    Ok(())
+}
+
+async fn set_gpu_fan_speed_impl(conn: &Connection, device_index: u32, fan_index: u32, speed: u32) -> Result<()> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
+    ).await?;
+    proxy.call::<_, _, ()>("SetGpuFanSpeed", &(device_index, fan_index, speed)).await?;
+    Ok(())
+}
+
+async fn set_gpu_fan_auto_impl(conn: &Connection, device_index: u32, fan_index: u32) -> Result<()> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
+    ).await?;
+    proxy.call::<_, _, ()>("SetGpuFanAuto", &(device_index, fan_index)).await?;
+    Ok(())
+}
+
+async fn set_gpu_power_limit_impl(conn: &Connection, device_index: u32, limit_watts: u32) -> Result<()> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
+    ).await?;
+    proxy.call::<_, _, ()>("SetGpuPowerLimit", &(device_index, limit_watts)).await?;
     Ok(())
 }

@@ -10,6 +10,8 @@ use crate::tuxedo_io::{TuxedoIo, HardwareInterface};
 use systemstat::{System, Platform};
 // use tuxedo_io::TuxedoIo;
 use lapsphere_common::types::*;
+use nix::ioctl_readwrite;
+use std::os::fd::{AsRawFd, RawFd};
 
 // Thread-safe storage for previous CPU stats
 static PREVIOUS_CPU_STATS: Mutex<Option<HashMap<u32, CpuStats>>> = Mutex::new(None);
@@ -19,6 +21,23 @@ static PREVIOUS_STORAGE_STATS: Lazy<Mutex<HashMap<String, StorageStats>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 static NVIDIA_NAMES_CACHE: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
+
+#[derive(Clone)]
+struct NvidiaMetadata {
+    architecture: Option<String>,
+    supported_p_states: Vec<String>,
+    power_limit_range: Option<(u32, u32)>,
+    supports_gpu_offset: bool,
+    supports_mem_offset: bool,
+    vram_type: Option<String>,
+    vram_vendor: Option<String>,
+    vram_bus_width: Option<u32>,
+    core_clock_range: Option<(u32, u32)>,
+    memory_clock_range: Option<(u32, u32)>,
+}
+
+static NVIDIA_METADATA_CACHE: Lazy<Mutex<HashMap<u32, NvidiaMetadata>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 const BITS_PER_BYTE: f64 = 8.0;
 const BITS_PER_MEGABIT: f64 = 1_000_000.0;
@@ -693,6 +712,102 @@ pub fn get_fan_speeds() -> Result<Vec<(u32, u32)>> {
     Ok(fans)
 }
 
+pub fn get_all_fan_info() -> Result<Vec<FanInfo>> {
+    let mut all_fans = Vec::new();
+
+    // 1. Get system fans (Tuxedo/Uniwill/Clevo)
+    if TuxedoIo::is_available() {
+        if let Ok(io) = TuxedoIo::new() {
+            let fan_settings = crate::FAN_DAEMON_STATE.lock().unwrap();
+            let manual_mode = fan_settings.as_ref().map_or(false, |s| s.control_enabled);
+
+            for fan_id in 0..io.get_fan_count() {
+                if let Ok(speed) = io.get_fan_speed(fan_id) {
+                    let temperature = io.get_fan_temperature(fan_id).ok().map(|t| t as f32);
+                    all_fans.push(FanInfo {
+                        id: fan_id,
+                        name: format!("System Fan {}", fan_id),
+                        rpm_or_percent: speed,
+                        temperature,
+                        is_rpm: false,
+                        mode: Some(if manual_mode { "Manual".to_string() } else { "Auto".to_string() }),
+                    });
+                }
+            }
+        }
+    }
+
+    // 2. Get NVIDIA GPU fans
+    let gpu_settings = crate::GPU_DAEMON_STATE.lock().unwrap();
+
+    // Check suspension status first to avoid waking up GPU
+    let mut nvidia_active = false;
+    if let Ok(entries) = fs::read_dir("/sys/bus/pci/drivers/nvidia") {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().contains(':') {
+                let status_path = entry.path().join("power/runtime_status");
+                if let Ok(status) = fs::read_to_string(status_path) {
+                    if status.trim() != "suspended" {
+                        nvidia_active = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if nvidia_active {
+        if let Ok(nvml) = get_nvml() {
+            if let Ok(device_count) = nvml.device_count() {
+                for i in 0..device_count {
+                    // Check specific GPU status again
+                    let mut is_suspended = true;
+                    if let Ok(pci_info) = nvml.device_by_index(i).and_then(|d| d.pci_info()) {
+                        let bus_id = pci_info.bus_id.to_lowercase();
+                        let status_path = format!("/sys/bus/pci/devices/{}/power/runtime_status", bus_id);
+                        if let Ok(status) = fs::read_to_string(status_path) {
+                            if status.trim() != "suspended" {
+                                is_suspended = false;
+                            }
+                        }
+                    }
+
+                    if is_suspended { continue; }
+
+                    if let Ok(device) = nvml.device_by_index(i) {
+                        if let Ok(num_fans) = device.num_fans() {
+                            for f in 0..num_fans {
+                                let speed = device.fan_speed(f).unwrap_or(0);
+
+                                let mode = if let Some(settings) = &*gpu_settings {
+                                    if settings.nvidia_fans.iter().any(|s| s.device_index == i && s.fan_id == f && s.manual) {
+                                        "Manual".to_string()
+                                    } else {
+                                        "Auto".to_string()
+                                    }
+                                } else {
+                                    "Auto".to_string()
+                                };
+
+                                all_fans.push(FanInfo {
+                                    id: 100 + i * 10 + f, // Unique ID for GPU fans
+                                    name: format!("NVIDIA GPU {} Fan {}", i, f),
+                                    rpm_or_percent: speed,
+                                    temperature: device.temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu).ok().map(|t| t as f32),
+                                    is_rpm: false,
+                                    mode: Some(mode),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(all_fans)
+}
+
 
 pub fn get_cpu_info() -> Result<CpuInfo> {
     let name = get_cpu_name();
@@ -1201,6 +1316,26 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
                 drain_offset: None,
                 power_offset: None,
                 total_offset: None,
+                min_core_clock: None,
+                max_core_clock: None,
+                min_memory_clock: None,
+                max_memory_clock: None,
+                core_clock_range: None,
+                memory_clock_range: None,
+                is_desktop: false,
+                architecture: None,
+                nvml_index: None,
+                driver_version: None,
+                supported_p_states: vec![],
+                supports_power_limit: false,
+                power_limit_range: None,
+                supports_gpu_offset: false,
+                supports_mem_offset: false,
+                fan_speed_range: None,
+                vram_type: None,
+                vram_vendor: None,
+                vram_bus_width: None,
+                vram_bandwidth: None,
             });
         }
     }
@@ -1258,22 +1393,37 @@ pub fn get_gpu_clock_ranges(device_index: u32) -> Result<(u32, u32)> {
     let nvml = get_nvml()?;
     let device = nvml.device_by_index(device_index)?;
 
-    // First, get the memory clocks to pass to supported_graphics_clocks
-    let mut mem_clocks = device.supported_memory_clocks()?;
-    if mem_clocks.is_empty() {
-        return Err(anyhow!("No supported memory clocks found, cannot determine graphics clock ranges"));
-    }
-    mem_clocks.sort_unstable();
-    // Use the highest memory clock to get the widest range of graphics clocks
-    let target_mem_clock = *mem_clocks.last().unwrap();
+    let mut min_clock = u32::MAX;
+    let mut max_clock = 0;
 
-    let mut clocks = device.supported_graphics_clocks(target_mem_clock)?;
-    if clocks.is_empty() {
-        return Err(anyhow!("No supported graphics clocks found for locking"));
+    // Iterate through all performance states to find absolute min/max
+    if let Ok(supported_states) = device.supported_performance_states() {
+        for pstate in supported_states {
+            if let Ok((p_min, p_max)) = device.min_max_clock_of_pstate(Clock::Graphics, pstate) {
+                if p_min < min_clock { min_clock = p_min; }
+                if p_max > max_clock { max_clock = p_max; }
+            }
+        }
     }
-    clocks.sort_unstable();
-    let min_clock = *clocks.first().unwrap();
-    let max_clock = *clocks.last().unwrap();
+
+    // Fallback to supported_graphics_clocks if min_clock is still MAX
+    if min_clock == u32::MAX {
+        if let Ok(mem_clocks) = device.supported_memory_clocks() {
+            if let Some(&target_mem_clock) = mem_clocks.iter().max() {
+                if let Ok(clocks) = device.supported_graphics_clocks(target_mem_clock) {
+                    if let (Some(&c_min), Some(&c_max)) = (clocks.iter().min(), clocks.iter().max()) {
+                        min_clock = c_min;
+                        max_clock = c_max;
+                    }
+                }
+            }
+        }
+    }
+
+    if min_clock == u32::MAX {
+        return Err(anyhow!("Could not determine graphics clock ranges"));
+    }
+
     Ok((min_clock, max_clock))
 }
 
@@ -1296,6 +1446,202 @@ pub fn get_gpu_memory_offset_limits(device_index: u32) -> Result<(i32, i32)> {
     let device = nvml.device_by_index(device_index)?;
     let offset_info = device.clock_offset(Clock::Memory, PerformanceState::Zero)?;
     Ok((offset_info.min_clock_offset_mhz, offset_info.max_clock_offset_mhz))
+}
+
+// NVIDIA Direct Driver Constants and Structs
+const NV_IOCTL_MAGIC: u8 = b'F';
+const NV_ESC_RM_ALLOC: u8 = 0x23;
+const NV_ESC_RM_CONTROL: u8 = 0x2B;
+const NV_ESC_REGISTER_FD: u8 = 0x27;
+
+const NV01_DEVICE_0: u32 = 0x00000080;
+const NV20_SUBDEVICE_0: u32 = 0x00002080;
+
+const NV2080_CTRL_CMD_FB_GET_INFO: u32 = 0x20800101;
+const NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE: u32 = 0x01;
+const NV2080_CTRL_FB_INFO_INDEX_BUS_WIDTH: u32 = 0x02;
+const NV2080_CTRL_FB_INFO_INDEX_MEMORYINFO_VENDOR_ID: u32 = 0x06;
+
+type NvHandle = u32;
+
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+struct NVOS21_PARAMETERS {
+    hRoot: NvHandle,
+    hObjectParent: NvHandle,
+    hObjectNew: NvHandle,
+    hClass: u32,
+    pAllocParms: *mut std::ffi::c_void,
+    status: u32,
+}
+
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+struct NVOS64_PARAMETERS {
+    hRoot: NvHandle,
+    hObjectParent: NvHandle,
+    hObjectNew: NvHandle,
+    hClass: u32,
+    pAllocParms: *mut std::ffi::c_void,
+    pRightsRequested: *mut std::ffi::c_void,
+    paramsSize: u32,
+    flags: u32,
+    status: u32,
+}
+
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+struct NVOS54_PARAMETERS {
+    hClient: NvHandle,
+    hObject: NvHandle,
+    cmd: u32,
+    flags: u32,
+    params: *mut std::ffi::c_void,
+    paramsSize: u32,
+    status: u32,
+}
+
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+struct NV0080_ALLOC_PARAMETERS {
+    deviceId: u32,
+    hClientShare: NvHandle,
+    hTargetClient: NvHandle,
+    hTargetDevice: NvHandle,
+    flags: u32,
+    pad: [u32; 2],
+}
+
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+struct NV2080_ALLOC_PARAMETERS {
+    subdeviceNumber: u32,
+}
+
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+struct NV2080_CTRL_FB_GET_INFO_PARAMS {
+    fbInfoListSize: u32,
+    fbInfoList: *mut NV2080_CTRL_FB_INFO,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+struct NV2080_CTRL_FB_INFO {
+    index: u32,
+    data: u32,
+}
+
+ioctl_readwrite!(rm_alloc_nvos21, NV_IOCTL_MAGIC, NV_ESC_RM_ALLOC, NVOS21_PARAMETERS);
+ioctl_readwrite!(rm_alloc_nvos64, NV_IOCTL_MAGIC, NV_ESC_RM_ALLOC, NVOS64_PARAMETERS);
+ioctl_readwrite!(register_fd, NV_IOCTL_MAGIC, NV_ESC_REGISTER_FD, RawFd);
+ioctl_readwrite!(rm_control_nvos54, NV_IOCTL_MAGIC, NV_ESC_RM_CONTROL, NVOS54_PARAMETERS);
+
+struct NvidiaDriverHandle {
+    nvidiactl_fd: std::fs::File,
+    client_handle: NvHandle,
+    subdevice_handle: NvHandle,
+}
+
+impl NvidiaDriverHandle {
+    fn open(minor_number: u32) -> Result<Self> {
+        let nvidiactl_fd = fs::File::options()
+            .read(true)
+            .write(true)
+            .open("/dev/nvidiactl")?;
+
+        let mut client_params: NVOS21_PARAMETERS = unsafe { std::mem::zeroed() };
+        unsafe {
+            rm_alloc_nvos21(nvidiactl_fd.as_raw_fd(), &mut client_params)?;
+        }
+        let client_handle = client_params.hObjectNew;
+
+        let device_fd = fs::File::options()
+            .read(true)
+            .write(true)
+            .open(format!("/dev/nvidia{}", minor_number))?;
+
+        let mut dev_fd_raw = device_fd.as_raw_fd();
+        unsafe {
+            register_fd(device_fd.as_raw_fd(), &mut dev_fd_raw)?;
+        }
+
+        let mut alloc_params: NV0080_ALLOC_PARAMETERS = unsafe { std::mem::zeroed() };
+        alloc_params.deviceId = minor_number;
+        let mut device_request = NVOS64_PARAMETERS {
+            hRoot: client_handle,
+            hObjectParent: client_handle,
+            hObjectNew: 0,
+            hClass: NV01_DEVICE_0,
+            pAllocParms: &mut alloc_params as *mut _ as *mut _,
+            pRightsRequested: std::ptr::null_mut(),
+            paramsSize: std::mem::size_of::<NV0080_ALLOC_PARAMETERS>() as u32,
+            flags: 0,
+            status: 0,
+        };
+        unsafe {
+            rm_alloc_nvos64(nvidiactl_fd.as_raw_fd(), &mut device_request)?;
+        }
+        if device_request.status != 0 {
+            return Err(anyhow!("Failed to alloc device handle: {:x}", device_request.status));
+        }
+        let device_handle = device_request.hObjectNew;
+
+        let mut subdevice_alloc: NV2080_ALLOC_PARAMETERS = Default::default();
+        let mut subdevice_request = NVOS64_PARAMETERS {
+            hRoot: client_handle,
+            hObjectParent: device_handle,
+            hObjectNew: 0,
+            hClass: NV20_SUBDEVICE_0,
+            pAllocParms: &mut subdevice_alloc as *mut _ as *mut _,
+            pRightsRequested: std::ptr::null_mut(),
+            paramsSize: std::mem::size_of::<NV2080_ALLOC_PARAMETERS>() as u32,
+            flags: 0,
+            status: 0,
+        };
+        unsafe {
+            rm_alloc_nvos64(nvidiactl_fd.as_raw_fd(), &mut subdevice_request)?;
+        }
+        if subdevice_request.status != 0 {
+            return Err(anyhow!("Failed to alloc subdevice handle: {:x}", subdevice_request.status));
+        }
+
+        Ok(Self {
+            nvidiactl_fd,
+            client_handle,
+            subdevice_handle: subdevice_request.hObjectNew,
+        })
+    }
+
+    fn get_fb_info(&self, index: u32) -> Result<u32> {
+        let mut info = NV2080_CTRL_FB_INFO { index, data: 0 };
+        let mut params = NV2080_CTRL_FB_GET_INFO_PARAMS {
+            fbInfoListSize: 1,
+            fbInfoList: &mut info,
+        };
+        let mut request = NVOS54_PARAMETERS {
+            hClient: self.client_handle,
+            hObject: self.subdevice_handle,
+            cmd: NV2080_CTRL_CMD_FB_GET_INFO,
+            flags: 0,
+            params: &mut params as *mut _ as *mut _,
+            paramsSize: std::mem::size_of::<NV2080_CTRL_FB_GET_INFO_PARAMS>() as u32,
+            status: 0,
+        };
+        unsafe {
+            rm_control_nvos54(self.nvidiactl_fd.as_raw_fd(), &mut request)?;
+        }
+        if request.status != 0 {
+            return Err(anyhow!("RM control failed: {:x}", request.status));
+        }
+        Ok(info.data)
+    }
 }
 
 // NVAPI Constants
@@ -1328,6 +1674,61 @@ struct NvApiVoltage {
 }
 
 // Function to get NVIDIA extended stats (hotspot, memory temp, voltage)
+fn get_vram_info(minor_number: u32) -> (Option<String>, Option<String>, Option<u32>, Option<f32>) {
+    // Returns (type, vendor, bus_width, bandwidth)
+    match NvidiaDriverHandle::open(minor_number) {
+        Ok(handle) => {
+            let ram_type_val = handle.get_fb_info(NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE).ok();
+            let bus_width = handle.get_fb_info(NV2080_CTRL_FB_INFO_INDEX_BUS_WIDTH).ok();
+            let vendor_id = handle.get_fb_info(NV2080_CTRL_FB_INFO_INDEX_MEMORYINFO_VENDOR_ID).ok();
+
+            let ram_type = ram_type_val.map(|v| match v {
+                0x00000001 => "SDRAM",
+                0x00000002 => "DDR1",
+                0x00000003 => "DDR2",
+                0x00000004 => "DDR3",
+                0x00000005 => "GDDR2",
+                0x00000006 => "GDDR3",
+                0x00000007 => "GDDR4",
+                0x00000008 => "GDDR5",
+                0x00000009 => "LPDDR2",
+                0x0000000A => "GDDR5X",
+                0x0000000B => "GDDR6",
+                0x0000000C => "GDDR6X",
+                0x0000000D => "HBM1",
+                0x0000000E => "HBM2",
+                0x0000000F => "HBM3",
+                0x00000010 => "LPDDR4",
+                0x00000011 => "LPDDR5",
+                0x00000012 => "GDDR7",
+                _ => "Unknown",
+            }.to_string());
+
+            let vendor = vendor_id.map(|v| match v {
+                0x00000001 => "Micron",
+                0x00000002 => "Samsung",
+                0x00000003 => "Qimonda",
+                0x00000004 => "Elpida",
+                0x00000005 => "Etron",
+                0x00000006 => "Nanya",
+                0x00000007 => "Hynix",
+                0x00000008 => "Mosel",
+                0x00000009 => "Winbond",
+                0x0000000A => "ESMT",
+                _ => "Unknown",
+            }.to_string());
+
+            // Bandwidth calculation: (Clock * 2 (for DDR) * BusWidth) / 8 / 1000?
+            // Actually bandwidth is complex to calculate without current clock.
+            // NVML already provides memory bandwidth in some versions but not all.
+            // nvidia/nvidia.rs doesn't seem to calculate it, just returns None.
+
+            (ram_type, vendor, bus_width, None)
+        }
+        Err(_) => (None, None, None, None),
+    }
+}
+
 fn get_nvidia_extended_stats(gpu_index: u32) -> (Option<f32>, Option<f32>, Option<f32>) {
     // Returns (hotspot_temp, memory_temp, voltage_v)
     // Note: This loads and initializes NVAPI on each call. This is acceptable for 
@@ -1518,6 +1919,26 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 drain_offset: None,
                 power_offset: None,
                 total_offset: None,
+                min_core_clock: None,
+                max_core_clock: None,
+                min_memory_clock: None,
+                max_memory_clock: None,
+                core_clock_range: None,
+                memory_clock_range: None,
+                is_desktop: false,
+                architecture: None,
+                nvml_index: Some(i as u32),
+                driver_version: None,
+                supported_p_states: vec![],
+                supports_power_limit: false,
+                power_limit_range: None,
+                supports_gpu_offset: false,
+                supports_mem_offset: false,
+                fan_speed_range: None,
+                vram_type: None,
+                vram_vendor: None,
+                vram_bus_width: None,
+                vram_bandwidth: None,
             });
         }
         return Ok(gpus);
@@ -1527,11 +1948,69 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
     let nvml = get_nvml()?;
     let mut gpus = Vec::new();
 
-    let device_count = nvml.device_count()?;
-    for i in 0..device_count {
-        let device = nvml.device_by_index(i)?;
+    let driver_version = nvml.sys_driver_version().ok();
 
-        let name = device.name()?;
+    let device_count = nvml.device_count().unwrap_or(0);
+    for i in 0..device_count {
+        // Use pre-read status to avoid waking up the GPU
+        let status_from_sysfs = statuses.get(i as usize).cloned();
+        let is_suspended = status_from_sysfs
+            .as_deref()
+            .map(|s| s.eq_ignore_ascii_case("suspended"))
+            .unwrap_or(false);
+
+        if is_suspended {
+            let name = {
+                let cache = NVIDIA_NAMES_CACHE.lock().unwrap();
+                cache.get(i as usize).cloned().unwrap_or_else(|| "NVIDIA GPU".to_string())
+            };
+            gpus.push(GpuInfo {
+                name,
+                gpu_type: GpuType::Discrete,
+                status: "suspended".to_string(),
+                frequency: None,
+                memory_frequency: None,
+                temperature: None,
+                hotspot_temperature: None,
+                memory_temperature: None,
+                load: None,
+                power: None,
+                voltage: None,
+                freq_offset: None,
+                drain_offset: None,
+                power_offset: None,
+                total_offset: None,
+                min_core_clock: None,
+                max_core_clock: None,
+                min_memory_clock: None,
+                max_memory_clock: None,
+                core_clock_range: None,
+                memory_clock_range: None,
+                is_desktop: false,
+                architecture: None,
+                nvml_index: Some(i),
+                driver_version: driver_version.clone(),
+                supported_p_states: vec![],
+                supports_power_limit: false,
+                power_limit_range: None,
+                supports_gpu_offset: false,
+                supports_mem_offset: false,
+                fan_speed_range: None,
+                vram_type: None,
+                vram_vendor: None,
+                vram_bus_width: None,
+                vram_bandwidth: None,
+            });
+            continue;
+        }
+
+        // Active GPU - proceed with NVML
+        let device = match nvml.device_by_index(i) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        let name = device.name().unwrap_or_else(|_| "NVIDIA GPU".to_string());
 
         // Update name cache
         {
@@ -1544,47 +2023,63 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         }
 
         let gpu_type = GpuType::Discrete;
-        
-        // Use pre-read status to avoid waking up the GPU with PCI info requests
-        let status_from_sysfs = statuses.get(i as usize).cloned();
-        let is_suspended = status_from_sysfs
-            .as_deref()
-            .map(|s| s.eq_ignore_ascii_case("suspended"))
-            .unwrap_or(false);
 
-        // Get performance state for status if not suspended
+        // Get performance state
         use nvml_wrapper::enum_wrappers::device::PerformanceState;
-        let status = if is_suspended {
-            "suspended".to_string()
-        } else {
-            match device.performance_state() {
-                Ok(state) => {
-                    // Map nvml_wrapper::PerformanceState to "PX" format for GUI
-                    match state {
-                        PerformanceState::Zero => "P0".to_string(),
-                        PerformanceState::One => "P1".to_string(),
-                        PerformanceState::Two => "P2".to_string(),
-                        PerformanceState::Three => "P3".to_string(),
-                        PerformanceState::Four => "P4".to_string(),
-                        PerformanceState::Five => "P5".to_string(),
-                        PerformanceState::Six => "P6".to_string(),
-                        PerformanceState::Seven => "P7".to_string(),
-                        PerformanceState::Eight => "P8".to_string(),
-                        PerformanceState::Nine => "P9".to_string(),
-                        PerformanceState::Ten => "P10".to_string(),
-                        PerformanceState::Eleven => "P11".to_string(),
-                        PerformanceState::Twelve => "P12".to_string(),
-                        PerformanceState::Thirteen => "P13".to_string(),
-                        PerformanceState::Fourteen => "P14".to_string(),
-                        PerformanceState::Fifteen => "P15".to_string(),
-                        PerformanceState::Unknown => "unknown".to_string(),
-                    }
+        let pstate = device.performance_state().ok();
+
+        let status = match pstate {
+            Some(state) => {
+                // Map nvml_wrapper::PerformanceState to "PX" format for GUI
+                match state {
+                    PerformanceState::Zero => "P0".to_string(),
+                    PerformanceState::One => "P1".to_string(),
+                    PerformanceState::Two => "P2".to_string(),
+                    PerformanceState::Three => "P3".to_string(),
+                    PerformanceState::Four => "P4".to_string(),
+                    PerformanceState::Five => "P5".to_string(),
+                    PerformanceState::Six => "P6".to_string(),
+                    PerformanceState::Seven => "P7".to_string(),
+                    PerformanceState::Eight => "P8".to_string(),
+                    PerformanceState::Nine => "P9".to_string(),
+                    PerformanceState::Ten => "P10".to_string(),
+                    PerformanceState::Eleven => "P11".to_string(),
+                    PerformanceState::Twelve => "P12".to_string(),
+                    PerformanceState::Thirteen => "P13".to_string(),
+                    PerformanceState::Fourteen => "P14".to_string(),
+                    PerformanceState::Fifteen => "P15".to_string(),
+                    PerformanceState::Unknown => "unknown".to_string(),
                 }
-                Err(_) => status_from_sysfs.unwrap_or_else(|| "active".to_string()),
             }
+            None => status_from_sysfs.unwrap_or_else(|| "active".to_string()),
         };
 
-        let (frequency, memory_frequency, temperature, load, power) = if is_suspended {
+        let pstate_val = pstate.map(|s| match s {
+            PerformanceState::Zero => 0,
+            PerformanceState::One => 1,
+            PerformanceState::Two => 2,
+            PerformanceState::Three => 3,
+            PerformanceState::Four => 4,
+            PerformanceState::Five => 5,
+            PerformanceState::Six => 6,
+            PerformanceState::Seven => 7,
+            PerformanceState::Eight => 8,
+            PerformanceState::Nine => 9,
+            PerformanceState::Ten => 10,
+            PerformanceState::Eleven => 11,
+            PerformanceState::Twelve => 12,
+            PerformanceState::Thirteen => 13,
+            PerformanceState::Fourteen => 14,
+            PerformanceState::Fifteen => 15,
+            PerformanceState::Unknown => 99,
+        }).unwrap_or(0);
+
+        // Determine if we should poll monitoring stats
+        // NVML stats up to P8, skip NVAPI if P5 or higher
+        let should_poll_nvml = pstate_val <= 8;
+        let should_poll_nvapi = pstate_val <= 4;
+
+        let (frequency, memory_frequency, temperature, load, power) = if !should_poll_nvml {
             (None, None, None, None, None)
         } else {
             (
@@ -1602,28 +2097,91 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             )
         };
 
-        // Determine if we should poll extended stats (to allow GPU to suspend)
-        let should_poll_extended = if is_suspended {
-            false
-        } else {
-            match device.performance_state() {
-                Ok(state) => {
-                    // Skip extended stats for low-power states (typically P8 and P12)
-                    // to allow the GPU to enter suspended mode.
-                    !matches!(state, PerformanceState::Eight | PerformanceState::Twelve | PerformanceState::Fifteen)
-                }
-                Err(_) => true, // Fallback to poll if state unknown but not suspended
-            }
-        };
-
         // Get extended stats via NVAPI
-        let (hotspot_temp, memory_temp, nvapi_voltage) = if should_poll_extended {
+        let (hotspot_temp, memory_temp, nvapi_voltage) = if !is_suspended && should_poll_nvapi {
             get_nvidia_extended_stats(i)
         } else {
             (None, None, None)
         };
 
         let voltage = nvapi_voltage;
+
+        let (min_core_clock, max_core_clock) = (None, None); // NVML wrapper 0.11 doesn't have a getter
+
+        let num_fans = device.num_fans().unwrap_or(0);
+        let is_desktop = false; // Deprecated, using capability flags instead
+
+        // Get metadata from cache or fetch it
+        let metadata = {
+            let mut cache = NVIDIA_METADATA_CACHE.lock().unwrap();
+            if let Some(meta) = cache.get(&i) {
+                meta.clone()
+            } else {
+                let arch = device.architecture().ok().map(|arch| arch.to_string());
+                let p_states = device.supported_performance_states().ok()
+                    .map(|states| states.iter().map(|s| format!("{:?}", s)).collect())
+                    .unwrap_or_default();
+                let p_limit_range = match device.power_management_limit_constraints() {
+                    Ok(constraints) => Some((constraints.min_limit / 1000, constraints.max_limit / 1000)),
+                    Err(_) => None,
+                };
+                let s_gpu_offset = device.clock_offset(Clock::Graphics, PerformanceState::Zero).is_ok();
+                let s_mem_offset = device.clock_offset(Clock::Memory, PerformanceState::Zero).is_ok();
+
+                let minor_number = device.minor_number().unwrap_or(i);
+                let (vram_type, vram_vendor, vram_bus_width, _) = get_vram_info(minor_number);
+
+                let core_range = get_gpu_clock_ranges(i).ok();
+
+                let mut mem_range = None;
+                if let Ok(supported_states) = device.supported_performance_states() {
+                    let mut m_min = u32::MAX;
+                    let mut m_max = 0;
+                    for pstate in supported_states {
+                        if let Ok((p_min, p_max)) = device.min_max_clock_of_pstate(Clock::Memory, pstate) {
+                            if p_min < m_min { m_min = p_min; }
+                            if p_max > m_max { m_max = p_max; }
+                        }
+                    }
+                    if m_min != u32::MAX {
+                        mem_range = Some((m_min, m_max));
+                    }
+                }
+
+                let meta = NvidiaMetadata {
+                    architecture: arch,
+                    supported_p_states: p_states,
+                    power_limit_range: p_limit_range,
+                    supports_gpu_offset: s_gpu_offset,
+                    supports_mem_offset: s_mem_offset,
+                    vram_type,
+                    vram_vendor,
+                    vram_bus_width,
+                    core_clock_range: core_range,
+                    memory_clock_range: mem_range,
+                };
+                cache.insert(i, meta.clone());
+                meta
+            }
+        };
+
+        let architecture = metadata.architecture;
+        let supported_p_states = metadata.supported_p_states;
+        let power_limit_range = metadata.power_limit_range;
+        let supports_power_limit = power_limit_range.is_some();
+        let supports_gpu_offset = metadata.supports_gpu_offset;
+        let supports_mem_offset = metadata.supports_mem_offset;
+        let v_type = metadata.vram_type;
+        let v_vendor = metadata.vram_vendor;
+        let v_bus = metadata.vram_bus_width;
+        let core_clock_range = metadata.core_clock_range;
+        let memory_clock_range = metadata.memory_clock_range;
+        let mut v_bw = None;
+
+        if let (Some(bus), Some((_, max_mem))) = (v_bus, memory_clock_range) {
+            // Approximate max bandwidth: (Max Clock * 2 (DDR) * Bus Width) / 8 / 1000
+            v_bw = Some((max_mem as f32 * 2.0 * bus as f32) / 8000.0);
+        }
 
         let mut gpu_info = GpuInfo {
             name: name.clone(),
@@ -1641,6 +2199,26 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             drain_offset: None,
             power_offset: None,
             total_offset: None,
+            min_core_clock,
+            max_core_clock,
+            min_memory_clock: None,
+            max_memory_clock: None,
+            core_clock_range,
+            memory_clock_range,
+            is_desktop,
+            architecture,
+            nvml_index: Some(i),
+            driver_version: driver_version.clone(),
+            supported_p_states,
+            supports_power_limit,
+            power_limit_range,
+            supports_gpu_offset,
+            supports_mem_offset,
+            fan_speed_range: if num_fans > 0 { Some((0, 100)) } else { None },
+            vram_type: v_type,
+            vram_vendor: v_vendor,
+            vram_bus_width: v_bus,
+            vram_bandwidth: v_bw,
         };
 
         // Fill in offsets if they exist in global state (assuming first NVIDIA GPU for now)
@@ -1651,6 +2229,13 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 gpu_info.drain_offset = Some(stats.drain_offset);
                 gpu_info.power_offset = Some(stats.power_offset);
                 gpu_info.total_offset = Some(stats.total_offset);
+            } else {
+                // Fallback to manual offsets if dynamic is not active
+                let manual_map = crate::MANUAL_GPU_OFFSETS.lock().unwrap();
+                if let Some(offsets) = manual_map.get(&i) {
+                    let core: f32 = offsets.0;
+                    gpu_info.total_offset = Some(core.round() as i32);
+                }
             }
         }
 

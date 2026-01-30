@@ -112,6 +112,26 @@ pub struct GpuInfo {
     pub drain_offset: Option<i32>,
     pub power_offset: Option<i32>,
     pub total_offset: Option<i32>,
+    pub min_core_clock: Option<u32>,
+    pub max_core_clock: Option<u32>,
+    pub min_memory_clock: Option<u32>,
+    pub max_memory_clock: Option<u32>,
+    pub core_clock_range: Option<(u32, u32)>,
+    pub memory_clock_range: Option<(u32, u32)>,
+    pub is_desktop: bool,
+    pub architecture: Option<String>,
+    pub nvml_index: Option<u32>,
+    pub driver_version: Option<String>,
+    pub supported_p_states: Vec<String>,
+    pub supports_power_limit: bool,
+    pub power_limit_range: Option<(u32, u32)>, // in Watts
+    pub supports_gpu_offset: bool,
+    pub supports_mem_offset: bool,
+    pub fan_speed_range: Option<(u32, u32)>, // in %
+    pub vram_type: Option<String>,
+    pub vram_vendor: Option<String>,
+    pub vram_bus_width: Option<u32>, // bits
+    pub vram_bandwidth: Option<f32>, // GB/s
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -141,6 +161,7 @@ pub struct FanInfo {
     pub rpm_or_percent: u32,
     pub temperature: Option<f32>,  // Temperature sensor for this fan
     pub is_rpm: bool,              // true if rpm_or_percent is RPM, false if it's percentage
+    pub mode: Option<String>,      // "Auto", "Manual", etc.
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -222,8 +243,9 @@ pub struct GpuSettings {
     pub min_mem_clock: Option<u32>,
     pub max_mem_clock: Option<u32>,
     pub manual_clocks: bool,
-    pub core_offset: Option<i32>,
-    pub memory_offset: Option<i32>,
+    pub core_offset: Option<f32>,
+    pub memory_offset: Option<f32>,
+    pub power_limit: Option<u32>,
     pub prime_profile: Option<String>,
     #[serde(default)]
     pub advanced_control: bool,
@@ -239,6 +261,16 @@ pub struct GpuSettings {
     pub advanced_max_mem_clock: Option<u32>,
     #[serde(default)]
     pub advanced_memory_offset: Option<i32>,
+    #[serde(default)]
+    pub nvidia_fans: Vec<NvidiaFanSettings>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct NvidiaFanSettings {
+    pub device_index: u32,
+    pub fan_id: u32,
+    pub speed: u32,
+    pub manual: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -526,8 +558,9 @@ impl Default for GpuSettings {
             min_mem_clock: None,
             max_mem_clock: None,
             manual_clocks: false,
-            core_offset: Some(0),
-            memory_offset: Some(0),
+            core_offset: Some(0.0),
+            memory_offset: Some(0.0),
+            power_limit: None,
             prime_profile: Some("on-demand".to_string()),
             advanced_control: false,
             advanced: GpuAdvancedSettings::default(),
@@ -536,6 +569,7 @@ impl Default for GpuSettings {
             advanced_min_mem_clock: None,
             advanced_max_mem_clock: None,
             advanced_memory_offset: Some(0),
+            nvidia_fans: vec![],
         }
     }
 }
