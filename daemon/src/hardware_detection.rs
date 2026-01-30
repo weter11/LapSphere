@@ -649,7 +649,7 @@ pub fn get_tdp_profiles() -> Result<Vec<String>> {
         Ok(io) => {
             match io.get_available_profiles() {
                 Ok(profiles) => {
-                    log::info!("Available TDP profiles: {:?}", profiles);
+                    log::debug!("Available TDP profiles: {:?}", profiles);
                     Ok(profiles)
                 }
                 Err(e) => {
@@ -2494,7 +2494,7 @@ pub fn get_wifi_info() -> Result<Vec<WiFiInfo>> {
         // Calculate actual throughput
         let (tx_rate, rx_rate) = read_wifi_rates(&interface, final_tx_bytes, final_rx_bytes);
         
-        log::info!("WiFi {} details: SSID={:?}, Signal={:?}, Channel={:?}, Rates={:?}/{:?}",
+        log::debug!("WiFi {} details: SSID={:?}, Signal={:?}, Channel={:?}, Rates={:?}/{:?}",
                    interface, ssid, signal_level, channel, tx_rate, rx_rate);
 
         wifi_devices.push(WiFiInfo {

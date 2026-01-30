@@ -39,7 +39,16 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTheme, ctx: 
 }
 
 fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
-    ui.label(RichText::new("Daemon Logs (last 100 lines)").strong().heading());
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Daemon Logs (last 500 lines)").strong().heading());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("📂 Crash Reports").on_hover_text("Open folder with crash reports").clicked() {
+                let crash_dir = crate::app::get_crash_dir();
+                let _ = std::fs::create_dir_all(&crash_dir);
+                let _ = webbrowser::open(&crash_dir);
+            }
+        });
+    });
     ui.add_space(8.0);
 
     ui.horizontal(|ui| {
@@ -49,6 +58,14 @@ fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
                 .collect::<Vec<_>>()
                 .join("\n");
             ctx.output_mut(|o| o.copied_text = log_text);
+        }
+
+        if ui.button(if state.log_paused { "▶ Resume Output" } else { "⏸ Pause Output" }).clicked() {
+            state.log_paused = !state.log_paused;
+        }
+
+        if state.log_paused {
+            ui.label(RichText::new("Output Paused").color(egui::Color32::from_rgb(255, 200, 0)).strong());
         }
     });
 
@@ -68,18 +85,19 @@ fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for entry in state.daemon_logs.iter().rev() {
-                let show = match entry.level.as_str() {
+                let level_upper = entry.level.to_uppercase();
+                let show = match level_upper.as_str() {
                     "ERROR" => state.log_filter_error,
-                    "WARN" => state.log_filter_warn,
+                    "WARN" | "WARNING" => state.log_filter_warn,
                     "INFO" => state.log_filter_info,
                     "DEBUG" | "TRACE" => state.log_filter_debug,
                     _ => true,
                 };
 
                 if show {
-                    let color = match entry.level.as_str() {
+                    let color = match level_upper.as_str() {
                         "ERROR" => egui::Color32::from_rgb(255, 100, 100),
-                        "WARN" => egui::Color32::from_rgb(255, 200, 100),
+                        "WARN" | "WARNING" => egui::Color32::from_rgb(255, 200, 100),
                         "DEBUG" | "TRACE" => egui::Color32::from_rgb(150, 150, 150),
                         _ => ui.visuals().text_color(),
                     };

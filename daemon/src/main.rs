@@ -42,7 +42,7 @@ pub static MANUAL_GPU_OFFSETS: once_cell::sync::Lazy<Arc<Mutex<HashMap<u32, (f32
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
 pub static DAEMON_LOGS: once_cell::sync::Lazy<Arc<Mutex<VecDeque<LogEntry>>>> =
-    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(VecDeque::with_capacity(100))));
+    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(VecDeque::with_capacity(500))));
 
 struct DaemonLogger {
     inner: env_logger::Logger,
@@ -63,7 +63,7 @@ impl log::Log for DaemonLogger {
 
             {
                 let mut logs = DAEMON_LOGS.lock().unwrap();
-                if logs.len() >= 100 {
+                if logs.len() >= 500 {
                     logs.pop_front();
                 }
                 logs.push_back(entry);
@@ -92,6 +92,8 @@ async fn main() -> Result<()> {
     log::set_max_level(max_level);
 
     log::info!("Starting LapSphere Daemon");
+    log::warn!("Test Warning Log: Log system initialized");
+    log::error!("Test Error Log: System ready");
 
     let args: Vec<String> = std::env::args().collect();
 
