@@ -414,29 +414,6 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                                 ui.end_row();
                             }
 
-                            if let Some(ref v_type) = gpu.vram_type {
-                                ui.label("VRAM Type:");
-                                ui.label(v_type);
-                                ui.end_row();
-                            }
-
-                            if let Some(ref v_vendor) = gpu.vram_vendor {
-                                ui.label("VRAM Vendor:");
-                                ui.label(v_vendor);
-                                ui.end_row();
-                            }
-
-                            if let Some(v_bus) = gpu.vram_bus_width {
-                                ui.label("Bus Width:");
-                                ui.label(format!("{}-bit", v_bus));
-                                ui.end_row();
-                            }
-
-                            if let Some(v_bw) = gpu.vram_bandwidth {
-                                ui.label("VRAM Bandwidth:");
-                                ui.label(format!("{:.1} GB/s", v_bw));
-                                ui.end_row();
-                            }
 
 
                             if let Some(fo) = gpu.freq_offset {
