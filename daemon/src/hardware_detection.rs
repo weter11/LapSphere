@@ -1550,7 +1550,7 @@ ioctl_readwrite!(rm_control_nvos54, NV_IOCTL_MAGIC, NV_ESC_RM_CONTROL, NVOS54_PA
 
 struct NvidiaDriverHandle {
     nvidiactl_fd: std::fs::File,
-    #[allow(dead_code)] // Field is kept alive to prevent device_fd from closing
+    #[allow(dead_code)] // Keeps the device file descriptor open for the lifetime of this handle
     device_fd: std::fs::File,
     client_handle: NvHandle,
     subdevice_handle: NvHandle,
@@ -1739,15 +1739,15 @@ fn get_vram_info(minor_number: u32) -> (Option<String>, Option<String>, Option<u
     match NvidiaDriverHandle::open(minor_number) {
         Ok(handle) => {
             let ram_type_val = handle.get_fb_info(NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE)
-                .map_err(|e| log::debug!(target: "hw.detect", "Failed to get RAM type for minor {}: {}", minor_number, e))
+                .inspect_err(|e| log::debug!(target: "hw.detect", "Failed to get RAM type for minor {}: {}", minor_number, e))
                 .ok();
             
             let bus_width = handle.get_fb_info(NV2080_CTRL_FB_INFO_INDEX_BUS_WIDTH)
-                .map_err(|e| log::debug!(target: "hw.detect", "Failed to get bus width for minor {}: {}", minor_number, e))
+                .inspect_err(|e| log::debug!(target: "hw.detect", "Failed to get bus width for minor {}: {}", minor_number, e))
                 .ok();
             
             let vendor_id = handle.get_fb_info(NV2080_CTRL_FB_INFO_INDEX_MEMORYINFO_VENDOR_ID)
-                .map_err(|e| log::debug!(target: "hw.detect", "Failed to get vendor ID for minor {}: {}", minor_number, e))
+                .inspect_err(|e| log::debug!(target: "hw.detect", "Failed to get vendor ID for minor {}: {}", minor_number, e))
                 .ok();
 
             log::debug!(target: "hw.detect", "VRAM raw info for minor {}: type={:?}, bus={:?}, vendor={:?}",
