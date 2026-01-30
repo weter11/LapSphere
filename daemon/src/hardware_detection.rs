@@ -22,6 +22,23 @@ static PREVIOUS_STORAGE_STATS: Lazy<Mutex<HashMap<String, StorageStats>>> =
 
 static NVIDIA_NAMES_CACHE: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
+#[derive(Clone)]
+struct NvidiaMetadata {
+    architecture: Option<String>,
+    supported_p_states: Vec<String>,
+    power_limit_range: Option<(u32, u32)>,
+    supports_gpu_offset: bool,
+    supports_mem_offset: bool,
+    vram_type: Option<String>,
+    vram_vendor: Option<String>,
+    vram_bus_width: Option<u32>,
+    core_clock_range: Option<(u32, u32)>,
+    memory_clock_range: Option<(u32, u32)>,
+}
+
+static NVIDIA_METADATA_CACHE: Lazy<Mutex<HashMap<u32, NvidiaMetadata>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
 const BITS_PER_BYTE: f64 = 8.0;
 const BITS_PER_MEGABIT: f64 = 1_000_000.0;
 
@@ -701,6 +718,9 @@ pub fn get_all_fan_info() -> Result<Vec<FanInfo>> {
     // 1. Get system fans (Tuxedo/Uniwill/Clevo)
     if TuxedoIo::is_available() {
         if let Ok(io) = TuxedoIo::new() {
+            let fan_settings = crate::FAN_DAEMON_STATE.lock().unwrap();
+            let manual_mode = fan_settings.as_ref().map_or(false, |s| s.control_enabled);
+
             for fan_id in 0..io.get_fan_count() {
                 if let Ok(speed) = io.get_fan_speed(fan_id) {
                     let temperature = io.get_fan_temperature(fan_id).ok().map(|t| t as f32);
@@ -710,7 +730,7 @@ pub fn get_all_fan_info() -> Result<Vec<FanInfo>> {
                         rpm_or_percent: speed,
                         temperature,
                         is_rpm: false,
-                        mode: None,
+                        mode: Some(if manual_mode { "Manual".to_string() } else { "Auto".to_string() }),
                     });
                 }
             }
@@ -719,32 +739,65 @@ pub fn get_all_fan_info() -> Result<Vec<FanInfo>> {
 
     // 2. Get NVIDIA GPU fans
     let gpu_settings = crate::GPU_DAEMON_STATE.lock().unwrap();
-    if let Ok(nvml) = get_nvml() {
-        if let Ok(device_count) = nvml.device_count() {
-            for i in 0..device_count {
-                if let Ok(device) = nvml.device_by_index(i) {
-                    if let Ok(num_fans) = device.num_fans() {
-                        for f in 0..num_fans {
-                            let speed = device.fan_speed(f).unwrap_or(0);
 
-                            let mode = if let Some(settings) = &*gpu_settings {
-                                if settings.nvidia_fans.iter().any(|s| s.device_index == i && s.fan_id == f && s.manual) {
-                                    "Manual".to_string()
+    // Check suspension status first to avoid waking up GPU
+    let mut nvidia_active = false;
+    if let Ok(entries) = fs::read_dir("/sys/bus/pci/drivers/nvidia") {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().contains(':') {
+                let status_path = entry.path().join("power/runtime_status");
+                if let Ok(status) = fs::read_to_string(status_path) {
+                    if status.trim() != "suspended" {
+                        nvidia_active = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if nvidia_active {
+        if let Ok(nvml) = get_nvml() {
+            if let Ok(device_count) = nvml.device_count() {
+                for i in 0..device_count {
+                    // Check specific GPU status again
+                    let mut is_suspended = true;
+                    if let Ok(pci_info) = nvml.device_by_index(i).and_then(|d| d.pci_info()) {
+                        let bus_id = pci_info.bus_id.to_lowercase();
+                        let status_path = format!("/sys/bus/pci/devices/{}/power/runtime_status", bus_id);
+                        if let Ok(status) = fs::read_to_string(status_path) {
+                            if status.trim() != "suspended" {
+                                is_suspended = false;
+                            }
+                        }
+                    }
+
+                    if is_suspended { continue; }
+
+                    if let Ok(device) = nvml.device_by_index(i) {
+                        if let Ok(num_fans) = device.num_fans() {
+                            for f in 0..num_fans {
+                                let speed = device.fan_speed(f).unwrap_or(0);
+
+                                let mode = if let Some(settings) = &*gpu_settings {
+                                    if settings.nvidia_fans.iter().any(|s| s.device_index == i && s.fan_id == f && s.manual) {
+                                        "Manual".to_string()
+                                    } else {
+                                        "Auto".to_string()
+                                    }
                                 } else {
                                     "Auto".to_string()
-                                }
-                            } else {
-                                "Auto".to_string()
-                            };
+                                };
 
-                            all_fans.push(FanInfo {
-                                id: 100 + i * 10 + f, // Unique ID for GPU fans
-                                name: format!("NVIDIA GPU {} Fan {}", i, f),
-                                rpm_or_percent: speed,
-                                temperature: device.temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu).ok().map(|t| t as f32),
-                                is_rpm: false,
-                                mode: Some(mode),
-                            });
+                                all_fans.push(FanInfo {
+                                    id: 100 + i * 10 + f, // Unique ID for GPU fans
+                                    name: format!("NVIDIA GPU {} Fan {}", i, f),
+                                    rpm_or_percent: speed,
+                                    temperature: device.temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu).ok().map(|t| t as f32),
+                                    is_rpm: false,
+                                    mode: Some(mode),
+                                });
+                            }
                         }
                     }
                 }
@@ -2053,57 +2106,81 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
 
         let voltage = nvapi_voltage;
 
-        let core_clock_range = get_gpu_clock_ranges(i).ok();
-
-        let mut memory_clock_range = None;
-        if let Ok(supported_states) = device.supported_performance_states() {
-            let mut m_min = u32::MAX;
-            let mut m_max = 0;
-            for pstate in supported_states {
-                if let Ok((p_min, p_max)) = device.min_max_clock_of_pstate(Clock::Memory, pstate) {
-                    if p_min < m_min { m_min = p_min; }
-                    if p_max > m_max { m_max = p_max; }
-                }
-            }
-            if m_min != u32::MAX {
-                memory_clock_range = Some((m_min, m_max));
-            }
-        }
-
-        if memory_clock_range.is_none() {
-            memory_clock_range = device.supported_memory_clocks().ok().and_then(|clocks| {
-                if clocks.is_empty() { None }
-                else { Some((*clocks.iter().min().unwrap(), *clocks.iter().max().unwrap())) }
-            });
-        }
-
         let (min_core_clock, max_core_clock) = (None, None); // NVML wrapper 0.11 doesn't have a getter
 
         let num_fans = device.num_fans().unwrap_or(0);
         let is_desktop = false; // Deprecated, using capability flags instead
 
-        let architecture = device.architecture().ok().map(|arch| arch.to_string());
+        // Get metadata from cache or fetch it
+        let metadata = {
+            let mut cache = NVIDIA_METADATA_CACHE.lock().unwrap();
+            if let Some(meta) = cache.get(&i) {
+                meta.clone()
+            } else {
+                let arch = device.architecture().ok().map(|arch| arch.to_string());
+                let p_states = device.supported_performance_states().ok()
+                    .map(|states| states.iter().map(|s| format!("{:?}", s)).collect())
+                    .unwrap_or_default();
+                let p_limit_range = match device.power_management_limit_constraints() {
+                    Ok(constraints) => Some((constraints.min_limit / 1000, constraints.max_limit / 1000)),
+                    Err(_) => None,
+                };
+                let s_gpu_offset = device.clock_offset(Clock::Graphics, PerformanceState::Zero).is_ok();
+                let s_mem_offset = device.clock_offset(Clock::Memory, PerformanceState::Zero).is_ok();
 
-        let supported_p_states = device.supported_performance_states().ok()
-            .map(|states| states.iter().map(|s| format!("{:?}", s)).collect())
-            .unwrap_or_default();
+                let minor_number = device.minor_number().unwrap_or(i);
+                let (vram_type, vram_vendor, vram_bus_width, _) = get_vram_info(minor_number);
 
-        let (supports_power_limit, power_limit_range) = match device.power_management_limit_constraints() {
-            Ok(constraints) => (true, Some((constraints.min_limit / 1000, constraints.max_limit / 1000))), // mW to W
-            Err(_) => (false, None),
+                let core_range = get_gpu_clock_ranges(i).ok();
+
+                let mut mem_range = None;
+                if let Ok(supported_states) = device.supported_performance_states() {
+                    let mut m_min = u32::MAX;
+                    let mut m_max = 0;
+                    for pstate in supported_states {
+                        if let Ok((p_min, p_max)) = device.min_max_clock_of_pstate(Clock::Memory, pstate) {
+                            if p_min < m_min { m_min = p_min; }
+                            if p_max > m_max { m_max = p_max; }
+                        }
+                    }
+                    if m_min != u32::MAX {
+                        mem_range = Some((m_min, m_max));
+                    }
+                }
+
+                let meta = NvidiaMetadata {
+                    architecture: arch,
+                    supported_p_states: p_states,
+                    power_limit_range: p_limit_range,
+                    supports_gpu_offset: s_gpu_offset,
+                    supports_mem_offset: s_mem_offset,
+                    vram_type,
+                    vram_vendor,
+                    vram_bus_width,
+                    core_clock_range: core_range,
+                    memory_clock_range: mem_range,
+                };
+                cache.insert(i, meta.clone());
+                meta
+            }
         };
 
-        let supports_gpu_offset = device.clock_offset(Clock::Graphics, PerformanceState::Zero).is_ok();
-        let supports_mem_offset = device.clock_offset(Clock::Memory, PerformanceState::Zero).is_ok();
+        let architecture = metadata.architecture;
+        let supported_p_states = metadata.supported_p_states;
+        let power_limit_range = metadata.power_limit_range;
+        let supports_power_limit = power_limit_range.is_some();
+        let supports_gpu_offset = metadata.supports_gpu_offset;
+        let supports_mem_offset = metadata.supports_mem_offset;
+        let v_type = metadata.vram_type;
+        let v_vendor = metadata.vram_vendor;
+        let v_bus = metadata.vram_bus_width;
+        let core_clock_range = metadata.core_clock_range;
+        let memory_clock_range = metadata.memory_clock_range;
+        let mut v_bw = None;
 
-        let minor_number = device.minor_number().unwrap_or(i);
-        let (v_type, v_vendor, v_bus, mut v_bw) = get_vram_info(minor_number);
-
-        if v_bw.is_none() {
-            if let (Some(bus), Some((_, max_mem))) = (v_bus, memory_clock_range) {
-                // Approximate max bandwidth: (Max Clock * 2 (DDR) * Bus Width) / 8 / 1000
-                v_bw = Some((max_mem as f32 * 2.0 * bus as f32) / 8000.0);
-            }
+        if let (Some(bus), Some((_, max_mem))) = (v_bus, memory_clock_range) {
+            // Approximate max bandwidth: (Max Clock * 2 (DDR) * Bus Width) / 8 / 1000
+            v_bw = Some((max_mem as f32 * 2.0 * bus as f32) / 8000.0);
         }
 
         let mut gpu_info = GpuInfo {

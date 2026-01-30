@@ -893,6 +893,8 @@ fn draw_nvidia_fan_tuning(
     gpu_info: &[lapsphere_common::types::GpuInfo],
     fan_info: &[FanInfo],
 ) {
+    let old_width = ui.spacing().slider_width;
+    ui.spacing_mut().slider_width = ui.available_width() * 0.33;
     for gpu in gpu_info {
         if let Some(nvml_index) = gpu.nvml_index {
             if gpu.name.contains("NVIDIA") {
@@ -944,6 +946,7 @@ fn draw_nvidia_fan_tuning(
             }
         }
     }
+    ui.spacing_mut().slider_width = old_width;
 }
 
 /// Apply GPU settings when the save button is clicked
@@ -1324,6 +1327,8 @@ fn draw_fan_tuning(
     selected_fan_curve: &mut usize,
     fan_count: usize,
 ) {
+    let old_width = ui.spacing().slider_width;
+    ui.spacing_mut().slider_width = ui.available_width() * 0.33;
     ui.heading("💨 Fan Control");
     ui.add_space(8.0);
     
@@ -1375,6 +1380,7 @@ fn draw_fan_tuning(
             *curve = editor.get_curve();
         }
     }
+    ui.spacing_mut().slider_width = old_width;
 }
 
 fn create_default_profile_for_reset(is_standard: bool) -> Profile {
