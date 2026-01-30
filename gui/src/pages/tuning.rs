@@ -1328,7 +1328,7 @@ fn draw_fan_tuning(
     fan_count: usize,
 ) {
     let old_width = ui.spacing().slider_width;
-    ui.spacing_mut().slider_width = ui.available_width() * 0.33;
+    ui.spacing_mut().slider_width = ui.available_width() * 0.32;
     ui.heading("💨 Fan Control");
     ui.add_space(8.0);
     
