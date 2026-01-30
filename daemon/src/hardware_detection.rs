@@ -649,7 +649,7 @@ pub fn get_tdp_profiles() -> Result<Vec<String>> {
         Ok(io) => {
             match io.get_available_profiles() {
                 Ok(profiles) => {
-                    log::debug!("Available TDP profiles: {:?}", profiles);
+                    log::info!("Available TDP profiles: {:?}", profiles);
                     Ok(profiles)
                 }
                 Err(e) => {
@@ -1676,14 +1676,14 @@ struct NvApiVoltage {
 // Function to get NVIDIA extended stats (hotspot, memory temp, voltage)
 fn get_vram_info(minor_number: u32) -> (Option<String>, Option<String>, Option<u32>, Option<f32>) {
     // Returns (type, vendor, bus_width, bandwidth)
-    log::debug!("Attempting to get VRAM info for NVIDIA device minor {}", minor_number);
+    log::info!("Attempting to get VRAM info for NVIDIA device minor {}", minor_number);
     match NvidiaDriverHandle::open(minor_number) {
         Ok(handle) => {
             let ram_type_val = handle.get_fb_info(NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE).ok();
             let bus_width = handle.get_fb_info(NV2080_CTRL_FB_INFO_INDEX_BUS_WIDTH).ok();
             let vendor_id = handle.get_fb_info(NV2080_CTRL_FB_INFO_INDEX_MEMORYINFO_VENDOR_ID).ok();
 
-            log::debug!("VRAM raw info for minor {}: type={:?}, bus={:?}, vendor={:?}",
+            log::info!("VRAM raw info for minor {}: type={:?}, bus={:?}, vendor={:?}",
                 minor_number, ram_type_val, bus_width, vendor_id);
 
             let ram_type = ram_type_val.map(|v| match v {
@@ -2494,7 +2494,7 @@ pub fn get_wifi_info() -> Result<Vec<WiFiInfo>> {
         // Calculate actual throughput
         let (tx_rate, rx_rate) = read_wifi_rates(&interface, final_tx_bytes, final_rx_bytes);
         
-        log::debug!("WiFi {} details: SSID={:?}, Signal={:?}, Channel={:?}, Rates={:?}/{:?}",
+        log::info!("WiFi {} details: SSID={:?}, Signal={:?}, Channel={:?}, Rates={:?}/{:?}",
                    interface, ssid, signal_level, channel, tx_rate, rx_rate);
 
         wifi_devices.push(WiFiInfo {

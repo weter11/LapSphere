@@ -50,11 +50,13 @@ struct DaemonLogger {
 
 impl log::Log for DaemonLogger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
-        self.inner.enabled(metadata)
+        // Operational levels are always enabled for internal buffer
+        metadata.level() <= log::Level::Info || self.inner.enabled(metadata)
     }
 
     fn log(&self, record: &log::Record) {
-        if self.enabled(record.metadata()) {
+        // Always capture operational logs into the buffer
+        if record.level() <= log::Level::Info || self.inner.enabled(record.metadata()) {
             let entry = LogEntry {
                 level: record.level().to_string(),
                 message: record.args().to_string(),
@@ -63,12 +65,15 @@ impl log::Log for DaemonLogger {
 
             {
                 let mut logs = DAEMON_LOGS.lock().unwrap();
-                if logs.len() >= 500 {
+                if logs.len() >= 1000 {
                     logs.pop_front();
                 }
                 logs.push_back(entry);
             }
+        }
 
+        // Only log to console if env_logger allows it
+        if self.inner.enabled(record.metadata()) {
             self.inner.log(record);
         }
     }
@@ -85,11 +90,11 @@ async fn main() -> Result<()> {
         builder.filter_level(log::LevelFilter::Info);
     }
     let inner = builder.build();
-    let max_level = inner.filter();
+    let _max_level = inner.filter();
     let logger = DaemonLogger { inner };
 
     log::set_boxed_logger(Box::new(logger)).unwrap();
-    log::set_max_level(max_level);
+    log::set_max_level(log::LevelFilter::Debug); // Allow up to Debug to reach our logger for buffer
 
     log::info!("Starting LapSphere Daemon");
     log::warn!("Test Warning Log: Log system initialized");
@@ -285,10 +290,22 @@ async fn main() -> Result<()> {
         Ok(())
     };
 
+    let log_tick = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let gpu_job_poll = {
+        let log_tick = log_tick.clone();
+        move || {
+            let tick = log_tick.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if tick % 60 == 0 {
+                log::warn!("Daemon heartbeat. Uptime tick: {}", tick);
+            }
+            gpu_poll_fn()
+        }
+    };
+
     let gpu_job = PollJob::new(
         "gpu_overclock".to_string(),
         Duration::from_millis(1000), // Default 1s
-        gpu_poll_fn,
+        gpu_job_poll,
     );
 
     if let Err(e) = scheduler_handle.add_job(gpu_job) {
