@@ -1550,6 +1550,8 @@ ioctl_readwrite!(rm_control_nvos54, NV_IOCTL_MAGIC, NV_ESC_RM_CONTROL, NVOS54_PA
 
 struct NvidiaDriverHandle {
     nvidiactl_fd: std::fs::File,
+    #[allow(dead_code)] // Keeps the device file descriptor open for the lifetime of this handle
+    device_fd: std::fs::File,
     client_handle: NvHandle,
     subdevice_handle: NvHandle,
 }
@@ -1628,6 +1630,7 @@ impl NvidiaDriverHandle {
 
         Ok(Self {
             nvidiactl_fd,
+            device_fd,
             client_handle,
             subdevice_handle: subdevice_request.hObjectNew,
         })
@@ -1735,9 +1738,17 @@ fn get_vram_info(minor_number: u32) -> (Option<String>, Option<String>, Option<u
     log::debug!(target: "hw.detect", "Attempting to get VRAM info for NVIDIA device minor {}", minor_number);
     match NvidiaDriverHandle::open(minor_number) {
         Ok(handle) => {
-            let ram_type_val = handle.get_fb_info(NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE).ok();
-            let bus_width = handle.get_fb_info(NV2080_CTRL_FB_INFO_INDEX_BUS_WIDTH).ok();
-            let vendor_id = handle.get_fb_info(NV2080_CTRL_FB_INFO_INDEX_MEMORYINFO_VENDOR_ID).ok();
+            let ram_type_val = handle.get_fb_info(NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE)
+                .inspect_err(|e| log::debug!(target: "hw.detect", "Failed to get RAM type for minor {}: {}", minor_number, e))
+                .ok();
+            
+            let bus_width = handle.get_fb_info(NV2080_CTRL_FB_INFO_INDEX_BUS_WIDTH)
+                .inspect_err(|e| log::debug!(target: "hw.detect", "Failed to get bus width for minor {}: {}", minor_number, e))
+                .ok();
+            
+            let vendor_id = handle.get_fb_info(NV2080_CTRL_FB_INFO_INDEX_MEMORYINFO_VENDOR_ID)
+                .inspect_err(|e| log::debug!(target: "hw.detect", "Failed to get vendor ID for minor {}: {}", minor_number, e))
+                .ok();
 
             log::debug!(target: "hw.detect", "VRAM raw info for minor {}: type={:?}, bus={:?}, vendor={:?}",
                 minor_number, ram_type_val, bus_width, vendor_id);
