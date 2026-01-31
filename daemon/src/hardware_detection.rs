@@ -39,6 +39,16 @@ struct NvidiaMetadata {
 static NVIDIA_METADATA_CACHE: Lazy<Mutex<HashMap<u32, NvidiaMetadata>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+static LAST_GPU_TWEAK_TIME: Lazy<Mutex<Instant>> = Lazy::new(|| {
+    // Initialize to 1 hour ago so it doesn't trigger immediately
+    Mutex::new(Instant::now() - std::time::Duration::from_secs(3600))
+});
+
+pub fn record_gpu_tweak() {
+    let mut last = LAST_GPU_TWEAK_TIME.lock().unwrap();
+    *last = Instant::now();
+}
+
 const BITS_PER_BYTE: f64 = 8.0;
 const BITS_PER_MEGABIT: f64 = 1_000_000.0;
 
@@ -1913,6 +1923,16 @@ fn get_nvidia_extended_stats(gpu_index: u32) -> (Option<f32>, Option<f32>, Optio
 }
 
 fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
+    let (manual_clocks_enabled, advanced_control_enabled) = {
+        let state = crate::GPU_DAEMON_STATE.lock().unwrap();
+        state.as_ref().map_or((false, false), |s| (s.manual_clocks, s.advanced_control))
+    };
+
+    let is_tweaking = {
+        let last = LAST_GPU_TWEAK_TIME.lock().unwrap();
+        last.elapsed() < std::time::Duration::from_secs(30)
+    };
+
     // 1. Check sysfs for NVIDIA devices and their status to avoid waking up suspended GPUs
     let mut nvidia_pci_ids = Vec::new();
     if let Ok(entries) = fs::read_dir("/sys/bus/pci/drivers/nvidia") {
@@ -2085,6 +2105,72 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             continue;
         }
 
+        // Check if we should skip this GPU to avoid waking it up
+        // If manual clocks are disabled, we only poll if we haven't cached metadata yet
+        let metadata_cached = {
+            let cache = NVIDIA_METADATA_CACHE.lock().unwrap();
+            cache.contains_key(&i)
+        };
+
+        if !manual_clocks_enabled && metadata_cached {
+            let name = {
+                let cache = NVIDIA_NAMES_CACHE.lock().unwrap();
+                cache.get(i as usize).cloned().unwrap_or_else(|| "NVIDIA GPU".to_string())
+            };
+
+            let cached_metadata = {
+                let cache = NVIDIA_METADATA_CACHE.lock().unwrap();
+                cache.get(&i).cloned()
+            };
+
+            let (vram_type, vram_vendor, vram_bus_width, vram_bandwidth) =
+                if let Some(ref meta) = cached_metadata {
+                    let bandwidth = calculate_vram_bandwidth(meta.vram_type.as_ref(), meta.vram_bus_width, meta.memory_clock_range);
+                    (meta.vram_type.clone(), meta.vram_vendor.clone(), meta.vram_bus_width, bandwidth)
+                } else {
+                    (None, None, None, None)
+                };
+
+            gpus.push(GpuInfo {
+                name,
+                gpu_type: GpuType::Discrete,
+                status: status_from_sysfs.unwrap_or_else(|| "active".to_string()),
+                frequency: None,
+                memory_frequency: None,
+                temperature: None,
+                hotspot_temperature: None,
+                memory_temperature: None,
+                load: None,
+                power: None,
+                voltage: None,
+                freq_offset: None,
+                drain_offset: None,
+                power_offset: None,
+                total_offset: None,
+                min_core_clock: None,
+                max_core_clock: None,
+                min_memory_clock: None,
+                max_memory_clock: None,
+                core_clock_range: cached_metadata.as_ref().and_then(|m| m.core_clock_range),
+                memory_clock_range: cached_metadata.as_ref().and_then(|m| m.memory_clock_range),
+                is_desktop: false,
+                architecture: cached_metadata.as_ref().and_then(|m| m.architecture.clone()),
+                nvml_index: Some(i),
+                driver_version: driver_version.clone(),
+                supported_p_states: cached_metadata.as_ref().map(|m| m.supported_p_states.clone()).unwrap_or_default(),
+                supports_power_limit: cached_metadata.as_ref().and_then(|m| m.power_limit_range).is_some(),
+                power_limit_range: cached_metadata.as_ref().and_then(|m| m.power_limit_range),
+                supports_gpu_offset: cached_metadata.as_ref().map(|m| m.supports_gpu_offset).unwrap_or(false),
+                supports_mem_offset: cached_metadata.as_ref().map(|m| m.supports_mem_offset).unwrap_or(false),
+                fan_speed_range: None,
+                vram_type,
+                vram_vendor,
+                vram_bus_width,
+                vram_bandwidth,
+            });
+            continue;
+        }
+
         // Active GPU - proceed with NVML
         let device = match nvml.device_by_index(i) {
             Ok(d) => d,
@@ -2156,9 +2242,17 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         }).unwrap_or(0);
 
         // Determine if we should poll monitoring stats
-        // NVML stats up to P8, skip NVAPI if P5 or higher
-        let should_poll_nvml = pstate_val <= 8;
-        let should_poll_nvapi = pstate_val <= 4;
+        // We only poll NVML if:
+        // 1. Manual clocks are enabled AND (Advanced control is on OR we are actively tweaking)
+        // 2. The GPU is in a high-power state (P0-P4), meaning it's already awake and in use
+        let is_high_power = pstate_val <= 4;
+        let should_poll_nvml = if advanced_control_enabled {
+            pstate_val <= 8
+        } else {
+            manual_clocks_enabled && (is_tweaking || is_high_power)
+        };
+
+        let should_poll_nvapi = is_high_power && (manual_clocks_enabled || advanced_control_enabled);
 
         let (frequency, memory_frequency, temperature, load, power) = if !should_poll_nvml {
             (None, None, None, None, None)
@@ -2289,32 +2383,8 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         let v_type = metadata.vram_type;
         let v_vendor = metadata.vram_vendor;
         let v_bus = metadata.vram_bus_width;
-        let core_clock_range = get_gpu_clock_ranges(i).ok();
-
-        let mut memory_clock_range = None;
-        if let Ok(supported_states) = device.supported_performance_states() {
-            let mut m_min = u32::MAX;
-            let mut m_max = 0;
-            for pstate in supported_states {
-                if let Ok((p_min, p_max)) = device.min_max_clock_of_pstate(Clock::Memory, pstate) {
-                    if p_min < m_min { m_min = p_min; }
-                    if p_max > m_max { m_max = p_max; }
-                }
-            }
-            if m_min != u32::MAX {
-                memory_clock_range = Some((m_min, m_max));
-            }
-        }
-
-        // Fallback for memory clock range
-        if memory_clock_range.is_none() {
-            if let Ok(clocks) = device.supported_memory_clocks() {
-                if let (Some(&c_min), Some(&c_max)) = (clocks.iter().min(), clocks.iter().max()) {
-                    memory_clock_range = Some((c_min, c_max));
-                }
-            }
-        }
-
+        let core_clock_range = metadata.core_clock_range;
+        let memory_clock_range = metadata.memory_clock_range;
         let v_bw = calculate_vram_bandwidth(v_type.as_ref(), v_bus, memory_clock_range);
 
         // Log VRAM info for diagnostics
@@ -2367,7 +2437,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         };
 
         // Fill in offsets if they exist in global state (assuming first NVIDIA GPU for now)
-        if name.to_lowercase().contains("nvidia") {
+        if name.to_lowercase().contains("nvidia") && manual_clocks_enabled {
             let stats_lock = crate::CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
             if let Some(ref stats) = *stats_lock {
                 gpu_info.freq_offset = Some(stats.freq_offset);
