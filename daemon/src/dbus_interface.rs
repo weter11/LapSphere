@@ -437,22 +437,6 @@ impl ControlInterface {
         )
     }
 
-    async fn set_memory_locked_clocks(&self, device_index: u32, min_clock: u32, max_clock: u32) -> Result<(), zbus::fdo::Error> {
-        log_api!(
-            "SetMemoryLockedClocks",
-            crate::hardware_control::set_memory_locked_clocks(device_index, min_clock, max_clock),
-            |_| format!("gpu={} min={} max={}", device_index, min_clock, max_clock)
-        )
-    }
-
-    async fn reset_memory_locked_clocks(&self, device_index: u32) -> Result<(), zbus::fdo::Error> {
-        log_api!(
-            "ResetMemoryLockedClocks",
-            crate::hardware_control::reset_memory_locked_clocks(device_index),
-            |_| format!("gpu={}", device_index)
-        )
-    }
-
     async fn reset_gpu_clocks(&self, device_index: u32) -> Result<(), zbus::fdo::Error> {
         log_api!(
             "ResetGpuClocks",
@@ -466,14 +450,6 @@ impl ControlInterface {
             "GetGpuClockRanges",
             crate::hardware_detection::get_gpu_clock_ranges(device_index),
             |i: &(u32, u32)| format!("gpu={} range={}..{}", device_index, i.0, i.1)
-        )
-    }
-
-    async fn get_gpu_mem_clock_ranges(&self, device_index: u32) -> Result<String, zbus::fdo::Error> {
-        log_api_json!(
-            "GetGpuMemClockRanges",
-            crate::hardware_detection::get_gpu_mem_clock_ranges(device_index),
-            |i: &Vec<u32>| format!("gpu={} count={}", device_index, i.len())
         )
     }
 

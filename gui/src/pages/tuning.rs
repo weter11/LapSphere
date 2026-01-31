@@ -483,18 +483,6 @@ fn draw_gpu_tuning(
                 });
             }
         }
-        if state.gpu_mem_clock_ranges.is_none() {
-            if let Some(client) = dbus_client {
-                let client = client.clone();
-                let tx = hw_update_tx.clone();
-                tokio::spawn(async move {
-                    let res = client.get_gpu_mem_clock_ranges(nvml_index).await
-                        .map(|r| r.map_err(|e| e.to_string()))
-                        .unwrap_or_else(|e| Err(e.to_string()));
-                    let _ = tx.send(crate::app::HardwareUpdate::GpuMemClockRanges(res));
-                });
-            }
-        }
         if state.gpu_core_offset_limits.is_none() {
             if let Some(client) = dbus_client {
                 let client = client.clone();
@@ -576,16 +564,59 @@ fn draw_gpu_standard_controls(
     ui: &mut Ui,
     profile: &mut Profile,
     gpu_clock_ranges: Option<(u32, u32)>,
-    gpu_mem_clock_ranges: Option<(u32, u32)>,
+    _gpu_mem_clock_ranges: Option<(u32, u32)>,
     gpu_core_offset_limits: Option<(i32, i32)>,
     gpu_mem_offset_limits: Option<(i32, i32)>,
     gpu_info: &lapsphere_common::types::GpuInfo,
 ) {
     let architecture = &gpu_info.architecture;
     ui.add_space(6.0);
-    // GPU Locked Clocks section
-    ui.label(RichText::new("GPU Locked Clocks:").strong());
-    if let Some((min_range, max_range)) = gpu_clock_ranges {
+
+    let mut current_core_offset = profile.gpu_settings.core_offset.unwrap_or(0.0);
+
+    // 1. GPU Core Offset
+    if !profile.gpu_settings.advanced_control && gpu_info.supports_gpu_offset {
+        ui.label(RichText::new("GPU Core Offset:").strong());
+        if let Some((min_limit, max_limit)) = gpu_core_offset_limits {
+            let step = if let Some(arch) = architecture {
+                let arch_l = arch.to_lowercase();
+                if arch_l.contains("ada") || arch_l.contains("blackwell") {
+                    7.5
+                } else {
+                    15.0
+                }
+            } else {
+                15.0
+            };
+
+            let steps_below = (min_limit.abs() as f32 / step).floor();
+            let snapped_min = -steps_below * step;
+            let steps_above = (max_limit as f32 / step).floor();
+            let snapped_max = steps_above * step;
+
+            let prev_offset = current_core_offset;
+            if ui.add(Slider::new(&mut current_core_offset, snapped_min..=snapped_max).suffix(" MHz").step_by(step as f64)).changed() {
+                let delta = current_core_offset - prev_offset;
+                // Shift locked clocks in real-time
+                if let Some(min) = profile.gpu_settings.min_gpu_clock {
+                    profile.gpu_settings.min_gpu_clock = Some((min as f32 + delta).round() as u32);
+                }
+                if let Some(max) = profile.gpu_settings.max_gpu_clock {
+                    profile.gpu_settings.max_gpu_clock = Some((max as f32 + delta).round() as u32);
+                }
+            }
+            profile.gpu_settings.core_offset = Some(current_core_offset);
+        }
+        ui.add_space(16.0);
+    }
+
+    // 2. GPU Locked Clocks (shifted by offset)
+    ui.label(RichText::new("GPU Locked Clocks (P-State 0):").strong());
+    if let Some((base_min, base_max)) = gpu_clock_ranges {
+        // Adjust bounds by current offset
+        let min_range = (base_min as f32 + current_core_offset).round() as u32;
+        let max_range = (base_max as f32 + current_core_offset).round() as u32;
+
         let mut min_gpu_clock = profile.gpu_settings.min_gpu_clock.unwrap_or(min_range);
         let mut max_gpu_clock = profile.gpu_settings.max_gpu_clock.unwrap_or(max_range);
 
@@ -615,69 +646,7 @@ fn draw_gpu_standard_controls(
 
     ui.add_space(16.0);
 
-    // Memory Locked Clocks section
-    ui.label(RichText::new("Memory Locked Clocks:").strong());
-    if let Some((min_range, max_range)) = gpu_mem_clock_ranges {
-        let mut min_mem_clock = profile.gpu_settings.min_mem_clock.unwrap_or(min_range);
-        let mut max_mem_clock = profile.gpu_settings.max_mem_clock.unwrap_or(max_range);
-
-        ui.horizontal(|ui| {
-            ui.label("Min:");
-            if ui.add(Slider::new(&mut min_mem_clock, min_range..=max_range).suffix(" MHz")).changed() {
-                if min_mem_clock > max_mem_clock {
-                    max_mem_clock = min_mem_clock;
-                }
-            }
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("Max:");
-            if ui.add(Slider::new(&mut max_mem_clock, min_range..=max_range).suffix(" MHz")).changed() {
-                if max_mem_clock < min_mem_clock {
-                    min_mem_clock = max_mem_clock;
-                }
-            }
-        });
-
-        profile.gpu_settings.min_mem_clock = Some(min_mem_clock);
-        profile.gpu_settings.max_mem_clock = Some(max_mem_clock);
-    } else {
-        ui.label("Fetching memory clock ranges...");
-    }
-
-    ui.add_space(16.0);
-
-    // GPU Core Offset - only for Standard control
-    if !profile.gpu_settings.advanced_control && gpu_info.supports_gpu_offset {
-        ui.label(RichText::new("GPU Core Offset:").strong());
-        if let Some((min_limit, max_limit)) = gpu_core_offset_limits {
-            let mut core_offset = profile.gpu_settings.core_offset.unwrap_or(0.0);
-
-            let step = if let Some(arch) = architecture {
-                let arch_l = arch.to_lowercase();
-                if arch_l.contains("ada") || arch_l.contains("blackwell") {
-                    7.5
-                } else {
-                    15.0
-                }
-            } else {
-                15.0
-            };
-
-            // Snap range to multiples of step relative to 0 to ensure 0 MHz is a valid step
-            let steps_below = (min_limit.abs() as f32 / step).floor();
-            let snapped_min = -steps_below * step;
-            let steps_above = (max_limit as f32 / step).floor();
-            let snapped_max = steps_above * step;
-
-            ui.add(Slider::new(&mut core_offset, snapped_min..=snapped_max).suffix(" MHz").step_by(step as f64));
-            profile.gpu_settings.core_offset = Some(core_offset);
-        }
-
-        ui.add_space(16.0);
-    }
-
-    // GPU Memory Offset (Standard mode only)
+    // 3. GPU Memory Offset
     if !profile.gpu_settings.advanced_control && gpu_info.supports_mem_offset {
         ui.label(RichText::new("GPU Memory Offset:").strong());
         if let Some((min_limit, max_limit)) = gpu_mem_offset_limits {
@@ -711,7 +680,7 @@ fn draw_gpu_advanced_controls(
     profile: &mut Profile,
     gpu_overclock_poll_rate: &mut u64,
     gpu_clock_ranges: Option<(u32, u32)>,
-    gpu_mem_clock_ranges: Option<(u32, u32)>,
+    _gpu_mem_clock_ranges: Option<(u32, u32)>,
     gpu_mem_offset_limits: Option<(i32, i32)>,
 ) {
     ui.add_space(6.0);
@@ -739,33 +708,6 @@ fn draw_gpu_advanced_controls(
             profile.gpu_settings.advanced_max_gpu_clock = Some(max_gpu_clock);
         } else {
             ui.label("Fetching GPU clock ranges...");
-    }
-
-    ui.add_space(8.0);
-    ui.label(RichText::new("Memory Locked Clocks (Advanced):").strong());
-        if let Some((min_range, max_range)) = gpu_mem_clock_ranges {
-            let mut min_mem_clock = profile.gpu_settings.advanced_min_mem_clock.unwrap_or(min_range);
-            let mut max_mem_clock = profile.gpu_settings.advanced_max_mem_clock.unwrap_or(max_range);
-            ui.horizontal(|ui| {
-                ui.label("Min:");
-                if ui.add(Slider::new(&mut min_mem_clock, min_range..=max_range).suffix(" MHz")).changed() {
-                    if min_mem_clock > max_mem_clock {
-                        max_mem_clock = min_mem_clock;
-                    }
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label("Max:");
-                if ui.add(Slider::new(&mut max_mem_clock, min_range..=max_range).suffix(" MHz")).changed() {
-                    if max_mem_clock < min_mem_clock {
-                        min_mem_clock = max_mem_clock;
-                    }
-                }
-            });
-            profile.gpu_settings.advanced_min_mem_clock = Some(min_mem_clock);
-            profile.gpu_settings.advanced_max_mem_clock = Some(max_mem_clock);
-        } else {
-            ui.label("Fetching memory clock ranges...");
     }
 
     ui.add_space(8.0);
@@ -966,17 +908,6 @@ fn apply_gpu_settings_on_save(client: &DbusClient, gpu_settings: &lapsphere_comm
             let _ = client.set_gpu_locked_clocks(nvidia_gpu_idx, min_clock, max_clock);
         }
         
-        // Apply memory locked clocks if set
-        if gpu_settings.advanced_control {
-            if let (Some(min_mem), Some(max_mem)) =
-                (gpu_settings.advanced_min_mem_clock, gpu_settings.advanced_max_mem_clock)
-            {
-                let _ = client.set_memory_locked_clocks(nvidia_gpu_idx, min_mem, max_mem);
-            }
-        } else if let (Some(min_mem), Some(max_mem)) = (gpu_settings.min_mem_clock, gpu_settings.max_mem_clock) {
-            let _ = client.set_memory_locked_clocks(nvidia_gpu_idx, min_mem, max_mem);
-        }
-        
         // Apply core offset if set and not in advanced mode (advanced mode is handled by daemon loop)
         if !gpu_settings.advanced_control {
             if let Some(core_offset) = gpu_settings.core_offset {
@@ -1000,7 +931,6 @@ fn apply_gpu_settings_on_save(client: &DbusClient, gpu_settings: &lapsphere_comm
     } else {
         // Reset to factory settings when manual control is disabled
         let _ = client.reset_gpu_clocks(nvidia_gpu_idx);
-        let _ = client.reset_memory_locked_clocks(nvidia_gpu_idx);
         // Reset offsets to 0
         let _ = client.set_gpu_core_offset(nvidia_gpu_idx, 0.0);
         let _ = client.set_gpu_memory_offset(nvidia_gpu_idx, 0.0);

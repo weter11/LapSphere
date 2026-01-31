@@ -1398,46 +1398,26 @@ pub fn get_gpu_clock_ranges(device_index: u32) -> Result<(u32, u32)> {
     let nvml = get_nvml()?;
     let device = nvml.device_by_index(device_index)?;
 
-    let mut min_clock = u32::MAX;
-    let mut max_clock = 0;
-
-    // Iterate through all performance states to find absolute min/max
-    if let Ok(supported_states) = device.supported_performance_states() {
-        for pstate in supported_states {
-            if let Ok((p_min, p_max)) = device.min_max_clock_of_pstate(Clock::Graphics, pstate) {
-                if p_min < min_clock { min_clock = p_min; }
-                if p_max > max_clock { max_clock = p_max; }
-            }
-        }
-    }
-
-    // Fallback to supported_graphics_clocks if min_clock is still MAX
-    if min_clock == u32::MAX {
-        if let Ok(mem_clocks) = device.supported_memory_clocks() {
-            if let Some(&target_mem_clock) = mem_clocks.iter().max() {
-                if let Ok(clocks) = device.supported_graphics_clocks(target_mem_clock) {
-                    if let (Some(&c_min), Some(&c_max)) = (clocks.iter().min(), clocks.iter().max()) {
-                        min_clock = c_min;
-                        max_clock = c_max;
+    // We specifically target P-State 0 for overclocking ranges
+    match device.min_max_clock_of_pstate(Clock::Graphics, PerformanceState::Zero) {
+        Ok((min, max)) => Ok((min, max)),
+        Err(e) => {
+            log::warn!(target: "hw.detect", "Failed to get P0 clock ranges via min_max_clock_of_pstate: {}. Using fallback.", e);
+            // Fallback to absolute max supported clocks if P0 ranges fail
+            if let Ok(mem_clocks) = device.supported_memory_clocks() {
+                if let Some(&target_mem_clock) = mem_clocks.iter().max() {
+                    if let Ok(clocks) = device.supported_graphics_clocks(target_mem_clock) {
+                        if let (Some(&c_min), Some(&c_max)) = (clocks.iter().min(), clocks.iter().max()) {
+                            return Ok((c_min, c_max));
+                        }
                     }
                 }
             }
+            Err(anyhow!("Could not determine graphics clock ranges for P-State 0"))
         }
     }
-
-    if min_clock == u32::MAX {
-        return Err(anyhow!("Could not determine graphics clock ranges"));
-    }
-
-    Ok((min_clock, max_clock))
 }
 
-pub fn get_gpu_mem_clock_ranges(device_index: u32) -> Result<Vec<u32>> {
-    let nvml = get_nvml()?;
-    let device = nvml.device_by_index(device_index)?;
-    let clocks = device.supported_memory_clocks()?;
-    Ok(clocks)
-}
 
 pub fn get_gpu_core_offset_limits(device_index: u32) -> Result<(i32, i32)> {
     let nvml = get_nvml()?;

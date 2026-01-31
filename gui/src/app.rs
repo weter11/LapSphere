@@ -218,7 +218,6 @@ pub enum HardwareUpdate {
     DaemonLogs(Vec<LogEntry>),
     UpdateInfo(String, String),
     GpuClockRanges(Result<(u32, u32), String>),
-    GpuMemClockRanges(Result<Vec<u32>, String>),
     GpuCoreOffsetLimits(Result<(i32, i32), String>),
     GpuMemOffsetLimits(Result<(i32, i32), String>),
     AvailableThresholds(Vec<u8>, Vec<u8>),
@@ -516,17 +515,6 @@ impl LapSphereApp {
                     match result {
                         Ok(ranges) => self.state.gpu_clock_ranges = Some(ranges),
                         Err(e) => self.state.show_message(format!("Failed to get GPU clock ranges: {}", e), true),
-                    }
-                }
-                HardwareUpdate::GpuMemClockRanges(result) => {
-                    match result {
-                        Ok(mut ranges) => {
-                            if !ranges.is_empty() {
-                                ranges.sort_unstable();
-                                self.state.gpu_mem_clock_ranges = Some((*ranges.first().unwrap(), *ranges.last().unwrap()));
-                            }
-                        },
-                        Err(e) => self.state.show_message(format!("Failed to get GPU memory clock ranges: {}", e), true),
                     }
                 }
                 HardwareUpdate::GpuCoreOffsetLimits(result) => {

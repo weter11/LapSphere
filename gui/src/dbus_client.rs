@@ -33,9 +33,6 @@ pub enum DbusCommand {
     SetGpuLockedClocks { device_index: u32, min_clock: u32, max_clock: u32, reply: oneshot::Sender<Result<()>> },
     ResetGpuClocks { device_index: u32, reply: oneshot::Sender<Result<()>> },
     GetGpuClockRanges { device_index: u32, reply: oneshot::Sender<Result<(u32, u32)>> },
-    GetGpuMemClockRanges { device_index: u32, reply: oneshot::Sender<Result<Vec<u32>>> },
-    SetMemoryLockedClocks { device_index: u32, min_clock: u32, max_clock: u32, reply: oneshot::Sender<Result<()>> },
-    ResetMemoryLockedClocks { device_index: u32, reply: oneshot::Sender<Result<()>> },
     SetGpuCoreOffset { device_index: u32, offset: f32, reply: oneshot::Sender<Result<()>> },
     SetGpuMemoryOffset { device_index: u32, offset: f32, reply: oneshot::Sender<Result<()>> },
     GetGpuCoreOffsetLimits { device_index: u32, reply: oneshot::Sender<Result<(i32, i32)>> },
@@ -208,24 +205,6 @@ impl DbusClient {
     pub fn get_gpu_clock_ranges(&self, device_index: u32) -> oneshot::Receiver<Result<(u32, u32)>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.command_tx.send(DbusCommand::GetGpuClockRanges { device_index, reply: tx });
-        rx
-    }
-
-    pub fn get_gpu_mem_clock_ranges(&self, device_index: u32) -> oneshot::Receiver<Result<Vec<u32>>> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self.command_tx.send(DbusCommand::GetGpuMemClockRanges { device_index, reply: tx });
-        rx
-    }
-
-    pub fn set_memory_locked_clocks(&self, device_index: u32, min_clock: u32, max_clock: u32) -> oneshot::Receiver<Result<()>> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self.command_tx.send(DbusCommand::SetMemoryLockedClocks { device_index, min_clock, max_clock, reply: tx });
-        rx
-    }
-
-    pub fn reset_memory_locked_clocks(&self, device_index: u32) -> oneshot::Receiver<Result<()>> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self.command_tx.send(DbusCommand::ResetMemoryLockedClocks { device_index, reply: tx });
         rx
     }
 
@@ -463,24 +442,6 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
                 }
                 DbusCommand::GetGpuClockRanges { device_index, reply } => {
                     let result = get_gpu_clock_ranges_impl(&connection, device_index).await;
-                    let is_err = result.is_err();
-                    let _ = reply.send(result);
-                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
-                }
-                DbusCommand::GetGpuMemClockRanges { device_index, reply } => {
-                    let result = get_gpu_mem_clock_ranges_impl(&connection, device_index).await;
-                    let is_err = result.is_err();
-                    let _ = reply.send(result);
-                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
-                }
-                DbusCommand::SetMemoryLockedClocks { device_index, min_clock, max_clock, reply } => {
-                    let result = set_memory_locked_clocks_impl(&connection, device_index, min_clock, max_clock).await;
-                    let is_err = result.is_err();
-                    let _ = reply.send(result);
-                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
-                }
-                DbusCommand::ResetMemoryLockedClocks { device_index, reply } => {
-                    let result = reset_memory_locked_clocks_impl(&connection, device_index).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
@@ -866,39 +827,6 @@ async fn get_gpu_clock_ranges_impl(conn: &Connection, device_index: u32) -> Resu
     ).await?;
     let json: String = proxy.call("GetGpuClockRanges", &(device_index,)).await?;
     Ok(serde_json::from_str(&json)?)
-}
-
-async fn get_gpu_mem_clock_ranges_impl(conn: &Connection, device_index: u32) -> Result<Vec<u32>> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
-    let json: String = proxy.call("GetGpuMemClockRanges", &(device_index,)).await?;
-    Ok(serde_json::from_str(&json)?)
-}
-
-async fn set_memory_locked_clocks_impl(conn: &Connection, device_index: u32, min_clock: u32, max_clock: u32) -> Result<()> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
-    proxy.call::<_, _, ()>("SetMemoryLockedClocks", &(device_index, min_clock, max_clock)).await?;
-    Ok(())
-}
-
-async fn reset_memory_locked_clocks_impl(conn: &Connection, device_index: u32) -> Result<()> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
-    proxy.call::<_, _, ()>("ResetMemoryLockedClocks", &(device_index,)).await?;
-    Ok(())
 }
 
 async fn set_gpu_core_offset_impl(conn: &Connection, device_index: u32, offset: f32) -> Result<()> {
