@@ -526,6 +526,9 @@ fn draw_gpu_tuning(
                     state.gpu_core_offset_limits,
                     state.gpu_mem_offset_limits,
                     gpu,
+                    dbus_client,
+                    hw_update_tx.clone(),
+                    nvml_index,
                 );
             }
         }
@@ -568,6 +571,9 @@ fn draw_gpu_standard_controls(
     gpu_core_offset_limits: Option<(i32, i32)>,
     gpu_mem_offset_limits: Option<(i32, i32)>,
     gpu_info: &lapsphere_common::types::GpuInfo,
+    dbus_client: Option<&DbusClient>,
+    hw_update_tx: tokio::sync::mpsc::UnboundedSender<crate::app::HardwareUpdate>,
+    nvml_index: u32,
 ) {
     let architecture = &gpu_info.architecture;
     ui.add_space(6.0);
@@ -594,15 +600,22 @@ fn draw_gpu_standard_controls(
             let steps_above = (max_limit as f32 / step).floor();
             let snapped_max = steps_above * step;
 
-            let prev_offset = current_core_offset;
             if ui.add(Slider::new(&mut current_core_offset, snapped_min..=snapped_max).suffix(" MHz").step_by(step as f64)).changed() {
-                let delta = current_core_offset - prev_offset;
-                // Shift locked clocks in real-time
-                if let Some(min) = profile.gpu_settings.min_gpu_clock {
-                    profile.gpu_settings.min_gpu_clock = Some((min as f32 + delta).round() as u32);
-                }
-                if let Some(max) = profile.gpu_settings.max_gpu_clock {
-                    profile.gpu_settings.max_gpu_clock = Some((max as f32 + delta).round() as u32);
+                profile.gpu_settings.core_offset = Some(current_core_offset);
+
+                // Apply offset in realtime and re-query ranges
+                if let Some(client) = dbus_client {
+                    let client_c = client.clone();
+                    let tx_c = hw_update_tx.clone();
+                    let offset = current_core_offset;
+                    tokio::spawn(async move {
+                        let _ = client_c.set_gpu_core_offset(nvml_index, offset).await;
+                        // Re-query ranges immediately
+                        let res = client_c.get_gpu_clock_ranges(nvml_index).await
+                            .map(|r| r.map_err(|e| e.to_string()))
+                            .unwrap_or_else(|e| Err(e.to_string()));
+                        let _ = tx_c.send(crate::app::HardwareUpdate::GpuClockRanges(res));
+                    });
                 }
             }
             profile.gpu_settings.core_offset = Some(current_core_offset);
@@ -612,11 +625,7 @@ fn draw_gpu_standard_controls(
 
     // 2. GPU Locked Clocks (shifted by offset)
     ui.label(RichText::new("GPU Locked Clocks (P-State 0):").strong());
-    if let Some((base_min, base_max)) = gpu_clock_ranges {
-        // Adjust bounds by current offset
-        let min_range = (base_min as f32 + current_core_offset).round() as u32;
-        let max_range = (base_max as f32 + current_core_offset).round() as u32;
-
+    if let Some((min_range, max_range)) = gpu_clock_ranges {
         let mut min_gpu_clock = profile.gpu_settings.min_gpu_clock.unwrap_or(min_range);
         let mut max_gpu_clock = profile.gpu_settings.max_gpu_clock.unwrap_or(max_range);
 

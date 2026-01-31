@@ -2289,8 +2289,32 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         let v_type = metadata.vram_type;
         let v_vendor = metadata.vram_vendor;
         let v_bus = metadata.vram_bus_width;
-        let core_clock_range = metadata.core_clock_range;
-        let memory_clock_range = metadata.memory_clock_range;
+        let core_clock_range = get_gpu_clock_ranges(i).ok();
+
+        let mut memory_clock_range = None;
+        if let Ok(supported_states) = device.supported_performance_states() {
+            let mut m_min = u32::MAX;
+            let mut m_max = 0;
+            for pstate in supported_states {
+                if let Ok((p_min, p_max)) = device.min_max_clock_of_pstate(Clock::Memory, pstate) {
+                    if p_min < m_min { m_min = p_min; }
+                    if p_max > m_max { m_max = p_max; }
+                }
+            }
+            if m_min != u32::MAX {
+                memory_clock_range = Some((m_min, m_max));
+            }
+        }
+
+        // Fallback for memory clock range
+        if memory_clock_range.is_none() {
+            if let Ok(clocks) = device.supported_memory_clocks() {
+                if let (Some(&c_min), Some(&c_max)) = (clocks.iter().min(), clocks.iter().max()) {
+                    memory_clock_range = Some((c_min, c_max));
+                }
+            }
+        }
+
         let v_bw = calculate_vram_bandwidth(v_type.as_ref(), v_bus, memory_clock_range);
 
         // Log VRAM info for diagnostics
