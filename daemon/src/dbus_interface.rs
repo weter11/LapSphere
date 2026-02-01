@@ -172,6 +172,7 @@ impl ControlInterface {
             if profile.gpu_settings.manual_clocks {
                 crate::hardware_detection::record_gpu_tweak();
             }
+            crate::hardware_detection::record_gpu_save();
             crate::hardware_control::apply_profile(&profile)
         })().await;
 
@@ -433,6 +434,7 @@ impl ControlInterface {
     }
 
     async fn set_gpu_locked_clocks(&self, device_index: u32, min_clock: u32, max_clock: u32) -> Result<(), zbus::fdo::Error> {
+        crate::hardware_detection::record_gpu_tweak();
         log_api!(
             "SetGpuLockedClocks",
             crate::hardware_control::set_gpu_locked_clocks(device_index, min_clock, max_clock),
@@ -476,6 +478,7 @@ impl ControlInterface {
     }
 
     async fn set_gpu_power_limit(&self, device_index: u32, limit_watts: u32) -> Result<(), zbus::fdo::Error> {
+        crate::hardware_detection::record_gpu_tweak();
         log_api!(
             "SetGpuPowerLimit",
             crate::hardware_control::set_gpu_power_limit(device_index, limit_watts),

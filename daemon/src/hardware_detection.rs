@@ -44,8 +44,17 @@ static LAST_GPU_TWEAK_TIME: Lazy<Mutex<Instant>> = Lazy::new(|| {
     Mutex::new(Instant::now() - std::time::Duration::from_secs(3600))
 });
 
+static LAST_GPU_SAVE_TIME: Lazy<Mutex<Instant>> = Lazy::new(|| {
+    Mutex::new(Instant::now() - std::time::Duration::from_secs(3600))
+});
+
 pub fn record_gpu_tweak() {
     let mut last = LAST_GPU_TWEAK_TIME.lock().unwrap();
+    *last = Instant::now();
+}
+
+pub fn record_gpu_save() {
+    let mut last = LAST_GPU_SAVE_TIME.lock().unwrap();
     *last = Instant::now();
 }
 
@@ -1929,8 +1938,10 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
     };
 
     let is_tweaking = {
-        let last = LAST_GPU_TWEAK_TIME.lock().unwrap();
-        last.elapsed() < std::time::Duration::from_secs(30)
+        let tweak = LAST_GPU_TWEAK_TIME.lock().unwrap();
+        let save = LAST_GPU_SAVE_TIME.lock().unwrap();
+        // Tweaking is active for 20 seconds, BUT stops immediately if save was clicked after the last tweak
+        tweak.elapsed() < std::time::Duration::from_secs(20) && *save < *tweak
     };
 
     // 1. Check sysfs for NVIDIA devices and their status to avoid waking up suspended GPUs
@@ -2242,14 +2253,17 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         }).unwrap_or(0);
 
         // Determine if we should poll monitoring stats
-        // We only poll NVML if:
-        // 1. Manual clocks are enabled AND (Advanced control is on OR we are actively tweaking)
-        // 2. The GPU is in a high-power state (P0-P4), meaning it's already awake and in use
+        // Logic:
+        // 1. If manual control is OFF: poll if GPU is NOT suspended (for benchmarks)
+        // 2. If manual control is ON:
+        //    - Poll if currently tweaking (wakes up GPU)
+        //    - Otherwise, poll only if in high-power state (P0-P4) and NOT suspended
+        //    - If in low-power (P5+) and NOT tweaking, stop polling to allow suspension
         let is_high_power = pstate_val <= 4;
-        let should_poll_nvml = if advanced_control_enabled {
-            pstate_val <= 8
+        let should_poll_nvml = if !manual_clocks_enabled {
+            !is_suspended
         } else {
-            manual_clocks_enabled && (is_tweaking || is_high_power)
+            is_tweaking || (is_high_power && !is_suspended)
         };
 
         let should_poll_nvapi = is_high_power && (manual_clocks_enabled || advanced_control_enabled);

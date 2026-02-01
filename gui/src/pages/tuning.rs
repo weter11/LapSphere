@@ -533,18 +533,18 @@ fn draw_gpu_tuning(
             }
         }
         if tuning_mode_advanced {
-            ui.add_space(16.0);
-            ui.separator();
             ui.add_space(12.0);
 
             let mut gpu_oc_poll = state.config.statistics_sections.gpu_overclock_poll_rate;
+            let nvidia_gpu_ref = nvidia_gpu.cloned();
             draw_gpu_advanced_controls(
                 ui,
                 profile,
                 &mut gpu_oc_poll,
                 state.gpu_clock_ranges,
-                state.gpu_mem_clock_ranges,
+                None,
                 state.gpu_mem_offset_limits,
+                nvidia_gpu_ref.as_ref(),
             );
             if gpu_oc_poll != state.config.statistics_sections.gpu_overclock_poll_rate {
                 state.config.statistics_sections.gpu_overclock_poll_rate = gpu_oc_poll;
@@ -691,6 +691,7 @@ fn draw_gpu_advanced_controls(
     gpu_clock_ranges: Option<(u32, u32)>,
     _gpu_mem_clock_ranges: Option<(u32, u32)>,
     gpu_mem_offset_limits: Option<(i32, i32)>,
+    gpu_info: Option<&lapsphere_common::types::GpuInfo>,
 ) {
     ui.add_space(6.0);
     ui.label(RichText::new("GPU Locked Clocks (Advanced):").strong());
@@ -727,6 +728,23 @@ fn draw_gpu_advanced_controls(
         profile.gpu_settings.advanced_memory_offset = Some(advanced_mem_offset);
     } else {
         ui.label("Fetching GPU memory offset limits...");
+    }
+
+    ui.add_space(16.0);
+
+    // GPU Power Limit (Advanced)
+    if let Some(gpu) = gpu_info {
+        if gpu.supports_power_limit {
+            ui.label(RichText::new("GPU Power Limit (Advanced):").strong());
+            if let Some((min_w, max_w)) = gpu.power_limit_range {
+                let mut power_limit = profile.gpu_settings.power_limit.unwrap_or(max_w);
+                ui.add(Slider::new(&mut power_limit, min_w..=max_w).suffix(" W"));
+                profile.gpu_settings.power_limit = Some(power_limit);
+            } else {
+                ui.label("Could not determine power limit range.");
+            }
+            ui.add_space(16.0);
+        }
     }
 
     ui.label(RichText::new("Advanced GPU Tuning (Dynamic Offsets):").strong());
