@@ -545,6 +545,9 @@ fn draw_gpu_tuning(
                 None,
                 state.gpu_mem_offset_limits,
                 nvidia_gpu_ref.as_ref(),
+                dbus_client,
+                hw_update_tx.clone(),
+                nvml_index,
             );
             if gpu_oc_poll != state.config.statistics_sections.gpu_overclock_poll_rate {
                 state.config.statistics_sections.gpu_overclock_poll_rate = gpu_oc_poll;
@@ -635,6 +638,14 @@ fn draw_gpu_standard_controls(
                 if min_gpu_clock > max_gpu_clock {
                     max_gpu_clock = min_gpu_clock;
                 }
+                if let Some(client) = dbus_client {
+                    let client_c = client.clone();
+                    let min = min_gpu_clock;
+                    let max = max_gpu_clock;
+                    tokio::spawn(async move {
+                        let _ = client_c.set_gpu_locked_clocks(nvml_index, min, max).await;
+                    });
+                }
             }
         });
 
@@ -643,6 +654,14 @@ fn draw_gpu_standard_controls(
             if ui.add(Slider::new(&mut max_gpu_clock, min_range..=max_range).suffix(" MHz")).changed() {
                 if max_gpu_clock < min_gpu_clock {
                     min_gpu_clock = max_gpu_clock;
+                }
+                if let Some(client) = dbus_client {
+                    let client_c = client.clone();
+                    let min = min_gpu_clock;
+                    let max = max_gpu_clock;
+                    tokio::spawn(async move {
+                        let _ = client_c.set_gpu_locked_clocks(nvml_index, min, max).await;
+                    });
                 }
             }
         });
@@ -660,7 +679,15 @@ fn draw_gpu_standard_controls(
         ui.label(RichText::new("GPU Memory Offset:").strong());
         if let Some((min_limit, max_limit)) = gpu_mem_offset_limits {
             let mut memory_offset = profile.gpu_settings.memory_offset.unwrap_or(0.0);
-            ui.add(Slider::new(&mut memory_offset, (min_limit as f32)..=(max_limit as f32)).suffix(" MHz"));
+            if ui.add(Slider::new(&mut memory_offset, (min_limit as f32)..=(max_limit as f32)).suffix(" MHz")).changed() {
+                if let Some(client) = dbus_client {
+                    let client_c = client.clone();
+                    let offset = memory_offset;
+                    tokio::spawn(async move {
+                        let _ = client_c.set_gpu_memory_offset(nvml_index, offset).await;
+                    });
+                }
+            }
             profile.gpu_settings.memory_offset = Some(memory_offset);
         } else {
             ui.label("Fetching GPU memory offset limits...");
@@ -675,7 +702,15 @@ fn draw_gpu_standard_controls(
         ui.label(RichText::new("GPU Power Limit:").strong());
         if let Some((min_w, max_w)) = gpu_info.power_limit_range {
             let mut power_limit = profile.gpu_settings.power_limit.unwrap_or(max_w);
-            ui.add(Slider::new(&mut power_limit, min_w..=max_w).suffix(" W"));
+            if ui.add(Slider::new(&mut power_limit, min_w..=max_w).suffix(" W")).changed() {
+                if let Some(client) = dbus_client {
+                    let client_c = client.clone();
+                    let limit = power_limit;
+                    tokio::spawn(async move {
+                        let _ = client_c.set_gpu_power_limit(nvml_index, limit).await;
+                    });
+                }
+            }
             profile.gpu_settings.power_limit = Some(power_limit);
         } else {
             ui.label("Could not determine power limit range.");
@@ -692,6 +727,9 @@ fn draw_gpu_advanced_controls(
     _gpu_mem_clock_ranges: Option<(u32, u32)>,
     gpu_mem_offset_limits: Option<(i32, i32)>,
     gpu_info: Option<&lapsphere_common::types::GpuInfo>,
+    dbus_client: Option<&DbusClient>,
+    hw_update_tx: tokio::sync::mpsc::UnboundedSender<crate::app::HardwareUpdate>,
+    nvml_index: u32,
 ) {
     ui.add_space(6.0);
     ui.label(RichText::new("GPU Locked Clocks (Advanced):").strong());
@@ -704,6 +742,19 @@ fn draw_gpu_advanced_controls(
                     if min_gpu_clock > max_gpu_clock {
                         max_gpu_clock = min_gpu_clock;
                     }
+                    if let Some(client) = dbus_client {
+                        let client_c = client.clone();
+                        let tx_c = hw_update_tx.clone();
+                        let min = min_gpu_clock;
+                        let max = max_gpu_clock;
+                        tokio::spawn(async move {
+                            let _ = client_c.set_gpu_locked_clocks(nvml_index, min, max).await;
+                            let res = client_c.get_gpu_clock_ranges(nvml_index).await
+                                .map(|r| r.map_err(|e| e.to_string()))
+                                .unwrap_or_else(|e| Err(e.to_string()));
+                            let _ = tx_c.send(crate::app::HardwareUpdate::GpuClockRanges(res));
+                        });
+                    }
                 }
             });
             ui.horizontal(|ui| {
@@ -711,6 +762,19 @@ fn draw_gpu_advanced_controls(
                 if ui.add(Slider::new(&mut max_gpu_clock, min_range..=max_range).suffix(" MHz")).changed() {
                     if max_gpu_clock < min_gpu_clock {
                         min_gpu_clock = max_gpu_clock;
+                    }
+                    if let Some(client) = dbus_client {
+                        let client_c = client.clone();
+                        let tx_c = hw_update_tx.clone();
+                        let min = min_gpu_clock;
+                        let max = max_gpu_clock;
+                        tokio::spawn(async move {
+                            let _ = client_c.set_gpu_locked_clocks(nvml_index, min, max).await;
+                            let res = client_c.get_gpu_clock_ranges(nvml_index).await
+                                .map(|r| r.map_err(|e| e.to_string()))
+                                .unwrap_or_else(|e| Err(e.to_string()));
+                            let _ = tx_c.send(crate::app::HardwareUpdate::GpuClockRanges(res));
+                        });
                     }
                 }
             });
@@ -724,7 +788,15 @@ fn draw_gpu_advanced_controls(
     ui.label(RichText::new("GPU Memory Offset (Advanced):").strong());
     if let Some((min_limit, max_limit)) = gpu_mem_offset_limits {
         let mut advanced_mem_offset = profile.gpu_settings.advanced_memory_offset.unwrap_or(0);
-        ui.add(Slider::new(&mut advanced_mem_offset, min_limit..=max_limit).suffix(" MHz"));
+        if ui.add(Slider::new(&mut advanced_mem_offset, min_limit..=max_limit).suffix(" MHz")).changed() {
+            if let Some(client) = dbus_client {
+                let client_c = client.clone();
+                let offset = advanced_mem_offset as f32;
+                tokio::spawn(async move {
+                    let _ = client_c.set_gpu_memory_offset(nvml_index, offset).await;
+                });
+            }
+        }
         profile.gpu_settings.advanced_memory_offset = Some(advanced_mem_offset);
     } else {
         ui.label("Fetching GPU memory offset limits...");
@@ -738,7 +810,15 @@ fn draw_gpu_advanced_controls(
             ui.label(RichText::new("GPU Power Limit (Advanced):").strong());
             if let Some((min_w, max_w)) = gpu.power_limit_range {
                 let mut power_limit = profile.gpu_settings.power_limit.unwrap_or(max_w);
-                ui.add(Slider::new(&mut power_limit, min_w..=max_w).suffix(" W"));
+                if ui.add(Slider::new(&mut power_limit, min_w..=max_w).suffix(" W")).changed() {
+                    if let Some(client) = dbus_client {
+                        let client_c = client.clone();
+                        let limit = power_limit;
+                        tokio::spawn(async move {
+                            let _ = client_c.set_gpu_power_limit(nvml_index, limit).await;
+                        });
+                    }
+                }
                 profile.gpu_settings.power_limit = Some(power_limit);
             } else {
                 ui.label("Could not determine power limit range.");
