@@ -1567,7 +1567,7 @@ impl NvidiaDriverHandle {
             .read(true)
             .write(true)
             .open("/dev/nvidiactl")
-            .with_context(|| format!("Failed to open /dev/nvidiactl - ensure NVIDIA driver is loaded and you have permissions (try: sudo usermod -aG video $USER)"))?;
+            .with_context(|| "Failed to open /dev/nvidiactl - ensure NVIDIA driver is loaded and you have permissions (try: sudo usermod -aG video <username>)")?;
         log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Opened /dev/nvidiactl");
 
         let mut client_params: NVOS21_PARAMETERS = unsafe { std::mem::zeroed() };
