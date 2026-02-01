@@ -2305,10 +2305,11 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         let metadata = {
             let mut cache = NVIDIA_METADATA_CACHE.lock().unwrap();
             if let Some(meta) = cache.get(&i) {
+                log::debug!(target: "hw.detect", "GPU {}: Using cached metadata", i);
                 // Check if cached VRAM info is None - if so, retry getting it
                 // This handles cases where initial detection failed (GPU suspended, driver not ready, etc.)
                 if meta.vram_type.is_none() && meta.vram_vendor.is_none() && meta.vram_bus_width.is_none() {
-                    log::info!(target: "hw.detect", "GPU {}: Cached VRAM is None, retrying detection", i);
+                    log::info!(target: "hw.detect", "GPU {}: Cached VRAM info is all None, retrying detection", i);
                     let minor_number = device.minor_number().unwrap_or(i);
                     let (vram_type, vram_vendor, vram_bus_width, _) = get_vram_info(minor_number);
                     
@@ -2325,13 +2326,16 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                         cache.insert(i, updated_meta.clone());
                         updated_meta
                     } else {
-                        log::debug!(target: "hw.detect", "GPU {}: VRAM detection retry also returned None", i);
+                        log::warn!(target: "hw.detect", "GPU {}: VRAM detection retry also returned None - see errors above for details", i);
                         meta.clone()
                     }
                 } else {
+                    log::debug!(target: "hw.detect", "GPU {}: Using cached VRAM info - Type: {:?}, Vendor: {:?}, Bus: {:?}", 
+                        i, meta.vram_type, meta.vram_vendor, meta.vram_bus_width);
                     meta.clone()
                 }
             } else {
+                log::info!(target: "hw.detect", "GPU {}: Initializing metadata cache (first detection)", i);
                 let arch = device.architecture().ok().map(|arch| arch.to_string());
                 let p_states = device.supported_performance_states().ok()
                     .map(|states| states.iter().map(|s| format!("{:?}", s)).collect())
@@ -2344,6 +2348,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 let s_mem_offset = device.clock_offset(Clock::Memory, PerformanceState::Zero).is_ok();
 
                 let minor_number = device.minor_number().unwrap_or(i);
+                log::debug!(target: "hw.detect", "GPU {}: Performing initial VRAM detection for minor {}", i, minor_number);
                 let (vram_type, vram_vendor, vram_bus_width, _) = get_vram_info(minor_number);
 
                 let core_range = get_gpu_clock_ranges(i).ok();
@@ -2404,12 +2409,18 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
 
         // Log VRAM info for diagnostics
         if v_type.is_some() || v_vendor.is_some() || v_bus.is_some() {
-            log::info!(target: "hw.detect", 
-                "GPU {}: VRAM detected - Type: {:?}, Vendor: {:?}, Bus Width: {:?} bits, Bandwidth: {:?} GB/s",
-                i, v_type, v_vendor, v_bus, v_bw);
+            if v_bw.is_none() && memory_clock_range.is_none() {
+                log::info!(target: "hw.detect", 
+                    "GPU {}: VRAM detected - Type: {:?}, Vendor: {:?}, Bus Width: {:?} bits, Bandwidth: N/A (memory clock range unknown)",
+                    i, v_type, v_vendor, v_bus);
+            } else {
+                log::info!(target: "hw.detect", 
+                    "GPU {}: VRAM detected - Type: {:?}, Vendor: {:?}, Bus Width: {:?} bits, Bandwidth: {:?} GB/s",
+                    i, v_type, v_vendor, v_bus, v_bw);
+            }
         } else {
             log::warn!(target: "hw.detect", 
-                "GPU {}: VRAM info not available - Type: None, Vendor: None, Bus Width: None, Bandwidth: None",
+                "GPU {}: VRAM info not available - Check daemon logs above for detailed error messages",
                 i);
         }
 
