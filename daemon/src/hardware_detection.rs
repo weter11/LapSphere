@@ -2205,19 +2205,19 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         // Determine if we should poll monitoring stats
         // Logic for all modes:
         // 1. If suspended: poll nothing.
-        // 2. If P0-P5: poll NVML and NVAPI (all stats).
-        // 3. If P6+ (including P8): poll NVML only if:
+        // 2. If P0-P3: poll NVML and NVAPI (all stats).
+        // 3. If P4+ (including P8): poll NVML only if:
         //    - Manual control is OFF (benchmarking/monitoring)
         //    - OR user is currently tweaking (real-time feedback)
         // This ensures visibility while allowing the GPU to enter low-power states and eventually suspend when overclocked and idle.
         let (should_poll_nvml, should_poll_nvapi) = if is_suspended {
             (false, false)
-        } else if pstate_val <= 5 {
+        } else if pstate_val <= 3 {
             (true, true)
         } else {
-            // P6+, including P8
-            let poll_p8 = !manual_clocks_enabled || is_tweaking;
-            (poll_p8, false)
+            // P4+, including P8
+            let poll_low_power = !manual_clocks_enabled || is_tweaking;
+            (poll_low_power, false)
         };
 
         let (frequency, memory_frequency, temperature, load, power) = if !should_poll_nvml {
@@ -2416,12 +2416,14 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 gpu_info.freq_offset = Some(stats.freq_offset);
                 gpu_info.drain_offset = Some(stats.drain_offset);
                 gpu_info.power_offset = Some(stats.power_offset);
-                // User requested NOT to show 'Total Offset' when manual control is enabled
-                gpu_info.total_offset = None;
+                gpu_info.total_offset = Some(stats.total_offset);
             } else {
                 // Fallback to manual offsets if dynamic is not active
-                // User requested NOT to show 'Total Offset' when manual control is enabled
-                gpu_info.total_offset = None;
+                let manual_map = crate::MANUAL_GPU_OFFSETS.lock().unwrap();
+                if let Some(offsets) = manual_map.get(&i) {
+                    let core: f32 = offsets.0;
+                    gpu_info.total_offset = Some(core.round() as i32);
+                }
             }
         }
 
