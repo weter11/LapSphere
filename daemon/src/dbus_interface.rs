@@ -8,12 +8,12 @@ const SHUTDOWN_SIGNAL_DELAY_MS: u64 = 200;
 
 macro_rules! log_api {
     ($method:expr, $call:expr, $ok_msg:expr) => {{
-        log::info!(target: "api.call", "{}", $method);
+        log::debug!(target: "api.call", "{}", $method);
         let start = std::time::Instant::now();
         let res = $call;
         let duration = start.elapsed().as_millis();
         match &res {
-            Ok(val) => log::info!(target: "api.ok", "{} {} duration_ms={}", $method, $ok_msg(val), duration),
+            Ok(val) => log::debug!(target: "api.ok", "{} {} duration_ms={}", $method, $ok_msg(val), duration),
             Err(e) => log::warn!(target: "api.fail", "{} reason=\"{}\" duration_ms={}", $method, e, duration),
         }
         res.map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
@@ -22,13 +22,13 @@ macro_rules! log_api {
 
 macro_rules! log_api_json {
     ($method:expr, $call:expr, $ok_msg:expr) => {{
-        log::info!(target: "api.call", "{}", $method);
+        log::debug!(target: "api.call", "{}", $method);
         let start = std::time::Instant::now();
         let res = $call;
         let duration = start.elapsed().as_millis();
         match res {
             Ok(info) => {
-                log::info!(target: "api.ok", "{} {} duration_ms={}", $method, $ok_msg(&info), duration);
+                log::debug!(target: "api.ok", "{} {} duration_ms={}", $method, $ok_msg(&info), duration);
                 serde_json::to_string(&info).map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
             }
             Err(e) => {

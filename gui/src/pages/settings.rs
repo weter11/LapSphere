@@ -40,7 +40,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTheme, ctx: 
 
 fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Daemon Logs (last 1000 lines)").strong().heading());
+        ui.label(RichText::new("Daemon Logs (last 2000 lines)").strong().heading());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button("📂 Crash Reports").on_hover_text("Open folder with crash reports").clicked() {
                 let crash_dir = crate::app::get_crash_dir();

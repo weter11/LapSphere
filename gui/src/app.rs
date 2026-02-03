@@ -363,7 +363,7 @@ impl LapSphereApp {
             let _ = handle.register("mount".to_string(), Duration::from_millis(state.config.statistics_sections.storage_poll_rate));
             let _ = handle.register("gpu_overclock".to_string(), Duration::from_millis(state.config.statistics_sections.gpu_overclock_poll_rate));
             let _ = handle.register("webcam".to_string(), Duration::from_secs(5));
-            let _ = handle.register("logs".to_string(), Duration::from_secs(2));
+            let _ = handle.register("logs".to_string(), Duration::from_secs(5));
 
             // Initial system info load
             let client_clone = client.clone();
@@ -560,8 +560,11 @@ impl LapSphereApp {
                 HardwareUpdate::WebcamState(state) => {
                     self.state.webcam_enabled = Some(state);
                 }
-                HardwareUpdate::DaemonLogs(logs) => {
+                HardwareUpdate::DaemonLogs(mut logs) => {
                     if !self.state.log_paused {
+                        if logs.len() > 2000 {
+                            logs.drain(0..logs.len() - 2000);
+                        }
                         self.state.daemon_logs = logs;
                     }
                 }
