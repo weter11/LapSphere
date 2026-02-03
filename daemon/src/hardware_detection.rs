@@ -3094,14 +3094,18 @@ pub fn get_gamepad_info() -> Result<Vec<GamepadInfo>> {
                                         // Try to find a stable UID from udev data
                                         let mut id_path = None;
                                         let mut id_serial = None;
+                                        let mut id_serial_short = None;
                                         for line in udev_data.lines() {
                                             if let Some(val) = line.strip_prefix("E:ID_PATH=") {
                                                 id_path = Some(val.to_string());
+                                            } else if let Some(val) = line.strip_prefix("E:ID_SERIAL_SHORT=") {
+                                                id_serial_short = Some(val.to_string());
                                             } else if let Some(val) = line.strip_prefix("E:ID_SERIAL=") {
                                                 id_serial = Some(val.to_string());
                                             }
                                         }
-                                        udev_uid = id_path.or(id_serial);
+                                        // Priority: Serial Short > Serial > Path
+                                        udev_uid = id_serial_short.or(id_serial).or(id_path);
 
                                         if is_gamepad {
                                             break;
@@ -3143,7 +3147,15 @@ pub fn get_gamepad_info() -> Result<Vec<GamepadInfo>> {
                     if let Ok(device_name) = fs::read_to_string(path.join("name")) {
                         let device_name = device_name.trim().to_string();
                         // Use sysfs path as absolute fallback for UID if udev failed
-                        let uid = udev_uid.unwrap_or_else(|| path.to_string_lossy().to_string());
+                        let mut uid = udev_uid.unwrap_or_else(|| path.to_string_lossy().to_string());
+
+                        // Try to get uniq (MAC address) which is very stable across connection types
+                        if let Ok(uniq) = fs::read_to_string(path.join("device/uniq")) {
+                            let uniq = uniq.trim();
+                            if !uniq.is_empty() && uniq != "00:00:00:00:00:00" {
+                                uid = uniq.to_string();
+                            }
+                        }
 
                         if !seen_uids.contains(&uid) {
                             let bustype = fs::read_to_string(path.join("id/bustype"))
