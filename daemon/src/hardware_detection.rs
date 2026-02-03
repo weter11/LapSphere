@@ -1394,50 +1394,46 @@ use nvml_wrapper::enum_wrappers::device::{Clock, PerformanceState};
 
 
 
+/// Internal helper to get base (un-offset) GPU clock ranges for P-State 0
+fn get_base_gpu_clock_ranges(device: &nvml_wrapper::Device) -> Result<(u32, u32)> {
+    match device.min_max_clock_of_pstate(Clock::Graphics, PerformanceState::Zero) {
+        Ok((min, max)) => Ok((min, max)),
+        Err(e) => {
+            log::warn!(target: "hw.detect", "Failed to get P0 clock ranges via min_max_clock_of_pstate: {}. Using fallback.", e);
+            // Fallback to absolute max supported clocks if P0 ranges fail
+            let mut fallback = None;
+            if let Ok(mem_clocks) = device.supported_memory_clocks() {
+                if let Some(&target_mem_clock) = mem_clocks.iter().max() {
+                    if let Ok(clocks) = device.supported_graphics_clocks(target_mem_clock) {
+                        if let (Some(&c_min), Some(&c_max)) = (clocks.iter().min(), clocks.iter().max()) {
+                            fallback = Some((c_min, c_max));
+                        }
+                    }
+                }
+            }
+            fallback.ok_or_else(|| anyhow!("Could not determine graphics clock ranges for P-State 0: {}", e))
+        }
+    }
+}
+
 pub fn get_gpu_clock_ranges(device_index: u32) -> Result<(u32, u32)> {
     let nvml = get_nvml()?;
     let device = nvml.device_by_index(device_index)?;
 
-    let mut min_clock = u32::MAX;
-    let mut max_clock = 0;
+    let (mut min, mut max) = get_base_gpu_clock_ranges(&device)?;
 
-    // Iterate through all performance states to find absolute min/max
-    if let Ok(supported_states) = device.supported_performance_states() {
-        for pstate in supported_states {
-            if let Ok((p_min, p_max)) = device.min_max_clock_of_pstate(Clock::Graphics, pstate) {
-                if p_min < min_clock { min_clock = p_min; }
-                if p_max > max_clock { max_clock = p_max; }
-            }
-        }
-    }
+    // Add current core offset if any to show real-time effective ranges in the UI
+    let offset = {
+        let map = crate::MANUAL_GPU_OFFSETS.lock().unwrap();
+        map.get(&device_index).map(|(c, _)| *c).unwrap_or(0.0)
+    };
 
-    // Fallback to supported_graphics_clocks if min_clock is still MAX
-    if min_clock == u32::MAX {
-        if let Ok(mem_clocks) = device.supported_memory_clocks() {
-            if let Some(&target_mem_clock) = mem_clocks.iter().max() {
-                if let Ok(clocks) = device.supported_graphics_clocks(target_mem_clock) {
-                    if let (Some(&c_min), Some(&c_max)) = (clocks.iter().min(), clocks.iter().max()) {
-                        min_clock = c_min;
-                        max_clock = c_max;
-                    }
-                }
-            }
-        }
-    }
+    min = (min as f32 + offset).max(0.0) as u32;
+    max = (max as f32 + offset).max(0.0) as u32;
 
-    if min_clock == u32::MAX {
-        return Err(anyhow!("Could not determine graphics clock ranges"));
-    }
-
-    Ok((min_clock, max_clock))
+    Ok((min, max))
 }
 
-pub fn get_gpu_mem_clock_ranges(device_index: u32) -> Result<Vec<u32>> {
-    let nvml = get_nvml()?;
-    let device = nvml.device_by_index(device_index)?;
-    let clocks = device.supported_memory_clocks()?;
-    Ok(clocks)
-}
 
 pub fn get_gpu_core_offset_limits(device_index: u32) -> Result<(i32, i32)> {
     let nvml = get_nvml()?;
@@ -1944,6 +1940,11 @@ fn get_nvidia_extended_stats(gpu_index: u32) -> (Option<f32>, Option<f32>, Optio
 }
 
 fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
+    let (manual_clocks_enabled, _advanced_control_enabled) = {
+        let state = crate::GPU_DAEMON_STATE.lock().unwrap();
+        state.as_ref().map_or((false, false), |s| (s.manual_clocks, s.advanced_control))
+    };
+
     // 1. Check sysfs for NVIDIA devices and their status to avoid waking up suspended GPUs
     let mut nvidia_pci_ids = Vec::new();
     if let Ok(entries) = fs::read_dir("/sys/bus/pci/drivers/nvidia") {
@@ -2187,9 +2188,20 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         }).unwrap_or(0);
 
         // Determine if we should poll monitoring stats
-        // NVML stats up to P8, skip NVAPI if P5 or higher
-        let should_poll_nvml = pstate_val <= 8;
-        let should_poll_nvapi = pstate_val <= 4;
+        // Logic for all modes:
+        // 1. If suspended: poll nothing.
+        // 2. If P0-P3: poll NVML and NVAPI (all stats).
+        // 3. If P4+ (including P8): poll NVML only (no NVAPI/direct ioctls).
+        // This ensures visibility (P0-P3) while allowing the GPU to enter
+        // low-power states (P8) and eventually suspend.
+        let (should_poll_nvml, should_poll_nvapi) = if is_suspended {
+            (false, false)
+        } else if pstate_val <= 3 {
+            (true, true)
+        } else {
+            // P4+, including P8
+            (true, false)
+        };
 
         let (frequency, memory_frequency, temperature, load, power) = if !should_poll_nvml {
             (None, None, None, None, None)
@@ -2268,7 +2280,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 let minor_number = device.minor_number().unwrap_or(i);
                 let (vram_type, vram_vendor, vram_bus_width, _) = get_vram_info(minor_number);
 
-                let core_range = get_gpu_clock_ranges(i).ok();
+                let core_range = get_base_gpu_clock_ranges(&device).ok();
 
                 let mut mem_range = None;
                 if let Ok(supported_states) = device.supported_performance_states() {
@@ -2320,7 +2332,14 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         let v_type = metadata.vram_type;
         let v_vendor = metadata.vram_vendor;
         let v_bus = metadata.vram_bus_width;
-        let core_clock_range = metadata.core_clock_range;
+        // Apply current offset to the cached base range for real-time reporting
+        let core_clock_range = metadata.core_clock_range.map(|(min, max)| {
+            let offset = {
+                let map = crate::MANUAL_GPU_OFFSETS.lock().unwrap();
+                map.get(&i).map(|(c, _)| *c).unwrap_or(0.0)
+            };
+            ((min as f32 + offset).max(0.0) as u32, (max as f32 + offset).max(0.0) as u32)
+        });
         let memory_clock_range = metadata.memory_clock_range;
         let v_bw = calculate_vram_bandwidth(v_type.as_ref(), v_bus, memory_clock_range);
 
@@ -2374,7 +2393,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         };
 
         // Fill in offsets if they exist in global state (assuming first NVIDIA GPU for now)
-        if name.to_lowercase().contains("nvidia") {
+        if name.to_lowercase().contains("nvidia") && manual_clocks_enabled {
             let stats_lock = crate::CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
             if let Some(ref stats) = *stats_lock {
                 gpu_info.freq_offset = Some(stats.freq_offset);

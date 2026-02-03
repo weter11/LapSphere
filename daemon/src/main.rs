@@ -427,8 +427,38 @@ fn apply_fan_curves(io: &tuxedo_io::TuxedoIo, settings: &FanSettings, sorted_cur
 }
 
 fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -> Result<()> {
+    // Clear stats and last offset if advanced control or manual clocks are disabled
+    if !gpu_settings.advanced_control || !gpu_settings.manual_clocks {
+        {
+            let mut stats = CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
+            *stats = None;
+        }
+        {
+            let mut last = LAST_APPLIED_OFFSET.lock().unwrap();
+            *last = None;
+        }
+        if !gpu_settings.manual_clocks {
+            // Only clear if not already cleared to avoid waking up GPU unnecessarily
+            let needs_clear = {
+                let map = MANUAL_GPU_OFFSETS.lock().unwrap();
+                map.get(&0).map_or(true, |offsets| offsets.0 != 0.0 || offsets.1 != 0.0)
+            };
+
+            if needs_clear {
+                log::info!("Manual clocks disabled, resetting GPU offsets to 0");
+                let _ = crate::hardware_control::set_gpu_core_offset(0, 0.0);
+                let _ = crate::hardware_control::set_gpu_memory_offset(0, 0.0);
+                {
+                    let mut map = MANUAL_GPU_OFFSETS.lock().unwrap();
+                    map.insert(0, (0.0, 0.0));
+                }
+            }
+        }
+        return Ok(());
+    }
+
     // 1. Get current GPU stats (temperature, power, frequency)
-    // We do this first to check for suspension
+    // We only do this if advanced control is enabled
     let gpus = crate::hardware_detection::get_gpu_info()?;
     let nvidia_gpu = gpus.iter().find(|g| g.name.to_lowercase().contains("nvidia"));
 
@@ -437,38 +467,8 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
         let is_suspended = status_lower.contains("suspended");
         let is_pstate = status_lower.starts_with('p');
 
-        // If suspended, don't do anything (definitely don't call NVML)
+        // If suspended, don't do anything
         if is_suspended {
-            return Ok(());
-        }
-
-        // Clear stats and last offset if advanced control or manual clocks are disabled
-        if !gpu_settings.advanced_control || !gpu_settings.manual_clocks {
-            {
-                let mut stats = CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
-                *stats = None;
-            }
-            {
-                let mut last = LAST_APPLIED_OFFSET.lock().unwrap();
-                *last = None;
-            }
-            if !gpu_settings.manual_clocks {
-                // Only clear if not already cleared to avoid waking up GPU unnecessarily
-                let needs_clear = {
-                    let map = MANUAL_GPU_OFFSETS.lock().unwrap();
-                    map.get(&0).map_or(true, |offsets| offsets.0 != 0.0 || offsets.1 != 0.0)
-                };
-
-                if needs_clear {
-                    log::info!("Manual clocks disabled, resetting GPU offsets to 0");
-                    let _ = crate::hardware_control::set_gpu_core_offset(0, 0.0);
-                    let _ = crate::hardware_control::set_gpu_memory_offset(0, 0.0);
-                    {
-                        let mut map = MANUAL_GPU_OFFSETS.lock().unwrap();
-                        map.insert(0, (0.0, 0.0));
-                    }
-                }
-            }
             return Ok(());
         }
 

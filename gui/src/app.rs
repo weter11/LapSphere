@@ -200,6 +200,9 @@ pub struct LapSphereApp {
     shortcuts: KeyboardShortcuts,
 
     startup_frames: u32,
+
+    last_tray_profile: String,
+    last_tray_profiles_count: usize,
 }
 
 #[derive(Debug)]
@@ -218,7 +221,6 @@ pub enum HardwareUpdate {
     DaemonLogs(Vec<LogEntry>),
     UpdateInfo(String, String),
     GpuClockRanges(Result<(u32, u32), String>),
-    GpuMemClockRanges(Result<Vec<u32>, String>),
     GpuCoreOffsetLimits(Result<(i32, i32), String>),
     GpuMemOffsetLimits(Result<(i32, i32), String>),
     AvailableThresholds(Vec<u8>, Vec<u8>),
@@ -453,6 +455,9 @@ impl LapSphereApp {
             }
         };
         
+        let last_tray_profile = state.config.current_profile.clone();
+        let last_tray_profiles_count = state.config.profiles.len();
+
         Self {
             state,
             dbus_client,
@@ -463,6 +468,8 @@ impl LapSphereApp {
             hw_update_rx,
             shortcuts: KeyboardShortcuts::new(),
             startup_frames: 10,
+            last_tray_profile,
+            last_tray_profiles_count,
         }
     }
     
@@ -516,17 +523,6 @@ impl LapSphereApp {
                     match result {
                         Ok(ranges) => self.state.gpu_clock_ranges = Some(ranges),
                         Err(e) => self.state.show_message(format!("Failed to get GPU clock ranges: {}", e), true),
-                    }
-                }
-                HardwareUpdate::GpuMemClockRanges(result) => {
-                    match result {
-                        Ok(mut ranges) => {
-                            if !ranges.is_empty() {
-                                ranges.sort_unstable();
-                                self.state.gpu_mem_clock_ranges = Some((*ranges.first().unwrap(), *ranges.last().unwrap()));
-                            }
-                        },
-                        Err(e) => self.state.show_message(format!("Failed to get GPU memory clock ranges: {}", e), true),
                     }
                 }
                 HardwareUpdate::GpuCoreOffsetLimits(result) => {
@@ -673,6 +669,21 @@ impl LapSphereApp {
         let Some(tray) = self.system_tray.as_mut() else {
             return;
         };
+
+        // Sync profile list if count changed
+        if self.state.config.profiles.len() != self.last_tray_profiles_count {
+            tray.set_profiles(&self.state.config.profiles);
+            self.last_tray_profiles_count = self.state.config.profiles.len();
+            // Force current profile sync as well since menu rebuilt
+            tray.set_current_profile(&self.state.config.current_profile);
+            self.last_tray_profile = self.state.config.current_profile.clone();
+        }
+
+        // Sync current profile if changed in main window
+        if self.state.config.current_profile != self.last_tray_profile {
+            tray.set_current_profile(&self.state.config.current_profile);
+            self.last_tray_profile = self.state.config.current_profile.clone();
+        }
 
         if let Some(event) = tray.handle_events() {
             match event {

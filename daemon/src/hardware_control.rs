@@ -448,19 +448,6 @@ pub fn set_gpu_locked_clocks(device_index: u32, min_clock: u32, max_clock: u32) 
     Ok(())
 }
 
-pub fn set_memory_locked_clocks(device_index: u32, min_clock: u32, max_clock: u32) -> Result<()> {
-    let nvml = get_nvml()?;
-    let mut device = nvml.device_by_index(device_index)?;
-    device.set_mem_locked_clocks(min_clock, max_clock)?;
-    Ok(())
-}
-
-pub fn reset_memory_locked_clocks(device_index: u32) -> Result<()> {
-    let nvml = get_nvml()?;
-    let mut device = nvml.device_by_index(device_index)?;
-    device.reset_mem_locked_clocks()?;
-    Ok(())
-}
 
 pub fn reset_gpu_clocks(device_index: u32) -> Result<()> {
     let nvml = get_nvml()?;
