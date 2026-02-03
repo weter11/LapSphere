@@ -831,6 +831,16 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
                         }
                     }
 
+                    if let Some(v_total) = gpu.vram_total {
+                        ui.label("VRAM Capacity:");
+                        if v_total >= 1024 {
+                            ui.label(format!("{:.1} GiB ({} MiB)", v_total as f32 / 1024.0, v_total));
+                        } else {
+                            ui.label(format!("{} MiB", v_total));
+                        }
+                        ui.end_row();
+                    }
+
                     if let Some(ref v_type) = gpu.vram_type {
                         ui.label("VRAM Type:");
                         ui.label(v_type);

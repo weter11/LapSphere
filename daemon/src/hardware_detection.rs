@@ -32,6 +32,7 @@ struct NvidiaMetadata {
     vram_type: Option<String>,
     vram_vendor: Option<String>,
     vram_bus_width: Option<u32>,
+    vram_total: Option<u64>,
     core_clock_range: Option<(u32, u32)>,
     memory_clock_range: Option<(u32, u32)>,
 }
@@ -1365,6 +1366,7 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
                 vram_vendor: None,
                 vram_bus_width: None,
                 vram_bandwidth: None,
+                vram_total: None,
             });
         }
     }
@@ -2087,16 +2089,16 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 cache.get(&(i as u32)).cloned()
             };
             
-            let (vram_type, vram_vendor, vram_bus_width, vram_bandwidth) = 
+            let (vram_type, vram_vendor, vram_bus_width, vram_bandwidth, vram_total) =
                 if let Some(ref meta) = cached_metadata {
                     let bandwidth = calculate_vram_bandwidth(meta.vram_type.as_ref(), meta.vram_bus_width, meta.memory_clock_range);
                     log::debug!(target: "hw.detect", 
-                        "GPU {} (all suspended): Using cached VRAM - Type: {:?}, Vendor: {:?}, Bus: {:?} bits, BW: {:?} GB/s",
-                        i, meta.vram_type, meta.vram_vendor, meta.vram_bus_width, bandwidth);
-                    (meta.vram_type.clone(), meta.vram_vendor.clone(), meta.vram_bus_width, bandwidth)
+                        "GPU {} (all suspended): Using cached VRAM - Type: {:?}, Vendor: {:?}, Bus: {:?} bits, BW: {:?} GB/s, Total: {:?} MiB",
+                        i, meta.vram_type, meta.vram_vendor, meta.vram_bus_width, bandwidth, meta.vram_total);
+                    (meta.vram_type.clone(), meta.vram_vendor.clone(), meta.vram_bus_width, bandwidth, meta.vram_total)
                 } else {
                     log::debug!(target: "hw.detect", "GPU {} (all suspended): No cached VRAM info available", i);
-                    (None, None, None, None)
+                    (None, None, None, None, None)
                 };
             
             gpus.push(GpuInfo {
@@ -2135,6 +2137,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 vram_vendor,
                 vram_bus_width,
                 vram_bandwidth,
+                vram_total,
             });
         }
         return Ok(gpus);
@@ -2167,16 +2170,16 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 cache.get(&i).cloned()
             };
             
-            let (vram_type, vram_vendor, vram_bus_width, vram_bandwidth) = 
+            let (vram_type, vram_vendor, vram_bus_width, vram_bandwidth, vram_total) =
                 if let Some(ref meta) = cached_metadata {
                     let bandwidth = calculate_vram_bandwidth(meta.vram_type.as_ref(), meta.vram_bus_width, meta.memory_clock_range);
                     log::debug!(target: "hw.detect", 
-                        "GPU {} (suspended): Using cached VRAM - Type: {:?}, Vendor: {:?}, Bus: {:?} bits, BW: {:?} GB/s",
-                        i, meta.vram_type, meta.vram_vendor, meta.vram_bus_width, bandwidth);
-                    (meta.vram_type.clone(), meta.vram_vendor.clone(), meta.vram_bus_width, bandwidth)
+                        "GPU {} (suspended): Using cached VRAM - Type: {:?}, Vendor: {:?}, Bus: {:?} bits, BW: {:?} GB/s, Total: {:?} MiB",
+                        i, meta.vram_type, meta.vram_vendor, meta.vram_bus_width, bandwidth, meta.vram_total);
+                    (meta.vram_type.clone(), meta.vram_vendor.clone(), meta.vram_bus_width, bandwidth, meta.vram_total)
                 } else {
                     log::debug!(target: "hw.detect", "GPU {} (suspended): No cached VRAM info available", i);
-                    (None, None, None, None)
+                    (None, None, None, None, None)
                 };
             
             gpus.push(GpuInfo {
@@ -2215,6 +2218,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 vram_vendor,
                 vram_bus_width,
                 vram_bandwidth,
+                vram_total,
             });
             continue;
         }
@@ -2383,6 +2387,8 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 let s_gpu_offset = device.clock_offset(Clock::Graphics, PerformanceState::Zero).is_ok();
                 let s_mem_offset = device.clock_offset(Clock::Memory, PerformanceState::Zero).is_ok();
 
+                let vram_total = device.memory_info().ok().map(|m| m.total / 1024 / 1024);
+
                 let minor_number = device.minor_number().unwrap_or(i);
                 log::debug!(target: "hw.detect", "GPU {}: Performing initial VRAM detection for minor {}", i, minor_number);
                 let (vram_type, vram_vendor, vram_bus_width, _) = get_vram_info(minor_number);
@@ -2422,6 +2428,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                     vram_type,
                     vram_vendor,
                     vram_bus_width,
+                    vram_total,
                     core_clock_range: core_range,
                     memory_clock_range: mem_range,
                 };
@@ -2439,6 +2446,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         let v_type = metadata.vram_type;
         let v_vendor = metadata.vram_vendor;
         let v_bus = metadata.vram_bus_width;
+        let v_total = metadata.vram_total;
         // Apply current offset to the cached base range for real-time reporting
         let core_clock_range = metadata.core_clock_range.map(|(min, max)| {
             let offset = {
@@ -2517,6 +2525,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             vram_vendor: v_vendor,
             vram_bus_width: v_bus,
             vram_bandwidth: v_bw,
+            vram_total: v_total,
         };
 
         // Fill in offsets if they exist in global state (assuming first NVIDIA GPU for now)
