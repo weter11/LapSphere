@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use std::fs::OpenOptions;
 use std::os::unix::io::AsRawFd;
+use std::sync::atomic::{AtomicBool, Ordering};
 use nix::errno::Errno;
 use nix::libc;
 
@@ -59,6 +60,8 @@ pub enum HardwareInterface {
     Uniwill,
     None,
 }
+
+static CLEVO_AUTO_DISABLED: AtomicBool = AtomicBool::new(false);
 
 pub struct TuxedoIo {
     device: std::fs::File,
@@ -304,10 +307,13 @@ impl TuxedoIo {
                 let speed_percent = speed_percent.min(100);
                 
                 // Step 1: Disable auto mode (critical for Clevo!)
-                log::debug!(target: "hw.fan", "Disabling Clevo auto mode for manual fan control");
-                let manual_val: i32 = 0;
-                let auto_request = Self::iow(MAGIC_WRITE_CL, 0x11, Self::PTR_SIZE);
-                Self::ioctl_write_i32(fd, auto_request, manual_val)?;
+                if !CLEVO_AUTO_DISABLED.load(Ordering::SeqCst) {
+                    log::debug!(target: "hw.fan", "Disabling Clevo auto mode for manual fan control");
+                    let manual_val: i32 = 0;
+                    let auto_request = Self::iow(MAGIC_WRITE_CL, 0x11, Self::PTR_SIZE);
+                    Self::ioctl_write_i32(fd, auto_request, manual_val)?;
+                    CLEVO_AUTO_DISABLED.store(true, Ordering::SeqCst);
+                }
                 
                 // Step 2: Read current speeds for all fans
                 let mut current_raw = [0u8; 3];
@@ -375,6 +381,7 @@ impl TuxedoIo {
                 
                 let request = Self::iow(MAGIC_WRITE_CL, 0x11, Self::PTR_SIZE);
                 Self::ioctl_write_i32(fd, request, auto_val)?;
+                CLEVO_AUTO_DISABLED.store(false, Ordering::SeqCst);
                 
                 log::info!(target: "hw.fan", "set_clevo_fans_auto");
                 Ok(())

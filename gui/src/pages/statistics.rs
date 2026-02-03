@@ -175,17 +175,17 @@ fn draw_cpu_info(ui: &mut Ui, state: &AppState) {
                         ui.label(&cpu.name);
                         ui.end_row();
                         
-                        ui.label("Median Frequency:");
-                        ui.label(RichText::new(format!("{} MHz", cpu.median_frequency / 1000))
+                        ui.label("Average Frequency:");
+                        ui.label(RichText::new(format!("{} MHz", cpu.average_frequency / 1000))
                             .monospace());
                         ui.end_row();
                         
-                        ui.label("Median Load:");
+                        ui.label("Average Load:");
                         ui.horizontal(|ui| {
                             ui.add(
-                                ProgressBar::new(cpu.median_load / 100.0)
-                                    .text(format!("{:.1}%", cpu.median_load))
-                                    .fill(load_color(cpu.median_load))
+                                ProgressBar::new(cpu.average_load / 100.0)
+                                    .text(format!("{:.1}%", cpu.average_load))
+                                    .fill(load_color(cpu.average_load))
                             );
                         });
                         ui.end_row();
@@ -568,19 +568,20 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
                             }
                             ui.end_row();
 
-                            // Channel Number
-                            ui.label("Channel Number:");
-                            if let Some(channel) = wifi.channel {
-                                ui.label(format!("{}", channel));
-                            } else {
-                                ui.label(RichText::new("—").weak());
-                            }
-                            ui.end_row();
-
-                            // Channel Width
-                            ui.label("Channel Width:");
-                            if let Some(width) = wifi.channel_width {
-                                ui.label(format!("{} MHz", width));
+                            // Channel Info
+                            ui.label("Channel Info:");
+                            if wifi.channel.is_some() || wifi.channel_width.is_some() || wifi.channel_freq.is_some() {
+                                let mut parts = Vec::new();
+                                if let Some(ch) = wifi.channel {
+                                    parts.push(format!("Ch {}", ch));
+                                }
+                                if let Some(freq) = wifi.channel_freq {
+                                    parts.push(format!("{} MHz", freq));
+                                }
+                                if let Some(width) = wifi.channel_width {
+                                    parts.push(format!("{} MHz width", width));
+                                }
+                                ui.label(parts.join(", "));
                             } else {
                                 ui.label(RichText::new("—").weak());
                             }

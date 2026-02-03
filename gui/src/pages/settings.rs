@@ -40,12 +40,23 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTheme, ctx: 
 
 fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Daemon Logs (last 2000 lines)").strong().heading());
+        ui.label(RichText::new(format!("Daemon Logs (showing last {} lines) [PID: {}]", state.config.log_limit, std::process::id())).strong().heading());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button("📂 Crash Reports").on_hover_text("Open folder with crash reports").clicked() {
+                log::warn!(target: "gui", "User requested to open crash reports folder (config folder). Path: {}", crate::app::get_crash_dir());
                 let crash_dir = crate::app::get_crash_dir();
                 let _ = std::fs::create_dir_all(&crash_dir);
-                let _ = webbrowser::open(&crash_dir);
+
+                #[cfg(target_os = "linux")]
+                {
+                    let _ = std::process::Command::new("xdg-open")
+                        .arg(&crash_dir)
+                        .spawn();
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let _ = webbrowser::open(&crash_dir);
+                }
             }
         });
     });
@@ -77,6 +88,19 @@ fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
         ui.checkbox(&mut state.log_filter_warn, "Warning");
         ui.checkbox(&mut state.log_filter_info, "Info");
         ui.checkbox(&mut state.log_filter_debug, "Debug");
+        if ui.checkbox(&mut state.log_filter_trace, "Trace").changed() {
+            state.config.log_filter_trace = state.log_filter_trace;
+            let _ = state.save_settings();
+        }
+    });
+
+    ui.add_space(8.0);
+
+    ui.horizontal(|ui| {
+        ui.label("Line Limit:");
+        if ui.add(Slider::new(&mut state.config.log_limit, 1..=10000)).changed() {
+            let _ = state.save_settings();
+        }
     });
 
     ui.add_space(8.0);
@@ -126,23 +150,46 @@ fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
 
     ScrollArea::vertical()
         .auto_shrink([false, false])
-        .show_rows(ui, row_height, filtered_logs.len(), |ui, row_range| {
-            for i in row_range {
-                let entry = filtered_logs[i];
+        .show(ui, |ui| {
+            let search_lower = state.log_search_text.to_lowercase();
+            let has_search = !search_lower.is_empty();
+            
+            for entry in state.daemon_logs.iter().rev().take(state.config.log_limit) {
                 let level_upper = entry.level.to_uppercase();
-                let color = match level_upper.as_str() {
-                    "ERROR" => egui::Color32::from_rgb(255, 100, 100),
-                    "WARN" | "WARNING" => egui::Color32::from_rgb(255, 200, 100),
-                    "DEBUG" | "TRACE" => egui::Color32::from_rgb(150, 150, 150),
-                    _ => ui.visuals().text_color(),
+                let show_level = match level_upper.as_str() {
+                    "ERROR" => state.log_filter_error,
+                    "WARN" | "WARNING" => state.log_filter_warn,
+                    "INFO" => state.log_filter_info,
+                    "DEBUG" => state.log_filter_debug,
+                    "TRACE" => state.log_filter_trace,
+                    _ => true,
                 };
 
-                ui.horizontal_top(|ui| {
-                    ui.label(RichText::new(&entry.timestamp).weak().monospace());
-                    ui.label(RichText::new(&entry.level).color(color).strong().monospace());
-                    ui.label(RichText::new(&entry.target).color(egui::Color32::from_rgb(100, 150, 255)).monospace());
-                    ui.label(RichText::new(&entry.message).monospace());
-                });
+                // Apply search filter
+                let show_search = if has_search {
+                    entry.message.to_lowercase().contains(&search_lower) ||
+                    entry.target.to_lowercase().contains(&search_lower) ||
+                    entry.level.to_lowercase().contains(&search_lower)
+                } else {
+                    true
+                };
+
+                if show_level && show_search {
+                    let color = match level_upper.as_str() {
+                        "ERROR" => egui::Color32::from_rgb(255, 100, 100),
+                        "WARN" | "WARNING" => egui::Color32::from_rgb(255, 200, 100),
+                        "DEBUG" => egui::Color32::from_rgb(150, 150, 150),
+                        "TRACE" => egui::Color32::from_rgb(100, 100, 100),
+                        _ => ui.visuals().text_color(),
+                    };
+
+                    ui.horizontal_top(|ui| {
+                        ui.label(RichText::new(&entry.timestamp).weak().monospace());
+                        ui.label(RichText::new(&entry.level).color(color).strong().monospace());
+                        ui.label(RichText::new(&entry.target).color(egui::Color32::from_rgb(100, 150, 255)).monospace());
+                        ui.label(RichText::new(&entry.message).monospace());
+                    });
+                }
             }
         });
 }

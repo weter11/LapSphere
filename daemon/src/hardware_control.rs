@@ -4,8 +4,11 @@ use once_cell::sync::Lazy;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use lapsphere_common::types::*;
 use crate::tuxedo_io::{TuxedoIo, HardwareInterface};
+
+static CPU_LIMITS_MODIFIED: AtomicBool = AtomicBool::new(false);
 
 fn get_cpu_count() -> Result<u32> {
     let cpuinfo = fs::read_to_string("/proc/cpuinfo")?;
@@ -66,7 +69,23 @@ pub fn set_cpu_frequency_limits(min_freq: u64, max_freq: u64) -> Result<()> {
         }
     }
     
+    CPU_LIMITS_MODIFIED.store(true, Ordering::SeqCst);
     log::info!(target: "hw.cpu", "set_freq_limits min={} max={}", min_freq, max_freq);
+    Ok(())
+}
+
+pub fn restore_cpu_frequency_limits() -> Result<()> {
+    if !CPU_LIMITS_MODIFIED.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    log::info!(target: "hw.cpu", "Restoring CPU frequency limits to hardware defaults");
+    let (hw_min, hw_max) = crate::hardware_detection::read_hw_frequency_limits()?;
+
+    if let (Some(min), Some(max)) = (hw_min, hw_max) {
+        set_cpu_frequency_limits(min, max)?;
+    }
+
     Ok(())
 }
 
