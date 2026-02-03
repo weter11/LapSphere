@@ -4,7 +4,7 @@ use crate::dbus_client::DbusClient;
 use lapsphere_common::types::{KeyboardMode, Profile, FanCurve, KeyboardCapabilities, FanInfo};
 use crate::widgets::fan_curve_editor::FanCurveEditor;
 
-pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>, hw_update_tx: tokio::sync::mpsc::UnboundedSender<crate::app::HardwareUpdate>) {
+pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>, hw_update_tx: tokio::sync::mpsc::Sender<crate::app::HardwareUpdate>) {
     ui.spacing_mut().slider_width = ui.available_width() * 0.4;
     let profile_idx = state.current_profile_index();
     
@@ -221,7 +221,7 @@ fn draw_cpu_tuning(
     cpu_caps: Option<&lapsphere_common::types::CpuCapabilities>,
     cpu_info: &lapsphere_common::types::CpuInfo,
     dbus_client: Option<&DbusClient>,
-    hw_update_tx: tokio::sync::mpsc::UnboundedSender<crate::app::HardwareUpdate>,
+    hw_update_tx: tokio::sync::mpsc::Sender<crate::app::HardwareUpdate>,
 ) {
     ui.heading("🖥 CPU Tuning");
     ui.add_space(8.0);
@@ -442,7 +442,7 @@ fn draw_gpu_tuning(
     dbus_client: Option<&DbusClient>,
     gpu_info: &[lapsphere_common::types::GpuInfo],
     state: &mut AppState,
-    hw_update_tx: tokio::sync::mpsc::UnboundedSender<crate::app::HardwareUpdate>,
+    hw_update_tx: tokio::sync::mpsc::Sender<crate::app::HardwareUpdate>,
 ) {
     ui.heading("GPU Tuning");
     ui.add_space(8.0);
@@ -575,7 +575,7 @@ fn draw_gpu_standard_controls(
     gpu_mem_offset_limits: Option<(i32, i32)>,
     gpu_info: &lapsphere_common::types::GpuInfo,
     dbus_client: Option<&DbusClient>,
-    hw_update_tx: tokio::sync::mpsc::UnboundedSender<crate::app::HardwareUpdate>,
+    hw_update_tx: tokio::sync::mpsc::Sender<crate::app::HardwareUpdate>,
     nvml_index: u32,
 ) {
     let architecture = &gpu_info.architecture;
@@ -728,7 +728,7 @@ fn draw_gpu_advanced_controls(
     gpu_mem_offset_limits: Option<(i32, i32)>,
     gpu_info: Option<&lapsphere_common::types::GpuInfo>,
     dbus_client: Option<&DbusClient>,
-    hw_update_tx: tokio::sync::mpsc::UnboundedSender<crate::app::HardwareUpdate>,
+    hw_update_tx: tokio::sync::mpsc::Sender<crate::app::HardwareUpdate>,
     nvml_index: u32,
 ) {
     ui.add_space(6.0);

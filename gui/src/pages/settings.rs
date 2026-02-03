@@ -98,46 +98,51 @@ fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
 
     ui.add_space(8.0);
 
+    let search_lower = state.log_search_text.to_lowercase();
+    let has_search = !search_lower.is_empty();
+
+    let filtered_logs: Vec<_> = state.daemon_logs.iter().rev().filter(|entry| {
+        let level_upper = entry.level.to_uppercase();
+        let show_level = match level_upper.as_str() {
+            "ERROR" => state.log_filter_error,
+            "WARN" | "WARNING" => state.log_filter_warn,
+            "INFO" => state.log_filter_info,
+            "DEBUG" | "TRACE" => state.log_filter_debug,
+            _ => true,
+        };
+
+        if !show_level { return false; }
+
+        if has_search {
+            entry.message.to_lowercase().contains(&search_lower) ||
+            entry.target.to_lowercase().contains(&search_lower) ||
+            entry.level.to_lowercase().contains(&search_lower)
+        } else {
+            true
+        }
+    }).collect();
+
+    let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
+
     ScrollArea::vertical()
         .auto_shrink([false, false])
-        .show(ui, |ui| {
-            let search_lower = state.log_search_text.to_lowercase();
-            let has_search = !search_lower.is_empty();
-            
-            for entry in state.daemon_logs.iter().rev() {
+        .show_rows(ui, row_height, filtered_logs.len(), |ui, row_range| {
+            for i in row_range {
+                let entry = filtered_logs[i];
                 let level_upper = entry.level.to_uppercase();
-                let show_level = match level_upper.as_str() {
-                    "ERROR" => state.log_filter_error,
-                    "WARN" | "WARNING" => state.log_filter_warn,
-                    "INFO" => state.log_filter_info,
-                    "DEBUG" | "TRACE" => state.log_filter_debug,
-                    _ => true,
+                let color = match level_upper.as_str() {
+                    "ERROR" => egui::Color32::from_rgb(255, 100, 100),
+                    "WARN" | "WARNING" => egui::Color32::from_rgb(255, 200, 100),
+                    "DEBUG" | "TRACE" => egui::Color32::from_rgb(150, 150, 150),
+                    _ => ui.visuals().text_color(),
                 };
 
-                // Apply search filter
-                let show_search = if has_search {
-                    entry.message.to_lowercase().contains(&search_lower) ||
-                    entry.target.to_lowercase().contains(&search_lower) ||
-                    entry.level.to_lowercase().contains(&search_lower)
-                } else {
-                    true
-                };
-
-                if show_level && show_search {
-                    let color = match level_upper.as_str() {
-                        "ERROR" => egui::Color32::from_rgb(255, 100, 100),
-                        "WARN" | "WARNING" => egui::Color32::from_rgb(255, 200, 100),
-                        "DEBUG" | "TRACE" => egui::Color32::from_rgb(150, 150, 150),
-                        _ => ui.visuals().text_color(),
-                    };
-
-                    ui.horizontal_top(|ui| {
-                        ui.label(RichText::new(&entry.timestamp).weak().monospace());
-                        ui.label(RichText::new(&entry.level).color(color).strong().monospace());
-                        ui.label(RichText::new(&entry.target).color(egui::Color32::from_rgb(100, 150, 255)).monospace());
-                        ui.label(RichText::new(&entry.message).monospace());
-                    });
-                }
+                ui.horizontal_top(|ui| {
+                    ui.label(RichText::new(&entry.timestamp).weak().monospace());
+                    ui.label(RichText::new(&entry.level).color(color).strong().monospace());
+                    ui.label(RichText::new(&entry.target).color(egui::Color32::from_rgb(100, 150, 255)).monospace());
+                    ui.label(RichText::new(&entry.message).monospace());
+                });
             }
         });
 }
