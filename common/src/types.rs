@@ -175,6 +175,7 @@ pub struct WiFiInfo {
     pub signal_level: Option<i32>,      // Signal level in dBm
     pub channel: Option<u32>,           // Current channel
     pub channel_width: Option<u32>,     // Channel width in MHz (20/40/80/160)
+    pub channel_freq: Option<u32>,      // Channel frequency in MHz
     pub tx_rate: Option<f64>,           // Upload rate in Mbps (Actual throughput)
     pub rx_rate: Option<f64>,           // Download rate in Mbps (Actual throughput)
     pub ssid: Option<String>,
@@ -437,8 +438,20 @@ pub struct AppConfig {
     pub profiles: Vec<Profile>,
     pub current_profile: String,
     pub battery_settings: BatterySettings,
+    #[serde(default = "default_log_limit")]
+    pub log_limit: usize,
+    #[serde(default = "default_log_filter_trace")]
+    pub log_filter_trace: bool,
     #[serde(default)]
     pub remembered_gamepads: Vec<GamepadInfo>,
+}
+
+fn default_log_limit() -> usize {
+    100
+}
+
+fn default_log_filter_trace() -> bool {
+    false
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -524,6 +537,8 @@ impl Default for AppConfig {
             profiles: vec![Profile::default()],
             current_profile: "Standard".to_string(),
             battery_settings: BatterySettings::default(),
+            log_limit: default_log_limit(),
+            log_filter_trace: default_log_filter_trace(),
             remembered_gamepads: vec![],
         }
     }

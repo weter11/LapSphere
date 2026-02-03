@@ -42,7 +42,7 @@ pub static MANUAL_GPU_OFFSETS: once_cell::sync::Lazy<Arc<Mutex<HashMap<u32, (f32
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
 pub static DAEMON_LOGS: once_cell::sync::Lazy<Arc<Mutex<VecDeque<LogEntry>>>> =
-    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(VecDeque::with_capacity(500))));
+    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(VecDeque::with_capacity(10000))));
 
 struct DaemonLogger {
     inner: env_logger::Logger,
@@ -67,7 +67,7 @@ impl log::Log for DaemonLogger {
 
         {
             let mut logs = DAEMON_LOGS.lock().unwrap();
-            if logs.len() >= 1000 {
+            if logs.len() >= 10000 {
                 logs.pop_front();
             }
             logs.push_back(entry);

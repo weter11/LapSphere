@@ -568,19 +568,20 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
                             }
                             ui.end_row();
 
-                            // Channel Number
-                            ui.label("Channel Number:");
-                            if let Some(channel) = wifi.channel {
-                                ui.label(format!("{}", channel));
-                            } else {
-                                ui.label(RichText::new("—").weak());
-                            }
-                            ui.end_row();
-
-                            // Channel Width
-                            ui.label("Channel Width:");
-                            if let Some(width) = wifi.channel_width {
-                                ui.label(format!("{} MHz", width));
+                            // Channel Info
+                            ui.label("Channel Info:");
+                            if wifi.channel.is_some() || wifi.channel_width.is_some() || wifi.channel_freq.is_some() {
+                                let mut parts = Vec::new();
+                                if let Some(ch) = wifi.channel {
+                                    parts.push(format!("Ch {}", ch));
+                                }
+                                if let Some(freq) = wifi.channel_freq {
+                                    parts.push(format!("{} MHz", freq));
+                                }
+                                if let Some(width) = wifi.channel_width {
+                                    parts.push(format!("{} MHz width", width));
+                                }
+                                ui.label(parts.join(", "));
                             } else {
                                 ui.label(RichText::new("—").weak());
                             }

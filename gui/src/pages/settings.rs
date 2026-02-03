@@ -40,7 +40,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTheme, ctx: 
 
 fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Daemon Logs (last 1000 lines)").strong().heading());
+        ui.label(RichText::new(format!("Daemon Logs (showing last {} lines)", state.config.log_limit)).strong().heading());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button("📂 Crash Reports").on_hover_text("Open folder with crash reports").clicked() {
                 let crash_dir = crate::app::get_crash_dir();
@@ -77,6 +77,19 @@ fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
         ui.checkbox(&mut state.log_filter_warn, "Warning");
         ui.checkbox(&mut state.log_filter_info, "Info");
         ui.checkbox(&mut state.log_filter_debug, "Debug");
+        if ui.checkbox(&mut state.log_filter_trace, "Trace").changed() {
+            state.config.log_filter_trace = state.log_filter_trace;
+            let _ = state.save_settings();
+        }
+    });
+
+    ui.add_space(8.0);
+
+    ui.horizontal(|ui| {
+        ui.label("Line Limit:");
+        if ui.add(Slider::new(&mut state.config.log_limit, 1..=10000)).changed() {
+            let _ = state.save_settings();
+        }
     });
 
     ui.add_space(8.0);
@@ -104,13 +117,14 @@ fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
             let search_lower = state.log_search_text.to_lowercase();
             let has_search = !search_lower.is_empty();
             
-            for entry in state.daemon_logs.iter().rev() {
+            for entry in state.daemon_logs.iter().rev().take(state.config.log_limit) {
                 let level_upper = entry.level.to_uppercase();
                 let show_level = match level_upper.as_str() {
                     "ERROR" => state.log_filter_error,
                     "WARN" | "WARNING" => state.log_filter_warn,
                     "INFO" => state.log_filter_info,
-                    "DEBUG" | "TRACE" => state.log_filter_debug,
+                    "DEBUG" => state.log_filter_debug,
+                    "TRACE" => state.log_filter_trace,
                     _ => true,
                 };
 
@@ -127,7 +141,8 @@ fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
                     let color = match level_upper.as_str() {
                         "ERROR" => egui::Color32::from_rgb(255, 100, 100),
                         "WARN" | "WARNING" => egui::Color32::from_rgb(255, 200, 100),
-                        "DEBUG" | "TRACE" => egui::Color32::from_rgb(150, 150, 150),
+                        "DEBUG" => egui::Color32::from_rgb(150, 150, 150),
+                        "TRACE" => egui::Color32::from_rgb(100, 100, 100),
                         _ => ui.visuals().text_color(),
                     };
 

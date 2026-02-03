@@ -2714,7 +2714,7 @@ pub fn get_wifi_info() -> Result<Vec<WiFiInfo>> {
         let (network_controller, subsystem) = get_pci_info(&interface);
         
         // Get all details from iw
-        let (ssid, channel, channel_width, tx_bitrate, rx_bitrate, iw_rx_bytes, iw_tx_bytes, iw_signal) = get_wifi_details(&interface);
+        let (ssid, channel, channel_width, channel_freq, tx_bitrate, rx_bitrate, iw_rx_bytes, iw_tx_bytes, iw_signal) = get_wifi_details(&interface);
 
         // Signal level priority: iw > /proc/net/wireless
         let signal_level = iw_signal.or_else(|| read_wifi_signal(&interface));
@@ -2740,6 +2740,7 @@ pub fn get_wifi_info() -> Result<Vec<WiFiInfo>> {
             signal_level,
             channel,
             channel_width,
+            channel_freq,
             tx_rate,
             rx_rate,
             ssid,
@@ -2763,6 +2764,7 @@ fn get_wifi_details(interface: &str) -> (
     Option<String>,
     Option<u32>,
     Option<u32>,
+    Option<u32>,
     Option<f64>,
     Option<f64>,
     Option<u64>,
@@ -2772,6 +2774,7 @@ fn get_wifi_details(interface: &str) -> (
     let mut ssid = None;
     let mut channel = None;
     let mut width = None;
+    let mut freq = None;
     let mut tx_bitrate = None;
     let mut rx_bitrate = None;
     let mut rx_bytes = None;
@@ -2794,6 +2797,9 @@ fn get_wifi_details(interface: &str) -> (
                 
                 if let Some(pos) = lower.find("ssid:") {
                     ssid = normalize_ssid(trimmed[pos + 5..].trim());
+                } else if let Some(pos) = lower.find("freq:") {
+                    let part = trimmed[pos + 5..].trim();
+                    freq = part.split_whitespace().next().and_then(|s| s.parse().ok());
                 } else if lower.contains("rx bitrate:") {
                     rx_bitrate = parse_wifi_rate(trimmed);
                 } else if lower.contains("tx bitrate:") {
@@ -2883,7 +2889,7 @@ fn get_wifi_details(interface: &str) -> (
         }
     }
 
-    (ssid, channel, width, tx_bitrate, rx_bitrate, rx_bytes, tx_bytes, signal)
+    (ssid, channel, width, freq, tx_bitrate, rx_bitrate, rx_bytes, tx_bytes, signal)
 }
 
 fn read_wifi_temperature(interface: &str) -> Option<f32> {
