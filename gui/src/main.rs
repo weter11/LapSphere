@@ -49,9 +49,9 @@ fn setup_panic_hook() {
         let _ = fs::write(file_path, report);
 
         #[cfg(target_os = "linux")]
-        eprintln!("Application panicked! Crash report saved to ~/.config/lapsphere/crashes");
+        eprintln!("Application panicked! Crash report saved to ~/.config/lapsphere");
         #[cfg(target_os = "windows")]
-        eprintln!("Application panicked! Crash report saved to %APPDATA%\\lapsphere\\crashes");
+        eprintln!("Application panicked! Crash report saved to %APPDATA%\\lapsphere");
     }));
 }
 
@@ -120,7 +120,10 @@ fn main() -> Result<(), eframe::Error> {
     setup_panic_hook();
 
     let args: Vec<String> = std::env::args().collect();
-    let start_in_tray = args.contains(&"--tray".to_string());
+    let start_in_tray_arg = args.contains(&"--tray".to_string());
+
+    let config = app::load_config_from_disk().unwrap_or_default();
+    let start_minimized = start_in_tray_arg || config.start_minimized;
 
     // Create and enter a Tokio runtime context.
     // This is required for `tokio::spawn` to work in the `DbusClient`.
@@ -144,7 +147,7 @@ fn main() -> Result<(), eframe::Error> {
             .with_inner_size([570.0, 620.0])
             .with_min_inner_size([440.0, 470.0])
             .with_icon(load_icon())
-            .with_visible(!start_in_tray),
+            .with_visible(!start_minimized),
         ..Default::default()
     };
     

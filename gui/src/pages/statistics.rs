@@ -1,10 +1,10 @@
 use egui::{Ui, ScrollArea, CollapsingHeader, Grid, ProgressBar, RichText};
 use egui::Color32;
+use lapsphere_common::types::GamepadStatus;
 use crate::app::AppState;
-use webbrowser;
 use crate::theme::{temp_color, load_color, power_color};
 
-pub const STATISTICS_SECTIONS: [(&str, &str); 8] = [
+pub const STATISTICS_SECTIONS: [(&str, &str); 9] = [
     ("SystemInfo", "System Info"),
     ("CPU", "CPU"),
     ("Memory", "Memory"),
@@ -13,6 +13,7 @@ pub const STATISTICS_SECTIONS: [(&str, &str); 8] = [
     ("WiFi", "WiFi"),
     ("Storage", "Storage"),
     ("Fans", "Fans"),
+    ("Gamepads", "Gamepads"),
 ];
 
 const WIFI_NOT_CONNECTED: &str = "Not connected";
@@ -36,16 +37,7 @@ pub fn normalize_section_order(order: &[String]) -> Vec<String> {
 
 pub fn draw(ui: &mut Ui, state: &mut AppState) {
     ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        ui.heading("📊 Statistics");
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button("📂 Crash Reports").on_hover_text("Open folder with crash reports").clicked() {
-                let crash_dir = crate::app::get_crash_dir();
-                let _ = std::fs::create_dir_all(&crash_dir);
-                let _ = webbrowser::open(&crash_dir);
-            }
-        });
-    });
+    ui.heading("📊 Statistics");
     ui.add_space(6.0);
     ui.separator();
 
@@ -91,6 +83,10 @@ pub fn draw(ui: &mut Ui, state: &mut AppState) {
                     }
                     "Fans" if state.config.statistics_sections.show_fans => {
                         draw_fan_info(ui, state);
+                        ui.add_space(6.0);
+                    }
+                    "Gamepads" if state.config.statistics_sections.show_gamepads => {
+                        draw_gamepad_info(ui, state);
                         ui.add_space(6.0);
                     }
                     _ => {}
@@ -179,17 +175,17 @@ fn draw_cpu_info(ui: &mut Ui, state: &AppState) {
                         ui.label(&cpu.name);
                         ui.end_row();
                         
-                        ui.label("Median Frequency:");
-                        ui.label(RichText::new(format!("{} MHz", cpu.median_frequency / 1000))
+                        ui.label("Average Frequency:");
+                        ui.label(RichText::new(format!("{} MHz", cpu.average_frequency / 1000))
                             .monospace());
                         ui.end_row();
                         
-                        ui.label("Median Load:");
+                        ui.label("Average Load:");
                         ui.horizontal(|ui| {
                             ui.add(
-                                ProgressBar::new(cpu.median_load / 100.0)
-                                    .text(format!("{:.1}%", cpu.median_load))
-                                    .fill(load_color(cpu.median_load))
+                                ProgressBar::new(cpu.average_load / 100.0)
+                                    .text(format!("{:.1}%", cpu.average_load))
+                                    .fill(load_color(cpu.average_load))
                             );
                         });
                         ui.end_row();
@@ -202,25 +198,6 @@ fn draw_cpu_info(ui: &mut Ui, state: &AppState) {
                                 .monospace()
                         );
                         ui.end_row();
-                        
-                        if let Some(power) = cpu.package_power {
-                            ui.label("Package Power:");
-                            ui.horizontal(|ui| {
-                                ui.colored_label(
-                                    power_color(power),
-                                    RichText::new(format!("{:.1} W", power))
-                                        .strong()
-                                        .monospace()
-                                );
-                                
-                                if let Some(ref source) = cpu.power_source {
-                                    ui.label(RichText::new(format!("({})", source))
-                                        .small()
-                                        .italics());
-                                }
-                            });
-                            ui.end_row();
-                        }
                         
                         if !cpu.all_power_sources.is_empty() && cpu.all_power_sources.len() > 1 {
                             ui.label("All Power Sources:");
@@ -347,42 +324,40 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                             ui.end_row();
                             
                             ui.label("Status:");
-                            // Display performance state with better formatting
-                            let is_suspended = gpu.status.to_lowercase().contains("suspended");
-                            let status_display = match gpu.status.as_str() {
-                                "P0" => "P0 (Maximum Performance)",
-                                "P1" => "P1 (High Performance)",
-                                "P2" => "P2 (Performance)",
-                                "P3" => "P3 (Balanced)",
-                                "P5" => "P5 (Balanced)",
-                                "P8" => "P8 (Power Saving)",
-                                "P12" => "P12 (Deep Power Saving)",
-                                "active" => "Active",
-                                "suspended" => "Suspended",
-                                "unknown" => "Unknown",
-                                other => other,
-                            };
-                            ui.label(status_display);
+                            ui.label(&gpu.status);
                             ui.end_row();
-
-                            if gpu.name.contains("NVIDIA")
-                                && !is_suspended
-                                && gpu.status.starts_with('P')
-                            {
-                                ui.label("P-State:");
-                                ui.label(&gpu.status);
-                                ui.end_row();
-                            }
                             
                             if let Some(freq) = gpu.frequency {
                                 ui.label("Core Frequency:");
-                                ui.label(format!("{} MHz", freq));
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("{} MHz", freq));
+                                    if let Some((min, max)) = gpu.core_clock_range {
+                                        ui.label(RichText::new(format!(" (Range: {} - {} MHz)", min, max)).small().italics());
+                                    }
+                                });
                                 ui.end_row();
                             }
-                            
+
+                            if let (Some(min), Some(max)) = (gpu.min_core_clock, gpu.max_core_clock) {
+                                ui.label("Locked Core Clocks:");
+                                ui.label(RichText::new(format!("{} - {} MHz", min, max)).strong());
+                                ui.end_row();
+                            }
+
                             if let Some(mem_freq) = gpu.memory_frequency {
                                 ui.label("Memory Frequency:");
-                                ui.label(format!("{} MHz", mem_freq));
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("{} MHz", mem_freq));
+                                    if let Some((min, max)) = gpu.memory_clock_range {
+                                        ui.label(RichText::new(format!(" (Range: {} - {} MHz)", min, max)).small().italics());
+                                    }
+                                });
+                                ui.end_row();
+                            }
+
+                            if let (Some(min), Some(max)) = (gpu.min_memory_clock, gpu.max_memory_clock) {
+                                ui.label("Locked Memory Clocks:");
+                                ui.label(RichText::new(format!("{} - {} MHz", min, max)).strong());
                                 ui.end_row();
                             }
                             
@@ -413,6 +388,24 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                                 ui.end_row();
                             }
                             
+                            if let Some(hotspot_temp) = gpu.hotspot_temperature {
+                                ui.label("Hotspot Temperature:");
+                                ui.colored_label(
+                                    temp_color(hotspot_temp),
+                                    format!("{:.1}°C", hotspot_temp)
+                                );
+                                ui.end_row();
+                            }
+
+                            if let Some(mem_temp) = gpu.memory_temperature {
+                                ui.label("Memory Temperature:");
+                                ui.colored_label(
+                                    temp_color(mem_temp),
+                                    format!("{:.1}°C", mem_temp)
+                                );
+                                ui.end_row();
+                            }
+                            
                             if let Some(load) = gpu.load {
                                 ui.label("Load:");
                                 ui.add(ProgressBar::new(load / 100.0)
@@ -434,6 +427,8 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                                 ui.label(format!("{:.3} V", voltage));
                                 ui.end_row();
                             }
+
+
 
                             if let Some(fo) = gpu.freq_offset {
                                 ui.label("Freq Offset:");
@@ -591,19 +586,20 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
                             }
                             ui.end_row();
 
-                            // Channel Number
-                            ui.label("Channel Number:");
-                            if let Some(channel) = wifi.channel {
-                                ui.label(format!("{}", channel));
-                            } else {
-                                ui.label(RichText::new("—").weak());
-                            }
-                            ui.end_row();
-
-                            // Channel Width
-                            ui.label("Channel Width:");
-                            if let Some(width) = wifi.channel_width {
-                                ui.label(format!("{} MHz", width));
+                            // Channel Info
+                            ui.label("Channel Info:");
+                            if wifi.channel.is_some() || wifi.channel_width.is_some() || wifi.channel_freq.is_some() {
+                                let mut parts = Vec::new();
+                                if let Some(ch) = wifi.channel {
+                                    parts.push(format!("Ch {}", ch));
+                                }
+                                if let Some(freq) = wifi.channel_freq {
+                                    parts.push(format!("{} MHz", freq));
+                                }
+                                if let Some(width) = wifi.channel_width {
+                                    parts.push(format!("{} MHz width", width));
+                                }
+                                ui.label(parts.join(", "));
                             } else {
                                 ui.label(RichText::new("—").weak());
                             }
@@ -758,19 +754,74 @@ fn draw_storage_info(ui: &mut Ui, state: &AppState) {
         });
 }
 
+fn draw_gamepad_info(ui: &mut Ui, state: &AppState) {
+    CollapsingHeader::new(RichText::new("🎮 Gamepads").heading())
+        .default_open(true)
+        .show(ui, |ui| {
+            if !state.config.remembered_gamepads.is_empty() {
+                for (idx, gamepad) in state.config.remembered_gamepads.iter().enumerate() {
+                    if idx > 0 {
+                        ui.add_space(4.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+                    }
+                    ui.label(RichText::new(&gamepad.name).strong());
+                    Grid::new(format!("gamepad_grid_{}", gamepad.name))
+                        .num_columns(2)
+                        .spacing([36.0, 6.0])
+                        .striped(true)
+                        .show(ui, |ui| {
+                            ui.label("Status:");
+                            let status_color = match gamepad.status {
+                                GamepadStatus::Connected => Color32::from_rgb(80, 200, 120),
+                                GamepadStatus::Disconnected => Color32::from_rgb(200, 80, 80),
+                            };
+                            ui.colored_label(status_color, format!("{:?}", gamepad.status));
+                            ui.end_row();
+
+                            if gamepad.status == GamepadStatus::Connected {
+                                ui.label("Connection:");
+                                ui.label(format!("{:?}", gamepad.connection_type));
+                                ui.end_row();
+
+                                ui.label("Battery:");
+                                if let Some(level) = gamepad.battery_level {
+                                    ui.horizontal(|ui| {
+                                        ui.add(ProgressBar::new(level as f32 / 100.0)
+                                            .text(format!("{}%", level))
+                                            .desired_width(120.0));
+                                    });
+                                } else {
+                                    ui.label("—");
+                                }
+                                ui.end_row();
+
+                                ui.label("Power Status:");
+                                ui.label(format!("{:?}", gamepad.power_status));
+                                ui.end_row();
+                            }
+                        });
+                }
+            } else {
+                ui.label("No gamepads discovered");
+            }
+        });
+}
+
 fn draw_fan_info(ui: &mut Ui, state: &AppState) {
     CollapsingHeader::new(RichText::new("💨 Fans").heading())
         .default_open(true)
         .show(ui, |ui| {
             if !state.fan_info.is_empty() {
                 Grid::new("fans_grid")
-                    .num_columns(3)
+                    .num_columns(4)
                     .spacing([36.0, 6.0])
                     .striped(true)
                     .show(ui, |ui| {
                         ui.label(RichText::new("Fan").strong());
                         ui.label(RichText::new("Speed").strong());
                         ui.label(RichText::new("Temperature").strong());
+                        ui.label(RichText::new("Mode").strong());
                         ui.end_row();
                         
                         for fan in &state.fan_info {
@@ -801,6 +852,12 @@ fn draw_fan_info(ui: &mut Ui, state: &AppState) {
                                 );
                             } else {
                                 ui.label("—");
+                            }
+
+                            if let Some(ref mode) = fan.mode {
+                                ui.label(mode);
+                            } else {
+                                ui.label("Auto");
                             }
                             
                             ui.end_row();

@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use std::fs::OpenOptions;
 use std::os::unix::io::AsRawFd;
+use std::sync::atomic::{AtomicBool, Ordering};
 use nix::errno::Errno;
 use nix::libc;
 
@@ -59,6 +60,8 @@ pub enum HardwareInterface {
     Uniwill,
     None,
 }
+
+static CLEVO_AUTO_DISABLED: AtomicBool = AtomicBool::new(false);
 
 pub struct TuxedoIo {
     device: std::fs::File,
@@ -132,7 +135,10 @@ impl TuxedoIo {
         let interface = Self::detect_interface(&device)?;
         let fan_count = Self::detect_fan_count(&device, interface)?;
 
-        log::info!("Detected interface: {:?}, fan count: {}", interface, fan_count);
+        static LOGGED_ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !LOGGED_ONCE.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            log::info!(target: "hw.detect", "platform={:?} fan_count={}", interface, fan_count);
+        }
 
         Ok(TuxedoIo {
             device,
@@ -174,28 +180,28 @@ impl TuxedoIo {
         let uw_res = Self::ioctl_read_i32(fd, uw_check);
 
         if matches!(cl_res, Ok(1)) {
-            log::debug!("Detected Clevo interface via hardware check");
+            log::debug!(target: "hw.detect", "Detected Clevo interface via hardware check");
             return Ok(HardwareInterface::Clevo);
         }
         if matches!(uw_res, Ok(1)) {
-            log::debug!("Detected Uniwill interface via hardware check");
+            log::debug!(target: "hw.detect", "Detected Uniwill interface via hardware check");
             return Ok(HardwareInterface::Uniwill);
         }
 
         // Fallback: try to read faninfo to detect interface
         let probe_cl = Self::ioctl_read_i32(fd, Self::ior(MAGIC_READ_CL, 0x10, Self::PTR_SIZE));
         if probe_cl.is_ok() {
-            log::debug!("Detected Clevo interface via faninfo probe");
+            log::debug!(target: "hw.detect", "Detected Clevo interface via faninfo probe");
             return Ok(HardwareInterface::Clevo);
         }
 
         let probe_uw = Self::ioctl_read_i32(fd, Self::ior(MAGIC_READ_UW, 0x10, Self::PTR_SIZE));
         if probe_uw.is_ok() {
-            log::debug!("Detected Uniwill interface via fanspeed probe");
+            log::debug!(target: "hw.detect", "Detected Uniwill interface via fanspeed probe");
             return Ok(HardwareInterface::Uniwill);
         }
 
-        log::warn!("No hardware interface detected");
+        log::warn!(target: "hw.detect", "No hardware interface detected");
         Ok(HardwareInterface::None)
     }
 
@@ -279,10 +285,13 @@ impl TuxedoIo {
                 let speed_percent = speed_percent.min(100);
                 
                 // Step 1: Disable auto mode (critical for Clevo!)
-                log::debug!("Disabling Clevo auto mode for manual fan control");
-                let manual_val: i32 = 0;
-                let auto_request = Self::iow(MAGIC_WRITE_CL, 0x11, Self::PTR_SIZE);
-                Self::ioctl_write_i32(fd, auto_request, manual_val)?;
+                if !CLEVO_AUTO_DISABLED.load(Ordering::SeqCst) {
+                    log::debug!(target: "hw.fan", "Disabling Clevo auto mode for manual fan control");
+                    let manual_val: i32 = 0;
+                    let auto_request = Self::iow(MAGIC_WRITE_CL, 0x11, Self::PTR_SIZE);
+                    Self::ioctl_write_i32(fd, auto_request, manual_val)?;
+                    CLEVO_AUTO_DISABLED.store(true, Ordering::SeqCst);
+                }
                 
                 // Step 2: Read current speeds for all fans
                 let mut current_raw = [0u8; 3];
@@ -306,7 +315,7 @@ impl TuxedoIo {
                     | ((current_raw[1] as i32) << 8)
                     | ((current_raw[2] as i32) << 16);
 
-                log::debug!(
+                log::debug!(target: "hw.fan",
                     "Setting Clevo fan {} to {}% (raw: {:#04x}), packed: {:#08x}",
                     fan_id, speed_percent, current_raw[fan_id as usize], packed
                 );
@@ -315,7 +324,7 @@ impl TuxedoIo {
                 let speed_request = Self::iow(MAGIC_WRITE_CL, 0x10, Self::PTR_SIZE);
                 Self::ioctl_write_i32(fd, speed_request, packed)?;
 
-                log::info!("Successfully set Clevo fan {} to {}%", fan_id, speed_percent);
+                log::info!(target: "hw.fan", "set_clevo_fan id={} speed={}%", fan_id, speed_percent);
                 Ok(())
             }
 
@@ -327,12 +336,12 @@ impl TuxedoIo {
                     _ => return Err(anyhow!("Invalid Uniwill fan ID: {}", fan_id)),
                 };
 
-                log::debug!("Setting Uniwill fan {} to {}%", fan_id, speed_percent);
+                log::debug!(target: "hw.fan", "Setting Uniwill fan {} to {}%", fan_id, speed_percent);
 
                 let request = Self::iow(MAGIC_WRITE_UW, seq, Self::PTR_SIZE);
                 Self::ioctl_write_i32(fd, request, val)?;
 
-                log::info!("Successfully set Uniwill fan {} to {}%", fan_id, speed_percent);
+                log::info!(target: "hw.fan", "set_uniwill_fan id={} speed={}%", fan_id, speed_percent);
                 Ok(())
             }
 
@@ -346,23 +355,24 @@ impl TuxedoIo {
         match self.interface {
             HardwareInterface::Clevo => {
                 let auto_val: i32 = 0xF;
-                log::debug!("Setting Clevo fans to auto mode");
+                log::debug!(target: "hw.fan", "Setting Clevo fans to auto mode");
                 
                 let request = Self::iow(MAGIC_WRITE_CL, 0x11, Self::PTR_SIZE);
                 Self::ioctl_write_i32(fd, request, auto_val)?;
+                CLEVO_AUTO_DISABLED.store(false, Ordering::SeqCst);
                 
-                log::info!("Successfully set Clevo fans to auto mode");
+                log::info!(target: "hw.fan", "set_clevo_fans_auto");
                 Ok(())
             }
 
             HardwareInterface::Uniwill => {
-                log::debug!("Setting Uniwill fans to auto mode");
+                log::debug!(target: "hw.fan", "Setting Uniwill fans to auto mode");
                 
                 // Uniwill uses _IO (no data argument)
                 let request = Self::io(MAGIC_WRITE_UW, 0x14);
                 Self::ioctl_write_only(fd, request, 1)?;
                 
-                log::info!("Successfully set Uniwill fans to auto mode");
+                log::info!(target: "hw.fan", "set_uniwill_fans_auto");
                 Ok(())
             }
 
@@ -521,12 +531,12 @@ impl TuxedoIo {
                     return Err(anyhow!("Invalid Clevo profile ID: {}", profile_id));
                 }
                 
-                log::debug!("Setting Clevo performance profile to {}", profile_id);
+                log::debug!(target: "hw.detect", "Setting Clevo performance profile to {}", profile_id);
                 
                 let request = Self::iow(MAGIC_WRITE_CL, 0x15, Self::PTR_SIZE);
                 Self::ioctl_write_i32(fd, request, profile_id as i32)?;
                 
-                log::info!("Successfully set Clevo performance profile to {}", profile_id);
+                log::info!(target: "hw.detect", "set_clevo_perf_profile id={}", profile_id);
                 Ok(())
             }
             HardwareInterface::Uniwill => {
@@ -534,12 +544,12 @@ impl TuxedoIo {
                     return Err(anyhow!("Invalid Uniwill profile ID: {}", profile_id));
                 }
                 
-                log::debug!("Setting Uniwill performance profile to {}", profile_id);
+                log::debug!(target: "hw.detect", "Setting Uniwill performance profile to {}", profile_id);
                 
                 let request = Self::iow(MAGIC_WRITE_UW, 0x18, Self::PTR_SIZE);
                 Self::ioctl_write_i32(fd, request, profile_id as i32)?;
                 
-                log::info!("Successfully set Uniwill performance profile to {}", profile_id);
+                log::info!(target: "hw.detect", "set_uniwill_perf_profile id={}", profile_id);
                 Ok(())
             }
             HardwareInterface::None => Err(anyhow!("No hardware interface available")),

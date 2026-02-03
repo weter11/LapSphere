@@ -1,14 +1,17 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use std::fs;
 use std::path::Path;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Instant;
+use std::mem;
 use once_cell::sync::Lazy;
 use crate::tuxedo_io::{TuxedoIo, HardwareInterface};
 use systemstat::{System, Platform};
 // use tuxedo_io::TuxedoIo;
 use lapsphere_common::types::*;
+use nix::ioctl_readwrite;
+use std::os::fd::{AsRawFd, RawFd};
 
 // Thread-safe storage for previous CPU stats
 static PREVIOUS_CPU_STATS: Mutex<Option<HashMap<u32, CpuStats>>> = Mutex::new(None);
@@ -19,16 +22,22 @@ static PREVIOUS_STORAGE_STATS: Lazy<Mutex<HashMap<String, StorageStats>>> =
 
 static NVIDIA_NAMES_CACHE: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
-struct NvApiState {
-    api: NvApi,
-    gpu_handle: crate::bindings::nvidia::NvPhysicalGpuHandle,
-    thermals_mask: i32,
-    bus_id: u32,
+#[derive(Clone)]
+struct NvidiaMetadata {
+    architecture: Option<String>,
+    supported_p_states: Vec<String>,
+    power_limit_range: Option<(u32, u32)>,
+    supports_gpu_offset: bool,
+    supports_mem_offset: bool,
+    vram_type: Option<String>,
+    vram_vendor: Option<String>,
+    vram_bus_width: Option<u32>,
+    core_clock_range: Option<(u32, u32)>,
+    memory_clock_range: Option<(u32, u32)>,
 }
 
-thread_local! {
-    static NVAPI_STATE: RefCell<Option<NvApiState>> = const { RefCell::new(None) };
-}
+static NVIDIA_METADATA_CACHE: Lazy<Mutex<HashMap<u32, NvidiaMetadata>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 const BITS_PER_BYTE: f64 = 8.0;
 const BITS_PER_MEGABIT: f64 = 1_000_000.0;
@@ -255,15 +264,6 @@ fn read_cpu_frequencies(logical_cores: u32) -> Vec<u64> {
     }
     
     freqs
-}
-
-fn calculate_median(values: &[u64]) -> u64 {
-    if values.is_empty() {
-        return 0;
-    }
-    let mut sorted = values.to_vec();
-    sorted.sort_unstable();
-    sorted[sorted.len() / 2]
 }
 
 fn get_core_temp(cpu: u32) -> f32 {
@@ -598,7 +598,7 @@ fn read_frequency_limits() -> (Option<u64>, Option<u64>) {
     (min_freq, max_freq)
 }
 
-fn read_hw_frequency_limits() -> Result<(Option<u64>, Option<u64>)> {
+pub fn read_hw_frequency_limits() -> Result<(Option<u64>, Option<u64>)> {
     let min_path = "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq";
     let max_path = "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq";
 
@@ -632,7 +632,7 @@ fn read_available_epp_options() -> Vec<String> {
 
 pub fn get_tdp_profiles() -> Result<Vec<String>> {
     if !TuxedoIo::is_available() {
-        log::info!("TDP profiles not available (/dev/tuxedo_io not present)");
+        log::debug!(target: "hw.detect", "TDP profiles not available (/dev/tuxedo_io not present)");
         return Ok(vec![]);
     }
     
@@ -640,17 +640,22 @@ pub fn get_tdp_profiles() -> Result<Vec<String>> {
         Ok(io) => {
             match io.get_available_profiles() {
                 Ok(profiles) => {
-                    log::info!("Available TDP profiles: {:?}", profiles);
+                    static LOGGED_ONCE: Mutex<bool> = Mutex::new(false);
+                    let mut logged = LOGGED_ONCE.lock().unwrap();
+                    if !*logged {
+                        log::info!(target: "hw.detect", "Available TDP profiles: {:?}", profiles);
+                        *logged = true;
+                    }
                     Ok(profiles)
                 }
                 Err(e) => {
-                    log::warn!("Failed to get TDP profiles: {}", e);
+                    log::warn!(target: "hw.detect", "Failed to get TDP profiles: {}", e);
                     Ok(vec![])
                 }
             }
         }
         Err(e) => {
-            log::warn!("Failed to open /dev/tuxedo_io: {}", e);
+            log::warn!(target: "hw.detect", "Failed to open /dev/tuxedo_io: {}", e);
             Ok(vec![])
         }
     }
@@ -703,6 +708,102 @@ pub fn get_fan_speeds() -> Result<Vec<(u32, u32)>> {
     Ok(fans)
 }
 
+pub fn get_all_fan_info() -> Result<Vec<FanInfo>> {
+    let mut all_fans = Vec::new();
+
+    // 1. Get system fans (Tuxedo/Uniwill/Clevo)
+    if TuxedoIo::is_available() {
+        if let Ok(io) = TuxedoIo::new() {
+            let fan_settings = crate::FAN_DAEMON_STATE.lock().unwrap();
+            let manual_mode = fan_settings.as_ref().map_or(false, |s| s.control_enabled);
+
+            for fan_id in 0..io.get_fan_count() {
+                if let Ok(speed) = io.get_fan_speed(fan_id) {
+                    let temperature = io.get_fan_temperature(fan_id).ok().map(|t| t as f32);
+                    all_fans.push(FanInfo {
+                        id: fan_id,
+                        name: format!("System Fan {}", fan_id),
+                        rpm_or_percent: speed,
+                        temperature,
+                        is_rpm: false,
+                        mode: Some(if manual_mode { "Manual".to_string() } else { "Auto".to_string() }),
+                    });
+                }
+            }
+        }
+    }
+
+    // 2. Get NVIDIA GPU fans
+    let gpu_settings = crate::GPU_DAEMON_STATE.lock().unwrap();
+
+    // Check suspension status first to avoid waking up GPU
+    let mut nvidia_active = false;
+    if let Ok(entries) = fs::read_dir("/sys/bus/pci/drivers/nvidia") {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().contains(':') {
+                let status_path = entry.path().join("power/runtime_status");
+                if let Ok(status) = fs::read_to_string(status_path) {
+                    if status.trim() != "suspended" {
+                        nvidia_active = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if nvidia_active {
+        if let Ok(nvml) = get_nvml() {
+            if let Ok(device_count) = nvml.device_count() {
+                for i in 0..device_count {
+                    // Check specific GPU status again
+                    let mut is_suspended = true;
+                    if let Ok(pci_info) = nvml.device_by_index(i).and_then(|d| d.pci_info()) {
+                        let bus_id = pci_info.bus_id.to_lowercase();
+                        let status_path = format!("/sys/bus/pci/devices/{}/power/runtime_status", bus_id);
+                        if let Ok(status) = fs::read_to_string(status_path) {
+                            if status.trim() != "suspended" {
+                                is_suspended = false;
+                            }
+                        }
+                    }
+
+                    if is_suspended { continue; }
+
+                    if let Ok(device) = nvml.device_by_index(i) {
+                        if let Ok(num_fans) = device.num_fans() {
+                            for f in 0..num_fans {
+                                let speed = device.fan_speed(f).unwrap_or(0);
+
+                                let mode = if let Some(settings) = &*gpu_settings {
+                                    if settings.nvidia_fans.iter().any(|s| s.device_index == i && s.fan_id == f && s.manual) {
+                                        "Manual".to_string()
+                                    } else {
+                                        "Auto".to_string()
+                                    }
+                                } else {
+                                    "Auto".to_string()
+                                };
+
+                                all_fans.push(FanInfo {
+                                    id: 100 + i * 10 + f, // Unique ID for GPU fans
+                                    name: format!("NVIDIA GPU {} Fan {}", i, f),
+                                    rpm_or_percent: speed,
+                                    temperature: device.temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu).ok().map(|t| t as f32),
+                                    is_rpm: false,
+                                    mode: Some(mode),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(all_fans)
+}
+
 
 pub fn get_cpu_info() -> Result<CpuInfo> {
     let name = get_cpu_name();
@@ -723,18 +824,15 @@ pub fn get_cpu_info() -> Result<CpuInfo> {
         });
     }
     
-    let median_frequency = calculate_median(&frequencies);
+    let average_frequency = if !frequencies.is_empty() {
+        frequencies.iter().sum::<u64>() / frequencies.len() as u64
+    } else {
+        0
+    };
     
     let loads_vec: Vec<f32> = loads.values().copied().collect();
-    let median_load = if !loads_vec.is_empty() {
-        let mut sorted = loads_vec.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        if sorted.len() % 2 == 0 {
-            let mid = sorted.len() / 2;
-            (sorted[mid - 1] + sorted[mid]) / 2.0
-        } else {
-            sorted[sorted.len() / 2]
-        }
+    let average_load = if !loads_vec.is_empty() {
+        loads_vec.iter().sum::<f32>() / loads_vec.len() as f32
     } else {
         0.0
     };
@@ -847,8 +945,8 @@ pub fn get_cpu_info() -> Result<CpuInfo> {
 
     Ok(CpuInfo {
         name,
-        median_frequency,
-        median_load,
+        average_frequency,
+        average_load,
         package_temp,
         package_power,
         cores,
@@ -1211,6 +1309,26 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
                 drain_offset: None,
                 power_offset: None,
                 total_offset: None,
+                min_core_clock: None,
+                max_core_clock: None,
+                min_memory_clock: None,
+                max_memory_clock: None,
+                core_clock_range: None,
+                memory_clock_range: None,
+                is_desktop: false,
+                architecture: None,
+                nvml_index: None,
+                driver_version: None,
+                supported_p_states: vec![],
+                supports_power_limit: false,
+                power_limit_range: None,
+                supports_gpu_offset: false,
+                supports_mem_offset: false,
+                fan_speed_range: None,
+                vram_type: None,
+                vram_vendor: None,
+                vram_bus_width: None,
+                vram_bandwidth: None,
             });
         }
     }
@@ -1268,35 +1386,46 @@ use nvml_wrapper::enum_wrappers::device::{Clock, PerformanceState};
 
 
 
+/// Internal helper to get base (un-offset) GPU clock ranges for P-State 0
+fn get_base_gpu_clock_ranges(device: &nvml_wrapper::Device) -> Result<(u32, u32)> {
+    match device.min_max_clock_of_pstate(Clock::Graphics, PerformanceState::Zero) {
+        Ok((min, max)) => Ok((min, max)),
+        Err(e) => {
+            log::warn!(target: "hw.detect", "Failed to get P0 clock ranges via min_max_clock_of_pstate: {}. Using fallback.", e);
+            // Fallback to absolute max supported clocks if P0 ranges fail
+            let mut fallback = None;
+            if let Ok(mem_clocks) = device.supported_memory_clocks() {
+                if let Some(&target_mem_clock) = mem_clocks.iter().max() {
+                    if let Ok(clocks) = device.supported_graphics_clocks(target_mem_clock) {
+                        if let (Some(&c_min), Some(&c_max)) = (clocks.iter().min(), clocks.iter().max()) {
+                            fallback = Some((c_min, c_max));
+                        }
+                    }
+                }
+            }
+            fallback.ok_or_else(|| anyhow!("Could not determine graphics clock ranges for P-State 0: {}", e))
+        }
+    }
+}
+
 pub fn get_gpu_clock_ranges(device_index: u32) -> Result<(u32, u32)> {
     let nvml = get_nvml()?;
     let device = nvml.device_by_index(device_index)?;
 
-    // First, get the memory clocks to pass to supported_graphics_clocks
-    let mut mem_clocks = device.supported_memory_clocks()?;
-    if mem_clocks.is_empty() {
-        return Err(anyhow!("No supported memory clocks found, cannot determine graphics clock ranges"));
-    }
-    mem_clocks.sort_unstable();
-    // Use the highest memory clock to get the widest range of graphics clocks
-    let target_mem_clock = *mem_clocks.last().unwrap();
+    let (mut min, mut max) = get_base_gpu_clock_ranges(&device)?;
 
-    let mut clocks = device.supported_graphics_clocks(target_mem_clock)?;
-    if clocks.is_empty() {
-        return Err(anyhow!("No supported graphics clocks found for locking"));
-    }
-    clocks.sort_unstable();
-    let min_clock = *clocks.first().unwrap();
-    let max_clock = *clocks.last().unwrap();
-    Ok((min_clock, max_clock))
+    // Add current core offset if any to show real-time effective ranges in the UI
+    let offset = {
+        let map = crate::MANUAL_GPU_OFFSETS.lock().unwrap();
+        map.get(&device_index).map(|(c, _)| *c).unwrap_or(0.0)
+    };
+
+    min = (min as f32 + offset).max(0.0) as u32;
+    max = (max as f32 + offset).max(0.0) as u32;
+
+    Ok((min, max))
 }
 
-pub fn get_gpu_mem_clock_ranges(device_index: u32) -> Result<Vec<u32>> {
-    let nvml = get_nvml()?;
-    let device = nvml.device_by_index(device_index)?;
-    let clocks = device.supported_memory_clocks()?;
-    Ok(clocks)
-}
 
 pub fn get_gpu_core_offset_limits(device_index: u32) -> Result<(i32, i32)> {
     let nvml = get_nvml()?;
@@ -1312,45 +1441,572 @@ pub fn get_gpu_memory_offset_limits(device_index: u32) -> Result<(i32, i32)> {
     Ok((offset_info.min_clock_offset_mhz, offset_info.max_clock_offset_mhz))
 }
 
-fn get_nvidia_voltage(index: u32) -> Option<f32> {
-    let path_lock = crate::NVIDIA_SMI_LEGACY_PATH.lock().unwrap();
-    if let Some(ref path) = *path_lock {
-        if Path::new(path).exists() {
-            // Try -q -d VOLTAGE format first as requested by user
-            if let Ok(output) = std::process::Command::new(path)
-                .args(["-i", &index.to_string(), "-q", "-d", "VOLTAGE"])
-                .output()
-            {
-                if output.status.success() {
-                    let s = String::from_utf8_lossy(&output.stdout);
-                    for line in s.lines() {
-                        if line.contains("Graphics") && line.contains(':') {
-                            if let Some(val_part) = line.split(':').nth(1) {
-                                let parts: Vec<&str> = val_part.trim().split_whitespace().collect();
-                                if let Some(num_str) = parts.get(0) {
-                                    if let Ok(val) = num_str.parse::<f32>() {
-                                        return Some(val / 1000.0);
-                                    }
-                                }
-                            }
-                        }
+// NVIDIA Direct Driver Constants and Structs
+const NV_IOCTL_MAGIC: u8 = b'F';
+const NV_ESC_RM_ALLOC: u8 = 0x23;
+const NV_ESC_RM_CONTROL: u8 = 0x2B;
+const NV_ESC_REGISTER_FD: u8 = 0x27;
+
+const NV01_DEVICE_0: u32 = 0x00000080;
+const NV20_SUBDEVICE_0: u32 = 0x00002080;
+
+// NVIDIA RM Control API constants
+// These values are verified to match NVIDIA driver headers and LACT implementation
+const NV2080_CTRL_CMD_FB_GET_INFO: u32 = 0x20800101;
+const NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE: u32 = 0x01;
+const NV2080_CTRL_FB_INFO_INDEX_BUS_WIDTH: u32 = 0x02;
+const NV2080_CTRL_FB_INFO_INDEX_MEMORYINFO_VENDOR_ID: u32 = 0x06;
+
+type NvHandle = u32;
+
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+struct NVOS21_PARAMETERS {
+    hRoot: NvHandle,
+    hObjectParent: NvHandle,
+    hObjectNew: NvHandle,
+    hClass: u32,
+    pAllocParms: *mut std::ffi::c_void,
+    status: u32,
+}
+
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+struct NVOS64_PARAMETERS {
+    hRoot: NvHandle,
+    hObjectParent: NvHandle,
+    hObjectNew: NvHandle,
+    hClass: u32,
+    pAllocParms: *mut std::ffi::c_void,
+    pRightsRequested: *mut std::ffi::c_void,
+    paramsSize: u32,
+    flags: u32,
+    status: u32,
+}
+
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+struct NVOS54_PARAMETERS {
+    hClient: NvHandle,
+    hObject: NvHandle,
+    cmd: u32,
+    flags: u32,
+    params: *mut std::ffi::c_void,
+    paramsSize: u32,
+    status: u32,
+}
+
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+struct NV0080_ALLOC_PARAMETERS {
+    deviceId: u32,
+    hClientShare: NvHandle,
+    hTargetClient: NvHandle,
+    hTargetDevice: NvHandle,
+    flags: u32,
+    pad: [u32; 2],
+}
+
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+struct NV2080_ALLOC_PARAMETERS {
+    subdeviceNumber: u32,
+}
+
+#[allow(non_snake_case)]
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+struct NV2080_CTRL_FB_GET_INFO_PARAMS {
+    fbInfoListSize: u32,
+    fbInfoList: *mut NV2080_CTRL_FB_INFO,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+struct NV2080_CTRL_FB_INFO {
+    index: u32,
+    data: u32,
+}
+
+ioctl_readwrite!(rm_alloc_nvos21, NV_IOCTL_MAGIC, NV_ESC_RM_ALLOC, NVOS21_PARAMETERS);
+ioctl_readwrite!(rm_alloc_nvos64, NV_IOCTL_MAGIC, NV_ESC_RM_ALLOC, NVOS64_PARAMETERS);
+ioctl_readwrite!(register_fd, NV_IOCTL_MAGIC, NV_ESC_REGISTER_FD, RawFd);
+ioctl_readwrite!(rm_control_nvos54, NV_IOCTL_MAGIC, NV_ESC_RM_CONTROL, NVOS54_PARAMETERS);
+
+struct NvidiaDriverHandle {
+    nvidiactl_fd: std::fs::File,
+    #[allow(dead_code)] // Keeps the device file descriptor open for the lifetime of this handle
+    device_fd: std::fs::File,
+    client_handle: NvHandle,
+    subdevice_handle: NvHandle,
+}
+
+impl NvidiaDriverHandle {
+    fn open(minor_number: u32) -> Result<Self> {
+        log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Attempting to open for minor {}", minor_number);
+        
+        // Open /dev/nvidiactl with enhanced error reporting
+        let nvidiactl_fd = fs::File::options()
+            .read(true)
+            .write(true)
+            .open("/dev/nvidiactl")
+            .with_context(|| "Failed to open /dev/nvidiactl - ensure NVIDIA driver is loaded and you have permissions (try: sudo usermod -aG video <username>)")?;
+        log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Opened /dev/nvidiactl");
+
+        let mut client_params: NVOS21_PARAMETERS = unsafe { std::mem::zeroed() };
+        unsafe {
+            rm_alloc_nvos21(nvidiactl_fd.as_raw_fd(), &mut client_params)
+                .with_context(|| "Failed to allocate NVIDIA RM client handle via IOCTL NV_ESC_RM_ALLOC")?;
+        }
+        let client_handle = client_params.hObjectNew;
+        log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Got client_handle=0x{:x}", client_handle);
+
+        // Open device-specific file with enhanced error reporting  
+        let device_path = format!("/dev/nvidia{}", minor_number);
+        let device_fd = fs::File::options()
+            .read(true)
+            .write(true)
+            .open(&device_path)
+            .with_context(|| format!("Failed to open {} - GPU device may not exist or is not accessible", device_path))?;
+        log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Opened /dev/nvidia{}", minor_number);
+
+        let mut dev_fd_raw = device_fd.as_raw_fd();
+        unsafe {
+            register_fd(device_fd.as_raw_fd(), &mut dev_fd_raw)
+                .with_context(|| format!("Failed to register device FD for /dev/nvidia{} via IOCTL NV_ESC_REGISTER_FD", minor_number))?;
+        }
+        log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Registered device FD");
+
+        let mut alloc_params: NV0080_ALLOC_PARAMETERS = unsafe { std::mem::zeroed() };
+        alloc_params.deviceId = minor_number;
+        let mut device_request = NVOS64_PARAMETERS {
+            hRoot: client_handle,
+            hObjectParent: client_handle,
+            hObjectNew: 0,
+            hClass: NV01_DEVICE_0,
+            pAllocParms: &mut alloc_params as *mut _ as *mut _,
+            pRightsRequested: std::ptr::null_mut(),
+            paramsSize: std::mem::size_of::<NV0080_ALLOC_PARAMETERS>() as u32,
+            flags: 0,
+            status: 0,
+        };
+        unsafe {
+            rm_alloc_nvos64(nvidiactl_fd.as_raw_fd(), &mut device_request)
+                .with_context(|| "Failed IOCTL NV_ESC_RM_ALLOC for device object")?;
+        }
+        if device_request.status != 0 {
+            log::error!(target: "hw.detect", "NvidiaDriverHandle::open: Failed to alloc device handle: status=0x{:08x}", device_request.status);
+            return Err(anyhow!("Failed to alloc device handle: status=0x{:08x}", device_request.status));
+        }
+        let device_handle = device_request.hObjectNew;
+        log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Got device_handle=0x{:x}", device_handle);
+
+        let mut subdevice_alloc: NV2080_ALLOC_PARAMETERS = Default::default();
+        let mut subdevice_request = NVOS64_PARAMETERS {
+            hRoot: client_handle,
+            hObjectParent: device_handle,
+            hObjectNew: 0,
+            hClass: NV20_SUBDEVICE_0,
+            pAllocParms: &mut subdevice_alloc as *mut _ as *mut _,
+            pRightsRequested: std::ptr::null_mut(),
+            paramsSize: std::mem::size_of::<NV2080_ALLOC_PARAMETERS>() as u32,
+            flags: 0,
+            status: 0,
+        };
+        unsafe {
+            rm_alloc_nvos64(nvidiactl_fd.as_raw_fd(), &mut subdevice_request)
+                .with_context(|| "Failed IOCTL NV_ESC_RM_ALLOC for subdevice object")?;
+        }
+        if subdevice_request.status != 0 {
+            log::error!(target: "hw.detect", "NvidiaDriverHandle::open: Failed to alloc subdevice handle: status=0x{:08x}", subdevice_request.status);
+            return Err(anyhow!("Failed to alloc subdevice handle: status=0x{:08x}", subdevice_request.status));
+        }
+        log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Got subdevice_handle=0x{:x}, successfully opened", subdevice_request.hObjectNew);
+
+        Ok(Self {
+            nvidiactl_fd,
+            device_fd,
+            client_handle,
+            subdevice_handle: subdevice_request.hObjectNew,
+        })
+    }
+
+    fn get_fb_info(&self, index: u32) -> Result<u32> {
+        let mut info = NV2080_CTRL_FB_INFO { index, data: 0 };
+        let mut params = NV2080_CTRL_FB_GET_INFO_PARAMS {
+            fbInfoListSize: 1,
+            fbInfoList: &mut info,
+        };
+        let mut request = NVOS54_PARAMETERS {
+            hClient: self.client_handle,
+            hObject: self.subdevice_handle,
+            cmd: NV2080_CTRL_CMD_FB_GET_INFO,
+            flags: 0,
+            params: &mut params as *mut _ as *mut _,
+            paramsSize: std::mem::size_of::<NV2080_CTRL_FB_GET_INFO_PARAMS>() as u32,
+            status: 0,
+        };
+        log::debug!(target: "hw.detect", "get_fb_info: index=0x{:02x}, hClient=0x{:x}, hObject=0x{:x}, cmd=0x{:08x}, paramsSize={}",
+            index, self.client_handle, self.subdevice_handle, request.cmd, request.paramsSize);
+        
+        let ioctl_result = unsafe {
+            rm_control_nvos54(self.nvidiactl_fd.as_raw_fd(), &mut request)
+        };
+        
+        // Log IOCTL result
+        if let Err(ref e) = ioctl_result {
+            log::error!(target: "hw.detect", "get_fb_info: IOCTL failed for index 0x{:02x}: errno={}, error={}", 
+                index, 
+                std::io::Error::last_os_error().raw_os_error().unwrap_or(-1),
+                e);
+            return Err(anyhow!("IOCTL NV_ESC_RM_CONTROL failed: {}", e));
+        }
+        
+        log::debug!(target: "hw.detect", "get_fb_info: IOCTL succeeded, request.status=0x{:08x}, info.data=0x{:08x}", 
+            request.status, info.data);
+        
+        if request.status != 0 {
+            // Decode common NVIDIA RM error codes
+            let error_desc = match request.status {
+                0x0000ffff => "NV_ERR_GENERIC",
+                0x00000001 => "NV_ERR_INVALID_ARGUMENT", 
+                0x00000002 => "NV_ERR_INVALID_OBJECT_HANDLE",
+                0x00000003 => "NV_ERR_INVALID_OBJECT_PARENT",
+                0x00000005 => "NV_ERR_INSUFFICIENT_RESOURCES",
+                0x00000006 => "NV_ERR_INVALID_FLAGS",
+                0x00000008 => "NV_ERR_INVALID_STATE",
+                0x0000000a => "NV_ERR_NOT_SUPPORTED",
+                0x0000000d => "NV_ERR_OBJECT_NOT_FOUND",
+                0x00000056 => "NV_ERR_GPU_NOT_FULL_POWER",
+                _ => "UNKNOWN_ERROR",
+            };
+            log::error!(target: "hw.detect", "get_fb_info: RM control returned error status 0x{:08x} ({}) for index 0x{:02x}", 
+                request.status, error_desc, index);
+            return Err(anyhow!("RM control failed: status=0x{:08x} ({})", request.status, error_desc));
+        }
+        Ok(info.data)
+    }
+}
+
+// NVAPI Constants
+const NVAPI_LIBRARY: &str = "libnvidia-api.so.1";
+const QUERY_NVAPI_INITIALIZE: u32 = 0x0150e828;
+const QUERY_NVAPI_UNLOAD: u32 = 0xd22bdd7e;
+const QUERY_NVAPI_ENUM_PHYSICAL_GPUS: u32 = 0xe5ac921f;
+const QUERY_NVAPI_THERMALS: u32 = 0x65fe3aad;  // Undocumented - thermal sensors
+const QUERY_NVAPI_VOLTAGE: u32 = 0x465f9bcf;   // Undocumented - voltage
+
+const NVAPI_MAX_PHYSICAL_GPUS: usize = 64;
+
+type NvPhysicalGpuHandle = *mut std::ffi::c_void;
+type NvApiStatus = i32;
+
+#[repr(C)]
+struct NvApiThermals {
+    version: u32,
+    mask: i32,
+    values: [i32; 40],
+}
+
+#[repr(C)]
+struct NvApiVoltage {
+    version: u32,
+    flags: u32,
+    padding_1: [u32; 8],
+    value_uv: u32,
+    padding_2: [u32; 8],
+}
+
+// Helper function to calculate VRAM bandwidth from metadata
+/// Calculates VRAM bandwidth in GB/s based on memory type, bus width, and clock speed.
+///
+/// # Arguments
+/// * `vram_type` - The type of VRAM (e.g., "GDDR6", "GDDR6X", "GDDR5")
+/// * `vram_bus_width` - Bus width in bits (e.g., 256)
+/// * `memory_clock_range` - Range of memory clock speeds in MHz (min, max)
+///
+/// # Returns
+/// Bandwidth in GB/s, or None if required parameters are missing
+///
+/// # Formula
+/// Bandwidth (GB/s) = (Max Clock MHz × Multiplier × Bus Width bits) / 8000
+///
+/// Where multiplier depends on memory type:
+/// - GDDR6X: 16.0 (due to PAM4 signaling)
+/// - GDDR6: 8.0 (quad data rate)
+/// - GDDR5: 4.0 (quad data rate)
+/// - Others: 2.0 (default DDR)
+fn calculate_vram_bandwidth(vram_type: Option<&String>, vram_bus_width: Option<u32>, memory_clock_range: Option<(u32, u32)>) -> Option<f32> {
+    if let (Some(bus), Some((_, max_mem))) = (vram_bus_width, memory_clock_range) {
+        let mut multiplier = 2.0; // Default for DDR
+        if let Some(t) = vram_type {
+            if t.contains("GDDR6X") {
+                multiplier = 16.0;
+            } else if t.contains("GDDR6") {
+                multiplier = 8.0;
+            } else if t.contains("GDDR5") {
+                multiplier = 4.0;
+            }
+        }
+        // Bandwidth (GB/s) = (Clock * Multiplier * Bus Width) / 8 bits / 1000 MHz
+        Some((max_mem as f32 * multiplier * bus as f32) / 8000.0)
+    } else {
+        None
+    }
+}
+
+// Function to get NVIDIA extended stats (hotspot, memory temp, voltage)
+fn get_vram_info(minor_number: u32) -> (Option<String>, Option<String>, Option<u32>, Option<f32>) {
+    // Returns (type, vendor, bus_width, bandwidth)
+    log::debug!(target: "hw.detect", "Attempting to get VRAM info for NVIDIA device minor {}", minor_number);
+    match NvidiaDriverHandle::open(minor_number) {
+        Ok(handle) => {
+            let ram_type_val = handle.get_fb_info(NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE)
+                .inspect_err(|e| log::warn!(target: "hw.detect", 
+                    "Failed to get RAM type for minor {} (index=0x{:02x}): {} - This may indicate driver/GPU incompatibility or suspended GPU state", 
+                    minor_number, NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE, e))
+                .ok();
+            
+            let bus_width = handle.get_fb_info(NV2080_CTRL_FB_INFO_INDEX_BUS_WIDTH)
+                .inspect_err(|e| log::warn!(target: "hw.detect", 
+                    "Failed to get bus width for minor {} (index=0x{:02x}): {} - This may indicate driver/GPU incompatibility or suspended GPU state", 
+                    minor_number, NV2080_CTRL_FB_INFO_INDEX_BUS_WIDTH, e))
+                .ok();
+            
+            let vendor_id = handle.get_fb_info(NV2080_CTRL_FB_INFO_INDEX_MEMORYINFO_VENDOR_ID)
+                .inspect_err(|e| log::warn!(target: "hw.detect", 
+                    "Failed to get vendor ID for minor {} (index=0x{:02x}): {} - This may indicate driver/GPU incompatibility or suspended GPU state", 
+                    minor_number, NV2080_CTRL_FB_INFO_INDEX_MEMORYINFO_VENDOR_ID, e))
+                .ok();
+
+            log::debug!(target: "hw.detect", "VRAM raw info for minor {}: type={:?}, bus={:?}, vendor={:?}",
+                minor_number, ram_type_val, bus_width, vendor_id);
+            
+            // Log summary of detection results
+            if ram_type_val.is_some() || bus_width.is_some() || vendor_id.is_some() {
+                log::info!(target: "hw.detect", "Successfully retrieved partial VRAM info for minor {}: type={}, bus={}, vendor={}", 
+                    minor_number, 
+                    ram_type_val.map(|v| format!("0x{:08x}", v)).unwrap_or_else(|| "None".to_string()),
+                    bus_width.map(|v| format!("{} bits", v)).unwrap_or_else(|| "None".to_string()),
+                    vendor_id.map(|v| format!("0x{:08x}", v)).unwrap_or_else(|| "None".to_string()));
+            } else {
+                log::warn!(target: "hw.detect", "Failed to retrieve any VRAM info for minor {} - all queries returned errors", minor_number);
+            }
+
+            let ram_type = ram_type_val.map(|v| match v {
+                0x00000001 => "SDRAM",
+                0x00000002 => "DDR1",
+                0x00000003 => "DDR2",
+                0x00000004 => "DDR3",
+                0x00000005 => "GDDR2",
+                0x00000006 => "GDDR3",
+                0x00000007 => "GDDR4",
+                0x00000008 => "GDDR5",
+                0x00000009 => "LPDDR2",
+                0x0000000A => "GDDR5X",
+                0x0000000B => "GDDR6",
+                0x0000000C => "GDDR6X",
+                0x0000000D => "HBM1",
+                0x0000000E => "HBM2",
+                0x0000000F => "HBM3",
+                0x00000010 => "LPDDR4",
+                0x00000011 => "LPDDR5",
+                0x00000012 => "GDDR7",
+                _ => "Unknown",
+            }.to_string());
+
+            let vendor = vendor_id.map(|v| match v {
+                0x00000001 => "Micron",
+                0x00000002 => "Samsung",
+                0x00000003 => "Qimonda",
+                0x00000004 => "Elpida",
+                0x00000005 => "Etron",
+                0x00000006 => "Nanya",
+                0x00000007 => "Hynix",
+                0x00000008 => "Mosel",
+                0x00000009 => "Winbond",
+                0x0000000A => "ESMT",
+                _ => "Unknown",
+            }.to_string());
+
+            // Bandwidth calculation: (Clock * 2 (for DDR) * BusWidth) / 8 / 1000?
+            // Actually bandwidth is complex to calculate without current clock.
+            // NVML already provides memory bandwidth in some versions but not all.
+            // nvidia/nvidia.rs doesn't seem to calculate it, just returns None.
+
+            (ram_type, vendor, bus_width, None)
+        }
+        Err(e) => {
+            // Enhanced error logging with more diagnostics
+            let error_msg = format!("{}", e);
+            
+            // Check for common error conditions
+            if error_msg.contains("Permission denied") || error_msg.contains("EACCES") {
+                log::error!(target: "hw.detect", 
+                    "Failed to open NvidiaDriverHandle for minor {}: Permission denied - Daemon may need to run as root or user needs to be in 'video' group. Error: {}", 
+                    minor_number, e);
+            } else if error_msg.contains("No such file") || error_msg.contains("ENOENT") {
+                log::error!(target: "hw.detect", 
+                    "Failed to open NvidiaDriverHandle for minor {}: Device not found - NVIDIA driver may not be loaded or GPU is not available. Error: {}", 
+                    minor_number, e);
+            } else if error_msg.contains("Device or resource busy") || error_msg.contains("EBUSY") {
+                log::error!(target: "hw.detect", 
+                    "Failed to open NvidiaDriverHandle for minor {}: Device busy - Another process may be using the GPU. Error: {}", 
+                    minor_number, e);
+            } else {
+                log::error!(target: "hw.detect", 
+                    "Failed to open NvidiaDriverHandle for minor {}: {} - Check that NVIDIA driver is loaded and device /dev/nvidia{} exists", 
+                    minor_number, e, minor_number);
+            }
+            
+            (None, None, None, None)
+        }
+    }
+}
+
+fn get_nvidia_extended_stats(gpu_index: u32) -> (Option<f32>, Option<f32>, Option<f32>) {
+    // Returns (hotspot_temp, memory_temp, voltage_v)
+    // Note: This loads and initializes NVAPI on each call. This is acceptable for 
+    // polling intervals of 1+ seconds but may need optimization for higher frequencies.
+    
+    unsafe {
+        // Load library - must be kept alive until after unload is called
+        let lib = match libloading::Library::new(NVAPI_LIBRARY) {
+            Ok(l) => l,
+            Err(_) => return (None, None, None),
+        };
+        
+        // Get query interface function
+        let query_interface: libloading::Symbol<unsafe extern "C" fn(u32) -> *const ()> = 
+            match lib.get(b"nvapi_QueryInterface\0") {
+                Ok(f) => f,
+                Err(_) => return (None, None, None),
+            };
+        
+        // Initialize NVAPI
+        let init_fn = query_interface(QUERY_NVAPI_INITIALIZE);
+        if init_fn.is_null() { return (None, None, None); }
+        let init: unsafe extern "C" fn() -> NvApiStatus = mem::transmute(init_fn);
+        let init_result = init();
+        
+        // Helper to safely unload NVAPI before returning
+        let safe_unload = || {
+            let unload_fn = query_interface(QUERY_NVAPI_UNLOAD);
+            if !unload_fn.is_null() {
+                let unload: unsafe extern "C" fn() -> NvApiStatus = mem::transmute(unload_fn);
+                let _ = unload();
+            }
+        };
+        
+        if init_result != 0 {
+            return (None, None, None);
+        }
+        
+        // Enumerate GPUs
+        let enum_fn = query_interface(QUERY_NVAPI_ENUM_PHYSICAL_GPUS);
+        if enum_fn.is_null() {
+            safe_unload();
+            return (None, None, None);
+        }
+        let enum_gpus: unsafe extern "C" fn(
+            handles: &mut [NvPhysicalGpuHandle; NVAPI_MAX_PHYSICAL_GPUS],
+            count: &mut u32,
+        ) -> NvApiStatus = mem::transmute(enum_fn);
+        
+        let mut handles = [std::ptr::null_mut(); NVAPI_MAX_PHYSICAL_GPUS];
+        let mut count = 0u32;
+        if enum_gpus(&mut handles, &mut count) != 0 {
+            safe_unload();
+            return (None, None, None);
+        }
+        
+        if gpu_index >= count {
+            safe_unload();
+            return (None, None, None);
+        }
+        let handle = handles[gpu_index as usize];
+        
+        let mut hotspot_temp = None;
+        let mut memory_temp = None;
+        let mut voltage = None;
+        
+        // Get thermals
+        let thermals_fn = query_interface(QUERY_NVAPI_THERMALS);
+        if !thermals_fn.is_null() {
+            let get_thermals: unsafe extern "C" fn(
+                handle: NvPhysicalGpuHandle,
+                sensors: &mut NvApiThermals,
+            ) -> NvApiStatus = mem::transmute(thermals_fn);
+            
+            // Calculate mask by probing (some GPUs fail if unsupported bits are set)
+            let mut mask = 1;
+            let mut sensors = NvApiThermals {
+                version: (mem::size_of::<NvApiThermals>() | (2 << 16)) as u32,
+                mask: 1,
+                values: [0; 40],
+            };
+
+            if get_thermals(handle, &mut sensors) == 0 {
+                for bit in 0..32 {
+                    sensors.mask = 1 << bit;
+                    if get_thermals(handle, &mut sensors) != 0 {
+                        mask = sensors.mask - 1;
+                        break;
                     }
+                    if bit == 31 { mask = !0; }
                 }
             }
 
-            // Fallback to query-gpu
-            if let Ok(output) = std::process::Command::new(path)
-                .args(["-i", &index.to_string(), "--query-gpu=voltage.graphics", "--format=csv,noheader,nounits"])
-                .output()
-            {
-                if output.status.success() {
-                    let s = String::from_utf8_lossy(&output.stdout);
-                    return s.trim().parse::<f32>().ok().map(|v| v / 1000.0);
+            sensors.mask = mask;
+            if get_thermals(handle, &mut sensors) == 0 {
+                // Hotspot is at index 9
+                let hotspot_raw = sensors.values[9] as f32 / 256.0;
+                if hotspot_raw > 0.0 && hotspot_raw < 255.0 {
+                    hotspot_temp = Some(hotspot_raw);
+                }
+                
+                // VRAM/Memory is at index 15
+                let vram_raw = sensors.values[15] as f32 / 256.0;
+                if vram_raw > 0.0 && vram_raw < 255.0 {
+                    memory_temp = Some(vram_raw);
                 }
             }
         }
+        
+        // Get voltage
+        let voltage_fn = query_interface(QUERY_NVAPI_VOLTAGE);
+        if !voltage_fn.is_null() {
+            let get_voltage: unsafe extern "C" fn(
+                handle: NvPhysicalGpuHandle,
+                data: &mut NvApiVoltage,
+            ) -> NvApiStatus = mem::transmute(voltage_fn);
+            
+            let mut volt_data = NvApiVoltage {
+                version: (mem::size_of::<NvApiVoltage>() | (1 << 16)) as u32,
+                flags: 0,
+                padding_1: [0; 8],
+                value_uv: 0,
+                padding_2: [0; 8],
+            };
+            
+            if get_voltage(handle, &mut volt_data) == 0 && volt_data.value_uv > 0 {
+                voltage = Some(volt_data.value_uv as f32 / 1_000_000.0); // Convert µV to V
+            }
+        }
+        
+        // Unload NVAPI before library is dropped
+        safe_unload();
+        
+        // Keep library alive until after all NVAPI calls and unload
+        drop(lib);
+        
+        (hotspot_temp, memory_temp, voltage)
     }
-    None
 }
 
 fn get_nvapi_info(
@@ -1429,6 +2085,11 @@ fn get_nvapi_info(
 }
 
 fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
+    let (manual_clocks_enabled, _advanced_control_enabled) = {
+        let state = crate::GPU_DAEMON_STATE.lock().unwrap();
+        state.as_ref().map_or((false, false), |s| (s.manual_clocks, s.advanced_control))
+    };
+
     // 1. Check sysfs for NVIDIA devices and their status to avoid waking up suspended GPUs
     let mut nvidia_pci_ids = Vec::new();
     if let Ok(entries) = fs::read_dir("/sys/bus/pci/drivers/nvidia") {
@@ -1462,6 +2123,25 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         let names = NVIDIA_NAMES_CACHE.lock().unwrap();
         for (i, status) in statuses.into_iter().enumerate() {
             let name = names.get(i).cloned().unwrap_or_else(|| "NVIDIA GPU".to_string());
+            
+            // Retrieve cached metadata (including VRAM info) if available
+            let cached_metadata = {
+                let cache = NVIDIA_METADATA_CACHE.lock().unwrap();
+                cache.get(&(i as u32)).cloned()
+            };
+            
+            let (vram_type, vram_vendor, vram_bus_width, vram_bandwidth) = 
+                if let Some(ref meta) = cached_metadata {
+                    let bandwidth = calculate_vram_bandwidth(meta.vram_type.as_ref(), meta.vram_bus_width, meta.memory_clock_range);
+                    log::debug!(target: "hw.detect", 
+                        "GPU {} (all suspended): Using cached VRAM - Type: {:?}, Vendor: {:?}, Bus: {:?} bits, BW: {:?} GB/s",
+                        i, meta.vram_type, meta.vram_vendor, meta.vram_bus_width, bandwidth);
+                    (meta.vram_type.clone(), meta.vram_vendor.clone(), meta.vram_bus_width, bandwidth)
+                } else {
+                    log::debug!(target: "hw.detect", "GPU {} (all suspended): No cached VRAM info available", i);
+                    (None, None, None, None)
+                };
+            
             gpus.push(GpuInfo {
                 name,
                 gpu_type: GpuType::Discrete,
@@ -1478,6 +2158,26 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 drain_offset: None,
                 power_offset: None,
                 total_offset: None,
+                min_core_clock: None,
+                max_core_clock: None,
+                min_memory_clock: None,
+                max_memory_clock: None,
+                core_clock_range: cached_metadata.as_ref().and_then(|m| m.core_clock_range),
+                memory_clock_range: cached_metadata.as_ref().and_then(|m| m.memory_clock_range),
+                is_desktop: false,
+                architecture: cached_metadata.as_ref().and_then(|m| m.architecture.clone()),
+                nvml_index: Some(i as u32),
+                driver_version: None,
+                supported_p_states: cached_metadata.as_ref().map(|m| m.supported_p_states.clone()).unwrap_or_default(),
+                supports_power_limit: cached_metadata.as_ref().and_then(|m| m.power_limit_range).is_some(),
+                power_limit_range: cached_metadata.as_ref().and_then(|m| m.power_limit_range),
+                supports_gpu_offset: cached_metadata.as_ref().map(|m| m.supports_gpu_offset).unwrap_or(false),
+                supports_mem_offset: cached_metadata.as_ref().map(|m| m.supports_mem_offset).unwrap_or(false),
+                fan_speed_range: None,
+                vram_type,
+                vram_vendor,
+                vram_bus_width,
+                vram_bandwidth,
             });
         }
         return Ok(gpus);
@@ -1487,11 +2187,88 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
     let nvml = get_nvml()?;
     let mut gpus = Vec::new();
 
-    let device_count = nvml.device_count()?;
-    for i in 0..device_count {
-        let device = nvml.device_by_index(i)?;
+    let driver_version = nvml.sys_driver_version().ok();
 
-        let name = device.name()?;
+    let device_count = nvml.device_count().unwrap_or(0);
+    for i in 0..device_count {
+        // Use pre-read status to avoid waking up the GPU
+        let status_from_sysfs = statuses.get(i as usize).cloned();
+        let is_suspended = status_from_sysfs
+            .as_deref()
+            .map(|s| s.eq_ignore_ascii_case("suspended"))
+            .unwrap_or(false);
+
+        if is_suspended {
+            let name = {
+                let cache = NVIDIA_NAMES_CACHE.lock().unwrap();
+                cache.get(i as usize).cloned().unwrap_or_else(|| "NVIDIA GPU".to_string())
+            };
+            
+            // Retrieve cached metadata (including VRAM info) if available
+            let cached_metadata = {
+                let cache = NVIDIA_METADATA_CACHE.lock().unwrap();
+                cache.get(&i).cloned()
+            };
+            
+            let (vram_type, vram_vendor, vram_bus_width, vram_bandwidth) = 
+                if let Some(ref meta) = cached_metadata {
+                    let bandwidth = calculate_vram_bandwidth(meta.vram_type.as_ref(), meta.vram_bus_width, meta.memory_clock_range);
+                    log::debug!(target: "hw.detect", 
+                        "GPU {} (suspended): Using cached VRAM - Type: {:?}, Vendor: {:?}, Bus: {:?} bits, BW: {:?} GB/s",
+                        i, meta.vram_type, meta.vram_vendor, meta.vram_bus_width, bandwidth);
+                    (meta.vram_type.clone(), meta.vram_vendor.clone(), meta.vram_bus_width, bandwidth)
+                } else {
+                    log::debug!(target: "hw.detect", "GPU {} (suspended): No cached VRAM info available", i);
+                    (None, None, None, None)
+                };
+            
+            gpus.push(GpuInfo {
+                name,
+                gpu_type: GpuType::Discrete,
+                status: "suspended".to_string(),
+                frequency: None,
+                memory_frequency: None,
+                temperature: None,
+                hotspot_temperature: None,
+                memory_temperature: None,
+                load: None,
+                power: None,
+                voltage: None,
+                freq_offset: None,
+                drain_offset: None,
+                power_offset: None,
+                total_offset: None,
+                min_core_clock: None,
+                max_core_clock: None,
+                min_memory_clock: None,
+                max_memory_clock: None,
+                core_clock_range: cached_metadata.as_ref().and_then(|m| m.core_clock_range),
+                memory_clock_range: cached_metadata.as_ref().and_then(|m| m.memory_clock_range),
+                is_desktop: false,
+                architecture: cached_metadata.as_ref().and_then(|m| m.architecture.clone()),
+                nvml_index: Some(i),
+                driver_version: driver_version.clone(),
+                supported_p_states: cached_metadata.as_ref().map(|m| m.supported_p_states.clone()).unwrap_or_default(),
+                supports_power_limit: cached_metadata.as_ref().and_then(|m| m.power_limit_range).is_some(),
+                power_limit_range: cached_metadata.as_ref().and_then(|m| m.power_limit_range),
+                supports_gpu_offset: cached_metadata.as_ref().map(|m| m.supports_gpu_offset).unwrap_or(false),
+                supports_mem_offset: cached_metadata.as_ref().map(|m| m.supports_mem_offset).unwrap_or(false),
+                fan_speed_range: None,
+                vram_type,
+                vram_vendor,
+                vram_bus_width,
+                vram_bandwidth,
+            });
+            continue;
+        }
+
+        // Active GPU - proceed with NVML
+        let device = match nvml.device_by_index(i) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        let name = device.name().unwrap_or_else(|_| "NVIDIA GPU".to_string());
 
         // Update name cache
         {
@@ -1503,30 +2280,75 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             }
         }
 
-        let gpu_type = if i == 0 {
-            GpuType::Integrated
-        } else {
-            GpuType::Discrete
-        };
-        
-        // Use pre-read status to avoid waking up the GPU with PCI info requests
-        let status_from_sysfs = statuses.get(i as usize).cloned();
-        let is_suspended = status_from_sysfs
-            .as_deref()
-            .map(|s| s.eq_ignore_ascii_case("suspended"))
-            .unwrap_or(false);
+        let gpu_type = GpuType::Discrete;
 
-        // Get performance state for status if not suspended
-        let status = if is_suspended {
-            "suspended".to_string()
-        } else {
-            match device.performance_state() {
-                Ok(state) => format!("{:?}", state),
-                Err(_) => status_from_sysfs.unwrap_or_else(|| "active".to_string()),
+        // Get performance state
+        use nvml_wrapper::enum_wrappers::device::PerformanceState;
+        let pstate = device.performance_state().ok();
+
+        let status = match pstate {
+            Some(state) => {
+                // Map nvml_wrapper::PerformanceState to "PX" format for GUI
+                match state {
+                    PerformanceState::Zero => "P0".to_string(),
+                    PerformanceState::One => "P1".to_string(),
+                    PerformanceState::Two => "P2".to_string(),
+                    PerformanceState::Three => "P3".to_string(),
+                    PerformanceState::Four => "P4".to_string(),
+                    PerformanceState::Five => "P5".to_string(),
+                    PerformanceState::Six => "P6".to_string(),
+                    PerformanceState::Seven => "P7".to_string(),
+                    PerformanceState::Eight => "P8".to_string(),
+                    PerformanceState::Nine => "P9".to_string(),
+                    PerformanceState::Ten => "P10".to_string(),
+                    PerformanceState::Eleven => "P11".to_string(),
+                    PerformanceState::Twelve => "P12".to_string(),
+                    PerformanceState::Thirteen => "P13".to_string(),
+                    PerformanceState::Fourteen => "P14".to_string(),
+                    PerformanceState::Fifteen => "P15".to_string(),
+                    PerformanceState::Unknown => "unknown".to_string(),
+                }
             }
+            None => status_from_sysfs.unwrap_or_else(|| "active".to_string()),
         };
 
-        let (frequency, memory_frequency, temperature, load, power) = if is_suspended {
+        let pstate_val = pstate.map(|s| match s {
+            PerformanceState::Zero => 0,
+            PerformanceState::One => 1,
+            PerformanceState::Two => 2,
+            PerformanceState::Three => 3,
+            PerformanceState::Four => 4,
+            PerformanceState::Five => 5,
+            PerformanceState::Six => 6,
+            PerformanceState::Seven => 7,
+            PerformanceState::Eight => 8,
+            PerformanceState::Nine => 9,
+            PerformanceState::Ten => 10,
+            PerformanceState::Eleven => 11,
+            PerformanceState::Twelve => 12,
+            PerformanceState::Thirteen => 13,
+            PerformanceState::Fourteen => 14,
+            PerformanceState::Fifteen => 15,
+            PerformanceState::Unknown => 99,
+        }).unwrap_or(0);
+
+        // Determine if we should poll monitoring stats
+        // Logic for all modes:
+        // 1. If suspended: poll nothing.
+        // 2. If P0-P3: poll NVML and NVAPI (all stats).
+        // 3. If P4+ (including P8): poll NVML only (no NVAPI/direct ioctls).
+        // This ensures visibility (P0-P3) while allowing the GPU to enter
+        // low-power states (P8) and eventually suspend.
+        let (should_poll_nvml, should_poll_nvapi) = if is_suspended {
+            (false, false)
+        } else if pstate_val <= 3 {
+            (true, true)
+        } else {
+            // P4+, including P8
+            (true, false)
+        };
+
+        let (frequency, memory_frequency, temperature, load, power) = if !should_poll_nvml {
             (None, None, None, None, None)
         } else {
             (
@@ -1544,9 +2366,149 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             )
         };
 
-        let (nvapi_voltage, hotspot_temperature, memory_temperature) =
-            get_nvapi_info(&device, is_suspended);
-        let voltage = nvapi_voltage.or_else(|| if is_suspended { None } else { get_nvidia_voltage(i) });
+        // Get extended stats via NVAPI
+        let (hotspot_temp, memory_temp, nvapi_voltage) = if !is_suspended && should_poll_nvapi {
+            get_nvidia_extended_stats(i)
+        } else {
+            (None, None, None)
+        };
+
+        let voltage = nvapi_voltage;
+
+        let (min_core_clock, max_core_clock) = (None, None); // NVML wrapper 0.11 doesn't have a getter
+
+        let num_fans = device.num_fans().unwrap_or(0);
+        let is_desktop = false; // Deprecated, using capability flags instead
+
+        // Get metadata from cache or fetch it
+        let metadata = {
+            let mut cache = NVIDIA_METADATA_CACHE.lock().unwrap();
+            if let Some(meta) = cache.get(&i) {
+                log::debug!(target: "hw.detect", "GPU {}: Using cached metadata", i);
+                // Check if cached VRAM info is None - if so, retry getting it
+                // This handles cases where initial detection failed (GPU suspended, driver not ready, etc.)
+                if meta.vram_type.is_none() && meta.vram_vendor.is_none() && meta.vram_bus_width.is_none() {
+                    log::info!(target: "hw.detect", "GPU {}: Cached VRAM info is all None, retrying detection", i);
+                    let minor_number = device.minor_number().unwrap_or(i);
+                    let (vram_type, vram_vendor, vram_bus_width, _) = get_vram_info(minor_number);
+                    
+                    // If we successfully got VRAM info, update the cache
+                    if vram_type.is_some() || vram_vendor.is_some() || vram_bus_width.is_some() {
+                        log::info!(target: "hw.detect", "GPU {}: Successfully detected VRAM on retry - Type: {:?}, Vendor: {:?}, Bus: {:?}",
+                            i, vram_type, vram_vendor, vram_bus_width);
+                        let updated_meta = NvidiaMetadata {
+                            vram_type,
+                            vram_vendor,
+                            vram_bus_width,
+                            ..meta.clone()
+                        };
+                        cache.insert(i, updated_meta.clone());
+                        updated_meta
+                    } else {
+                        log::warn!(target: "hw.detect", "GPU {}: VRAM detection retry also returned None - see errors above for details", i);
+                        meta.clone()
+                    }
+                } else {
+                    log::debug!(target: "hw.detect", "GPU {}: Using cached VRAM info - Type: {:?}, Vendor: {:?}, Bus: {:?}", 
+                        i, meta.vram_type, meta.vram_vendor, meta.vram_bus_width);
+                    meta.clone()
+                }
+            } else {
+                log::info!(target: "hw.detect", "GPU {}: Initializing metadata cache (first detection)", i);
+                let arch = device.architecture().ok().map(|arch| arch.to_string());
+                let p_states = device.supported_performance_states().ok()
+                    .map(|states| states.iter().map(|s| format!("{:?}", s)).collect())
+                    .unwrap_or_default();
+                let p_limit_range = match device.power_management_limit_constraints() {
+                    Ok(constraints) => Some((constraints.min_limit / 1000, constraints.max_limit / 1000)),
+                    Err(_) => None,
+                };
+                let s_gpu_offset = device.clock_offset(Clock::Graphics, PerformanceState::Zero).is_ok();
+                let s_mem_offset = device.clock_offset(Clock::Memory, PerformanceState::Zero).is_ok();
+
+                let minor_number = device.minor_number().unwrap_or(i);
+                log::debug!(target: "hw.detect", "GPU {}: Performing initial VRAM detection for minor {}", i, minor_number);
+                let (vram_type, vram_vendor, vram_bus_width, _) = get_vram_info(minor_number);
+
+                let core_range = get_base_gpu_clock_ranges(&device).ok();
+
+                let mut mem_range = None;
+                if let Ok(supported_states) = device.supported_performance_states() {
+                    let mut m_min = u32::MAX;
+                    let mut m_max = 0;
+                    for pstate in supported_states {
+                        if let Ok((p_min, p_max)) = device.min_max_clock_of_pstate(Clock::Memory, pstate) {
+                            if p_min < m_min { m_min = p_min; }
+                            if p_max > m_max { m_max = p_max; }
+                        }
+                    }
+                    if m_min != u32::MAX {
+                        mem_range = Some((m_min, m_max));
+                    }
+                }
+
+                // Fallback for memory clock range
+                if mem_range.is_none() {
+                    if let Ok(clocks) = device.supported_memory_clocks() {
+                        if let (Some(&c_min), Some(&c_max)) = (clocks.iter().min(), clocks.iter().max()) {
+                            mem_range = Some((c_min, c_max));
+                        }
+                    }
+                }
+
+                let meta = NvidiaMetadata {
+                    architecture: arch,
+                    supported_p_states: p_states,
+                    power_limit_range: p_limit_range,
+                    supports_gpu_offset: s_gpu_offset,
+                    supports_mem_offset: s_mem_offset,
+                    vram_type,
+                    vram_vendor,
+                    vram_bus_width,
+                    core_clock_range: core_range,
+                    memory_clock_range: mem_range,
+                };
+                cache.insert(i, meta.clone());
+                meta
+            }
+        };
+
+        let architecture = metadata.architecture;
+        let supported_p_states = metadata.supported_p_states;
+        let power_limit_range = metadata.power_limit_range;
+        let supports_power_limit = power_limit_range.is_some();
+        let supports_gpu_offset = metadata.supports_gpu_offset;
+        let supports_mem_offset = metadata.supports_mem_offset;
+        let v_type = metadata.vram_type;
+        let v_vendor = metadata.vram_vendor;
+        let v_bus = metadata.vram_bus_width;
+        // Apply current offset to the cached base range for real-time reporting
+        let core_clock_range = metadata.core_clock_range.map(|(min, max)| {
+            let offset = {
+                let map = crate::MANUAL_GPU_OFFSETS.lock().unwrap();
+                map.get(&i).map(|(c, _)| *c).unwrap_or(0.0)
+            };
+            ((min as f32 + offset).max(0.0) as u32, (max as f32 + offset).max(0.0) as u32)
+        });
+        let memory_clock_range = metadata.memory_clock_range;
+        let v_bw = calculate_vram_bandwidth(v_type.as_ref(), v_bus, memory_clock_range);
+
+        // Log VRAM info for diagnostics
+        if v_type.is_some() || v_vendor.is_some() || v_bus.is_some() {
+            if v_bw.is_none() && memory_clock_range.is_none() {
+                log::info!(target: "hw.detect", 
+                    "GPU {}: VRAM detected - Type: {:?}, Vendor: {:?}, Bus Width: {:?} bits, Bandwidth: N/A (memory clock range unknown)",
+                    i, v_type, v_vendor, v_bus);
+            } else {
+                log::info!(target: "hw.detect", 
+                    "GPU {}: VRAM detected - Type: {:?}, Vendor: {:?}, Bus Width: {:?} bits, Bandwidth: {:?} GB/s",
+                    i, v_type, v_vendor, v_bus, v_bw);
+            }
+        } else {
+            log::warn!(target: "hw.detect", 
+                "GPU {}: VRAM info not available - Check daemon logs above for detailed error messages",
+                i);
+        }
 
         let mut gpu_info = GpuInfo {
             name: name.clone(),
@@ -1555,8 +2517,8 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             frequency,
             memory_frequency,
             temperature,
-            hotspot_temperature,
-            memory_temperature,
+            hotspot_temperature: hotspot_temp,
+            memory_temperature: memory_temp,
             load,
             power,
             voltage,
@@ -1564,16 +2526,43 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             drain_offset: None,
             power_offset: None,
             total_offset: None,
+            min_core_clock,
+            max_core_clock,
+            min_memory_clock: None,
+            max_memory_clock: None,
+            core_clock_range,
+            memory_clock_range,
+            is_desktop,
+            architecture,
+            nvml_index: Some(i),
+            driver_version: driver_version.clone(),
+            supported_p_states,
+            supports_power_limit,
+            power_limit_range,
+            supports_gpu_offset,
+            supports_mem_offset,
+            fan_speed_range: if num_fans > 0 { Some((0, 100)) } else { None },
+            vram_type: v_type,
+            vram_vendor: v_vendor,
+            vram_bus_width: v_bus,
+            vram_bandwidth: v_bw,
         };
 
         // Fill in offsets if they exist in global state (assuming first NVIDIA GPU for now)
-        if name.to_lowercase().contains("nvidia") {
+        if name.to_lowercase().contains("nvidia") && manual_clocks_enabled {
             let stats_lock = crate::CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
             if let Some(ref stats) = *stats_lock {
                 gpu_info.freq_offset = Some(stats.freq_offset);
                 gpu_info.drain_offset = Some(stats.drain_offset);
                 gpu_info.power_offset = Some(stats.power_offset);
                 gpu_info.total_offset = Some(stats.total_offset);
+            } else {
+                // Fallback to manual offsets if dynamic is not active
+                let manual_map = crate::MANUAL_GPU_OFFSETS.lock().unwrap();
+                if let Some(offsets) = manual_map.get(&i) {
+                    let core: f32 = offsets.0;
+                    gpu_info.total_offset = Some(core.round() as i32);
+                }
             }
         }
 
@@ -1792,7 +2781,7 @@ pub fn get_wifi_info() -> Result<Vec<WiFiInfo>> {
         let (network_controller, subsystem) = get_pci_info(&interface);
         
         // Get all details from iw
-        let (ssid, channel, channel_width, tx_bitrate, rx_bitrate, iw_rx_bytes, iw_tx_bytes, iw_signal) = get_wifi_details(&interface);
+        let (ssid, channel, channel_width, channel_freq, tx_bitrate, rx_bitrate, iw_rx_bytes, iw_tx_bytes, iw_signal) = get_wifi_details(&interface);
 
         // Signal level priority: iw > /proc/net/wireless
         let signal_level = iw_signal.or_else(|| read_wifi_signal(&interface));
@@ -1806,7 +2795,7 @@ pub fn get_wifi_info() -> Result<Vec<WiFiInfo>> {
         // Calculate actual throughput
         let (tx_rate, rx_rate) = read_wifi_rates(&interface, final_tx_bytes, final_rx_bytes);
         
-        log::info!("WiFi {} details: SSID={:?}, Signal={:?}, Channel={:?}, Rates={:?}/{:?}",
+        log::debug!(target: "hw.detect", "WiFi {} details: SSID={:?}, Signal={:?}, Channel={:?}, Rates={:?}/{:?}",
                    interface, ssid, signal_level, channel, tx_rate, rx_rate);
 
         wifi_devices.push(WiFiInfo {
@@ -1818,6 +2807,7 @@ pub fn get_wifi_info() -> Result<Vec<WiFiInfo>> {
             signal_level,
             channel,
             channel_width,
+            channel_freq,
             tx_rate,
             rx_rate,
             ssid,
@@ -1841,6 +2831,7 @@ fn get_wifi_details(interface: &str) -> (
     Option<String>,
     Option<u32>,
     Option<u32>,
+    Option<u32>,
     Option<f64>,
     Option<f64>,
     Option<u64>,
@@ -1850,6 +2841,7 @@ fn get_wifi_details(interface: &str) -> (
     let mut ssid = None;
     let mut channel = None;
     let mut width = None;
+    let mut freq = None;
     let mut tx_bitrate = None;
     let mut rx_bitrate = None;
     let mut rx_bytes = None;
@@ -1872,6 +2864,9 @@ fn get_wifi_details(interface: &str) -> (
                 
                 if let Some(pos) = lower.find("ssid:") {
                     ssid = normalize_ssid(trimmed[pos + 5..].trim());
+                } else if let Some(pos) = lower.find("freq:") {
+                    let part = trimmed[pos + 5..].trim();
+                    freq = part.split_whitespace().next().and_then(|s| s.parse().ok());
                 } else if lower.contains("rx bitrate:") {
                     rx_bitrate = parse_wifi_rate(trimmed);
                 } else if lower.contains("tx bitrate:") {
@@ -1961,7 +2956,7 @@ fn get_wifi_details(interface: &str) -> (
         }
     }
 
-    (ssid, channel, width, tx_bitrate, rx_bitrate, rx_bytes, tx_bytes, signal)
+    (ssid, channel, width, freq, tx_bitrate, rx_bitrate, rx_bytes, tx_bytes, signal)
 }
 
 fn read_wifi_temperature(interface: &str) -> Option<f32> {
@@ -2132,6 +3127,203 @@ fn read_wifi_rates(interface: &str, tx_bytes: u64, rx_bytes: u64) -> (Option<f64
     );
 
     rates
+}
+
+pub fn get_gamepad_info() -> Result<Vec<GamepadInfo>> {
+    let mut gamepads = Vec::new();
+    let mut seen_uids = std::collections::HashSet::new();
+
+    if let Ok(entries) = fs::read_dir("/sys/class/input") {
+        for entry in entries.flatten() {
+            let input_name = entry.file_name().to_string_lossy().to_string();
+            if input_name.starts_with("input") {
+                let path = entry.path();
+
+                // Find event child to check udev properties
+                let mut is_gamepad = false;
+                let mut udev_uid = None;
+                if let Ok(children) = fs::read_dir(&path) {
+                    for child in children.flatten() {
+                        let child_name = child.file_name().to_string_lossy().to_string();
+                        if child_name.starts_with("event") {
+                            if let Ok(uevent) = fs::read_to_string(child.path().join("uevent")) {
+                                let mut major = None;
+                                let mut minor = None;
+                                for line in uevent.lines() {
+                                    if let Some(val) = line.strip_prefix("MAJOR=") {
+                                        major = Some(val);
+                                    } else if let Some(val) = line.strip_prefix("MINOR=") {
+                                        minor = Some(val);
+                                    }
+                                }
+
+                                if let (Some(maj), Some(min)) = (major, minor) {
+                                    let udev_path = format!("/run/udev/data/c{}:{}", maj, min);
+                                    if let Ok(udev_data) = fs::read_to_string(udev_path) {
+                                        if udev_data.contains("E:ID_INPUT_JOYSTICK=1") {
+                                            is_gamepad = true;
+                                        }
+
+                                        // Try to find a stable UID from udev data
+                                        let mut id_path = None;
+                                        let mut id_serial = None;
+                                        let mut id_serial_short = None;
+                                        for line in udev_data.lines() {
+                                            if let Some(val) = line.strip_prefix("E:ID_PATH=") {
+                                                id_path = Some(val.to_string());
+                                            } else if let Some(val) = line.strip_prefix("E:ID_SERIAL_SHORT=") {
+                                                id_serial_short = Some(val.to_string());
+                                            } else if let Some(val) = line.strip_prefix("E:ID_SERIAL=") {
+                                                id_serial = Some(val.to_string());
+                                            }
+                                        }
+                                        // Priority: Serial Short > Serial > Path
+                                        udev_uid = id_serial_short.or(id_serial).or(id_path);
+
+                                        if is_gamepad {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Fallback to name heuristic if udev info is missing or not joystick
+                if !is_gamepad {
+                    if let Ok(device_name) = fs::read_to_string(path.join("name")) {
+                        let device_name_lower = device_name.to_lowercase();
+                        if (device_name_lower.contains("controller") ||
+                            device_name_lower.contains("gamepad") ||
+                            device_name_lower.contains("joystick")) &&
+                           !device_name_lower.contains("keyboard") {
+                            is_gamepad = true;
+                        }
+                    }
+                }
+
+                // Apply exclusions based on name (even if udev says joystick)
+                if is_gamepad {
+                    if let Ok(device_name) = fs::read_to_string(path.join("name")) {
+                        let device_name_lower = device_name.to_lowercase();
+                        if device_name_lower.contains("touchpad") ||
+                           device_name_lower.contains("motion sensors") ||
+                           device_name_lower.contains("consumer control") ||
+                           device_name_lower.contains("system control") {
+                            is_gamepad = false;
+                        }
+                    }
+                }
+
+                if is_gamepad {
+                    if let Ok(device_name) = fs::read_to_string(path.join("name")) {
+                        let device_name = device_name.trim().to_string();
+                        // Use sysfs path as absolute fallback for UID if udev failed
+                        let mut uid = udev_uid.unwrap_or_else(|| path.to_string_lossy().to_string());
+
+                        // Try to get uniq (MAC address) which is very stable across connection types
+                        if let Ok(uniq) = fs::read_to_string(path.join("device/uniq")) {
+                            let uniq = uniq.trim();
+                            if !uniq.is_empty() && uniq != "00:00:00:00:00:00" {
+                                uid = uniq.to_string();
+                            }
+                        }
+
+                        if !seen_uids.contains(&uid) {
+                            let bustype = fs::read_to_string(path.join("id/bustype"))
+                                .ok()
+                                .and_then(|s| u16::from_str_radix(s.trim(), 16).ok())
+                                .unwrap_or(0);
+
+                            let connection_type = match bustype {
+                                0x03 => ConnectionType::Wired,
+                                0x05 => ConnectionType::Wireless,
+                                _ => ConnectionType::Unknown,
+                            };
+
+                            let (battery_level, power_status) = find_battery_for_input(&path);
+
+                            gamepads.push(GamepadInfo {
+                                name: device_name,
+                                id: input_name,
+                                uid: uid.clone(),
+                                status: GamepadStatus::Connected,
+                                battery_level,
+                                connection_type,
+                                power_status,
+                            });
+                            seen_uids.insert(uid);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(gamepads)
+}
+
+fn find_battery_for_input(input_path: &Path) -> (Option<u8>, PowerStatus) {
+    if let Ok(device_path) = fs::canonicalize(input_path.join("device")) {
+        let mut current = Some(device_path.as_path());
+        while let Some(path) = current {
+            let ps_path = path.join("power_supply");
+            if ps_path.exists() {
+                if let Ok(ps_entries) = fs::read_dir(ps_path) {
+                    for ps_entry in ps_entries.flatten() {
+                        let mut level = None;
+                        let mut status = PowerStatus::Unknown;
+                        if let Ok(cap) = fs::read_to_string(ps_entry.path().join("capacity")) {
+                            level = cap.trim().parse().ok();
+                        }
+                        if let Ok(st) = fs::read_to_string(ps_entry.path().join("status")) {
+                            status = match st.trim().to_lowercase().as_str() {
+                                "charging" => PowerStatus::Charging,
+                                "discharging" => PowerStatus::Discharging,
+                                "full" => PowerStatus::Full,
+                                _ => PowerStatus::Unknown,
+                            };
+                        }
+                        return (level, status);
+                    }
+                }
+            }
+
+            // Also check for power_supply as a sibling in some cases or child of parent
+            current = path.parent();
+            if let Some(p) = current {
+                if p == Path::new("/sys/devices") || p == Path::new("/sys") {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Fallback: search all power supplies for names matching the input device
+    if let Ok(ps_entries) = fs::read_dir("/sys/class/power_supply") {
+        for ps_entry in ps_entries.flatten() {
+            let ps_name = ps_entry.file_name().to_string_lossy().to_lowercase();
+            if ps_name.contains("controller") || ps_name.contains("gamepad") {
+                 let mut level = None;
+                 let mut status = PowerStatus::Unknown;
+                 if let Ok(cap) = fs::read_to_string(ps_entry.path().join("capacity")) {
+                     level = cap.trim().parse().ok();
+                 }
+                 if let Ok(st) = fs::read_to_string(ps_entry.path().join("status")) {
+                     status = match st.trim().to_lowercase().as_str() {
+                         "charging" => PowerStatus::Charging,
+                         "discharging" => PowerStatus::Discharging,
+                         "full" => PowerStatus::Full,
+                         _ => PowerStatus::Unknown,
+                     };
+                 }
+                 return (level, status);
+            }
+        }
+    }
+
+    (None, PowerStatus::Unknown)
 }
 
 pub fn get_battery_info() -> Result<BatteryInfo> {

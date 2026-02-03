@@ -19,6 +19,7 @@ pub enum DbusCommand {
     GetStorageDeviceInfo { reply: oneshot::Sender<Result<Vec<StorageDevice>>> },
     GetMountInfo { reply: oneshot::Sender<Result<Vec<MountInfo>>> },
     GetWifiInfo { reply: oneshot::Sender<Result<Vec<WiFiInfo>>> },
+    GetGamepadInfo { reply: oneshot::Sender<Result<Vec<GamepadInfo>>> },
     GetTdpProfiles { reply: oneshot::Sender<Result<Vec<String>>> },
     GetHardwareInterfaceInfo { reply: oneshot::Sender<Result<String>> },
     GetKeyboardCapabilities { reply: oneshot::Sender<Result<KeyboardCapabilities>> },
@@ -29,24 +30,23 @@ pub enum DbusCommand {
     GetBatteryAvailableStartThresholds { reply: oneshot::Sender<Result<Vec<u8>>> },
     GetBatteryAvailableEndThresholds { reply: oneshot::Sender<Result<Vec<u8>>> },
     SetBatterySettings { settings: BatterySettings, reply: oneshot::Sender<Result<()>> },
-    SetFanAuto { fan_id: u32, reply: oneshot::Sender<Result<()>> },
+    SetAllFansAuto { reply: oneshot::Sender<Result<()>> },
     SetGpuLockedClocks { device_index: u32, min_clock: u32, max_clock: u32, reply: oneshot::Sender<Result<()>> },
     ResetGpuClocks { device_index: u32, reply: oneshot::Sender<Result<()>> },
     GetGpuClockRanges { device_index: u32, reply: oneshot::Sender<Result<(u32, u32)>> },
-    GetGpuMemClockRanges { device_index: u32, reply: oneshot::Sender<Result<Vec<u32>>> },
-    SetMemoryLockedClocks { device_index: u32, min_clock: u32, max_clock: u32, reply: oneshot::Sender<Result<()>> },
-    ResetMemoryLockedClocks { device_index: u32, reply: oneshot::Sender<Result<()>> },
-    SetGpuCoreOffset { device_index: u32, offset: i32, reply: oneshot::Sender<Result<()>> },
-    SetGpuMemoryOffset { device_index: u32, offset: i32, reply: oneshot::Sender<Result<()>> },
+    SetGpuCoreOffset { device_index: u32, offset: f32, reply: oneshot::Sender<Result<()>> },
+    SetGpuMemoryOffset { device_index: u32, offset: f32, reply: oneshot::Sender<Result<()>> },
     GetGpuCoreOffsetLimits { device_index: u32, reply: oneshot::Sender<Result<(i32, i32)>> },
     GetGpuMemoryOffsetLimits { device_index: u32, reply: oneshot::Sender<Result<(i32, i32)>> },
     SetPrimeProfile { profile: String, reply: oneshot::Sender<Result<()>> },
-    SetNvidiaSmiLegacyPath { path: String, reply: oneshot::Sender<Result<()>> },
     UpdatePollingInterval { component: String, interval_ms: u64, reply: oneshot::Sender<Result<()>> },
     GetWebcamState { reply: oneshot::Sender<Result<bool>> },
     SetWebcamState { enabled: bool, reply: oneshot::Sender<Result<()>> },
     GetDaemonLogs { reply: oneshot::Sender<Result<Vec<LogEntry>>> },
     ShutdownDaemon { reply: oneshot::Sender<Result<()>> },
+    SetGpuFanSpeed { device_index: u32, fan_index: u32, speed: u32, reply: oneshot::Sender<Result<()>> },
+    SetGpuFanAuto { device_index: u32, fan_index: u32, reply: oneshot::Sender<Result<()>> },
+    SetGpuPowerLimit { device_index: u32, limit_watts: u32, reply: oneshot::Sender<Result<()>> },
 }
 
 impl DbusClient {
@@ -119,6 +119,12 @@ impl DbusClient {
         rx
     }
 
+    pub fn get_gamepad_info(&self) -> oneshot::Receiver<Result<Vec<GamepadInfo>>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::GetGamepadInfo { reply: tx });
+        rx
+    }
+
     pub fn get_tdp_profiles(&self) -> oneshot::Receiver<Result<Vec<String>>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.command_tx.send(DbusCommand::GetTdpProfiles { reply: tx });
@@ -185,9 +191,9 @@ impl DbusClient {
         rx
     }
 
-    pub fn set_fan_auto(&self, fan_id: u32) -> oneshot::Receiver<Result<()>> {
+    pub fn set_all_fans_auto(&self) -> oneshot::Receiver<Result<()>> {
         let (tx, rx) = oneshot::channel();
-        let _ = self.command_tx.send(DbusCommand::SetFanAuto { fan_id, reply: tx });
+        let _ = self.command_tx.send(DbusCommand::SetAllFansAuto { reply: tx });
         rx
     }
 
@@ -209,31 +215,13 @@ impl DbusClient {
         rx
     }
 
-    pub fn get_gpu_mem_clock_ranges(&self, device_index: u32) -> oneshot::Receiver<Result<Vec<u32>>> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self.command_tx.send(DbusCommand::GetGpuMemClockRanges { device_index, reply: tx });
-        rx
-    }
-
-    pub fn set_memory_locked_clocks(&self, device_index: u32, min_clock: u32, max_clock: u32) -> oneshot::Receiver<Result<()>> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self.command_tx.send(DbusCommand::SetMemoryLockedClocks { device_index, min_clock, max_clock, reply: tx });
-        rx
-    }
-
-    pub fn reset_memory_locked_clocks(&self, device_index: u32) -> oneshot::Receiver<Result<()>> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self.command_tx.send(DbusCommand::ResetMemoryLockedClocks { device_index, reply: tx });
-        rx
-    }
-
-    pub fn set_gpu_core_offset(&self, device_index: u32, offset: i32) -> oneshot::Receiver<Result<()>> {
+    pub fn set_gpu_core_offset(&self, device_index: u32, offset: f32) -> oneshot::Receiver<Result<()>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.command_tx.send(DbusCommand::SetGpuCoreOffset { device_index, offset, reply: tx });
         rx
     }
 
-    pub fn set_gpu_memory_offset(&self, device_index: u32, offset: i32) -> oneshot::Receiver<Result<()>> {
+    pub fn set_gpu_memory_offset(&self, device_index: u32, offset: f32) -> oneshot::Receiver<Result<()>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.command_tx.send(DbusCommand::SetGpuMemoryOffset { device_index, offset, reply: tx });
         rx
@@ -254,12 +242,6 @@ impl DbusClient {
     pub fn set_prime_profile(&self, profile: &str) -> oneshot::Receiver<Result<()>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.command_tx.send(DbusCommand::SetPrimeProfile { profile: profile.to_string(), reply: tx });
-        rx
-    }
-
-    pub fn set_nvidia_smi_legacy_path(&self, path: &str) -> oneshot::Receiver<Result<()>> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self.command_tx.send(DbusCommand::SetNvidiaSmiLegacyPath { path: path.to_string(), reply: tx });
         rx
     }
 
@@ -296,6 +278,24 @@ impl DbusClient {
         let _ = self.command_tx.send(DbusCommand::GetDaemonLogs { reply: tx });
         rx
     }
+
+    pub fn set_gpu_fan_speed(&self, device_index: u32, fan_index: u32, speed: u32) -> oneshot::Receiver<Result<()>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::SetGpuFanSpeed { device_index, fan_index, speed, reply: tx });
+        rx
+    }
+
+    pub fn set_gpu_fan_auto(&self, device_index: u32, fan_index: u32) -> oneshot::Receiver<Result<()>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::SetGpuFanAuto { device_index, fan_index, reply: tx });
+        rx
+    }
+
+    pub fn set_gpu_power_limit(&self, device_index: u32, limit_watts: u32) -> oneshot::Receiver<Result<()>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::SetGpuPowerLimit { device_index, limit_watts, reply: tx });
+        rx
+    }
 }
 
 // Background worker - handles all DBus calls asynchronously with reconnection logic
@@ -317,6 +317,12 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
             let res: Result<(), anyhow::Error> = match command {
                 DbusCommand::GetSystemInfo { reply } => {
                     let result = get_system_info_impl(&connection).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::GetGamepadInfo { reply } => {
+                    let result = get_gamepad_info_impl(&connection).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
@@ -429,8 +435,8 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
-                DbusCommand::SetFanAuto { fan_id, reply } => {
-                    let result = set_fan_auto_impl(&connection, fan_id).await;
+                DbusCommand::SetAllFansAuto { reply } => {
+                    let result = set_all_fans_auto_impl(&connection).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
@@ -449,24 +455,6 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
                 }
                 DbusCommand::GetGpuClockRanges { device_index, reply } => {
                     let result = get_gpu_clock_ranges_impl(&connection, device_index).await;
-                    let is_err = result.is_err();
-                    let _ = reply.send(result);
-                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
-                }
-                DbusCommand::GetGpuMemClockRanges { device_index, reply } => {
-                    let result = get_gpu_mem_clock_ranges_impl(&connection, device_index).await;
-                    let is_err = result.is_err();
-                    let _ = reply.send(result);
-                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
-                }
-                DbusCommand::SetMemoryLockedClocks { device_index, min_clock, max_clock, reply } => {
-                    let result = set_memory_locked_clocks_impl(&connection, device_index, min_clock, max_clock).await;
-                    let is_err = result.is_err();
-                    let _ = reply.send(result);
-                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
-                }
-                DbusCommand::ResetMemoryLockedClocks { device_index, reply } => {
-                    let result = reset_memory_locked_clocks_impl(&connection, device_index).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
@@ -501,12 +489,6 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
-                DbusCommand::SetNvidiaSmiLegacyPath { path, reply } => {
-                    let result = set_nvidia_smi_legacy_path_impl(&connection, &path).await;
-                    let is_err = result.is_err();
-                    let _ = reply.send(result);
-                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
-                }
                 DbusCommand::UpdatePollingInterval { component, interval_ms, reply } => {
                     let result = update_polling_interval_impl(&connection, &component, interval_ms).await;
                     let is_err = result.is_err();
@@ -533,6 +515,24 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
                 }
                 DbusCommand::GetDaemonLogs { reply } => {
                     let result = get_daemon_logs_impl(&connection).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::SetGpuFanSpeed { device_index, fan_index, speed, reply } => {
+                    let result = set_gpu_fan_speed_impl(&connection, device_index, fan_index, speed).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::SetGpuFanAuto { device_index, fan_index, reply } => {
+                    let result = set_gpu_fan_auto_impl(&connection, device_index, fan_index).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::SetGpuPowerLimit { device_index, limit_watts, reply } => {
+                    let result = set_gpu_power_limit_impl(&connection, device_index, limit_watts).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
@@ -675,6 +675,18 @@ async fn get_wifi_info_impl(conn: &Connection) -> Result<Vec<WiFiInfo>> {
     Ok(serde_json::from_str(&json)?)
 }
 
+async fn get_gamepad_info_impl(conn: &Connection) -> Result<Vec<GamepadInfo>> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
+    ).await?;
+
+    let json: String = proxy.call("GetGamepadInfo", &()).await?;
+    Ok(serde_json::from_str(&json)?)
+}
+
 async fn get_tdp_profiles_impl(conn: &Connection) -> Result<Vec<String>> {
     let proxy = zbus::Proxy::new(
         conn,
@@ -798,14 +810,14 @@ async fn set_battery_settings_impl(conn: &Connection, settings: BatterySettings)
     Ok(())
 }
 
-async fn set_fan_auto_impl(conn: &Connection, fan_id: u32) -> Result<()> {
+async fn set_all_fans_auto_impl(conn: &Connection) -> Result<()> {
     let proxy = zbus::Proxy::new(
         conn,
         "io.lapsphere.Control",
         "/io/lapsphere/Control",
         "io.lapsphere.Control",
     ).await?;
-    proxy.call::<_, _, ()>("SetFanAuto", &(fan_id,)).await?;
+    proxy.call::<_, _, ()>("SetAllFansAuto", &()).await?;
     Ok(())
 }
 
@@ -842,40 +854,7 @@ async fn get_gpu_clock_ranges_impl(conn: &Connection, device_index: u32) -> Resu
     Ok(serde_json::from_str(&json)?)
 }
 
-async fn get_gpu_mem_clock_ranges_impl(conn: &Connection, device_index: u32) -> Result<Vec<u32>> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
-    let json: String = proxy.call("GetGpuMemClockRanges", &(device_index,)).await?;
-    Ok(serde_json::from_str(&json)?)
-}
-
-async fn set_memory_locked_clocks_impl(conn: &Connection, device_index: u32, min_clock: u32, max_clock: u32) -> Result<()> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
-    proxy.call::<_, _, ()>("SetMemoryLockedClocks", &(device_index, min_clock, max_clock)).await?;
-    Ok(())
-}
-
-async fn reset_memory_locked_clocks_impl(conn: &Connection, device_index: u32) -> Result<()> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
-    proxy.call::<_, _, ()>("ResetMemoryLockedClocks", &(device_index,)).await?;
-    Ok(())
-}
-
-async fn set_gpu_core_offset_impl(conn: &Connection, device_index: u32, offset: i32) -> Result<()> {
+async fn set_gpu_core_offset_impl(conn: &Connection, device_index: u32, offset: f32) -> Result<()> {
     let proxy = zbus::Proxy::new(
         conn,
         "io.lapsphere.Control",
@@ -886,7 +865,7 @@ async fn set_gpu_core_offset_impl(conn: &Connection, device_index: u32, offset: 
     Ok(())
 }
 
-async fn set_gpu_memory_offset_impl(conn: &Connection, device_index: u32, offset: i32) -> Result<()> {
+async fn set_gpu_memory_offset_impl(conn: &Connection, device_index: u32, offset: f32) -> Result<()> {
     let proxy = zbus::Proxy::new(
         conn,
         "io.lapsphere.Control",
@@ -927,17 +906,6 @@ async fn set_prime_profile_impl(conn: &Connection, profile: &str) -> Result<()> 
         "io.lapsphere.Control",
     ).await?;
     proxy.call::<_, _, ()>("SetPrimeProfile", &(profile,)).await?;
-    Ok(())
-}
-
-async fn set_nvidia_smi_legacy_path_impl(conn: &Connection, path: &str) -> Result<()> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
-    proxy.call::<_, _, ()>("SetNvidiaSmiLegacyPath", &(path,)).await?;
     Ok(())
 }
 
@@ -993,5 +961,38 @@ async fn shutdown_daemon_impl(conn: &Connection) -> Result<()> {
         "io.lapsphere.Control",
     ).await?;
     proxy.call::<_, _, ()>("ShutdownDaemon", &()).await?;
+    Ok(())
+}
+
+async fn set_gpu_fan_speed_impl(conn: &Connection, device_index: u32, fan_index: u32, speed: u32) -> Result<()> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
+    ).await?;
+    proxy.call::<_, _, ()>("SetGpuFanSpeed", &(device_index, fan_index, speed)).await?;
+    Ok(())
+}
+
+async fn set_gpu_fan_auto_impl(conn: &Connection, device_index: u32, fan_index: u32) -> Result<()> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
+    ).await?;
+    proxy.call::<_, _, ()>("SetGpuFanAuto", &(device_index, fan_index)).await?;
+    Ok(())
+}
+
+async fn set_gpu_power_limit_impl(conn: &Connection, device_index: u32, limit_watts: u32) -> Result<()> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
+    ).await?;
+    proxy.call::<_, _, ()>("SetGpuPowerLimit", &(device_index, limit_watts)).await?;
     Ok(())
 }

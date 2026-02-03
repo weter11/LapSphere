@@ -9,6 +9,7 @@ const STORAGE_POLL_MAX_SECONDS: f32 = 10.0;
 
 pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTheme, ctx: &Context, dbus_client: Option<&DbusClient>) {
     ui.add_space(6.0);
+    ui.spacing_mut().slider_width = ui.available_width() * 0.4;
 
     ui.horizontal(|ui| {
         ui.selectable_value(&mut state.settings_tab, SettingsTab::Main, "Main");
@@ -38,7 +39,27 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTheme, ctx: 
 }
 
 fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
-    ui.label(RichText::new("Daemon Logs (last 100 lines)").strong().heading());
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(format!("Daemon Logs (showing last {} lines) [PID: {}]", state.config.log_limit, std::process::id())).strong().heading());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("📂 Crash Reports").on_hover_text("Open folder with crash reports").clicked() {
+                log::warn!(target: "gui", "User requested to open crash reports folder (config folder). Path: {}", crate::app::get_crash_dir());
+                let crash_dir = crate::app::get_crash_dir();
+                let _ = std::fs::create_dir_all(&crash_dir);
+
+                #[cfg(target_os = "linux")]
+                {
+                    let _ = std::process::Command::new("xdg-open")
+                        .arg(&crash_dir)
+                        .spawn();
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let _ = webbrowser::open(&crash_dir);
+                }
+            }
+        });
+    });
     ui.add_space(8.0);
 
     ui.horizontal(|ui| {
@@ -49,16 +70,54 @@ fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
                 .join("\n");
             ctx.output_mut(|o| o.copied_text = log_text);
         }
+
+        if ui.button(if state.log_paused { "▶ Resume Output" } else { "⏸ Pause Output" }).clicked() {
+            state.log_paused = !state.log_paused;
+        }
+
+        if state.log_paused {
+            ui.label(RichText::new("Output Paused").color(egui::Color32::from_rgb(255, 200, 0)).strong());
+        }
     });
 
     ui.add_space(8.0);
 
     ui.horizontal(|ui| {
-        ui.label("Filter:");
+        ui.label("Filter Level:");
         ui.checkbox(&mut state.log_filter_error, "Error");
         ui.checkbox(&mut state.log_filter_warn, "Warning");
         ui.checkbox(&mut state.log_filter_info, "Info");
         ui.checkbox(&mut state.log_filter_debug, "Debug");
+        if ui.checkbox(&mut state.log_filter_trace, "Trace").changed() {
+            state.config.log_filter_trace = state.log_filter_trace;
+            let _ = state.save_settings();
+        }
+    });
+
+    ui.add_space(8.0);
+
+    ui.horizontal(|ui| {
+        ui.label("Line Limit:");
+        if ui.add(Slider::new(&mut state.config.log_limit, 1..=10000)).changed() {
+            let _ = state.save_settings();
+        }
+    });
+
+    ui.add_space(8.0);
+
+    ui.horizontal(|ui| {
+        ui.label("🔍 Search:");
+        ui.add(
+            egui::TextEdit::singleline(&mut state.log_search_text)
+                .hint_text("Filter logs by text (case-insensitive)")
+                .desired_width(300.0)
+        );
+        if ui.button("✖ Clear").clicked() {
+            state.log_search_text.clear();
+        }
+        if !state.log_search_text.is_empty() {
+            ui.label(egui::RichText::new(format!("Filtering...")).weak());
+        }
     });
 
     ui.add_space(8.0);
@@ -66,26 +125,42 @@ fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
     ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            for entry in state.daemon_logs.iter().rev() {
-                let show = match entry.level.as_str() {
+            let search_lower = state.log_search_text.to_lowercase();
+            let has_search = !search_lower.is_empty();
+            
+            for entry in state.daemon_logs.iter().rev().take(state.config.log_limit) {
+                let level_upper = entry.level.to_uppercase();
+                let show_level = match level_upper.as_str() {
                     "ERROR" => state.log_filter_error,
-                    "WARN" => state.log_filter_warn,
+                    "WARN" | "WARNING" => state.log_filter_warn,
                     "INFO" => state.log_filter_info,
-                    "DEBUG" | "TRACE" => state.log_filter_debug,
+                    "DEBUG" => state.log_filter_debug,
+                    "TRACE" => state.log_filter_trace,
                     _ => true,
                 };
 
-                if show {
-                    let color = match entry.level.as_str() {
+                // Apply search filter
+                let show_search = if has_search {
+                    entry.message.to_lowercase().contains(&search_lower) ||
+                    entry.target.to_lowercase().contains(&search_lower) ||
+                    entry.level.to_lowercase().contains(&search_lower)
+                } else {
+                    true
+                };
+
+                if show_level && show_search {
+                    let color = match level_upper.as_str() {
                         "ERROR" => egui::Color32::from_rgb(255, 100, 100),
-                        "WARN" => egui::Color32::from_rgb(255, 200, 100),
-                        "DEBUG" | "TRACE" => egui::Color32::from_rgb(150, 150, 150),
+                        "WARN" | "WARNING" => egui::Color32::from_rgb(255, 200, 100),
+                        "DEBUG" => egui::Color32::from_rgb(150, 150, 150),
+                        "TRACE" => egui::Color32::from_rgb(100, 100, 100),
                         _ => ui.visuals().text_color(),
                     };
 
                     ui.horizontal_top(|ui| {
                         ui.label(RichText::new(&entry.timestamp).weak().monospace());
                         ui.label(RichText::new(&entry.level).color(color).strong().monospace());
+                        ui.label(RichText::new(&entry.target).color(egui::Color32::from_rgb(100, 150, 255)).monospace());
                         ui.label(RichText::new(&entry.message).monospace());
                     });
                 }
@@ -295,6 +370,9 @@ fn draw_main_settings(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTh
     ui.add_space(6.0);
     
     if ui.checkbox(&mut state.config.start_minimized, "Start minimized").changed() {
+        if state.config.start_minimized {
+            state.config.tray_enabled = true;
+        }
         let _ = state.save_settings();
     }
 
@@ -326,30 +404,18 @@ fn draw_main_settings(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTh
     ui.separator();
     ui.add_space(12.0);
 
-    // NVIDIA Advanced Settings
-    draw_nvidia_advanced_settings(ui, state, dbus_client);
-}
-
-fn draw_nvidia_advanced_settings(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>) {
-    ui.heading("🎮 NVIDIA Advanced Settings");
+    // Gamepads database
+    ui.label(RichText::new("Gamepads").strong().heading());
     ui.add_space(6.0);
+    if ui.button("🗑 Remove database with previously connected gamepads").clicked() {
+        state.config.remembered_gamepads.clear();
+        let _ = state.save_settings();
+        state.show_message("Gamepad database cleared", false);
+    }
 
-    ui.label(RichText::new("Voltage Monitoring (nvidia-smi 565 or earlier):").strong());
-    ui.horizontal(|ui| {
-        let mut path = state.config.nvidia_smi_legacy_path.clone().unwrap_or_default();
-        if ui.text_edit_singleline(&mut path).changed() {
-            state.config.nvidia_smi_legacy_path = if path.is_empty() { None } else { Some(path.clone()) };
-            let _ = state.save_settings();
-            if let Some(client) = dbus_client {
-                let client = client.clone();
-                let path_clone = path.clone();
-                tokio::spawn(async move {
-                    let _ = client.set_nvidia_smi_legacy_path(&path_clone).await;
-                });
-            }
-        }
-    });
-    ui.label(RichText::new("Path to nvidia-smi binary v565 or earlier. Example: '/opt/nvidia-565/bin/nvidia-smi'").small().italics());
+    ui.add_space(12.0);
+    ui.separator();
+    ui.add_space(12.0);
 }
 
 fn draw_stats_configuration(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>) {
@@ -379,6 +445,9 @@ fn draw_stats_configuration(ui: &mut Ui, state: &mut AppState, dbus_client: Opti
         let _ = state.save_settings();
     }
     if ui.checkbox(&mut state.config.statistics_sections.show_fans, "Show fans").changed() {
+        let _ = state.save_settings();
+    }
+    if ui.checkbox(&mut state.config.statistics_sections.show_gamepads, "Show gamepads").changed() {
         let _ = state.save_settings();
     }
     
@@ -552,6 +621,22 @@ fn draw_stats_configuration(ui: &mut Ui, state: &mut AppState, dbus_client: Opti
         }
     });
 
+    let mut gamepad_poll = (state.config.statistics_sections.gamepad_poll_rate as f32) / 1000.0;
+    ui.horizontal(|ui| {
+        ui.label("Gamepads:");
+        if ui.add(Slider::new(&mut gamepad_poll, 0.5..=30.0).step_by(0.5).suffix(" s")).changed() {
+            let new_rate = (gamepad_poll * 1000.0) as u64;
+            state.config.statistics_sections.gamepad_poll_rate = new_rate;
+            let _ = state.save_settings();
+            // Update coordinator interval
+            if let Some(ref handle) = state.coordinator_handle {
+                let _ = handle.update_interval("gamepads".to_string(), std::time::Duration::from_millis(new_rate));
+            }
+            if let Some(client) = dbus_client {
+                let _ = client.update_polling_interval("gamepads", new_rate);
+            }
+        }
+    });
 }
 
 fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
@@ -741,6 +826,60 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
                     ui.label("Type:");
                     ui.label(format!("{:?}", gpu.gpu_type));
                     ui.end_row();
+
+                    if let Some(ref driver) = gpu.driver_version {
+                        ui.label("Driver Version:");
+                        ui.label(driver);
+                        ui.end_row();
+                    }
+
+                    if let Some(ref arch) = gpu.architecture {
+                        ui.label("Architecture:");
+                        ui.label(arch);
+                        ui.end_row();
+                    }
+
+                    if !gpu.supported_p_states.is_empty() {
+                        ui.label("Supported P-States:");
+                        ui.label(gpu.supported_p_states.join(", "));
+                        ui.end_row();
+                    }
+
+                    if gpu.gpu_type == lapsphere_common::types::GpuType::Discrete {
+                        ui.label("Power Limit Support:");
+                        ui.label(if gpu.supports_power_limit { "✅ Supported" } else { "❌ Not Supported" });
+                        ui.end_row();
+
+                        if let Some((min, max)) = gpu.power_limit_range {
+                            ui.label("Power Limit Range:");
+                            ui.label(format!("{} - {} W", min, max));
+                            ui.end_row();
+                        }
+                    }
+
+                    if let Some(ref v_type) = gpu.vram_type {
+                        ui.label("VRAM Type:");
+                        ui.label(v_type);
+                        ui.end_row();
+                    }
+
+                    if let Some(ref v_vendor) = gpu.vram_vendor {
+                        ui.label("VRAM Vendor:");
+                        ui.label(v_vendor);
+                        ui.end_row();
+                    }
+
+                    if let Some(v_bus) = gpu.vram_bus_width {
+                        ui.label("Bus Width:");
+                        ui.label(format!("{}-bit", v_bus));
+                        ui.end_row();
+                    }
+
+                    if let Some(v_bw) = gpu.vram_bandwidth {
+                        ui.label("VRAM Bandwidth:");
+                        ui.label(format!("{:.1} GB/s", v_bw));
+                        ui.end_row();
+                    }
                 });
 
             if idx + 1 < state.gpu_info.len() {

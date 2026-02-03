@@ -10,7 +10,7 @@ use anyhow::Result;
 use tokio::signal;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use std::collections::VecDeque;
+use std::collections::{VecDeque, HashMap};
 use lapsphere_common::types::{FanSettings, LogEntry};
 use polling_scheduler::{PollingScheduler, PollJob};
 
@@ -36,40 +36,46 @@ pub struct GpuOverclockStats {
 pub static CURRENT_GPU_OVERCLOCK_STATS: once_cell::sync::Lazy<Arc<Mutex<Option<GpuOverclockStats>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
 
-pub static NVIDIA_SMI_LEGACY_PATH: once_cell::sync::Lazy<Arc<Mutex<Option<String>>>> =
-    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
-
 pub static LAST_APPLIED_OFFSET: once_cell::sync::Lazy<Arc<Mutex<Option<i32>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
 
+pub static MANUAL_GPU_OFFSETS: once_cell::sync::Lazy<Arc<Mutex<HashMap<u32, (f32, f32)>>>> =
+    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+
 pub static DAEMON_LOGS: once_cell::sync::Lazy<Arc<Mutex<VecDeque<LogEntry>>>> =
-    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(VecDeque::with_capacity(100))));
+    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(VecDeque::with_capacity(10000))));
 
 struct DaemonLogger {
     inner: env_logger::Logger,
 }
 
 impl log::Log for DaemonLogger {
-    fn enabled(&self, metadata: &log::Metadata) -> bool {
-        self.inner.enabled(metadata)
+    fn enabled(&self, _metadata: &log::Metadata) -> bool {
+        // All levels are enabled for internal buffer (up to Debug per set_max_level)
+        // Also allow env_logger to control its own filtering
+        true
     }
 
     fn log(&self, record: &log::Record) {
-        if self.enabled(record.metadata()) {
-            let entry = LogEntry {
-                level: record.level().to_string(),
-                message: record.args().to_string(),
-                timestamp: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-            };
+        // Always capture all log levels into the buffer (Error, Warn, Info, Debug)
+        // The global max level (Debug) controls what reaches this logger
+        let entry = LogEntry {
+            level: record.level().to_string(),
+            target: record.target().to_string(),
+            message: record.args().to_string(),
+            timestamp: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        };
 
-            {
-                let mut logs = DAEMON_LOGS.lock().unwrap();
-                if logs.len() >= 100 {
-                    logs.pop_front();
-                }
-                logs.push_back(entry);
+        {
+            let mut logs = DAEMON_LOGS.lock().unwrap();
+            if logs.len() >= 10000 {
+                logs.pop_front();
             }
+            logs.push_back(entry);
+        }
 
+        // Only log to console if env_logger allows it
+        if self.inner.enabled(record.metadata()) {
             self.inner.log(record);
         }
     }
@@ -82,12 +88,16 @@ impl log::Log for DaemonLogger {
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut builder = env_logger::Builder::from_default_env();
+    if std::env::var("RUST_LOG").is_err() {
+        builder.filter_level(log::LevelFilter::Info);
+        builder.filter(Some("zbus"), log::LevelFilter::Warn);
+    }
     let inner = builder.build();
-    let max_level = inner.filter();
+    let _max_level = inner.filter();
     let logger = DaemonLogger { inner };
 
     log::set_boxed_logger(Box::new(logger)).unwrap();
-    log::set_max_level(max_level);
+    log::set_max_level(log::LevelFilter::Debug); // Allow up to Debug to reach our logger for buffer
 
     log::info!("Starting LapSphere Daemon");
 
@@ -125,7 +135,7 @@ async fn main() -> Result<()> {
             match hardware_detection::get_cpu_info() {
                 Ok(cpu) => {
                     println!("CPU: {}", cpu.name);
-                    println!("  Load: {:.1}%", cpu.median_load);
+                    println!("  Load: {:.1}%", cpu.average_load);
                     println!("  Temp: {:.1}°C", cpu.package_temp);
                 }
                 Err(e) => println!("Error getting CPU info: {}", e),
@@ -149,7 +159,7 @@ async fn main() -> Result<()> {
         match hardware_detection::get_cpu_info() {
             Ok(cpu) => {
                 println!("CPU: {}", cpu.name);
-                println!("  Load: {:.1}%", cpu.median_load);
+                println!("  Load: {:.1}%", cpu.average_load);
                 println!("  Temp: {:.1}°C", cpu.package_temp);
                 if let Some(power) = cpu.package_power {
                     println!("  Power: {:.1}W", power);
@@ -281,10 +291,22 @@ async fn main() -> Result<()> {
         Ok(())
     };
 
+    let log_tick = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let gpu_job_poll = {
+        let log_tick = log_tick.clone();
+        move || {
+            let tick = log_tick.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if tick % 60 == 0 {
+                log::warn!(target: "daemon", "heartbeat uptime_tick={}", tick);
+            }
+            gpu_poll_fn()
+        }
+    };
+
     let gpu_job = PollJob::new(
         "gpu_overclock".to_string(),
         Duration::from_millis(1000), // Default 1s
-        gpu_poll_fn,
+        gpu_job_poll,
     );
 
     if let Err(e) = scheduler_handle.add_job(gpu_job) {
@@ -376,6 +398,11 @@ async fn main() -> Result<()> {
     signal::ctrl_c().await?;
     log::info!("Shutting down daemon");
 
+    // Cleanup
+    if let Err(e) = crate::hardware_control::restore_cpu_frequency_limits() {
+        log::error!("Failed to restore CPU frequency limits on exit: {}", e);
+    }
+
     Ok(())
 }
 
@@ -406,35 +433,55 @@ fn apply_fan_curves(io: &tuxedo_io::TuxedoIo, settings: &FanSettings, sorted_cur
 }
 
 fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -> Result<()> {
-     // Clear stats and last offset if advanced control or manual clocks are disabled
-     if !gpu_settings.advanced_control || !gpu_settings.manual_clocks {
-         {
-             let mut stats = CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
-             *stats = None;
-         }
-         {
-             let mut last = LAST_APPLIED_OFFSET.lock().unwrap();
-             *last = None;
-         }
-         if !gpu_settings.manual_clocks {
-             let _ = crate::hardware_control::set_gpu_core_offset(0, 0);
-         }
-         return Ok(());
-     }
+    // Clear stats and last offset if advanced control or manual clocks are disabled
+    if !gpu_settings.advanced_control || !gpu_settings.manual_clocks {
+        {
+            let mut stats = CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
+            *stats = None;
+        }
+        {
+            let mut last = LAST_APPLIED_OFFSET.lock().unwrap();
+            *last = None;
+        }
+        if !gpu_settings.manual_clocks {
+            // Only clear if not already cleared to avoid waking up GPU unnecessarily
+            let needs_clear = {
+                let map = MANUAL_GPU_OFFSETS.lock().unwrap();
+                map.get(&0).map_or(true, |offsets| offsets.0 != 0.0 || offsets.1 != 0.0)
+            };
+
+            if needs_clear {
+                log::info!("Manual clocks disabled, resetting GPU offsets to 0");
+                let _ = crate::hardware_control::set_gpu_core_offset(0, 0.0);
+                let _ = crate::hardware_control::set_gpu_memory_offset(0, 0.0);
+                {
+                    let mut map = MANUAL_GPU_OFFSETS.lock().unwrap();
+                    map.insert(0, (0.0, 0.0));
+                }
+            }
+        }
+        return Ok(());
+    }
 
     // 1. Get current GPU stats (temperature, power, frequency)
+    // We only do this if advanced control is enabled
     let gpus = crate::hardware_detection::get_gpu_info()?;
     let nvidia_gpu = gpus.iter().find(|g| g.name.to_lowercase().contains("nvidia"));
 
-        if let Some(gpu) = nvidia_gpu {
-            let status_lower = gpu.status.to_lowercase();
-            let is_suspended = status_lower.contains("suspended");
-            let is_pstate = status_lower.starts_with('p');
-            // Check if GPU is suspended or not active
-            if is_suspended || !is_pstate {
-                return Ok(());
-            }
+    if let Some(gpu) = nvidia_gpu {
+        let status_lower = gpu.status.to_lowercase();
+        let is_suspended = status_lower.contains("suspended");
+        let is_pstate = status_lower.starts_with('p');
 
+        // If suspended, don't do anything
+        if is_suspended {
+            return Ok(());
+        }
+
+        // Check if GPU is in an active state for overclocking (typically P0)
+        if !is_pstate {
+            return Ok(());
+        }
 
         let temp = gpu.temperature.unwrap_or(0.0);
         let power = gpu.power.unwrap_or(0.0);
@@ -512,7 +559,7 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
         if status_lower != "p0" {
             let mut last = LAST_APPLIED_OFFSET.lock().unwrap();
             if *last != Some(0) {
-                crate::hardware_control::set_gpu_core_offset(0, 0)?;
+                crate::hardware_control::set_gpu_core_offset(0, 0.0)?;
                 *last = Some(0);
                 log::info!("Cleared dynamic GPU offset (P-state not 0)");
             }
@@ -544,7 +591,7 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
         {
             let mut last = LAST_APPLIED_OFFSET.lock().unwrap();
             if *last != Some(final_offset_i32) {
-                crate::hardware_control::set_gpu_core_offset(0, final_offset_i32)?;
+                crate::hardware_control::set_gpu_core_offset(0, final_offset_i32 as f32)?;
                 *last = Some(final_offset_i32);
                 if final_offset_i32 == 0 {
                     log::info!("Cleared dynamic GPU offset (P-state not 0)");
@@ -595,4 +642,41 @@ fn calculate_fan_speed(sorted_points: &[(u8, u8)], temp: f32) -> u8 {
     }
     
     50 // Fallback
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use log::Log;
+    
+    #[test]
+    fn test_daemon_logger_captures_all_levels() {
+        // This test verifies that the DaemonLogger captures all log levels
+        // Note: In a real environment, we would need to initialize the logger
+        // Here we're just verifying the static log buffer can be accessed
+        let logs = DAEMON_LOGS.lock().unwrap();
+        assert!(logs.capacity() >= 500, "Log buffer should have capacity of at least 500");
+    }
+    
+    #[test]
+    fn test_logger_enabled_returns_true() {
+        // Create a dummy env_logger
+        let inner = env_logger::Builder::new()
+            .filter_level(log::LevelFilter::Info)
+            .build();
+        let logger = DaemonLogger { inner };
+        
+        // Test that enabled() returns true for all metadata
+        let metadata = log::Metadata::builder()
+            .level(log::Level::Debug)
+            .target("test")
+            .build();
+        assert!(logger.enabled(&metadata), "Logger should enable all levels");
+        
+        let metadata = log::Metadata::builder()
+            .level(log::Level::Error)
+            .target("test")
+            .build();
+        assert!(logger.enabled(&metadata), "Logger should enable Error level");
+    }
 }

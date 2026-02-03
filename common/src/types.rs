@@ -13,6 +13,7 @@ pub struct SystemInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry {
     pub level: String,
+    pub target: String,
     pub message: String,
     pub timestamp: String,
 }
@@ -20,8 +21,8 @@ pub struct LogEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CpuInfo {
     pub name: String,
-    pub median_frequency: u64,
-    pub median_load: f32,
+    pub average_frequency: u64,
+    pub average_load: f32,
     pub package_temp: f32,
     pub package_power: Option<f32>,
     pub power_source: Option<String>,
@@ -103,8 +104,8 @@ pub struct GpuInfo {
     pub frequency: Option<u64>,
     pub memory_frequency: Option<u64>,
     pub temperature: Option<f32>,
-    pub hotspot_temperature: Option<f32>,
-    pub memory_temperature: Option<f32>,
+    pub hotspot_temperature: Option<f32>,  // GPU hotspot/junction temperature
+    pub memory_temperature: Option<f32>,   // VRAM temperature
     pub load: Option<f32>,
     pub power: Option<f32>,
     pub voltage: Option<f32>,
@@ -112,6 +113,26 @@ pub struct GpuInfo {
     pub drain_offset: Option<i32>,
     pub power_offset: Option<i32>,
     pub total_offset: Option<i32>,
+    pub min_core_clock: Option<u32>,
+    pub max_core_clock: Option<u32>,
+    pub min_memory_clock: Option<u32>,
+    pub max_memory_clock: Option<u32>,
+    pub core_clock_range: Option<(u32, u32)>,
+    pub memory_clock_range: Option<(u32, u32)>,
+    pub is_desktop: bool,
+    pub architecture: Option<String>,
+    pub nvml_index: Option<u32>,
+    pub driver_version: Option<String>,
+    pub supported_p_states: Vec<String>,
+    pub supports_power_limit: bool,
+    pub power_limit_range: Option<(u32, u32)>, // in Watts
+    pub supports_gpu_offset: bool,
+    pub supports_mem_offset: bool,
+    pub fan_speed_range: Option<(u32, u32)>, // in %
+    pub vram_type: Option<String>,
+    pub vram_vendor: Option<String>,
+    pub vram_bus_width: Option<u32>, // bits
+    pub vram_bandwidth: Option<f32>, // GB/s
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -141,6 +162,7 @@ pub struct FanInfo {
     pub rpm_or_percent: u32,
     pub temperature: Option<f32>,  // Temperature sensor for this fan
     pub is_rpm: bool,              // true if rpm_or_percent is RPM, false if it's percentage
+    pub mode: Option<String>,      // "Auto", "Manual", etc.
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,6 +175,7 @@ pub struct WiFiInfo {
     pub signal_level: Option<i32>,      // Signal level in dBm
     pub channel: Option<u32>,           // Current channel
     pub channel_width: Option<u32>,     // Channel width in MHz (20/40/80/160)
+    pub channel_freq: Option<u32>,      // Channel frequency in MHz
     pub tx_rate: Option<f64>,           // Upload rate in Mbps (Actual throughput)
     pub rx_rate: Option<f64>,           // Download rate in Mbps (Actual throughput)
     pub ssid: Option<String>,
@@ -174,6 +197,48 @@ pub struct StorageDevice {
     pub write_speed: Option<f64>,
     pub read_iops: Option<f64>,
     pub write_iops: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct GamepadInfo {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub id: String, // Dynamic identifier (e.g. input0)
+    #[serde(default)]
+    pub uid: String, // Stable unique identifier (e.g. ID_PATH from udev)
+    #[serde(default)]
+    pub status: GamepadStatus,
+    #[serde(default)]
+    pub battery_level: Option<u8>,
+    #[serde(default)]
+    pub connection_type: ConnectionType,
+    #[serde(default)]
+    pub power_status: PowerStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub enum GamepadStatus {
+    Connected,
+    #[default]
+    Disconnected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub enum ConnectionType {
+    Wired,
+    Wireless,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub enum PowerStatus {
+    Charging,
+    Discharging,
+    Full,
+    #[default]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -222,8 +287,9 @@ pub struct GpuSettings {
     pub min_mem_clock: Option<u32>,
     pub max_mem_clock: Option<u32>,
     pub manual_clocks: bool,
-    pub core_offset: Option<i32>,
-    pub memory_offset: Option<i32>,
+    pub core_offset: Option<f32>,
+    pub memory_offset: Option<f32>,
+    pub power_limit: Option<u32>,
     pub prime_profile: Option<String>,
     #[serde(default)]
     pub advanced_control: bool,
@@ -239,6 +305,16 @@ pub struct GpuSettings {
     pub advanced_max_mem_clock: Option<u32>,
     #[serde(default)]
     pub advanced_memory_offset: Option<i32>,
+    #[serde(default)]
+    pub nvidia_fans: Vec<NvidiaFanSettings>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct NvidiaFanSettings {
+    pub device_index: u32,
+    pub fan_id: u32,
+    pub speed: u32,
+    pub manual: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -357,13 +433,25 @@ pub struct AppConfig {
     pub autostart: bool,
     pub cpu_scheduler: String,
     pub font_size: FontSize,
-    #[serde(default)]
-    pub nvidia_smi_legacy_path: Option<String>,
     pub statistics_sections: StatisticsSections,
     pub tuning_section_order: Vec<String>,
     pub profiles: Vec<Profile>,
     pub current_profile: String,
     pub battery_settings: BatterySettings,
+    #[serde(default = "default_log_limit")]
+    pub log_limit: usize,
+    #[serde(default = "default_log_filter_trace")]
+    pub log_filter_trace: bool,
+    #[serde(default)]
+    pub remembered_gamepads: Vec<GamepadInfo>,
+}
+
+fn default_log_limit() -> usize {
+    100
+}
+
+fn default_log_filter_trace() -> bool {
+    false
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -391,6 +479,8 @@ pub struct StatisticsSections {
     pub show_wifi: bool,
     pub show_storage: bool,
     pub show_fans: bool,
+    #[serde(default = "default_show_gamepads")]
+    pub show_gamepads: bool,
     pub section_order: Vec<String>,
     // Polling rates in milliseconds
     pub cpu_poll_rate: u64,
@@ -401,6 +491,8 @@ pub struct StatisticsSections {
     pub wifi_poll_rate: u64,
     pub storage_poll_rate: u64,
     pub fans_poll_rate: u64,
+    #[serde(default = "default_gamepad_poll_rate")]
+    pub gamepad_poll_rate: u64,
     #[serde(default = "default_gpu_overclock_poll_rate")]
     pub gpu_overclock_poll_rate: u64,
 }
@@ -413,7 +505,15 @@ fn default_memory_poll_rate() -> u64 {
     1000
 }
 
+fn default_gamepad_poll_rate() -> u64 {
+    5000
+}
+
 fn default_show_memory() -> bool {
+    true
+}
+
+fn default_show_gamepads() -> bool {
     true
 }
 
@@ -426,7 +526,6 @@ impl Default for AppConfig {
             autostart: false,
             cpu_scheduler: "CFS".to_string(),
             font_size: FontSize::Medium,
-            nvidia_smi_legacy_path: None,
             statistics_sections: StatisticsSections::default(),
             tuning_section_order: vec![
                 "Keyboard".to_string(),
@@ -438,6 +537,9 @@ impl Default for AppConfig {
             profiles: vec![Profile::default()],
             current_profile: "Standard".to_string(),
             battery_settings: BatterySettings::default(),
+            log_limit: default_log_limit(),
+            log_filter_trace: default_log_filter_trace(),
+            remembered_gamepads: vec![],
         }
     }
 }
@@ -463,6 +565,7 @@ impl Default for StatisticsSections {
             show_wifi: true,
             show_storage: true,
             show_fans: true,
+            show_gamepads: true,
             section_order: vec![
                 "SystemInfo".to_string(),
                 "CPU".to_string(),
@@ -472,6 +575,7 @@ impl Default for StatisticsSections {
                 "WiFi".to_string(),
                 "Storage".to_string(),
                 "Fans".to_string(),
+                "Gamepads".to_string(),
             ],
             cpu_poll_rate: 1000,            // 1 second
             memory_poll_rate: default_memory_poll_rate(),
@@ -480,6 +584,7 @@ impl Default for StatisticsSections {
             wifi_poll_rate: 5000,           // 5 seconds
             storage_poll_rate: 5 * 1000,    // 5 seconds
             fans_poll_rate: 1000,           // 1 second
+            gamepad_poll_rate: 5000,        // 5 seconds
             gpu_overclock_poll_rate: 1000,
         }
     }
@@ -529,8 +634,9 @@ impl Default for GpuSettings {
             min_mem_clock: None,
             max_mem_clock: None,
             manual_clocks: false,
-            core_offset: Some(0),
-            memory_offset: Some(0),
+            core_offset: Some(0.0),
+            memory_offset: Some(0.0),
+            power_limit: None,
             prime_profile: Some("on-demand".to_string()),
             advanced_control: false,
             advanced: GpuAdvancedSettings::default(),
@@ -539,6 +645,7 @@ impl Default for GpuSettings {
             advanced_min_mem_clock: None,
             advanced_max_mem_clock: None,
             advanced_memory_offset: Some(0),
+            nvidia_fans: vec![],
         }
     }
 }

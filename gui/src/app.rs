@@ -42,6 +42,7 @@ pub struct AppState {
     pub gpu_info: Vec<GpuInfo>,
     pub battery_info: Option<BatteryInfo>,
     pub wifi_info: Vec<WiFiInfo>,
+    pub gamepad_info: Vec<GamepadInfo>,
     pub fan_info: Vec<FanInfo>,
     pub storage_device_info: Vec<StorageDevice>,
     pub mount_info: Vec<MountInfo>,
@@ -58,10 +59,13 @@ pub struct AppState {
     pub daemon_logs: Vec<LogEntry>,
     pub new_version_available: Option<String>,
     pub latest_changelog: Option<String>,
+    pub log_filter_trace: bool,
     pub log_filter_debug: bool,
     pub log_filter_info: bool,
     pub log_filter_warn: bool,
     pub log_filter_error: bool,
+    pub log_paused: bool,
+    pub log_search_text: String,
     
     // UI state
     pub current_page: Page,
@@ -100,6 +104,7 @@ impl AppState {
             gpu_info: Vec::new(),
             battery_info: None,
             wifi_info: Vec::new(),
+            gamepad_info: Vec::new(),
             fan_info: Vec::new(),
             storage_device_info: Vec::new(),
             mount_info: Vec::new(),
@@ -115,10 +120,13 @@ impl AppState {
             daemon_logs: Vec::new(),
             new_version_available: None,
             latest_changelog: None,
+            log_filter_trace: false,
             log_filter_debug: false,
             log_filter_info: true,
             log_filter_warn: true,
             log_filter_error: true,
+            log_paused: false,
+            log_search_text: String::new(),
             keyboard_capabilities: None,
             current_page: Page::Statistics,
             settings_tab: SettingsTab::Main,
@@ -147,6 +155,7 @@ pub fn load_config(&mut self) {
         self.config = config;
         self.config.statistics_sections.section_order =
             statistics::normalize_section_order(&self.config.statistics_sections.section_order);
+        self.log_filter_trace = self.config.log_filter_trace;
     }
 }
     
@@ -194,6 +203,11 @@ pub struct LapSphereApp {
     
     // Keyboard shortcuts
     shortcuts: KeyboardShortcuts,
+
+    startup_frames: u32,
+
+    last_tray_profile: String,
+    last_tray_profiles_count: usize,
 }
 
 #[derive(Debug)]
@@ -204,6 +218,7 @@ pub enum HardwareUpdate {
     GpuInfo(Vec<GpuInfo>),
     BatteryInfo(BatteryInfo),
     WifiInfo(Vec<WiFiInfo>),
+    GamepadInfo(Vec<GamepadInfo>),
     FanInfo(Vec<FanInfo>),
     StorageDeviceInfo(Vec<StorageDevice>),
     MountInfo(Vec<MountInfo>),
@@ -212,7 +227,6 @@ pub enum HardwareUpdate {
     DaemonLogs(Vec<LogEntry>),
     UpdateInfo(String, String),
     GpuClockRanges(Result<(u32, u32), String>),
-    GpuMemClockRanges(Result<Vec<u32>, String>),
     GpuCoreOffsetLimits(Result<(i32, i32), String>),
     GpuMemOffsetLimits(Result<(i32, i32), String>),
     AvailableThresholds(Vec<u8>, Vec<u8>),
@@ -301,6 +315,13 @@ impl LapSphereApp {
                                     Err(e) => log::error!("DBus error getting WiFi info: {}", e),
                                 }
                             }
+                            "gamepads" => {
+                                match client.get_gamepad_info().await {
+                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::GamepadInfo(info)); }
+                                    Ok(Err(e)) => log::error!("Failed to get Gamepad info: {}", e),
+                                    Err(e) => log::error!("DBus error getting Gamepad info: {}", e),
+                                }
+                            }
                             "storage" => {
                                 match client.get_storage_device_info().await {
                                     Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::StorageDeviceInfo(info)); }
@@ -340,20 +361,12 @@ impl LapSphereApp {
             let _ = handle.register("fans".to_string(), Duration::from_millis(state.config.statistics_sections.fans_poll_rate));
             let _ = handle.register("battery".to_string(), Duration::from_millis(state.config.statistics_sections.battery_poll_rate));
             let _ = handle.register("wifi".to_string(), Duration::from_millis(state.config.statistics_sections.wifi_poll_rate));
+            let _ = handle.register("gamepads".to_string(), Duration::from_millis(state.config.statistics_sections.gamepad_poll_rate));
             let _ = handle.register("storage".to_string(), Duration::from_millis(state.config.statistics_sections.storage_poll_rate));
             let _ = handle.register("mount".to_string(), Duration::from_millis(state.config.statistics_sections.storage_poll_rate));
             let _ = handle.register("gpu_overclock".to_string(), Duration::from_millis(state.config.statistics_sections.gpu_overclock_poll_rate));
             let _ = handle.register("webcam".to_string(), Duration::from_secs(5));
             let _ = handle.register("logs".to_string(), Duration::from_secs(2));
-
-            // Sync legacy path to daemon
-            if let Some(ref path) = state.config.nvidia_smi_legacy_path {
-                let client_clone = client.clone();
-                let path_clone = path.clone();
-                tokio::spawn(async move {
-                    let _ = client_clone.set_nvidia_smi_legacy_path(&path_clone).await;
-                });
-            }
 
             // Initial system info load
             let client_clone = client.clone();
@@ -456,6 +469,9 @@ impl LapSphereApp {
             }
         };
         
+        let last_tray_profile = state.config.current_profile.clone();
+        let last_tray_profiles_count = state.config.profiles.len();
+
         Self {
             state,
             dbus_client,
@@ -465,6 +481,9 @@ impl LapSphereApp {
             hw_update_tx,
             hw_update_rx,
             shortcuts: KeyboardShortcuts::new(),
+            startup_frames: 10,
+            last_tray_profile,
+            last_tray_profiles_count,
         }
     }
     
@@ -490,6 +509,45 @@ impl LapSphereApp {
                 HardwareUpdate::WifiInfo(info) => {
                     self.state.wifi_info = info;
                 }
+                HardwareUpdate::GamepadInfo(connected_gamepads) => {
+                    self.state.gamepad_info = connected_gamepads.clone();
+
+                    let mut changed = false;
+
+                    // Update existing ones and mark as connected/disconnected
+                    for remembered in &mut self.state.config.remembered_gamepads {
+                        if let Some(connected) = connected_gamepads.iter().find(|c| c.uid == remembered.uid) {
+                            if remembered.status != GamepadStatus::Connected ||
+                               remembered.battery_level != connected.battery_level ||
+                               remembered.power_status != connected.power_status ||
+                               remembered.connection_type != connected.connection_type ||
+                               remembered.name != connected.name
+                            {
+                                remembered.status = GamepadStatus::Connected;
+                                remembered.name = connected.name.clone();
+                                remembered.battery_level = connected.battery_level;
+                                remembered.power_status = connected.power_status.clone();
+                                remembered.connection_type = connected.connection_type.clone();
+                                changed = true;
+                            }
+                        } else if remembered.status != GamepadStatus::Disconnected {
+                            remembered.status = GamepadStatus::Disconnected;
+                            changed = true;
+                        }
+                    }
+
+                    // Add new ones
+                    for connected in connected_gamepads {
+                        if !self.state.config.remembered_gamepads.iter().any(|r| r.uid == connected.uid) {
+                            self.state.config.remembered_gamepads.push(connected);
+                            changed = true;
+                        }
+                    }
+
+                    if changed {
+                        let _ = self.state.save_settings();
+                    }
+                }
                 HardwareUpdate::FanInfo(info) => {
                     self.state.fan_info = info;
                 }
@@ -506,7 +564,9 @@ impl LapSphereApp {
                     self.state.webcam_enabled = Some(state);
                 }
                 HardwareUpdate::DaemonLogs(logs) => {
-                    self.state.daemon_logs = logs;
+                    if !self.state.log_paused {
+                        self.state.daemon_logs = logs;
+                    }
                 }
                 HardwareUpdate::UpdateInfo(version, changelog) => {
                     self.state.new_version_available = Some(version);
@@ -516,17 +576,6 @@ impl LapSphereApp {
                     match result {
                         Ok(ranges) => self.state.gpu_clock_ranges = Some(ranges),
                         Err(e) => self.state.show_message(format!("Failed to get GPU clock ranges: {}", e), true),
-                    }
-                }
-                HardwareUpdate::GpuMemClockRanges(result) => {
-                    match result {
-                        Ok(mut ranges) => {
-                            if !ranges.is_empty() {
-                                ranges.sort_unstable();
-                                self.state.gpu_mem_clock_ranges = Some((*ranges.first().unwrap(), *ranges.last().unwrap()));
-                            }
-                        },
-                        Err(e) => self.state.show_message(format!("Failed to get GPU memory clock ranges: {}", e), true),
                     }
                 }
                 HardwareUpdate::GpuCoreOffsetLimits(result) => {
@@ -674,6 +723,21 @@ impl LapSphereApp {
             return;
         };
 
+        // Sync profile list if count changed
+        if self.state.config.profiles.len() != self.last_tray_profiles_count {
+            tray.set_profiles(&self.state.config.profiles);
+            self.last_tray_profiles_count = self.state.config.profiles.len();
+            // Force current profile sync as well since menu rebuilt
+            tray.set_current_profile(&self.state.config.current_profile);
+            self.last_tray_profile = self.state.config.current_profile.clone();
+        }
+
+        // Sync current profile if changed in main window
+        if self.state.config.current_profile != self.last_tray_profile {
+            tray.set_current_profile(&self.state.config.current_profile);
+            self.last_tray_profile = self.state.config.current_profile.clone();
+        }
+
         if let Some(event) = tray.handle_events() {
             match event {
                 TrayEvent::ShowWindow => {
@@ -702,6 +766,14 @@ impl LapSphereApp {
 
 impl eframe::App for LapSphereApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        if self.startup_frames > 0 {
+            let start_in_tray = std::env::args().any(|arg| arg == "--tray");
+            if self.state.config.start_minimized || start_in_tray {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
+            self.startup_frames -= 1;
+        }
+
         // Handle keyboard shortcuts
         self.shortcuts.handle_shortcuts(ctx, &mut self.state);
         
@@ -758,10 +830,14 @@ impl eframe::App for LapSphereApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         if let Some(client) = &self.dbus_client {
             let client = client.clone();
-            tokio::spawn(async move {
-                let _ = tokio::time::timeout(Duration::from_secs(2), client.set_fan_auto(0)).await;
-                let _ = tokio::time::timeout(Duration::from_secs(2), client.shutdown_daemon()).await;
-            });
+            // Use a fresh runtime for shutdown to avoid potential nesting issues
+            // and ensure commands are processed before the main runtime closes.
+            if let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                let _ = rt.block_on(async move {
+                    let _ = tokio::time::timeout(Duration::from_secs(2), client.set_all_fans_auto()).await;
+                    let _ = tokio::time::timeout(Duration::from_secs(2), client.shutdown_daemon()).await;
+                });
+            }
         }
     }
 }
@@ -775,10 +851,12 @@ struct SettingsConfig {
     autostart: bool,
     cpu_scheduler: String,
     font_size: FontSize,
-    nvidia_smi_legacy_path: Option<String>,
     statistics_sections: StatisticsSections,
     tuning_section_order: Vec<String>,
     battery_settings: BatterySettings,
+    log_limit: usize,
+    log_filter_trace: bool,
+    remembered_gamepads: Vec<GamepadInfo>,
 }
 
 impl Default for SettingsConfig {
@@ -791,10 +869,12 @@ impl Default for SettingsConfig {
             autostart: config.autostart,
             cpu_scheduler: config.cpu_scheduler,
             font_size: config.font_size,
-            nvidia_smi_legacy_path: config.nvidia_smi_legacy_path.clone(),
             statistics_sections: config.statistics_sections,
             tuning_section_order: config.tuning_section_order,
             battery_settings: config.battery_settings,
+            log_limit: config.log_limit,
+            log_filter_trace: config.log_filter_trace,
+            remembered_gamepads: config.remembered_gamepads.clone(),
         }
     }
 }
@@ -808,10 +888,12 @@ impl From<&AppConfig> for SettingsConfig {
             autostart: config.autostart,
             cpu_scheduler: config.cpu_scheduler.clone(),
             font_size: config.font_size.clone(),
-            nvidia_smi_legacy_path: config.nvidia_smi_legacy_path.clone(),
             statistics_sections: config.statistics_sections.clone(),
             tuning_section_order: config.tuning_section_order.clone(),
             battery_settings: config.battery_settings.clone(),
+            log_limit: config.log_limit,
+            log_filter_trace: config.log_filter_trace,
+            remembered_gamepads: config.remembered_gamepads.clone(),
         }
     }
 }
@@ -824,10 +906,12 @@ impl SettingsConfig {
         config.autostart = self.autostart;
         config.cpu_scheduler = self.cpu_scheduler.clone();
         config.font_size = self.font_size.clone();
-        config.nvidia_smi_legacy_path = self.nvidia_smi_legacy_path.clone();
         config.statistics_sections = self.statistics_sections.clone();
         config.tuning_section_order = self.tuning_section_order.clone();
         config.battery_settings = self.battery_settings.clone();
+        config.log_limit = self.log_limit;
+        config.log_filter_trace = self.log_filter_trace;
+        config.remembered_gamepads = self.remembered_gamepads.clone();
     }
 }
 
@@ -885,10 +969,10 @@ pub fn get_config_dir() -> String {
 }
 
 pub fn get_crash_dir() -> String {
-    format!("{}/crashes", get_config_dir())
+    get_config_dir()
 }
 
-fn load_config_from_disk() -> anyhow::Result<AppConfig> {
+pub fn load_config_from_disk() -> anyhow::Result<AppConfig> {
     let config_dir = get_config_dir();
     let settings_path = format!("{}/settings.json", config_dir);
     let profiles_path = format!("{}/profiles.json", config_dir);
@@ -919,6 +1003,10 @@ fn load_config_from_disk() -> anyhow::Result<AppConfig> {
     }
     if let Some(profiles) = profiles {
         profiles.apply_to(&mut config);
+    }
+
+    if config.start_minimized {
+        config.tray_enabled = true;
     }
 
     config.statistics_sections.section_order =
@@ -963,8 +1051,20 @@ fn save_settings_to_disk(config: &AppConfig) -> anyhow::Result<()> {
                 X-GNOME-Autostart-enabled=true\n"
             );
             std::fs::write(&desktop_file, content)?;
-        } else if std::path::Path::new(&desktop_file).exists() {
-            std::fs::remove_file(&desktop_file)?;
+        } else {
+            // Write a desktop file that explicitly disables autostart to override system-wide one
+            std::fs::create_dir_all(&autostart_dir)?;
+            let content = format!(
+                "[Desktop Entry]\n\
+                Type=Application\n\
+                Name=LapSphere\n\
+                Exec=lapsphere --tray\n\
+                Icon=lapsphere\n\
+                X-GNOME-Autostart-enabled=false\n\
+                NoDisplay=true\n\
+                Hidden=true\n"
+            );
+            std::fs::write(&desktop_file, content)?;
         }
     }
 
