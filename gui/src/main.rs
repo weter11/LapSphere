@@ -49,9 +49,9 @@ fn setup_panic_hook() {
         let _ = fs::write(file_path, report);
 
         #[cfg(target_os = "linux")]
-        eprintln!("Application panicked! Crash report saved to ~/.config/lapsphere/crashes");
+        eprintln!("Application panicked! Crash report saved to ~/.config/lapsphere");
         #[cfg(target_os = "windows")]
-        eprintln!("Application panicked! Crash report saved to %APPDATA%\\lapsphere\\crashes");
+        eprintln!("Application panicked! Crash report saved to %APPDATA%\\lapsphere");
     }));
 }
 

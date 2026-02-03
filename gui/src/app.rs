@@ -72,6 +72,7 @@ pub struct AppState {
     pub settings_tab: SettingsTab,
     pub status_message: Option<StatusMessage>,
     pub restart_confirmation_pending: bool,
+    pub crash_folder_warning_pending: bool,
     pub pending_prime_profile: Option<String>,
     pub selected_fan_curve: usize,
     
@@ -132,6 +133,7 @@ impl AppState {
             settings_tab: SettingsTab::Main,
             status_message: None,
             restart_confirmation_pending: false,
+            crash_folder_warning_pending: false,
             pending_prime_profile: None,
             editing_profile_name: None,
             pending_battery_update: None,
@@ -969,7 +971,7 @@ pub fn get_config_dir() -> String {
 }
 
 pub fn get_crash_dir() -> String {
-    format!("{}/crashes", get_config_dir())
+    get_config_dir()
 }
 
 pub fn load_config_from_disk() -> anyhow::Result<AppConfig> {

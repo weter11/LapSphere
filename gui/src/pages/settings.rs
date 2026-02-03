@@ -43,9 +43,7 @@ fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
         ui.label(RichText::new(format!("Daemon Logs (showing last {} lines)", state.config.log_limit)).strong().heading());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button("📂 Crash Reports").on_hover_text("Open folder with crash reports").clicked() {
-                let crash_dir = crate::app::get_crash_dir();
-                let _ = std::fs::create_dir_all(&crash_dir);
-                let _ = webbrowser::open(&crash_dir);
+                state.crash_folder_warning_pending = true;
             }
         });
     });
@@ -155,6 +153,41 @@ fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
                 }
             }
         });
+
+    if state.crash_folder_warning_pending {
+        egui::Window::new("Open Crash Reports Folder")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(RichText::new("⚠ Warning").color(egui::Color32::from_rgb(255, 200, 0)).strong());
+                ui.label("You are about to open the application's configuration folder, which also contains crash reports.");
+                ui.label("Be careful when modifying files in this directory.");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Open Folder").clicked() {
+                        let crash_dir = crate::app::get_crash_dir();
+                        let _ = std::fs::create_dir_all(&crash_dir);
+
+                        #[cfg(target_os = "linux")]
+                        {
+                            let _ = std::process::Command::new("xdg-open")
+                                .arg(&crash_dir)
+                                .spawn();
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            let _ = webbrowser::open(&crash_dir);
+                        }
+
+                        state.crash_folder_warning_pending = false;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        state.crash_folder_warning_pending = false;
+                    }
+                });
+            });
+    }
 }
 
 fn draw_help_info(ui: &mut Ui, state: &AppState) {
