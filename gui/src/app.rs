@@ -59,6 +59,7 @@ pub struct AppState {
     pub daemon_logs: Vec<LogEntry>,
     pub new_version_available: Option<String>,
     pub latest_changelog: Option<String>,
+    pub log_filter_trace: bool,
     pub log_filter_debug: bool,
     pub log_filter_info: bool,
     pub log_filter_warn: bool,
@@ -119,6 +120,7 @@ impl AppState {
             daemon_logs: Vec::new(),
             new_version_available: None,
             latest_changelog: None,
+            log_filter_trace: false,
             log_filter_debug: false,
             log_filter_info: true,
             log_filter_warn: true,
@@ -153,6 +155,7 @@ pub fn load_config(&mut self) {
         self.config = config;
         self.config.statistics_sections.section_order =
             statistics::normalize_section_order(&self.config.statistics_sections.section_order);
+        self.log_filter_trace = self.config.log_filter_trace;
     }
 }
     
@@ -851,6 +854,8 @@ struct SettingsConfig {
     statistics_sections: StatisticsSections,
     tuning_section_order: Vec<String>,
     battery_settings: BatterySettings,
+    log_limit: usize,
+    log_filter_trace: bool,
     remembered_gamepads: Vec<GamepadInfo>,
 }
 
@@ -867,6 +872,8 @@ impl Default for SettingsConfig {
             statistics_sections: config.statistics_sections,
             tuning_section_order: config.tuning_section_order,
             battery_settings: config.battery_settings,
+            log_limit: config.log_limit,
+            log_filter_trace: config.log_filter_trace,
             remembered_gamepads: config.remembered_gamepads.clone(),
         }
     }
@@ -884,6 +891,8 @@ impl From<&AppConfig> for SettingsConfig {
             statistics_sections: config.statistics_sections.clone(),
             tuning_section_order: config.tuning_section_order.clone(),
             battery_settings: config.battery_settings.clone(),
+            log_limit: config.log_limit,
+            log_filter_trace: config.log_filter_trace,
             remembered_gamepads: config.remembered_gamepads.clone(),
         }
     }
@@ -900,6 +909,8 @@ impl SettingsConfig {
         config.statistics_sections = self.statistics_sections.clone();
         config.tuning_section_order = self.tuning_section_order.clone();
         config.battery_settings = self.battery_settings.clone();
+        config.log_limit = self.log_limit;
+        config.log_filter_trace = self.log_filter_trace;
         config.remembered_gamepads = self.remembered_gamepads.clone();
     }
 }
@@ -958,7 +969,7 @@ pub fn get_config_dir() -> String {
 }
 
 pub fn get_crash_dir() -> String {
-    format!("{}/crashes", get_config_dir())
+    get_config_dir()
 }
 
 pub fn load_config_from_disk() -> anyhow::Result<AppConfig> {

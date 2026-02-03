@@ -42,7 +42,7 @@ pub static MANUAL_GPU_OFFSETS: once_cell::sync::Lazy<Arc<Mutex<HashMap<u32, (f32
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
 pub static DAEMON_LOGS: once_cell::sync::Lazy<Arc<Mutex<VecDeque<LogEntry>>>> =
-    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(VecDeque::with_capacity(500))));
+    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(VecDeque::with_capacity(10000))));
 
 struct DaemonLogger {
     inner: env_logger::Logger,
@@ -67,7 +67,7 @@ impl log::Log for DaemonLogger {
 
         {
             let mut logs = DAEMON_LOGS.lock().unwrap();
-            if logs.len() >= 1000 {
+            if logs.len() >= 10000 {
                 logs.pop_front();
             }
             logs.push_back(entry);
@@ -134,7 +134,7 @@ async fn main() -> Result<()> {
             match hardware_detection::get_cpu_info() {
                 Ok(cpu) => {
                     println!("CPU: {}", cpu.name);
-                    println!("  Load: {:.1}%", cpu.median_load);
+                    println!("  Load: {:.1}%", cpu.average_load);
                     println!("  Temp: {:.1}°C", cpu.package_temp);
                 }
                 Err(e) => println!("Error getting CPU info: {}", e),
@@ -158,7 +158,7 @@ async fn main() -> Result<()> {
         match hardware_detection::get_cpu_info() {
             Ok(cpu) => {
                 println!("CPU: {}", cpu.name);
-                println!("  Load: {:.1}%", cpu.median_load);
+                println!("  Load: {:.1}%", cpu.average_load);
                 println!("  Temp: {:.1}°C", cpu.package_temp);
                 if let Some(power) = cpu.package_power {
                     println!("  Power: {:.1}W", power);
@@ -396,6 +396,11 @@ async fn main() -> Result<()> {
     // Wait for shutdown signal
     signal::ctrl_c().await?;
     log::info!("Shutting down daemon");
+
+    // Cleanup
+    if let Err(e) = crate::hardware_control::restore_cpu_frequency_limits() {
+        log::error!("Failed to restore CPU frequency limits on exit: {}", e);
+    }
 
     Ok(())
 }

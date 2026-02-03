@@ -266,15 +266,6 @@ fn read_cpu_frequencies(logical_cores: u32) -> Vec<u64> {
     freqs
 }
 
-fn calculate_median(values: &[u64]) -> u64 {
-    if values.is_empty() {
-        return 0;
-    }
-    let mut sorted = values.to_vec();
-    sorted.sort_unstable();
-    sorted[sorted.len() / 2]
-}
-
 fn get_core_temp(cpu: u32) -> f32 {
     if let Ok(entries) = fs::read_dir("/sys/class/hwmon") {
         for entry in entries.flatten() {
@@ -607,7 +598,7 @@ fn read_frequency_limits() -> (Option<u64>, Option<u64>) {
     (min_freq, max_freq)
 }
 
-fn read_hw_frequency_limits() -> Result<(Option<u64>, Option<u64>)> {
+pub fn read_hw_frequency_limits() -> Result<(Option<u64>, Option<u64>)> {
     let min_path = "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq";
     let max_path = "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq";
 
@@ -833,18 +824,15 @@ pub fn get_cpu_info() -> Result<CpuInfo> {
         });
     }
     
-    let median_frequency = calculate_median(&frequencies);
+    let average_frequency = if !frequencies.is_empty() {
+        frequencies.iter().sum::<u64>() / frequencies.len() as u64
+    } else {
+        0
+    };
     
     let loads_vec: Vec<f32> = loads.values().copied().collect();
-    let median_load = if !loads_vec.is_empty() {
-        let mut sorted = loads_vec.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        if sorted.len() % 2 == 0 {
-            let mid = sorted.len() / 2;
-            (sorted[mid - 1] + sorted[mid]) / 2.0
-        } else {
-            sorted[sorted.len() / 2]
-        }
+    let average_load = if !loads_vec.is_empty() {
+        loads_vec.iter().sum::<f32>() / loads_vec.len() as f32
     } else {
         0.0
     };
@@ -957,8 +945,8 @@ pub fn get_cpu_info() -> Result<CpuInfo> {
 
     Ok(CpuInfo {
         name,
-        median_frequency,
-        median_load,
+        average_frequency,
+        average_load,
         package_temp,
         package_power,
         cores,
@@ -2714,7 +2702,7 @@ pub fn get_wifi_info() -> Result<Vec<WiFiInfo>> {
         let (network_controller, subsystem) = get_pci_info(&interface);
         
         // Get all details from iw
-        let (ssid, channel, channel_width, tx_bitrate, rx_bitrate, iw_rx_bytes, iw_tx_bytes, iw_signal) = get_wifi_details(&interface);
+        let (ssid, channel, channel_width, channel_freq, tx_bitrate, rx_bitrate, iw_rx_bytes, iw_tx_bytes, iw_signal) = get_wifi_details(&interface);
 
         // Signal level priority: iw > /proc/net/wireless
         let signal_level = iw_signal.or_else(|| read_wifi_signal(&interface));
@@ -2740,6 +2728,7 @@ pub fn get_wifi_info() -> Result<Vec<WiFiInfo>> {
             signal_level,
             channel,
             channel_width,
+            channel_freq,
             tx_rate,
             rx_rate,
             ssid,
@@ -2763,6 +2752,7 @@ fn get_wifi_details(interface: &str) -> (
     Option<String>,
     Option<u32>,
     Option<u32>,
+    Option<u32>,
     Option<f64>,
     Option<f64>,
     Option<u64>,
@@ -2772,6 +2762,7 @@ fn get_wifi_details(interface: &str) -> (
     let mut ssid = None;
     let mut channel = None;
     let mut width = None;
+    let mut freq = None;
     let mut tx_bitrate = None;
     let mut rx_bitrate = None;
     let mut rx_bytes = None;
@@ -2794,6 +2785,9 @@ fn get_wifi_details(interface: &str) -> (
                 
                 if let Some(pos) = lower.find("ssid:") {
                     ssid = normalize_ssid(trimmed[pos + 5..].trim());
+                } else if let Some(pos) = lower.find("freq:") {
+                    let part = trimmed[pos + 5..].trim();
+                    freq = part.split_whitespace().next().and_then(|s| s.parse().ok());
                 } else if lower.contains("rx bitrate:") {
                     rx_bitrate = parse_wifi_rate(trimmed);
                 } else if lower.contains("tx bitrate:") {
@@ -2883,7 +2877,7 @@ fn get_wifi_details(interface: &str) -> (
         }
     }
 
-    (ssid, channel, width, tx_bitrate, rx_bitrate, rx_bytes, tx_bytes, signal)
+    (ssid, channel, width, freq, tx_bitrate, rx_bitrate, rx_bytes, tx_bytes, signal)
 }
 
 fn read_wifi_temperature(interface: &str) -> Option<f32> {
@@ -3094,14 +3088,18 @@ pub fn get_gamepad_info() -> Result<Vec<GamepadInfo>> {
                                         // Try to find a stable UID from udev data
                                         let mut id_path = None;
                                         let mut id_serial = None;
+                                        let mut id_serial_short = None;
                                         for line in udev_data.lines() {
                                             if let Some(val) = line.strip_prefix("E:ID_PATH=") {
                                                 id_path = Some(val.to_string());
+                                            } else if let Some(val) = line.strip_prefix("E:ID_SERIAL_SHORT=") {
+                                                id_serial_short = Some(val.to_string());
                                             } else if let Some(val) = line.strip_prefix("E:ID_SERIAL=") {
                                                 id_serial = Some(val.to_string());
                                             }
                                         }
-                                        udev_uid = id_path.or(id_serial);
+                                        // Priority: Serial Short > Serial > Path
+                                        udev_uid = id_serial_short.or(id_serial).or(id_path);
 
                                         if is_gamepad {
                                             break;
@@ -3143,7 +3141,15 @@ pub fn get_gamepad_info() -> Result<Vec<GamepadInfo>> {
                     if let Ok(device_name) = fs::read_to_string(path.join("name")) {
                         let device_name = device_name.trim().to_string();
                         // Use sysfs path as absolute fallback for UID if udev failed
-                        let uid = udev_uid.unwrap_or_else(|| path.to_string_lossy().to_string());
+                        let mut uid = udev_uid.unwrap_or_else(|| path.to_string_lossy().to_string());
+
+                        // Try to get uniq (MAC address) which is very stable across connection types
+                        if let Ok(uniq) = fs::read_to_string(path.join("device/uniq")) {
+                            let uniq = uniq.trim();
+                            if !uniq.is_empty() && uniq != "00:00:00:00:00:00" {
+                                uid = uniq.to_string();
+                            }
+                        }
 
                         if !seen_uids.contains(&uid) {
                             let bustype = fs::read_to_string(path.join("id/bustype"))
