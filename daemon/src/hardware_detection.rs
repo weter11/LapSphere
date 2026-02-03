@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use std::fs;
 use std::path::Path;
 use std::collections::HashMap;
@@ -1458,6 +1458,8 @@ const NV_ESC_REGISTER_FD: u8 = 0x27;
 const NV01_DEVICE_0: u32 = 0x00000080;
 const NV20_SUBDEVICE_0: u32 = 0x00002080;
 
+// NVIDIA RM Control API constants
+// These values are verified to match NVIDIA driver headers and LACT implementation
 const NV2080_CTRL_CMD_FB_GET_INFO: u32 = 0x20800101;
 const NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE: u32 = 0x01;
 const NV2080_CTRL_FB_INFO_INDEX_BUS_WIDTH: u32 = 0x02;
@@ -1555,28 +1557,36 @@ struct NvidiaDriverHandle {
 impl NvidiaDriverHandle {
     fn open(minor_number: u32) -> Result<Self> {
         log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Attempting to open for minor {}", minor_number);
+        
+        // Open /dev/nvidiactl with enhanced error reporting
         let nvidiactl_fd = fs::File::options()
             .read(true)
             .write(true)
-            .open("/dev/nvidiactl")?;
+            .open("/dev/nvidiactl")
+            .with_context(|| "Failed to open /dev/nvidiactl - ensure NVIDIA driver is loaded and you have permissions (try: sudo usermod -aG video <username>)")?;
         log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Opened /dev/nvidiactl");
 
         let mut client_params: NVOS21_PARAMETERS = unsafe { std::mem::zeroed() };
         unsafe {
-            rm_alloc_nvos21(nvidiactl_fd.as_raw_fd(), &mut client_params)?;
+            rm_alloc_nvos21(nvidiactl_fd.as_raw_fd(), &mut client_params)
+                .with_context(|| "Failed to allocate NVIDIA RM client handle via IOCTL NV_ESC_RM_ALLOC")?;
         }
         let client_handle = client_params.hObjectNew;
-        log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Got client_handle={}", client_handle);
+        log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Got client_handle=0x{:x}", client_handle);
 
+        // Open device-specific file with enhanced error reporting  
+        let device_path = format!("/dev/nvidia{}", minor_number);
         let device_fd = fs::File::options()
             .read(true)
             .write(true)
-            .open(format!("/dev/nvidia{}", minor_number))?;
+            .open(&device_path)
+            .with_context(|| format!("Failed to open {} - GPU device may not exist or is not accessible", device_path))?;
         log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Opened /dev/nvidia{}", minor_number);
 
         let mut dev_fd_raw = device_fd.as_raw_fd();
         unsafe {
-            register_fd(device_fd.as_raw_fd(), &mut dev_fd_raw)?;
+            register_fd(device_fd.as_raw_fd(), &mut dev_fd_raw)
+                .with_context(|| format!("Failed to register device FD for /dev/nvidia{} via IOCTL NV_ESC_REGISTER_FD", minor_number))?;
         }
         log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Registered device FD");
 
@@ -1594,14 +1604,15 @@ impl NvidiaDriverHandle {
             status: 0,
         };
         unsafe {
-            rm_alloc_nvos64(nvidiactl_fd.as_raw_fd(), &mut device_request)?;
+            rm_alloc_nvos64(nvidiactl_fd.as_raw_fd(), &mut device_request)
+                .with_context(|| "Failed IOCTL NV_ESC_RM_ALLOC for device object")?;
         }
         if device_request.status != 0 {
-            log::error!(target: "hw.detect", "NvidiaDriverHandle::open: Failed to alloc device handle: {:x}", device_request.status);
-            return Err(anyhow!("Failed to alloc device handle: {:x}", device_request.status));
+            log::error!(target: "hw.detect", "NvidiaDriverHandle::open: Failed to alloc device handle: status=0x{:08x}", device_request.status);
+            return Err(anyhow!("Failed to alloc device handle: status=0x{:08x}", device_request.status));
         }
         let device_handle = device_request.hObjectNew;
-        log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Got device_handle={}", device_handle);
+        log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Got device_handle=0x{:x}", device_handle);
 
         let mut subdevice_alloc: NV2080_ALLOC_PARAMETERS = Default::default();
         let mut subdevice_request = NVOS64_PARAMETERS {
@@ -1616,13 +1627,14 @@ impl NvidiaDriverHandle {
             status: 0,
         };
         unsafe {
-            rm_alloc_nvos64(nvidiactl_fd.as_raw_fd(), &mut subdevice_request)?;
+            rm_alloc_nvos64(nvidiactl_fd.as_raw_fd(), &mut subdevice_request)
+                .with_context(|| "Failed IOCTL NV_ESC_RM_ALLOC for subdevice object")?;
         }
         if subdevice_request.status != 0 {
-            log::error!(target: "hw.detect", "NvidiaDriverHandle::open: Failed to alloc subdevice handle: {:x}", subdevice_request.status);
-            return Err(anyhow!("Failed to alloc subdevice handle: {:x}", subdevice_request.status));
+            log::error!(target: "hw.detect", "NvidiaDriverHandle::open: Failed to alloc subdevice handle: status=0x{:08x}", subdevice_request.status);
+            return Err(anyhow!("Failed to alloc subdevice handle: status=0x{:08x}", subdevice_request.status));
         }
-        log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Got subdevice_handle={}, successfully opened", subdevice_request.hObjectNew);
+        log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Got subdevice_handle=0x{:x}, successfully opened", subdevice_request.hObjectNew);
 
         Ok(Self {
             nvidiactl_fd,
@@ -1647,15 +1659,43 @@ impl NvidiaDriverHandle {
             paramsSize: std::mem::size_of::<NV2080_CTRL_FB_GET_INFO_PARAMS>() as u32,
             status: 0,
         };
-        log::debug!(target: "hw.detect", "get_fb_info: index={}, hClient={}, hObject={}, cmd={:x}, paramsSize={}",
+        log::debug!(target: "hw.detect", "get_fb_info: index=0x{:02x}, hClient=0x{:x}, hObject=0x{:x}, cmd=0x{:08x}, paramsSize={}",
             index, self.client_handle, self.subdevice_handle, request.cmd, request.paramsSize);
-        unsafe {
-            rm_control_nvos54(self.nvidiactl_fd.as_raw_fd(), &mut request)?;
+        
+        let ioctl_result = unsafe {
+            rm_control_nvos54(self.nvidiactl_fd.as_raw_fd(), &mut request)
+        };
+        
+        // Log IOCTL result
+        if let Err(ref e) = ioctl_result {
+            log::error!(target: "hw.detect", "get_fb_info: IOCTL failed for index 0x{:02x}: errno={}, error={}", 
+                index, 
+                std::io::Error::last_os_error().raw_os_error().unwrap_or(-1),
+                e);
+            return Err(anyhow!("IOCTL NV_ESC_RM_CONTROL failed: {}", e));
         }
-        log::debug!(target: "hw.detect", "get_fb_info: request.status={:x}, info.data={:x}", 
+        
+        log::debug!(target: "hw.detect", "get_fb_info: IOCTL succeeded, request.status=0x{:08x}, info.data=0x{:08x}", 
             request.status, info.data);
+        
         if request.status != 0 {
-            return Err(anyhow!("RM control failed: {:x}", request.status));
+            // Decode common NVIDIA RM error codes
+            let error_desc = match request.status {
+                0x0000ffff => "NV_ERR_GENERIC",
+                0x00000001 => "NV_ERR_INVALID_ARGUMENT", 
+                0x00000002 => "NV_ERR_INVALID_OBJECT_HANDLE",
+                0x00000003 => "NV_ERR_INVALID_OBJECT_PARENT",
+                0x00000005 => "NV_ERR_INSUFFICIENT_RESOURCES",
+                0x00000006 => "NV_ERR_INVALID_FLAGS",
+                0x00000008 => "NV_ERR_INVALID_STATE",
+                0x0000000a => "NV_ERR_NOT_SUPPORTED",
+                0x0000000d => "NV_ERR_OBJECT_NOT_FOUND",
+                0x00000056 => "NV_ERR_GPU_NOT_FULL_POWER",
+                _ => "UNKNOWN_ERROR",
+            };
+            log::error!(target: "hw.detect", "get_fb_info: RM control returned error status 0x{:08x} ({}) for index 0x{:02x}", 
+                request.status, error_desc, index);
+            return Err(anyhow!("RM control failed: status=0x{:08x} ({})", request.status, error_desc));
         }
         Ok(info.data)
     }
@@ -1735,19 +1775,36 @@ fn get_vram_info(minor_number: u32) -> (Option<String>, Option<String>, Option<u
     match NvidiaDriverHandle::open(minor_number) {
         Ok(handle) => {
             let ram_type_val = handle.get_fb_info(NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE)
-                .inspect_err(|e| log::debug!(target: "hw.detect", "Failed to get RAM type for minor {}: {}", minor_number, e))
+                .inspect_err(|e| log::warn!(target: "hw.detect", 
+                    "Failed to get RAM type for minor {} (index=0x{:02x}): {} - This may indicate driver/GPU incompatibility or suspended GPU state", 
+                    minor_number, NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE, e))
                 .ok();
             
             let bus_width = handle.get_fb_info(NV2080_CTRL_FB_INFO_INDEX_BUS_WIDTH)
-                .inspect_err(|e| log::debug!(target: "hw.detect", "Failed to get bus width for minor {}: {}", minor_number, e))
+                .inspect_err(|e| log::warn!(target: "hw.detect", 
+                    "Failed to get bus width for minor {} (index=0x{:02x}): {} - This may indicate driver/GPU incompatibility or suspended GPU state", 
+                    minor_number, NV2080_CTRL_FB_INFO_INDEX_BUS_WIDTH, e))
                 .ok();
             
             let vendor_id = handle.get_fb_info(NV2080_CTRL_FB_INFO_INDEX_MEMORYINFO_VENDOR_ID)
-                .inspect_err(|e| log::debug!(target: "hw.detect", "Failed to get vendor ID for minor {}: {}", minor_number, e))
+                .inspect_err(|e| log::warn!(target: "hw.detect", 
+                    "Failed to get vendor ID for minor {} (index=0x{:02x}): {} - This may indicate driver/GPU incompatibility or suspended GPU state", 
+                    minor_number, NV2080_CTRL_FB_INFO_INDEX_MEMORYINFO_VENDOR_ID, e))
                 .ok();
 
             log::debug!(target: "hw.detect", "VRAM raw info for minor {}: type={:?}, bus={:?}, vendor={:?}",
                 minor_number, ram_type_val, bus_width, vendor_id);
+            
+            // Log summary of detection results
+            if ram_type_val.is_some() || bus_width.is_some() || vendor_id.is_some() {
+                log::info!(target: "hw.detect", "Successfully retrieved partial VRAM info for minor {}: type={}, bus={}, vendor={}", 
+                    minor_number, 
+                    ram_type_val.map(|v| format!("0x{:08x}", v)).unwrap_or_else(|| "None".to_string()),
+                    bus_width.map(|v| format!("{} bits", v)).unwrap_or_else(|| "None".to_string()),
+                    vendor_id.map(|v| format!("0x{:08x}", v)).unwrap_or_else(|| "None".to_string()));
+            } else {
+                log::warn!(target: "hw.detect", "Failed to retrieve any VRAM info for minor {} - all queries returned errors", minor_number);
+            }
 
             let ram_type = ram_type_val.map(|v| match v {
                 0x00000001 => "SDRAM",
@@ -1793,7 +1850,28 @@ fn get_vram_info(minor_number: u32) -> (Option<String>, Option<String>, Option<u
             (ram_type, vendor, bus_width, None)
         }
         Err(e) => {
-            log::warn!(target: "hw.detect", "Failed to open NvidiaDriverHandle for minor {}: {}", minor_number, e);
+            // Enhanced error logging with more diagnostics
+            let error_msg = format!("{}", e);
+            
+            // Check for common error conditions
+            if error_msg.contains("Permission denied") || error_msg.contains("EACCES") {
+                log::error!(target: "hw.detect", 
+                    "Failed to open NvidiaDriverHandle for minor {}: Permission denied - Daemon may need to run as root or user needs to be in 'video' group. Error: {}", 
+                    minor_number, e);
+            } else if error_msg.contains("No such file") || error_msg.contains("ENOENT") {
+                log::error!(target: "hw.detect", 
+                    "Failed to open NvidiaDriverHandle for minor {}: Device not found - NVIDIA driver may not be loaded or GPU is not available. Error: {}", 
+                    minor_number, e);
+            } else if error_msg.contains("Device or resource busy") || error_msg.contains("EBUSY") {
+                log::error!(target: "hw.detect", 
+                    "Failed to open NvidiaDriverHandle for minor {}: Device busy - Another process may be using the GPU. Error: {}", 
+                    minor_number, e);
+            } else {
+                log::error!(target: "hw.detect", 
+                    "Failed to open NvidiaDriverHandle for minor {}: {} - Check that NVIDIA driver is loaded and device /dev/nvidia{} exists", 
+                    minor_number, e, minor_number);
+            }
+            
             (None, None, None, None)
         }
     }
@@ -2239,10 +2317,11 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         let metadata = {
             let mut cache = NVIDIA_METADATA_CACHE.lock().unwrap();
             if let Some(meta) = cache.get(&i) {
+                log::debug!(target: "hw.detect", "GPU {}: Using cached metadata", i);
                 // Check if cached VRAM info is None - if so, retry getting it
                 // This handles cases where initial detection failed (GPU suspended, driver not ready, etc.)
                 if meta.vram_type.is_none() && meta.vram_vendor.is_none() && meta.vram_bus_width.is_none() {
-                    log::info!(target: "hw.detect", "GPU {}: Cached VRAM is None, retrying detection", i);
+                    log::info!(target: "hw.detect", "GPU {}: Cached VRAM info is all None, retrying detection", i);
                     let minor_number = device.minor_number().unwrap_or(i);
                     let (vram_type, vram_vendor, vram_bus_width, _) = get_vram_info(minor_number);
                     
@@ -2259,13 +2338,16 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                         cache.insert(i, updated_meta.clone());
                         updated_meta
                     } else {
-                        log::debug!(target: "hw.detect", "GPU {}: VRAM detection retry also returned None", i);
+                        log::warn!(target: "hw.detect", "GPU {}: VRAM detection retry also returned None - see errors above for details", i);
                         meta.clone()
                     }
                 } else {
+                    log::debug!(target: "hw.detect", "GPU {}: Using cached VRAM info - Type: {:?}, Vendor: {:?}, Bus: {:?}", 
+                        i, meta.vram_type, meta.vram_vendor, meta.vram_bus_width);
                     meta.clone()
                 }
             } else {
+                log::info!(target: "hw.detect", "GPU {}: Initializing metadata cache (first detection)", i);
                 let arch = device.architecture().ok().map(|arch| arch.to_string());
                 let p_states = device.supported_performance_states().ok()
                     .map(|states| states.iter().map(|s| format!("{:?}", s)).collect())
@@ -2278,6 +2360,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 let s_mem_offset = device.clock_offset(Clock::Memory, PerformanceState::Zero).is_ok();
 
                 let minor_number = device.minor_number().unwrap_or(i);
+                log::debug!(target: "hw.detect", "GPU {}: Performing initial VRAM detection for minor {}", i, minor_number);
                 let (vram_type, vram_vendor, vram_bus_width, _) = get_vram_info(minor_number);
 
                 let core_range = get_base_gpu_clock_ranges(&device).ok();
@@ -2345,12 +2428,18 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
 
         // Log VRAM info for diagnostics
         if v_type.is_some() || v_vendor.is_some() || v_bus.is_some() {
-            log::info!(target: "hw.detect", 
-                "GPU {}: VRAM detected - Type: {:?}, Vendor: {:?}, Bus Width: {:?} bits, Bandwidth: {:?} GB/s",
-                i, v_type, v_vendor, v_bus, v_bw);
+            if v_bw.is_none() && memory_clock_range.is_none() {
+                log::info!(target: "hw.detect", 
+                    "GPU {}: VRAM detected - Type: {:?}, Vendor: {:?}, Bus Width: {:?} bits, Bandwidth: N/A (memory clock range unknown)",
+                    i, v_type, v_vendor, v_bus);
+            } else {
+                log::info!(target: "hw.detect", 
+                    "GPU {}: VRAM detected - Type: {:?}, Vendor: {:?}, Bus Width: {:?} bits, Bandwidth: {:?} GB/s",
+                    i, v_type, v_vendor, v_bus, v_bw);
+            }
         } else {
             log::warn!(target: "hw.detect", 
-                "GPU {}: VRAM info not available - Type: None, Vendor: None, Bus Width: None, Bandwidth: None",
+                "GPU {}: VRAM info not available - Check daemon logs above for detailed error messages",
                 i);
         }
 
