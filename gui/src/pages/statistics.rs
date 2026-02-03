@@ -735,19 +735,11 @@ fn draw_storage_info(ui: &mut Ui, state: &AppState) {
         });
 }
 
-fn draw_gamepad_info(ui: &mut Ui, state: &mut AppState) {
-    let mut clear_requested = false;
+fn draw_gamepad_info(ui: &mut Ui, state: &AppState) {
     CollapsingHeader::new(RichText::new("🎮 Gamepads").heading())
         .default_open(true)
         .show(ui, |ui| {
             if !state.config.remembered_gamepads.is_empty() {
-                ui.horizontal(|ui| {
-                    if ui.button("🗑 Remove Gamepads Database").on_hover_text("Remove all previously connected gamepads from history").clicked() {
-                        clear_requested = true;
-                    }
-                });
-                ui.add_space(4.0);
-
                 for (idx, gamepad) in state.config.remembered_gamepads.iter().enumerate() {
                     if idx > 0 {
                         ui.add_space(4.0);
@@ -795,12 +787,6 @@ fn draw_gamepad_info(ui: &mut Ui, state: &mut AppState) {
                 ui.label("No gamepads discovered");
             }
         });
-
-    if clear_requested {
-        state.config.remembered_gamepads.clear();
-        let _ = state.save_settings();
-        state.show_message("Gamepad database cleared", false);
-    }
 }
 
 fn draw_fan_info(ui: &mut Ui, state: &AppState) {

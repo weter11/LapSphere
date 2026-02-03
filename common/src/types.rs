@@ -198,35 +198,45 @@ pub struct StorageDevice {
     pub write_iops: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct GamepadInfo {
+    #[serde(default)]
     pub name: String,
+    #[serde(default)]
     pub id: String, // Dynamic identifier (e.g. input0)
+    #[serde(default)]
     pub uid: String, // Stable unique identifier (e.g. ID_PATH from udev)
+    #[serde(default)]
     pub status: GamepadStatus,
+    #[serde(default)]
     pub battery_level: Option<u8>,
+    #[serde(default)]
     pub connection_type: ConnectionType,
+    #[serde(default)]
     pub power_status: PowerStatus,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub enum GamepadStatus {
     Connected,
+    #[default]
     Disconnected,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub enum ConnectionType {
     Wired,
     Wireless,
+    #[default]
     Unknown,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub enum PowerStatus {
     Charging,
     Discharging,
     Full,
+    #[default]
     Unknown,
 }
 

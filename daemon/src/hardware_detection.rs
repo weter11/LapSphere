@@ -3018,6 +3018,19 @@ pub fn get_gamepad_info() -> Result<Vec<GamepadInfo>> {
                     }
                 }
 
+                // Apply exclusions based on name (even if udev says joystick)
+                if is_gamepad {
+                    if let Ok(device_name) = fs::read_to_string(path.join("name")) {
+                        let device_name_lower = device_name.to_lowercase();
+                        if device_name_lower.contains("touchpad") ||
+                           device_name_lower.contains("motion sensors") ||
+                           device_name_lower.contains("consumer control") ||
+                           device_name_lower.contains("system control") {
+                            is_gamepad = false;
+                        }
+                    }
+                }
+
                 if is_gamepad {
                     if let Ok(device_name) = fs::read_to_string(path.join("name")) {
                         let device_name = device_name.trim().to_string();
