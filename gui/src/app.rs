@@ -506,13 +506,15 @@ impl LapSphereApp {
 
                     // Update existing ones and mark as connected/disconnected
                     for remembered in &mut self.state.config.remembered_gamepads {
-                        if let Some(connected) = connected_gamepads.iter().find(|c| c.name == remembered.name) {
+                        if let Some(connected) = connected_gamepads.iter().find(|c| c.uid == remembered.uid) {
                             if remembered.status != GamepadStatus::Connected ||
                                remembered.battery_level != connected.battery_level ||
                                remembered.power_status != connected.power_status ||
-                               remembered.connection_type != connected.connection_type
+                               remembered.connection_type != connected.connection_type ||
+                               remembered.name != connected.name
                             {
                                 remembered.status = GamepadStatus::Connected;
+                                remembered.name = connected.name.clone();
                                 remembered.battery_level = connected.battery_level;
                                 remembered.power_status = connected.power_status.clone();
                                 remembered.connection_type = connected.connection_type.clone();
@@ -526,7 +528,7 @@ impl LapSphereApp {
 
                     // Add new ones
                     for connected in connected_gamepads {
-                        if !self.state.config.remembered_gamepads.iter().any(|r| r.name == connected.name) {
+                        if !self.state.config.remembered_gamepads.iter().any(|r| r.uid == connected.uid) {
                             self.state.config.remembered_gamepads.push(connected);
                             changed = true;
                         }

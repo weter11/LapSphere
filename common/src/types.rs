@@ -201,7 +201,8 @@ pub struct StorageDevice {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GamepadInfo {
     pub name: String,
-    pub id: String, // Unique identifier (e.g. sysfs path or serial)
+    pub id: String, // Dynamic identifier (e.g. input0)
+    pub uid: String, // Stable unique identifier (e.g. ID_PATH from udev)
     pub status: GamepadStatus,
     pub battery_level: Option<u8>,
     pub connection_type: ConnectionType,
