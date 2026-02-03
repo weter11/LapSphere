@@ -32,12 +32,15 @@ struct NvidiaMetadata {
     vram_type: Option<String>,
     vram_vendor: Option<String>,
     vram_bus_width: Option<u32>,
+    vram_total: Option<u64>,
     core_clock_range: Option<(u32, u32)>,
     memory_clock_range: Option<(u32, u32)>,
 }
 
 static NVIDIA_METADATA_CACHE: Lazy<Mutex<HashMap<u32, NvidiaMetadata>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+
+static PREVIOUS_RAPL_STATS: Mutex<Option<(f64, Instant)>> = Mutex::new(None);
 
 const BITS_PER_BYTE: f64 = 8.0;
 const BITS_PER_MEGABIT: f64 = 1_000_000.0;
@@ -167,57 +170,65 @@ fn get_scheduler_info() -> (String, Vec<String>) {
 }
 
 fn get_cpu_name() -> String {
-    if let Ok(cpuinfo) = fs::read_to_string("/proc/cpuinfo") {
-        for line in cpuinfo.lines() {
-            if line.starts_with("model name") {
-                if let Some(name) = line.split(':').nth(1) {
-                    return name.trim().to_string();
+    static CACHED_NAME: Lazy<String> = Lazy::new(|| {
+        if let Ok(cpuinfo) = fs::read_to_string("/proc/cpuinfo") {
+            for line in cpuinfo.lines() {
+                if line.starts_with("model name") {
+                    if let Some(name) = line.split(':').nth(1) {
+                        return name.trim().to_string();
+                    }
                 }
             }
         }
-    }
-    "Unknown CPU".to_string()
+        "Unknown CPU".to_string()
+    });
+    CACHED_NAME.clone()
 }
+
 
 fn get_cpu_topology() -> (u32, u32) {
-    let mut logical = 0;
-    let mut physical = 0;
+    static CACHED_TOPOLOGY: Lazy<(u32, u32)> = Lazy::new(|| {
+        let mut logical = 0;
+        let mut physical = 0;
 
-    let output = std::process::Command::new("lscpu").output();
-    if let Ok(out) = output {
-        let s = String::from_utf8_lossy(&out.stdout);
-        let mut _threads_per_core = 1;
-        let mut cores_per_socket = 0;
-        let mut sockets = 0;
+        let output = std::process::Command::new("lscpu").output();
+        if let Ok(out) = output {
+            let s = String::from_utf8_lossy(&out.stdout);
+            let mut _threads_per_core = 1;
+            let mut cores_per_socket = 0;
+            let mut sockets = 0;
 
-        for line in s.lines() {
-            let line = line.trim();
-            if line.starts_with("CPU(s):") {
-                logical = line.split(':').nth(1).unwrap_or("").trim().parse().unwrap_or(0);
-            } else if line.starts_with("Thread(s) per core:") {
-                _threads_per_core = line.split(':').nth(1).unwrap_or("").trim().parse().unwrap_or(1);
-            } else if line.starts_with("Core(s) per socket:") {
-                cores_per_socket = line.split(':').nth(1).unwrap_or("").trim().parse().unwrap_or(0);
-            } else if line.starts_with("Socket(s):") {
-                sockets = line.split(':').nth(1).unwrap_or("").trim().parse().unwrap_or(1);
+            for line in s.lines() {
+                let line = line.trim();
+                if line.starts_with("CPU(s):") {
+                    logical = line.split(':').nth(1).unwrap_or("").trim().parse().unwrap_or(0);
+                } else if line.starts_with("Thread(s) per core:") {
+                    _threads_per_core = line.split(':').nth(1).unwrap_or("").trim().parse().unwrap_or(1);
+                } else if line.starts_with("Core(s) per socket:") {
+                    cores_per_socket = line.split(':').nth(1).unwrap_or("").trim().parse().unwrap_or(0);
+                } else if line.starts_with("Socket(s):") {
+                    sockets = line.split(':').nth(1).unwrap_or("").trim().parse().unwrap_or(1);
+                }
             }
+
+            physical = cores_per_socket * sockets;
         }
 
-        physical = cores_per_socket * sockets;
-    }
+        // Fallback if lscpu fails or gives incomplete info
+        if logical == 0 {
+            logical = fs::read_to_string("/proc/cpuinfo")
+                .map(|s| s.lines().filter(|l| l.starts_with("processor")).count() as u32)
+                .unwrap_or(1);
+        }
+        if physical == 0 {
+            physical = logical;
+        }
 
-    // Fallback if lscpu fails or gives incomplete info
-    if logical == 0 {
-        logical = fs::read_to_string("/proc/cpuinfo")
-            .map(|s| s.lines().filter(|l| l.starts_with("processor")).count() as u32)
-            .unwrap_or(1);
-    }
-    if physical == 0 {
-        physical = logical;
-    }
-
-    (physical, logical)
+        (physical, logical)
+    });
+    *CACHED_TOPOLOGY
 }
+
 
 fn read_cpu_frequencies(logical_cores: u32) -> Vec<u64> {
     let mut freqs = Vec::with_capacity(logical_cores as usize);
@@ -348,14 +359,29 @@ fn try_rapl() -> Result<f32> {
             if name.trim() == "package-0" {
                 if let Ok(energy_str) = fs::read_to_string(path.join("energy_uj")) {
                     if let Ok(energy) = energy_str.trim().parse::<f64>() {
-                        std::thread::sleep(std::time::Duration::from_millis(100));
-                        if let Ok(energy2_str) = fs::read_to_string(path.join("energy_uj")) {
-                            if let Ok(energy2) = energy2_str.trim().parse::<f64>() {
-                                let diff = energy2 - energy;
-                                let power = (diff / 100000.0) as f32;
-                                return Ok(power);
+                        let now = Instant::now();
+                        let mut prev_lock = PREVIOUS_RAPL_STATS.lock().unwrap();
+
+                        let power = if let Some((prev_energy, prev_time)) = *prev_lock {
+                            let elapsed = now.duration_since(prev_time).as_secs_f64();
+                            if elapsed > 0.01 { // Only update if enough time has passed
+                                let diff = energy - prev_energy;
+                                if diff >= 0.0 {
+                                    // energy is in microjoules.
+                                    // Power (Watts) = Joules / Seconds
+                                    (diff / 1_000_000.0 / elapsed) as f32
+                                } else {
+                                    0.0 // Counter reset?
+                                }
+                            } else {
+                                return Err(anyhow!("RAPL: Too soon for update"));
                             }
-                        }
+                        } else {
+                            0.0
+                        };
+
+                        *prev_lock = Some((energy, now));
+                        return Ok(power);
                     }
                 }
             }
@@ -686,27 +712,6 @@ pub fn get_current_tdp_profile() -> Result<String> {
     Ok(profiles[0].clone())
 }
 
-pub fn get_fan_speeds() -> Result<Vec<(u32, u32)>> {
-    if !TuxedoIo::is_available() {
-        return Ok(vec![]);
-    }
-    
-    let io = TuxedoIo::new()?;
-    let mut fans = Vec::new();
-    
-    for fan_id in 0..io.get_fan_count() {
-        match io.get_fan_speed(fan_id) {
-            Ok(speed) => {
-                if speed > 0 {
-                    fans.push((fan_id, speed));
-                }
-            }
-            Err(_) => break,
-        }
-    }
-    
-    Ok(fans)
-}
 
 pub fn get_all_fan_info() -> Result<Vec<FanInfo>> {
     let mut all_fans = Vec::new();
@@ -980,40 +985,44 @@ pub fn get_cpu_info() -> Result<CpuInfo> {
 }
 
 fn get_memory_type_and_freq() -> (Option<String>, Option<u64>) {
-    let dmidecode_path = find_binary("dmidecode").unwrap_or_else(|| "dmidecode".to_string());
-    let output = std::process::Command::new(dmidecode_path)
-        .args(["-t", "memory"])
-        .output();
+    static CACHED_MEM_METADATA: Lazy<(Option<String>, Option<u64>)> = Lazy::new(|| {
+        let dmidecode_path = find_binary("dmidecode").unwrap_or_else(|| "dmidecode".to_string());
+        let output = std::process::Command::new(dmidecode_path)
+            .args(["-t", "memory"])
+            .output();
 
-    let mut mem_type = None;
-    let mut mem_speed = None;
+        let mut mem_type = None;
+        let mut mem_speed = None;
 
-    if let Ok(out) = output {
-        let s = String::from_utf8_lossy(&out.stdout);
-        for line in s.lines() {
-            let line = line.trim();
-            if line.contains("Type: DDR") || line.contains("Type: LPDDR") {
-                mem_type = Some(line.split(':').nth(1).unwrap_or("").trim().to_string());
-            }
-            if (line.starts_with("Speed:")
-                || line.starts_with("Configured Memory Speed:")
-                || line.starts_with("Configured Clock Speed:"))
-                && mem_speed.is_none()
-            {
-                let speed_str = line.split(':').nth(1).unwrap_or("").trim();
-                if !speed_str.to_lowercase().contains("unknown") && !speed_str.is_empty() {
-                    // Expecting something like "3200 MT/s" or "3200 MHz"
-                    if let Some(speed_val) = speed_str.split_whitespace().next() {
-                        if let Ok(val) = speed_val.parse::<u64>() {
-                            mem_speed = Some(val);
+        if let Ok(out) = output {
+            let s = String::from_utf8_lossy(&out.stdout);
+            for line in s.lines() {
+                let line = line.trim();
+                if line.contains("Type: DDR") || line.contains("Type: LPDDR") {
+                    mem_type = Some(line.split(':').nth(1).unwrap_or("").trim().to_string());
+                }
+                if (line.starts_with("Speed:")
+                    || line.starts_with("Configured Memory Speed:")
+                    || line.starts_with("Configured Clock Speed:"))
+                    && mem_speed.is_none()
+                {
+                    let speed_str = line.split(':').nth(1).unwrap_or("").trim();
+                    if !speed_str.to_lowercase().contains("unknown") && !speed_str.is_empty() {
+                        // Expecting something like "3200 MT/s" or "3200 MHz"
+                        if let Some(speed_val) = speed_str.split_whitespace().next() {
+                            if let Ok(val) = speed_val.parse::<u64>() {
+                                mem_speed = Some(val);
+                            }
                         }
                     }
                 }
             }
         }
-    }
-    (mem_type, mem_speed)
+        (mem_type, mem_speed)
+    });
+    CACHED_MEM_METADATA.clone()
 }
+
 
 pub fn get_memory_info() -> Result<MemoryInfo> {
     let sys = System::new();
@@ -1177,6 +1186,15 @@ pub fn get_keyboard_capabilities() -> KeyboardCapabilities {
 }
 
 pub fn get_system_info() -> Result<SystemInfo> {
+    static CACHED_SYSTEM_INFO: Mutex<Option<SystemInfo>> = Mutex::new(None);
+
+    {
+        let cache = CACHED_SYSTEM_INFO.lock().unwrap();
+        if let Some(info) = &*cache {
+            return Ok(info.clone());
+        }
+    }
+
     let mut product_name = fs::read_to_string("/sys/class/dmi/id/product_name")
         .unwrap_or_else(|_| "Unknown".to_string())
         .trim()
@@ -1215,14 +1233,21 @@ pub fn get_system_info() -> Result<SystemInfo> {
 
     let kernel_modules = get_tuxedo_kernel_modules();
     
-    Ok(SystemInfo {
+    let info = SystemInfo {
         product_name,
         product_sku,
         manufacturer,
         board_name,
         bios_version,
         kernel_modules,
-    })
+    };
+
+    {
+        let mut cache = CACHED_SYSTEM_INFO.lock().unwrap();
+        *cache = Some(info.clone());
+    }
+
+    Ok(info)
 }
 
 pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
@@ -1329,6 +1354,7 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
                 vram_vendor: None,
                 vram_bus_width: None,
                 vram_bandwidth: None,
+                vram_total: None,
             });
         }
     }
@@ -2051,16 +2077,16 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 cache.get(&(i as u32)).cloned()
             };
             
-            let (vram_type, vram_vendor, vram_bus_width, vram_bandwidth) = 
+            let (vram_type, vram_vendor, vram_bus_width, vram_bandwidth, vram_total) =
                 if let Some(ref meta) = cached_metadata {
                     let bandwidth = calculate_vram_bandwidth(meta.vram_type.as_ref(), meta.vram_bus_width, meta.memory_clock_range);
                     log::debug!(target: "hw.detect", 
-                        "GPU {} (all suspended): Using cached VRAM - Type: {:?}, Vendor: {:?}, Bus: {:?} bits, BW: {:?} GB/s",
-                        i, meta.vram_type, meta.vram_vendor, meta.vram_bus_width, bandwidth);
-                    (meta.vram_type.clone(), meta.vram_vendor.clone(), meta.vram_bus_width, bandwidth)
+                        "GPU {} (all suspended): Using cached VRAM - Type: {:?}, Vendor: {:?}, Bus: {:?} bits, BW: {:?} GB/s, Total: {:?} MiB",
+                        i, meta.vram_type, meta.vram_vendor, meta.vram_bus_width, bandwidth, meta.vram_total);
+                    (meta.vram_type.clone(), meta.vram_vendor.clone(), meta.vram_bus_width, bandwidth, meta.vram_total)
                 } else {
                     log::debug!(target: "hw.detect", "GPU {} (all suspended): No cached VRAM info available", i);
-                    (None, None, None, None)
+                    (None, None, None, None, None)
                 };
             
             gpus.push(GpuInfo {
@@ -2099,6 +2125,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 vram_vendor,
                 vram_bus_width,
                 vram_bandwidth,
+                vram_total,
             });
         }
         return Ok(gpus);
@@ -2131,16 +2158,16 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 cache.get(&i).cloned()
             };
             
-            let (vram_type, vram_vendor, vram_bus_width, vram_bandwidth) = 
+            let (vram_type, vram_vendor, vram_bus_width, vram_bandwidth, vram_total) =
                 if let Some(ref meta) = cached_metadata {
                     let bandwidth = calculate_vram_bandwidth(meta.vram_type.as_ref(), meta.vram_bus_width, meta.memory_clock_range);
                     log::debug!(target: "hw.detect", 
-                        "GPU {} (suspended): Using cached VRAM - Type: {:?}, Vendor: {:?}, Bus: {:?} bits, BW: {:?} GB/s",
-                        i, meta.vram_type, meta.vram_vendor, meta.vram_bus_width, bandwidth);
-                    (meta.vram_type.clone(), meta.vram_vendor.clone(), meta.vram_bus_width, bandwidth)
+                        "GPU {} (suspended): Using cached VRAM - Type: {:?}, Vendor: {:?}, Bus: {:?} bits, BW: {:?} GB/s, Total: {:?} MiB",
+                        i, meta.vram_type, meta.vram_vendor, meta.vram_bus_width, bandwidth, meta.vram_total);
+                    (meta.vram_type.clone(), meta.vram_vendor.clone(), meta.vram_bus_width, bandwidth, meta.vram_total)
                 } else {
                     log::debug!(target: "hw.detect", "GPU {} (suspended): No cached VRAM info available", i);
-                    (None, None, None, None)
+                    (None, None, None, None, None)
                 };
             
             gpus.push(GpuInfo {
@@ -2179,6 +2206,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 vram_vendor,
                 vram_bus_width,
                 vram_bandwidth,
+                vram_total,
             });
             continue;
         }
@@ -2347,6 +2375,8 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 let s_gpu_offset = device.clock_offset(Clock::Graphics, PerformanceState::Zero).is_ok();
                 let s_mem_offset = device.clock_offset(Clock::Memory, PerformanceState::Zero).is_ok();
 
+                let vram_total = device.memory_info().ok().map(|m| m.total / 1024 / 1024);
+
                 let minor_number = device.minor_number().unwrap_or(i);
                 log::debug!(target: "hw.detect", "GPU {}: Performing initial VRAM detection for minor {}", i, minor_number);
                 let (vram_type, vram_vendor, vram_bus_width, _) = get_vram_info(minor_number);
@@ -2386,6 +2416,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                     vram_type,
                     vram_vendor,
                     vram_bus_width,
+                    vram_total,
                     core_clock_range: core_range,
                     memory_clock_range: mem_range,
                 };
@@ -2403,6 +2434,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         let v_type = metadata.vram_type;
         let v_vendor = metadata.vram_vendor;
         let v_bus = metadata.vram_bus_width;
+        let v_total = metadata.vram_total;
         // Apply current offset to the cached base range for real-time reporting
         let core_clock_range = metadata.core_clock_range.map(|(min, max)| {
             let offset = {
@@ -2414,21 +2446,35 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         let memory_clock_range = metadata.memory_clock_range;
         let v_bw = calculate_vram_bandwidth(v_type.as_ref(), v_bus, memory_clock_range);
 
-        // Log VRAM info for diagnostics
-        if v_type.is_some() || v_vendor.is_some() || v_bus.is_some() {
-            if v_bw.is_none() && memory_clock_range.is_none() {
-                log::info!(target: "hw.detect", 
-                    "GPU {}: VRAM detected - Type: {:?}, Vendor: {:?}, Bus Width: {:?} bits, Bandwidth: N/A (memory clock range unknown)",
-                    i, v_type, v_vendor, v_bus);
-            } else {
-                log::info!(target: "hw.detect", 
-                    "GPU {}: VRAM detected - Type: {:?}, Vendor: {:?}, Bus Width: {:?} bits, Bandwidth: {:?} GB/s",
-                    i, v_type, v_vendor, v_bus, v_bw);
+        // Log VRAM info for diagnostics (rate-limited)
+        static LAST_VRAM_LOG: Lazy<Mutex<HashMap<u32, Instant>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+        let should_log_vram = {
+            let mut last_log = LAST_VRAM_LOG.lock().unwrap();
+            match last_log.get(&i) {
+                Some(instant) if instant.elapsed() < std::time::Duration::from_secs(60) => false,
+                _ => {
+                    last_log.insert(i, Instant::now());
+                    true
+                }
             }
-        } else {
-            log::warn!(target: "hw.detect", 
-                "GPU {}: VRAM info not available - Check daemon logs above for detailed error messages",
-                i);
+        };
+
+        if should_log_vram {
+            if v_type.is_some() || v_vendor.is_some() || v_bus.is_some() {
+                if v_bw.is_none() && memory_clock_range.is_none() {
+                    log::info!(target: "hw.detect",
+                        "GPU {}: VRAM detected - Type: {:?}, Vendor: {:?}, Bus Width: {:?} bits, Bandwidth: N/A (memory clock range unknown)",
+                        i, v_type, v_vendor, v_bus);
+                } else {
+                    log::info!(target: "hw.detect",
+                        "GPU {}: VRAM detected - Type: {:?}, Vendor: {:?}, Bus Width: {:?} bits, Bandwidth: {:?} GB/s",
+                        i, v_type, v_vendor, v_bus, v_bw);
+                }
+            } else {
+                log::warn!(target: "hw.detect",
+                    "GPU {}: VRAM info not available - Check daemon logs above for detailed error messages",
+                    i);
+            }
         }
 
         let mut gpu_info = GpuInfo {
@@ -2467,6 +2513,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             vram_vendor: v_vendor,
             vram_bus_width: v_bus,
             vram_bandwidth: v_bw,
+            vram_total: v_total,
         };
 
         // Fill in offsets if they exist in global state (assuming first NVIDIA GPU for now)

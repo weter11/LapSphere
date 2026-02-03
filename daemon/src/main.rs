@@ -10,8 +10,35 @@ use tokio::signal;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::collections::{VecDeque, HashMap};
-use lapsphere_common::types::{FanSettings, LogEntry};
+use lapsphere_common::types::*;
 use polling_scheduler::{PollingScheduler, PollJob};
+
+pub struct HardwareCache {
+    pub cpu_info: Option<CpuInfo>,
+    pub memory_info: Option<MemoryInfo>,
+    pub gpu_info: Vec<GpuInfo>,
+    pub battery_info: Option<BatteryInfo>,
+    pub fan_info: Vec<FanInfo>,
+    pub wifi_info: Vec<WiFiInfo>,
+    pub gamepad_info: Vec<GamepadInfo>,
+    pub storage_device_info: Vec<StorageDevice>,
+    pub mount_info: Vec<MountInfo>,
+    pub system_info: Option<SystemInfo>,
+}
+
+pub static HARDWARE_CACHE: once_cell::sync::Lazy<Arc<Mutex<HardwareCache>>> =
+    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HardwareCache {
+        cpu_info: None,
+        memory_info: None,
+        gpu_info: Vec::new(),
+        battery_info: None,
+        fan_info: Vec::new(),
+        wifi_info: Vec::new(),
+        gamepad_info: Vec::new(),
+        storage_device_info: Vec::new(),
+        mount_info: Vec::new(),
+        system_info: None,
+    })));
 
 // Global fan daemon state
 pub static FAN_DAEMON_STATE: once_cell::sync::Lazy<Arc<Mutex<Option<FanSettings>>>> = 
@@ -42,7 +69,7 @@ pub static MANUAL_GPU_OFFSETS: once_cell::sync::Lazy<Arc<Mutex<HashMap<u32, (f32
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
 pub static DAEMON_LOGS: once_cell::sync::Lazy<Arc<Mutex<VecDeque<LogEntry>>>> =
-    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(VecDeque::with_capacity(10000))));
+    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(VecDeque::with_capacity(2000))));
 
 struct DaemonLogger {
     inner: env_logger::Logger,
@@ -67,7 +94,7 @@ impl log::Log for DaemonLogger {
 
         {
             let mut logs = DAEMON_LOGS.lock().unwrap();
-            if logs.len() >= 10000 {
+            if logs.len() >= 2000 {
                 logs.pop_front();
             }
             logs.push_back(entry);
@@ -223,10 +250,33 @@ async fn main() -> Result<()> {
     // Store handle globally for DBus interface to use
     SCHEDULER_HANDLE.set(scheduler_handle.clone()).ok();
     
+    // Initial hardware poll to populate cache immediately
+    log::info!("Performing initial hardware detection...");
+    refresh_hardware_cache();
+    log::info!("Initial hardware detection complete");
+
     // Start scheduler in background
     tokio::spawn(async move {
         scheduler.run().await;
     });
+
+    // Add hardware monitor polling job
+    let hw_monitor_fn = || {
+        refresh_hardware_cache();
+        Ok(())
+    };
+
+    let hw_monitor_job = PollJob::new(
+        "hardware_monitor".to_string(),
+        Duration::from_millis(1000), // Poll every 1 second
+        hw_monitor_fn,
+    );
+
+    if let Err(e) = scheduler_handle.add_job(hw_monitor_job) {
+        log::error!("Failed to add hardware monitor job: {}", e);
+    } else {
+        log::info!("Hardware monitor polling job added");
+    }
 
     // Add fan control polling job if hardware is available
     if let Some(io) = tuxedo_io {
@@ -403,6 +453,33 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn refresh_hardware_cache() {
+    let cpu_info = hardware_detection::get_cpu_info().ok();
+    let memory_info = hardware_detection::get_memory_info().ok();
+    let gpu_info = hardware_detection::get_gpu_info().unwrap_or_default();
+    let battery_info = hardware_detection::get_battery_info().ok();
+    let fan_info = hardware_detection::get_all_fan_info().unwrap_or_default();
+    let wifi_info = hardware_detection::get_wifi_info().unwrap_or_default();
+    let gamepad_info = hardware_detection::get_gamepad_info().unwrap_or_default();
+    let storage_device_info = hardware_detection::get_storage_device_info().unwrap_or_default();
+    let mount_info = hardware_detection::get_mount_info().unwrap_or_default();
+    let system_info = hardware_detection::get_system_info().ok();
+
+    {
+        let mut cache = HARDWARE_CACHE.lock().unwrap();
+        cache.cpu_info = cpu_info;
+        cache.memory_info = memory_info;
+        cache.gpu_info = gpu_info;
+        cache.battery_info = battery_info;
+        cache.fan_info = fan_info;
+        cache.wifi_info = wifi_info;
+        cache.gamepad_info = gamepad_info;
+        cache.storage_device_info = storage_device_info;
+        cache.mount_info = mount_info;
+        cache.system_info = system_info;
+    }
 }
 
 fn apply_fan_curves(io: &tuxedo_io::TuxedoIo, settings: &FanSettings, sorted_curves: &[Vec<(u8, u8)>]) -> Result<()> {

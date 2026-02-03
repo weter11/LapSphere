@@ -122,6 +122,32 @@ fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
 
     ui.add_space(8.0);
 
+    let search_lower = state.log_search_text.to_lowercase();
+    let has_search = !search_lower.is_empty();
+
+    let filtered_logs: Vec<_> = state.daemon_logs.iter().rev().filter(|entry| {
+        let level_upper = entry.level.to_uppercase();
+        let show_level = match level_upper.as_str() {
+            "ERROR" => state.log_filter_error,
+            "WARN" | "WARNING" => state.log_filter_warn,
+            "INFO" => state.log_filter_info,
+            "DEBUG" | "TRACE" => state.log_filter_debug,
+            _ => true,
+        };
+
+        if !show_level { return false; }
+
+        if has_search {
+            entry.message.to_lowercase().contains(&search_lower) ||
+            entry.target.to_lowercase().contains(&search_lower) ||
+            entry.level.to_lowercase().contains(&search_lower)
+        } else {
+            true
+        }
+    }).collect();
+
+    let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
+
     ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -855,6 +881,16 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
                             ui.label(format!("{} - {} W", min, max));
                             ui.end_row();
                         }
+                    }
+
+                    if let Some(v_total) = gpu.vram_total {
+                        ui.label("VRAM Capacity:");
+                        if v_total >= 1024 {
+                            ui.label(format!("{:.1} GiB ({} MiB)", v_total as f32 / 1024.0, v_total));
+                        } else {
+                            ui.label(format!("{} MiB", v_total));
+                        }
+                        ui.end_row();
                     }
 
                     if let Some(ref v_type) = gpu.vram_type {

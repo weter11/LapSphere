@@ -3,6 +3,7 @@ use egui::{Align, CentralPanel, Context, FontFamily, FontId, Layout, RichText, T
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::{Duration, Instant};
+use std::collections::VecDeque;
 use tokio::sync::{mpsc, oneshot};
 use lapsphere_common::types::*;
 
@@ -56,7 +57,7 @@ pub struct AppState {
     pub available_end_thresholds: Vec<u8>,
     pub available_tdp_profiles: Vec<String>,
     pub webcam_enabled: Option<bool>,
-    pub daemon_logs: Vec<LogEntry>,
+    pub daemon_logs: VecDeque<LogEntry>,
     pub new_version_available: Option<String>,
     pub latest_changelog: Option<String>,
     pub log_filter_trace: bool,
@@ -117,7 +118,7 @@ impl AppState {
             available_end_thresholds: Vec::new(),
             available_tdp_profiles: Vec::new(),
             webcam_enabled: None,
-            daemon_logs: Vec::new(),
+            daemon_logs: VecDeque::new(),
             new_version_available: None,
             latest_changelog: None,
             log_filter_trace: false,
@@ -198,8 +199,8 @@ pub struct LapSphereApp {
     force_quit: bool,
     
     // Background update channel
-    hw_update_tx: mpsc::UnboundedSender<HardwareUpdate>,
-    hw_update_rx: mpsc::UnboundedReceiver<HardwareUpdate>,
+    hw_update_tx: mpsc::Sender<HardwareUpdate>,
+    hw_update_rx: mpsc::Receiver<HardwareUpdate>,
     
     // Keyboard shortcuts
     shortcuts: KeyboardShortcuts,
@@ -256,7 +257,8 @@ impl LapSphereApp {
         };
         
         // Setup background polling with refresh coordinator
-        let (hw_update_tx, hw_update_rx) = mpsc::unbounded_channel();
+        // Use a bounded channel to prevent potential memory leaks if UI processing stalls
+        let (hw_update_tx, hw_update_rx) = mpsc::channel(100);
         let coordinator_handle = if let Some(ref client) = dbus_client {
             let coordinator = RefreshCoordinator::new();
             let handle = coordinator.get_handle();
@@ -275,76 +277,76 @@ impl LapSphereApp {
                         match component.as_str() {
                             "cpu" => {
                                 match client.get_cpu_info().await {
-                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::CpuInfo(info)); }
+                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::CpuInfo(info)).await; }
                                     Ok(Err(e)) => log::error!("Failed to get CPU info: {}", e),
                                     Err(e) => log::error!("DBus error getting CPU info: {}", e),
                                 }
                             }
                             "gpu" => {
                                 match client.get_gpu_info().await {
-                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::GpuInfo(info)); }
+                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::GpuInfo(info)).await; }
                                     Ok(Err(e)) => log::error!("Failed to get GPU info: {}", e),
                                     Err(e) => log::error!("DBus error getting GPU info: {}", e),
                                 }
                             }
                             "memory" => {
                                 match client.get_memory_info().await {
-                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::MemoryInfo(info)); }
+                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::MemoryInfo(info)).await; }
                                     Ok(Err(e)) => log::error!("Failed to get Memory info: {}", e),
                                     Err(e) => log::error!("DBus error getting Memory info: {}", e),
                                 }
                             }
                             "fans" => {
                                 match client.get_fan_info().await {
-                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::FanInfo(info)); }
+                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::FanInfo(info)).await; }
                                     Ok(Err(e)) => log::error!("Failed to get Fan info: {}", e),
                                     Err(e) => log::error!("DBus error getting Fan info: {}", e),
                                 }
                             }
                             "battery" => {
                                 match client.get_battery_info().await {
-                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::BatteryInfo(info)); }
+                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::BatteryInfo(info)).await; }
                                     Ok(Err(e)) => log::error!("Failed to get Battery info: {}", e),
                                     Err(e) => log::error!("DBus error getting Battery info: {}", e),
                                 }
                             }
                             "wifi" => {
                                 match client.get_wifi_info().await {
-                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::WifiInfo(info)); }
+                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::WifiInfo(info)).await; }
                                     Ok(Err(e)) => log::error!("Failed to get WiFi info: {}", e),
                                     Err(e) => log::error!("DBus error getting WiFi info: {}", e),
                                 }
                             }
                             "gamepads" => {
                                 match client.get_gamepad_info().await {
-                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::GamepadInfo(info)); }
+                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::GamepadInfo(info)).await; }
                                     Ok(Err(e)) => log::error!("Failed to get Gamepad info: {}", e),
                                     Err(e) => log::error!("DBus error getting Gamepad info: {}", e),
                                 }
                             }
                             "storage" => {
                                 match client.get_storage_device_info().await {
-                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::StorageDeviceInfo(info)); }
+                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::StorageDeviceInfo(info)).await; }
                                     Ok(Err(e)) => log::error!("Failed to get Storage info: {}", e),
                                     Err(e) => log::error!("DBus error getting Storage info: {}", e),
                                 }
                             }
                             "mount" => {
                                 match client.get_mount_info().await {
-                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::MountInfo(info)); }
+                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::MountInfo(info)).await; }
                                     Ok(Err(e)) => log::error!("Failed to get Mount info: {}", e),
                                     Err(e) => log::error!("DBus error getting Mount info: {}", e),
                                 }
                             }
                             "webcam" => {
                                 match client.get_webcam_state().await {
-                                    Ok(Ok(state)) => { let _ = tx.send(HardwareUpdate::WebcamState(state)); }
+                                    Ok(Ok(state)) => { let _ = tx.send(HardwareUpdate::WebcamState(state)).await; }
                                     _ => {}
                                 }
                             }
                             "logs" => {
                                 match client.get_daemon_logs().await {
-                                    Ok(Ok(logs)) => { let _ = tx.send(HardwareUpdate::DaemonLogs(logs)); }
+                                    Ok(Ok(logs)) => { let _ = tx.send(HardwareUpdate::DaemonLogs(logs)).await; }
                                     _ => {}
                                 }
                             }
@@ -366,14 +368,14 @@ impl LapSphereApp {
             let _ = handle.register("mount".to_string(), Duration::from_millis(state.config.statistics_sections.storage_poll_rate));
             let _ = handle.register("gpu_overclock".to_string(), Duration::from_millis(state.config.statistics_sections.gpu_overclock_poll_rate));
             let _ = handle.register("webcam".to_string(), Duration::from_secs(5));
-            let _ = handle.register("logs".to_string(), Duration::from_secs(2));
+            let _ = handle.register("logs".to_string(), Duration::from_secs(5));
 
             // Initial system info load
             let client_clone = client.clone();
             let tx_clone = hw_update_tx.clone();
             tokio::spawn(async move {
                 if let Ok(Ok(info)) = client_clone.get_system_info().await {
-                    let _ = tx_clone.send(HardwareUpdate::SystemInfo(info));
+                    let _ = tx_clone.send(HardwareUpdate::SystemInfo(info)).await;
                 }
             });
 
@@ -386,7 +388,7 @@ impl LapSphereApp {
 
                 match (start_rx.await, end_rx.await) {
                     (Ok(Ok(start)), Ok(Ok(end))) => {
-                        let _ = tx_clone.send(HardwareUpdate::AvailableThresholds(start, end));
+                        let _ = tx_clone.send(HardwareUpdate::AvailableThresholds(start, end)).await;
                     }
                     _ => {}
                 }
@@ -396,7 +398,7 @@ impl LapSphereApp {
             let tx_clone = hw_update_tx.clone();
             tokio::spawn(async move {
                 if let Ok(Ok(profiles)) = client_clone.get_tdp_profiles().await {
-                    let _ = tx_clone.send(HardwareUpdate::TdpProfiles(profiles));
+                    let _ = tx_clone.send(HardwareUpdate::TdpProfiles(profiles)).await;
                 }
             });
 
@@ -404,7 +406,7 @@ impl LapSphereApp {
             let tx_clone = hw_update_tx.clone();
             tokio::spawn(async move {
                 if let Ok(Ok(interface)) = client_clone.get_hardware_interface_info().await {
-                    let _ = tx_clone.send(HardwareUpdate::HardwareInterface(interface));
+                    let _ = tx_clone.send(HardwareUpdate::HardwareInterface(interface)).await;
                 }
             });
 
@@ -412,7 +414,7 @@ impl LapSphereApp {
             let tx_clone = hw_update_tx.clone();
             tokio::spawn(async move {
                 if let Ok(Ok(caps)) = client_clone.get_keyboard_capabilities().await {
-                    let _ = tx_clone.send(HardwareUpdate::KeyboardCapabilities(caps));
+                    let _ = tx_clone.send(HardwareUpdate::KeyboardCapabilities(caps)).await;
                 }
             });
             
@@ -438,7 +440,7 @@ impl LapSphereApp {
                             let latest = tag.trim_start_matches('v');
                             if latest != current_version {
                                 let body = json["body"].as_str().unwrap_or("No changelog provided.").to_string();
-                                let _ = tx_update.send(HardwareUpdate::UpdateInfo(latest.to_string(), body));
+                                let _ = tx_update.send(HardwareUpdate::UpdateInfo(latest.to_string(), body)).await;
                             }
                         }
                     }
@@ -563,9 +565,12 @@ impl LapSphereApp {
                 HardwareUpdate::WebcamState(state) => {
                     self.state.webcam_enabled = Some(state);
                 }
-                HardwareUpdate::DaemonLogs(logs) => {
+                HardwareUpdate::DaemonLogs(mut logs) => {
                     if !self.state.log_paused {
-                        self.state.daemon_logs = logs;
+                        if logs.len() > 2000 {
+                            logs.drain(0..logs.len() - 2000);
+                        }
+                        self.state.daemon_logs = logs.into();
                     }
                 }
                 HardwareUpdate::UpdateInfo(version, changelog) => {

@@ -133,6 +133,7 @@ pub struct GpuInfo {
     pub vram_vendor: Option<String>,
     pub vram_bus_width: Option<u32>, // bits
     pub vram_bandwidth: Option<f32>, // GB/s
+    pub vram_total: Option<u64>,     // MiB
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

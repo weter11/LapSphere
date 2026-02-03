@@ -179,29 +179,51 @@ impl TuxedoIo {
         let cl_res = Self::ioctl_read_i32(fd, cl_check);
         let uw_res = Self::ioctl_read_i32(fd, uw_check);
 
+        static LAST_LOG: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+        let should_log = {
+            let mut last_log = LAST_LOG.lock().unwrap();
+            match *last_log {
+                Some(instant) if instant.elapsed() < std::time::Duration::from_secs(60) => false,
+                _ => {
+                    *last_log = Some(std::time::Instant::now());
+                    true
+                }
+            }
+        };
+
         if matches!(cl_res, Ok(1)) {
-            log::debug!(target: "hw.detect", "Detected Clevo interface via hardware check");
+            if should_log {
+                log::debug!(target: "hw.detect", "Detected Clevo interface via hardware check");
+            }
             return Ok(HardwareInterface::Clevo);
         }
         if matches!(uw_res, Ok(1)) {
-            log::debug!(target: "hw.detect", "Detected Uniwill interface via hardware check");
+            if should_log {
+                log::debug!(target: "hw.detect", "Detected Uniwill interface via hardware check");
+            }
             return Ok(HardwareInterface::Uniwill);
         }
 
         // Fallback: try to read faninfo to detect interface
         let probe_cl = Self::ioctl_read_i32(fd, Self::ior(MAGIC_READ_CL, 0x10, Self::PTR_SIZE));
         if probe_cl.is_ok() {
-            log::debug!(target: "hw.detect", "Detected Clevo interface via faninfo probe");
+            if should_log {
+                log::debug!(target: "hw.detect", "Detected Clevo interface via faninfo probe");
+            }
             return Ok(HardwareInterface::Clevo);
         }
 
         let probe_uw = Self::ioctl_read_i32(fd, Self::ior(MAGIC_READ_UW, 0x10, Self::PTR_SIZE));
         if probe_uw.is_ok() {
-            log::debug!(target: "hw.detect", "Detected Uniwill interface via fanspeed probe");
+            if should_log {
+                log::debug!(target: "hw.detect", "Detected Uniwill interface via fanspeed probe");
+            }
             return Ok(HardwareInterface::Uniwill);
         }
 
-        log::warn!(target: "hw.detect", "No hardware interface detected");
+        if should_log {
+            log::warn!(target: "hw.detect", "No hardware interface detected");
+        }
         Ok(HardwareInterface::None)
     }
 
