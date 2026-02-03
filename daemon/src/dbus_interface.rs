@@ -44,73 +44,95 @@ pub struct ControlInterface;
 #[interface(name = "io.lapsphere.Control")]
 impl ControlInterface {
     async fn get_system_info(&self) -> Result<String, zbus::fdo::Error> {
+        let info = crate::HARDWARE_CACHE.lock().unwrap().system_info.clone()
+            .ok_or_else(|| zbus::fdo::Error::Failed("System info not available".to_string()))?;
+
         log_api_json!(
             "GetSystemInfo",
-            crate::hardware_detection::get_system_info(),
+            Ok::<_, anyhow::Error>(info),
             |i: &SystemInfo| format!("model=\"{}\"", i.product_name)
         )
     }
 
     async fn get_memory_info(&self) -> Result<String, zbus::fdo::Error> {
+        let info = crate::HARDWARE_CACHE.lock().unwrap().memory_info.clone()
+            .ok_or_else(|| zbus::fdo::Error::Failed("Memory info not available".to_string()))?;
+
         log_api_json!(
             "GetMemoryInfo",
-            crate::hardware_detection::get_memory_info(),
+            Ok::<_, anyhow::Error>(info),
             |i: &MemoryInfo| format!("total_gib={:.1} used_percent={:.1}", i.total_gib, i.used_percent)
         )
     }
 
     async fn get_cpu_info(&self) -> Result<String, zbus::fdo::Error> {
+        let info = crate::HARDWARE_CACHE.lock().unwrap().cpu_info.clone()
+            .ok_or_else(|| zbus::fdo::Error::Failed("CPU info not available".to_string()))?;
+
         log_api_json!(
             "GetCpuInfo",
-            crate::hardware_detection::get_cpu_info(),
+            Ok::<_, anyhow::Error>(info),
             |i: &CpuInfo| format!("model=\"{}\" cores={}", i.name, i.physical_cores)
         )
     }
 
     async fn get_gpu_info(&self) -> Result<String, zbus::fdo::Error> {
+        let info = crate::HARDWARE_CACHE.lock().unwrap().gpu_info.clone();
+
         log_api_json!(
             "GetGpuInfo",
-            crate::hardware_detection::get_gpu_info(),
+            Ok::<_, anyhow::Error>(info),
             |i: &Vec<GpuInfo>| format!("count={}", i.len())
         )
     }
 
     async fn get_battery_info(&self) -> Result<String, zbus::fdo::Error> {
+        let info = crate::HARDWARE_CACHE.lock().unwrap().battery_info.clone()
+            .ok_or_else(|| zbus::fdo::Error::Failed("Battery info not available".to_string()))?;
+
         log_api_json!(
             "GetBatteryInfo",
-            crate::hardware_detection::get_battery_info(),
+            Ok::<_, anyhow::Error>(info),
             |i: &BatteryInfo| format!("percent={} status=\"{}\"", i.charge_percent, i.status)
         )
     }
 
     async fn get_storage_device_info(&self) -> Result<String, zbus::fdo::Error> {
+        let info = crate::HARDWARE_CACHE.lock().unwrap().storage_device_info.clone();
+
         log_api_json!(
             "GetStorageDeviceInfo",
-            crate::hardware_detection::get_storage_device_info(),
+            Ok::<_, anyhow::Error>(info),
             |i: &Vec<StorageDevice>| format!("count={}", i.len())
         )
     }
 
     async fn get_mount_info(&self) -> Result<String, zbus::fdo::Error> {
+        let info = crate::HARDWARE_CACHE.lock().unwrap().mount_info.clone();
+
         log_api_json!(
             "GetMountInfo",
-            crate::hardware_detection::get_mount_info(),
+            Ok::<_, anyhow::Error>(info),
             |i: &Vec<MountInfo>| format!("count={}", i.len())
         )
     }
 
     async fn get_wifi_info(&self) -> Result<String, zbus::fdo::Error> {
+        let info = crate::HARDWARE_CACHE.lock().unwrap().wifi_info.clone();
+
         log_api_json!(
             "GetWifiInfo",
-            crate::hardware_detection::get_wifi_info(),
+            Ok::<_, anyhow::Error>(info),
             |i: &Vec<WiFiInfo>| format!("interfaces={}", i.len())
         )
     }
 
     async fn get_gamepad_info(&self) -> Result<String, zbus::fdo::Error> {
+        let info = crate::HARDWARE_CACHE.lock().unwrap().gamepad_info.clone();
+
         log_api_json!(
             "GetGamepadInfo",
-            crate::hardware_detection::get_gamepad_info(),
+            Ok::<_, anyhow::Error>(info),
             |i: &Vec<GamepadInfo>| format!("count={}", i.len())
         )
     }
@@ -213,17 +235,23 @@ impl ControlInterface {
     }
 
     async fn get_fan_speeds(&self) -> Result<String, zbus::fdo::Error> {
+        let info: Vec<(u32, u32)> = crate::HARDWARE_CACHE.lock().unwrap().fan_info.iter()
+            .map(|f| (f.id, f.rpm_or_percent))
+            .collect();
+
         log_api_json!(
             "GetFanSpeeds",
-            crate::hardware_detection::get_fan_speeds(),
+            Ok::<_, anyhow::Error>(info),
             |i: &Vec<(u32, u32)>| format!("count={}", i.len())
         )
     }
 
     async fn get_fan_info(&self) -> Result<String, zbus::fdo::Error> {
+        let info = crate::HARDWARE_CACHE.lock().unwrap().fan_info.clone();
+
         log_api_json!(
             "GetFanInfo",
-            crate::hardware_detection::get_all_fan_info(),
+            Ok::<_, anyhow::Error>(info),
             |i: &Vec<FanInfo>| format!("count={}", i.len())
         )
     }
