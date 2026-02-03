@@ -2132,14 +2132,6 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             continue;
         }
 
-        // Check if we should skip this GPU to avoid waking it up
-        // If manual clocks are disabled, we only poll if we haven't cached metadata yet
-        let _metadata_cached = {
-            let cache = NVIDIA_METADATA_CACHE.lock().unwrap();
-            cache.contains_key(&i)
-        };
-
-
         // Active GPU - proceed with NVML
         let device = match nvml.device_by_index(i) {
             Ok(d) => d,
@@ -2211,20 +2203,22 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         }).unwrap_or(0);
 
         // Determine if we should poll monitoring stats
-        // Logic:
-        // 1. If manual control is OFF: poll if GPU is NOT suspended (for benchmarks)
-        // 2. If manual control is ON:
-        //    - Poll if currently tweaking (wakes up GPU and forces stats for a 20s window)
-        //    - Otherwise, follow the "show stats until sleep" rule: poll ONLY if in high-power state (P0-P4)
-        //      and NOT suspended. This allows it to drop to low-power and suspend when idle.
-        let is_high_power = pstate_val <= 4;
-        let should_poll_nvml = if !manual_clocks_enabled {
-            !is_suspended
+        // Logic for all modes:
+        // 1. If suspended: poll nothing.
+        // 2. If P0-P5: poll NVML and NVAPI (all stats).
+        // 3. If P6+ (including P8): poll NVML only if:
+        //    - Manual control is OFF (benchmarking/monitoring)
+        //    - OR user is currently tweaking (real-time feedback)
+        // This ensures visibility while allowing the GPU to enter low-power states and eventually suspend when overclocked and idle.
+        let (should_poll_nvml, should_poll_nvapi) = if is_suspended {
+            (false, false)
+        } else if pstate_val <= 5 {
+            (true, true)
         } else {
-            is_tweaking || (is_high_power && !is_suspended)
+            // P6+, including P8
+            let poll_p8 = !manual_clocks_enabled || is_tweaking;
+            (poll_p8, false)
         };
-
-        let should_poll_nvapi = is_high_power && should_poll_nvml;
 
         let (frequency, memory_frequency, temperature, load, power) = if !should_poll_nvml {
             (None, None, None, None, None)
@@ -2422,14 +2416,12 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 gpu_info.freq_offset = Some(stats.freq_offset);
                 gpu_info.drain_offset = Some(stats.drain_offset);
                 gpu_info.power_offset = Some(stats.power_offset);
-                gpu_info.total_offset = Some(stats.total_offset);
+                // User requested NOT to show 'Total Offset' when manual control is enabled
+                gpu_info.total_offset = None;
             } else {
                 // Fallback to manual offsets if dynamic is not active
-                let manual_map = crate::MANUAL_GPU_OFFSETS.lock().unwrap();
-                if let Some(offsets) = manual_map.get(&i) {
-                    let core: f32 = offsets.0;
-                    gpu_info.total_offset = Some(core.round() as i32);
-                }
+                // User requested NOT to show 'Total Offset' when manual control is enabled
+                gpu_info.total_offset = None;
             }
         }
 
