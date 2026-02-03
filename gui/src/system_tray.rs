@@ -158,6 +158,21 @@ impl SystemTray {
         None
     }
 
+    pub fn set_current_profile(&self, profile_name: &str) {
+        self._tray_handle.update(|state| {
+            if let Some(index) = state.profiles.iter().position(|p| p == profile_name) {
+                state.current_profile = index;
+            }
+        });
+    }
+
+    pub fn set_profiles(&self, profiles: &[Profile]) {
+        let profile_names: Vec<String> = profiles.iter().map(|p| p.name.clone()).collect();
+        self._tray_handle.update(|state| {
+            state.profiles = profile_names;
+        });
+    }
+
 }
 
 pub enum TrayEvent {
