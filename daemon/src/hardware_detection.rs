@@ -2450,21 +2450,35 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         let memory_clock_range = metadata.memory_clock_range;
         let v_bw = calculate_vram_bandwidth(v_type.as_ref(), v_bus, memory_clock_range);
 
-        // Log VRAM info for diagnostics
-        if v_type.is_some() || v_vendor.is_some() || v_bus.is_some() {
-            if v_bw.is_none() && memory_clock_range.is_none() {
-                log::info!(target: "hw.detect", 
-                    "GPU {}: VRAM detected - Type: {:?}, Vendor: {:?}, Bus Width: {:?} bits, Bandwidth: N/A (memory clock range unknown)",
-                    i, v_type, v_vendor, v_bus);
-            } else {
-                log::info!(target: "hw.detect", 
-                    "GPU {}: VRAM detected - Type: {:?}, Vendor: {:?}, Bus Width: {:?} bits, Bandwidth: {:?} GB/s",
-                    i, v_type, v_vendor, v_bus, v_bw);
+        // Log VRAM info for diagnostics (rate-limited)
+        static LAST_VRAM_LOG: Lazy<Mutex<HashMap<u32, Instant>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+        let should_log_vram = {
+            let mut last_log = LAST_VRAM_LOG.lock().unwrap();
+            match last_log.get(&i) {
+                Some(instant) if instant.elapsed() < std::time::Duration::from_secs(60) => false,
+                _ => {
+                    last_log.insert(i, Instant::now());
+                    true
+                }
             }
-        } else {
-            log::warn!(target: "hw.detect", 
-                "GPU {}: VRAM info not available - Check daemon logs above for detailed error messages",
-                i);
+        };
+
+        if should_log_vram {
+            if v_type.is_some() || v_vendor.is_some() || v_bus.is_some() {
+                if v_bw.is_none() && memory_clock_range.is_none() {
+                    log::info!(target: "hw.detect",
+                        "GPU {}: VRAM detected - Type: {:?}, Vendor: {:?}, Bus Width: {:?} bits, Bandwidth: N/A (memory clock range unknown)",
+                        i, v_type, v_vendor, v_bus);
+                } else {
+                    log::info!(target: "hw.detect",
+                        "GPU {}: VRAM detected - Type: {:?}, Vendor: {:?}, Bus Width: {:?} bits, Bandwidth: {:?} GB/s",
+                        i, v_type, v_vendor, v_bus, v_bw);
+                }
+            } else {
+                log::warn!(target: "hw.detect",
+                    "GPU {}: VRAM info not available - Check daemon logs above for detailed error messages",
+                    i);
+            }
         }
 
         let mut gpu_info = GpuInfo {
