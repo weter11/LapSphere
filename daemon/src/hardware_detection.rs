@@ -598,7 +598,7 @@ fn read_frequency_limits() -> (Option<u64>, Option<u64>) {
     (min_freq, max_freq)
 }
 
-fn read_hw_frequency_limits() -> Result<(Option<u64>, Option<u64>)> {
+pub fn read_hw_frequency_limits() -> Result<(Option<u64>, Option<u64>)> {
     let min_path = "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq";
     let max_path = "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq";
 

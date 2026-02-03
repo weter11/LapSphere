@@ -397,6 +397,11 @@ async fn main() -> Result<()> {
     signal::ctrl_c().await?;
     log::info!("Shutting down daemon");
 
+    // Cleanup
+    if let Err(e) = crate::hardware_control::restore_cpu_frequency_limits() {
+        log::error!("Failed to restore CPU frequency limits on exit: {}", e);
+    }
+
     Ok(())
 }
 
