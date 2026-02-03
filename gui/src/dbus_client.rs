@@ -19,6 +19,7 @@ pub enum DbusCommand {
     GetStorageDeviceInfo { reply: oneshot::Sender<Result<Vec<StorageDevice>>> },
     GetMountInfo { reply: oneshot::Sender<Result<Vec<MountInfo>>> },
     GetWifiInfo { reply: oneshot::Sender<Result<Vec<WiFiInfo>>> },
+    GetGamepadInfo { reply: oneshot::Sender<Result<Vec<GamepadInfo>>> },
     GetTdpProfiles { reply: oneshot::Sender<Result<Vec<String>>> },
     GetHardwareInterfaceInfo { reply: oneshot::Sender<Result<String>> },
     GetKeyboardCapabilities { reply: oneshot::Sender<Result<KeyboardCapabilities>> },
@@ -118,6 +119,12 @@ impl DbusClient {
     pub fn get_wifi_info(&self) -> oneshot::Receiver<Result<Vec<WiFiInfo>>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.command_tx.send(DbusCommand::GetWifiInfo { reply: tx });
+        rx
+    }
+
+    pub fn get_gamepad_info(&self) -> oneshot::Receiver<Result<Vec<GamepadInfo>>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::GetGamepadInfo { reply: tx });
         rx
     }
 
@@ -331,6 +338,12 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
             let res: Result<(), anyhow::Error> = match command {
                 DbusCommand::GetSystemInfo { reply } => {
                     let result = get_system_info_impl(&connection).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::GetGamepadInfo { reply } => {
+                    let result = get_gamepad_info_impl(&connection).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
@@ -698,6 +711,18 @@ async fn get_wifi_info_impl(conn: &Connection) -> Result<Vec<WiFiInfo>> {
     ).await?;
 
     let json: String = proxy.call("GetWifiInfo", &()).await?;
+    Ok(serde_json::from_str(&json)?)
+}
+
+async fn get_gamepad_info_impl(conn: &Connection) -> Result<Vec<GamepadInfo>> {
+    let proxy = zbus::Proxy::new(
+        conn,
+        "io.lapsphere.Control",
+        "/io/lapsphere/Control",
+        "io.lapsphere.Control",
+    ).await?;
+
+    let json: String = proxy.call("GetGamepadInfo", &()).await?;
     Ok(serde_json::from_str(&json)?)
 }
 

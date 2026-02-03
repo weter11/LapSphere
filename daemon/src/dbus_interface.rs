@@ -107,6 +107,14 @@ impl ControlInterface {
         )
     }
 
+    async fn get_gamepad_info(&self) -> Result<String, zbus::fdo::Error> {
+        log_api_json!(
+            "GetGamepadInfo",
+            crate::hardware_detection::get_gamepad_info(),
+            |i: &Vec<GamepadInfo>| format!("count={}", i.len())
+        )
+    }
+
     async fn set_cpu_governor(&self, governor: &str) -> Result<(), zbus::fdo::Error> {
         log_api!(
             "SetCpuGovernor",

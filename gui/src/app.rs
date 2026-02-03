@@ -42,6 +42,7 @@ pub struct AppState {
     pub gpu_info: Vec<GpuInfo>,
     pub battery_info: Option<BatteryInfo>,
     pub wifi_info: Vec<WiFiInfo>,
+    pub gamepad_info: Vec<GamepadInfo>,
     pub fan_info: Vec<FanInfo>,
     pub storage_device_info: Vec<StorageDevice>,
     pub mount_info: Vec<MountInfo>,
@@ -102,6 +103,7 @@ impl AppState {
             gpu_info: Vec::new(),
             battery_info: None,
             wifi_info: Vec::new(),
+            gamepad_info: Vec::new(),
             fan_info: Vec::new(),
             storage_device_info: Vec::new(),
             mount_info: Vec::new(),
@@ -210,6 +212,7 @@ pub enum HardwareUpdate {
     GpuInfo(Vec<GpuInfo>),
     BatteryInfo(BatteryInfo),
     WifiInfo(Vec<WiFiInfo>),
+    GamepadInfo(Vec<GamepadInfo>),
     FanInfo(Vec<FanInfo>),
     StorageDeviceInfo(Vec<StorageDevice>),
     MountInfo(Vec<MountInfo>),
@@ -307,6 +310,13 @@ impl LapSphereApp {
                                     Err(e) => log::error!("DBus error getting WiFi info: {}", e),
                                 }
                             }
+                            "gamepads" => {
+                                match client.get_gamepad_info().await {
+                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::GamepadInfo(info)); }
+                                    Ok(Err(e)) => log::error!("Failed to get Gamepad info: {}", e),
+                                    Err(e) => log::error!("DBus error getting Gamepad info: {}", e),
+                                }
+                            }
                             "storage" => {
                                 match client.get_storage_device_info().await {
                                     Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::StorageDeviceInfo(info)); }
@@ -346,6 +356,7 @@ impl LapSphereApp {
             let _ = handle.register("fans".to_string(), Duration::from_millis(state.config.statistics_sections.fans_poll_rate));
             let _ = handle.register("battery".to_string(), Duration::from_millis(state.config.statistics_sections.battery_poll_rate));
             let _ = handle.register("wifi".to_string(), Duration::from_millis(state.config.statistics_sections.wifi_poll_rate));
+            let _ = handle.register("gamepads".to_string(), Duration::from_millis(state.config.statistics_sections.gamepad_poll_rate));
             let _ = handle.register("storage".to_string(), Duration::from_millis(state.config.statistics_sections.storage_poll_rate));
             let _ = handle.register("mount".to_string(), Duration::from_millis(state.config.statistics_sections.storage_poll_rate));
             let _ = handle.register("gpu_overclock".to_string(), Duration::from_millis(state.config.statistics_sections.gpu_overclock_poll_rate));
@@ -487,6 +498,43 @@ impl LapSphereApp {
                 }
                 HardwareUpdate::WifiInfo(info) => {
                     self.state.wifi_info = info;
+                }
+                HardwareUpdate::GamepadInfo(connected_gamepads) => {
+                    self.state.gamepad_info = connected_gamepads.clone();
+
+                    let mut changed = false;
+
+                    // Update existing ones and mark as connected/disconnected
+                    for remembered in &mut self.state.config.remembered_gamepads {
+                        if let Some(connected) = connected_gamepads.iter().find(|c| c.name == remembered.name) {
+                            if remembered.status != GamepadStatus::Connected ||
+                               remembered.battery_level != connected.battery_level ||
+                               remembered.power_status != connected.power_status ||
+                               remembered.connection_type != connected.connection_type
+                            {
+                                remembered.status = GamepadStatus::Connected;
+                                remembered.battery_level = connected.battery_level;
+                                remembered.power_status = connected.power_status.clone();
+                                remembered.connection_type = connected.connection_type.clone();
+                                changed = true;
+                            }
+                        } else if remembered.status != GamepadStatus::Disconnected {
+                            remembered.status = GamepadStatus::Disconnected;
+                            changed = true;
+                        }
+                    }
+
+                    // Add new ones
+                    for connected in connected_gamepads {
+                        if !self.state.config.remembered_gamepads.iter().any(|r| r.name == connected.name) {
+                            self.state.config.remembered_gamepads.push(connected);
+                            changed = true;
+                        }
+                    }
+
+                    if changed {
+                        let _ = self.state.save_settings();
+                    }
                 }
                 HardwareUpdate::FanInfo(info) => {
                     self.state.fan_info = info;
@@ -790,6 +838,7 @@ struct SettingsConfig {
     statistics_sections: StatisticsSections,
     tuning_section_order: Vec<String>,
     battery_settings: BatterySettings,
+    remembered_gamepads: Vec<GamepadInfo>,
 }
 
 impl Default for SettingsConfig {
@@ -805,6 +854,7 @@ impl Default for SettingsConfig {
             statistics_sections: config.statistics_sections,
             tuning_section_order: config.tuning_section_order,
             battery_settings: config.battery_settings,
+            remembered_gamepads: config.remembered_gamepads.clone(),
         }
     }
 }
@@ -821,6 +871,7 @@ impl From<&AppConfig> for SettingsConfig {
             statistics_sections: config.statistics_sections.clone(),
             tuning_section_order: config.tuning_section_order.clone(),
             battery_settings: config.battery_settings.clone(),
+            remembered_gamepads: config.remembered_gamepads.clone(),
         }
     }
 }
@@ -836,6 +887,7 @@ impl SettingsConfig {
         config.statistics_sections = self.statistics_sections.clone();
         config.tuning_section_order = self.tuning_section_order.clone();
         config.battery_settings = self.battery_settings.clone();
+        config.remembered_gamepads = self.remembered_gamepads.clone();
     }
 }
 

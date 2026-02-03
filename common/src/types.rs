@@ -198,6 +198,37 @@ pub struct StorageDevice {
     pub write_iops: Option<f64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GamepadInfo {
+    pub name: String,
+    pub id: String, // Unique identifier (e.g. sysfs path or serial)
+    pub status: GamepadStatus,
+    pub battery_level: Option<u8>,
+    pub connection_type: ConnectionType,
+    pub power_status: PowerStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum GamepadStatus {
+    Connected,
+    Disconnected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum ConnectionType {
+    Wired,
+    Wireless,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum PowerStatus {
+    Charging,
+    Discharging,
+    Full,
+    Unknown,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MountInfo {
     pub mount_point: String,
@@ -395,6 +426,8 @@ pub struct AppConfig {
     pub profiles: Vec<Profile>,
     pub current_profile: String,
     pub battery_settings: BatterySettings,
+    #[serde(default)]
+    pub remembered_gamepads: Vec<GamepadInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -422,6 +455,8 @@ pub struct StatisticsSections {
     pub show_wifi: bool,
     pub show_storage: bool,
     pub show_fans: bool,
+    #[serde(default = "default_show_gamepads")]
+    pub show_gamepads: bool,
     pub section_order: Vec<String>,
     // Polling rates in milliseconds
     pub cpu_poll_rate: u64,
@@ -432,6 +467,8 @@ pub struct StatisticsSections {
     pub wifi_poll_rate: u64,
     pub storage_poll_rate: u64,
     pub fans_poll_rate: u64,
+    #[serde(default = "default_gamepad_poll_rate")]
+    pub gamepad_poll_rate: u64,
     #[serde(default = "default_gpu_overclock_poll_rate")]
     pub gpu_overclock_poll_rate: u64,
 }
@@ -444,7 +481,15 @@ fn default_memory_poll_rate() -> u64 {
     1000
 }
 
+fn default_gamepad_poll_rate() -> u64 {
+    5000
+}
+
 fn default_show_memory() -> bool {
+    true
+}
+
+fn default_show_gamepads() -> bool {
     true
 }
 
@@ -468,6 +513,7 @@ impl Default for AppConfig {
             profiles: vec![Profile::default()],
             current_profile: "Standard".to_string(),
             battery_settings: BatterySettings::default(),
+            remembered_gamepads: vec![],
         }
     }
 }
@@ -493,6 +539,7 @@ impl Default for StatisticsSections {
             show_wifi: true,
             show_storage: true,
             show_fans: true,
+            show_gamepads: true,
             section_order: vec![
                 "SystemInfo".to_string(),
                 "CPU".to_string(),
@@ -502,6 +549,7 @@ impl Default for StatisticsSections {
                 "WiFi".to_string(),
                 "Storage".to_string(),
                 "Fans".to_string(),
+                "Gamepads".to_string(),
             ],
             cpu_poll_rate: 1000,            // 1 second
             memory_poll_rate: default_memory_poll_rate(),
@@ -510,6 +558,7 @@ impl Default for StatisticsSections {
             wifi_poll_rate: 5000,           // 5 seconds
             storage_poll_rate: 5 * 1000,    // 5 seconds
             fans_poll_rate: 1000,           // 1 second
+            gamepad_poll_rate: 5000,        // 5 seconds
             gpu_overclock_poll_rate: 1000,
         }
     }
