@@ -266,15 +266,6 @@ fn read_cpu_frequencies(logical_cores: u32) -> Vec<u64> {
     freqs
 }
 
-fn calculate_median(values: &[u64]) -> u64 {
-    if values.is_empty() {
-        return 0;
-    }
-    let mut sorted = values.to_vec();
-    sorted.sort_unstable();
-    sorted[sorted.len() / 2]
-}
-
 fn get_core_temp(cpu: u32) -> f32 {
     if let Ok(entries) = fs::read_dir("/sys/class/hwmon") {
         for entry in entries.flatten() {
@@ -833,18 +824,15 @@ pub fn get_cpu_info() -> Result<CpuInfo> {
         });
     }
     
-    let median_frequency = calculate_median(&frequencies);
+    let average_frequency = if !frequencies.is_empty() {
+        frequencies.iter().sum::<u64>() / frequencies.len() as u64
+    } else {
+        0
+    };
     
     let loads_vec: Vec<f32> = loads.values().copied().collect();
-    let median_load = if !loads_vec.is_empty() {
-        let mut sorted = loads_vec.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        if sorted.len() % 2 == 0 {
-            let mid = sorted.len() / 2;
-            (sorted[mid - 1] + sorted[mid]) / 2.0
-        } else {
-            sorted[sorted.len() / 2]
-        }
+    let average_load = if !loads_vec.is_empty() {
+        loads_vec.iter().sum::<f32>() / loads_vec.len() as f32
     } else {
         0.0
     };
@@ -957,8 +945,8 @@ pub fn get_cpu_info() -> Result<CpuInfo> {
 
     Ok(CpuInfo {
         name,
-        median_frequency,
-        median_load,
+        average_frequency,
+        average_load,
         package_temp,
         package_power,
         cores,

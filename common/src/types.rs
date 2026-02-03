@@ -21,8 +21,8 @@ pub struct LogEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CpuInfo {
     pub name: String,
-    pub median_frequency: u64,
-    pub median_load: f32,
+    pub average_frequency: u64,
+    pub average_load: f32,
     pub package_temp: f32,
     pub package_power: Option<f32>,
     pub power_source: Option<String>,

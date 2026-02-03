@@ -134,7 +134,7 @@ async fn main() -> Result<()> {
             match hardware_detection::get_cpu_info() {
                 Ok(cpu) => {
                     println!("CPU: {}", cpu.name);
-                    println!("  Load: {:.1}%", cpu.median_load);
+                    println!("  Load: {:.1}%", cpu.average_load);
                     println!("  Temp: {:.1}°C", cpu.package_temp);
                 }
                 Err(e) => println!("Error getting CPU info: {}", e),
@@ -158,7 +158,7 @@ async fn main() -> Result<()> {
         match hardware_detection::get_cpu_info() {
             Ok(cpu) => {
                 println!("CPU: {}", cpu.name);
-                println!("  Load: {:.1}%", cpu.median_load);
+                println!("  Load: {:.1}%", cpu.average_load);
                 println!("  Temp: {:.1}°C", cpu.package_temp);
                 if let Some(power) = cpu.package_power {
                     println!("  Power: {:.1}W", power);
