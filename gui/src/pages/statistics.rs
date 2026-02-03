@@ -1,9 +1,10 @@
 use egui::{Ui, ScrollArea, CollapsingHeader, Grid, ProgressBar, RichText};
 use egui::Color32;
+use lapsphere_common::types::GamepadStatus;
 use crate::app::AppState;
 use crate::theme::{temp_color, load_color, power_color};
 
-pub const STATISTICS_SECTIONS: [(&str, &str); 8] = [
+pub const STATISTICS_SECTIONS: [(&str, &str); 9] = [
     ("SystemInfo", "System Info"),
     ("CPU", "CPU"),
     ("Memory", "Memory"),
@@ -12,6 +13,7 @@ pub const STATISTICS_SECTIONS: [(&str, &str); 8] = [
     ("WiFi", "WiFi"),
     ("Storage", "Storage"),
     ("Fans", "Fans"),
+    ("Gamepads", "Gamepads"),
 ];
 
 const WIFI_NOT_CONNECTED: &str = "Not connected";
@@ -81,6 +83,10 @@ pub fn draw(ui: &mut Ui, state: &mut AppState) {
                     }
                     "Fans" if state.config.statistics_sections.show_fans => {
                         draw_fan_info(ui, state);
+                        ui.add_space(6.0);
+                    }
+                    "Gamepads" if state.config.statistics_sections.show_gamepads => {
+                        draw_gamepad_info(ui, state);
                         ui.add_space(6.0);
                     }
                     _ => {}
@@ -725,6 +731,60 @@ fn draw_storage_info(ui: &mut Ui, state: &AppState) {
                         });
                     ui.add_space(6.0);
                 }
+            }
+        });
+}
+
+fn draw_gamepad_info(ui: &mut Ui, state: &AppState) {
+    CollapsingHeader::new(RichText::new("🎮 Gamepads").heading())
+        .default_open(true)
+        .show(ui, |ui| {
+            if !state.config.remembered_gamepads.is_empty() {
+                for (idx, gamepad) in state.config.remembered_gamepads.iter().enumerate() {
+                    if idx > 0 {
+                        ui.add_space(4.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+                    }
+                    ui.label(RichText::new(&gamepad.name).strong());
+                    Grid::new(format!("gamepad_grid_{}", gamepad.name))
+                        .num_columns(2)
+                        .spacing([36.0, 6.0])
+                        .striped(true)
+                        .show(ui, |ui| {
+                            ui.label("Status:");
+                            let status_color = match gamepad.status {
+                                GamepadStatus::Connected => Color32::from_rgb(80, 200, 120),
+                                GamepadStatus::Disconnected => Color32::from_rgb(200, 80, 80),
+                            };
+                            ui.colored_label(status_color, format!("{:?}", gamepad.status));
+                            ui.end_row();
+
+                            if gamepad.status == GamepadStatus::Connected {
+                                ui.label("Connection:");
+                                ui.label(format!("{:?}", gamepad.connection_type));
+                                ui.end_row();
+
+                                ui.label("Battery:");
+                                if let Some(level) = gamepad.battery_level {
+                                    ui.horizontal(|ui| {
+                                        ui.add(ProgressBar::new(level as f32 / 100.0)
+                                            .text(format!("{}%", level))
+                                            .desired_width(120.0));
+                                    });
+                                } else {
+                                    ui.label("—");
+                                }
+                                ui.end_row();
+
+                                ui.label("Power Status:");
+                                ui.label(format!("{:?}", gamepad.power_status));
+                                ui.end_row();
+                            }
+                        });
+                }
+            } else {
+                ui.label("No gamepads discovered");
             }
         });
 }

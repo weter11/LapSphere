@@ -377,6 +377,19 @@ fn draw_main_settings(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTh
     ui.add_space(12.0);
     ui.separator();
     ui.add_space(12.0);
+
+    // Gamepads database
+    ui.label(RichText::new("Gamepads").strong().heading());
+    ui.add_space(6.0);
+    if ui.button("🗑 Remove database with previously connected gamepads").clicked() {
+        state.config.remembered_gamepads.clear();
+        let _ = state.save_settings();
+        state.show_message("Gamepad database cleared", false);
+    }
+
+    ui.add_space(12.0);
+    ui.separator();
+    ui.add_space(12.0);
 }
 
 fn draw_stats_configuration(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>) {
@@ -406,6 +419,9 @@ fn draw_stats_configuration(ui: &mut Ui, state: &mut AppState, dbus_client: Opti
         let _ = state.save_settings();
     }
     if ui.checkbox(&mut state.config.statistics_sections.show_fans, "Show fans").changed() {
+        let _ = state.save_settings();
+    }
+    if ui.checkbox(&mut state.config.statistics_sections.show_gamepads, "Show gamepads").changed() {
         let _ = state.save_settings();
     }
     
@@ -579,6 +595,22 @@ fn draw_stats_configuration(ui: &mut Ui, state: &mut AppState, dbus_client: Opti
         }
     });
 
+    let mut gamepad_poll = (state.config.statistics_sections.gamepad_poll_rate as f32) / 1000.0;
+    ui.horizontal(|ui| {
+        ui.label("Gamepads:");
+        if ui.add(Slider::new(&mut gamepad_poll, 0.5..=30.0).step_by(0.5).suffix(" s")).changed() {
+            let new_rate = (gamepad_poll * 1000.0) as u64;
+            state.config.statistics_sections.gamepad_poll_rate = new_rate;
+            let _ = state.save_settings();
+            // Update coordinator interval
+            if let Some(ref handle) = state.coordinator_handle {
+                let _ = handle.update_interval("gamepads".to_string(), std::time::Duration::from_millis(new_rate));
+            }
+            if let Some(client) = dbus_client {
+                let _ = client.update_polling_interval("gamepads", new_rate);
+            }
+        }
+    });
 }
 
 fn draw_hardware_info(ui: &mut Ui, state: &AppState) {

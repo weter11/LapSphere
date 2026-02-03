@@ -3056,6 +3056,191 @@ fn read_wifi_rates(interface: &str, tx_bytes: u64, rx_bytes: u64) -> (Option<f64
     rates
 }
 
+pub fn get_gamepad_info() -> Result<Vec<GamepadInfo>> {
+    let mut gamepads = Vec::new();
+    let mut seen_uids = std::collections::HashSet::new();
+
+    if let Ok(entries) = fs::read_dir("/sys/class/input") {
+        for entry in entries.flatten() {
+            let input_name = entry.file_name().to_string_lossy().to_string();
+            if input_name.starts_with("input") {
+                let path = entry.path();
+
+                // Find event child to check udev properties
+                let mut is_gamepad = false;
+                let mut udev_uid = None;
+                if let Ok(children) = fs::read_dir(&path) {
+                    for child in children.flatten() {
+                        let child_name = child.file_name().to_string_lossy().to_string();
+                        if child_name.starts_with("event") {
+                            if let Ok(uevent) = fs::read_to_string(child.path().join("uevent")) {
+                                let mut major = None;
+                                let mut minor = None;
+                                for line in uevent.lines() {
+                                    if let Some(val) = line.strip_prefix("MAJOR=") {
+                                        major = Some(val);
+                                    } else if let Some(val) = line.strip_prefix("MINOR=") {
+                                        minor = Some(val);
+                                    }
+                                }
+
+                                if let (Some(maj), Some(min)) = (major, minor) {
+                                    let udev_path = format!("/run/udev/data/c{}:{}", maj, min);
+                                    if let Ok(udev_data) = fs::read_to_string(udev_path) {
+                                        if udev_data.contains("E:ID_INPUT_JOYSTICK=1") {
+                                            is_gamepad = true;
+                                        }
+
+                                        // Try to find a stable UID from udev data
+                                        let mut id_path = None;
+                                        let mut id_serial = None;
+                                        for line in udev_data.lines() {
+                                            if let Some(val) = line.strip_prefix("E:ID_PATH=") {
+                                                id_path = Some(val.to_string());
+                                            } else if let Some(val) = line.strip_prefix("E:ID_SERIAL=") {
+                                                id_serial = Some(val.to_string());
+                                            }
+                                        }
+                                        udev_uid = id_path.or(id_serial);
+
+                                        if is_gamepad {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Fallback to name heuristic if udev info is missing or not joystick
+                if !is_gamepad {
+                    if let Ok(device_name) = fs::read_to_string(path.join("name")) {
+                        let device_name_lower = device_name.to_lowercase();
+                        if (device_name_lower.contains("controller") ||
+                            device_name_lower.contains("gamepad") ||
+                            device_name_lower.contains("joystick")) &&
+                           !device_name_lower.contains("keyboard") {
+                            is_gamepad = true;
+                        }
+                    }
+                }
+
+                // Apply exclusions based on name (even if udev says joystick)
+                if is_gamepad {
+                    if let Ok(device_name) = fs::read_to_string(path.join("name")) {
+                        let device_name_lower = device_name.to_lowercase();
+                        if device_name_lower.contains("touchpad") ||
+                           device_name_lower.contains("motion sensors") ||
+                           device_name_lower.contains("consumer control") ||
+                           device_name_lower.contains("system control") {
+                            is_gamepad = false;
+                        }
+                    }
+                }
+
+                if is_gamepad {
+                    if let Ok(device_name) = fs::read_to_string(path.join("name")) {
+                        let device_name = device_name.trim().to_string();
+                        // Use sysfs path as absolute fallback for UID if udev failed
+                        let uid = udev_uid.unwrap_or_else(|| path.to_string_lossy().to_string());
+
+                        if !seen_uids.contains(&uid) {
+                            let bustype = fs::read_to_string(path.join("id/bustype"))
+                                .ok()
+                                .and_then(|s| u16::from_str_radix(s.trim(), 16).ok())
+                                .unwrap_or(0);
+
+                            let connection_type = match bustype {
+                                0x03 => ConnectionType::Wired,
+                                0x05 => ConnectionType::Wireless,
+                                _ => ConnectionType::Unknown,
+                            };
+
+                            let (battery_level, power_status) = find_battery_for_input(&path);
+
+                            gamepads.push(GamepadInfo {
+                                name: device_name,
+                                id: input_name,
+                                uid: uid.clone(),
+                                status: GamepadStatus::Connected,
+                                battery_level,
+                                connection_type,
+                                power_status,
+                            });
+                            seen_uids.insert(uid);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(gamepads)
+}
+
+fn find_battery_for_input(input_path: &Path) -> (Option<u8>, PowerStatus) {
+    if let Ok(device_path) = fs::canonicalize(input_path.join("device")) {
+        let mut current = Some(device_path.as_path());
+        while let Some(path) = current {
+            let ps_path = path.join("power_supply");
+            if ps_path.exists() {
+                if let Ok(ps_entries) = fs::read_dir(ps_path) {
+                    for ps_entry in ps_entries.flatten() {
+                        let mut level = None;
+                        let mut status = PowerStatus::Unknown;
+                        if let Ok(cap) = fs::read_to_string(ps_entry.path().join("capacity")) {
+                            level = cap.trim().parse().ok();
+                        }
+                        if let Ok(st) = fs::read_to_string(ps_entry.path().join("status")) {
+                            status = match st.trim().to_lowercase().as_str() {
+                                "charging" => PowerStatus::Charging,
+                                "discharging" => PowerStatus::Discharging,
+                                "full" => PowerStatus::Full,
+                                _ => PowerStatus::Unknown,
+                            };
+                        }
+                        return (level, status);
+                    }
+                }
+            }
+
+            // Also check for power_supply as a sibling in some cases or child of parent
+            current = path.parent();
+            if let Some(p) = current {
+                if p == Path::new("/sys/devices") || p == Path::new("/sys") {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Fallback: search all power supplies for names matching the input device
+    if let Ok(ps_entries) = fs::read_dir("/sys/class/power_supply") {
+        for ps_entry in ps_entries.flatten() {
+            let ps_name = ps_entry.file_name().to_string_lossy().to_lowercase();
+            if ps_name.contains("controller") || ps_name.contains("gamepad") {
+                 let mut level = None;
+                 let mut status = PowerStatus::Unknown;
+                 if let Ok(cap) = fs::read_to_string(ps_entry.path().join("capacity")) {
+                     level = cap.trim().parse().ok();
+                 }
+                 if let Ok(st) = fs::read_to_string(ps_entry.path().join("status")) {
+                     status = match st.trim().to_lowercase().as_str() {
+                         "charging" => PowerStatus::Charging,
+                         "discharging" => PowerStatus::Discharging,
+                         "full" => PowerStatus::Full,
+                         _ => PowerStatus::Unknown,
+                     };
+                 }
+                 return (level, status);
+            }
+        }
+    }
+
+    (None, PowerStatus::Unknown)
+}
+
 pub fn get_battery_info() -> Result<BatteryInfo> {
     let base = if Path::new("/sys/class/power_supply/BAT0").exists() {
         "/sys/class/power_supply/BAT0"
