@@ -39,25 +39,6 @@ struct NvidiaMetadata {
 static NVIDIA_METADATA_CACHE: Lazy<Mutex<HashMap<u32, NvidiaMetadata>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-static LAST_GPU_TWEAK_TIME: Lazy<Mutex<Instant>> = Lazy::new(|| {
-    // Initialize to 1 hour ago so it doesn't trigger immediately
-    Mutex::new(Instant::now() - std::time::Duration::from_secs(3600))
-});
-
-static LAST_GPU_SAVE_TIME: Lazy<Mutex<Instant>> = Lazy::new(|| {
-    Mutex::new(Instant::now() - std::time::Duration::from_secs(3600))
-});
-
-pub fn record_gpu_tweak() {
-    let mut last = LAST_GPU_TWEAK_TIME.lock().unwrap();
-    *last = Instant::now();
-}
-
-pub fn record_gpu_save() {
-    let mut last = LAST_GPU_SAVE_TIME.lock().unwrap();
-    *last = Instant::now();
-}
-
 const BITS_PER_BYTE: f64 = 8.0;
 const BITS_PER_MEGABIT: f64 = 1_000_000.0;
 
@@ -1953,13 +1934,6 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         state.as_ref().map_or((false, false), |s| (s.manual_clocks, s.advanced_control))
     };
 
-    let is_tweaking = {
-        let tweak = LAST_GPU_TWEAK_TIME.lock().unwrap();
-        let save = LAST_GPU_SAVE_TIME.lock().unwrap();
-        // Tweaking is active for 20 seconds, BUT stops immediately if save was clicked after the last tweak
-        tweak.elapsed() < std::time::Duration::from_secs(20) && *save < *tweak
-    };
-
     // 1. Check sysfs for NVIDIA devices and their status to avoid waking up suspended GPUs
     let mut nvidia_pci_ids = Vec::new();
     if let Ok(entries) = fs::read_dir("/sys/bus/pci/drivers/nvidia") {
@@ -2206,18 +2180,16 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         // Logic for all modes:
         // 1. If suspended: poll nothing.
         // 2. If P0-P3: poll NVML and NVAPI (all stats).
-        // 3. If P4+ (including P8): poll NVML only if:
-        //    - Manual control is OFF (benchmarking/monitoring)
-        //    - OR user is currently tweaking (real-time feedback)
-        // This ensures visibility while allowing the GPU to enter low-power states and eventually suspend when overclocked and idle.
+        // 3. If P4+ (including P8): poll NVML only (no NVAPI/direct ioctls).
+        // This ensures visibility (P0-P3) while allowing the GPU to enter
+        // low-power states (P8) and eventually suspend.
         let (should_poll_nvml, should_poll_nvapi) = if is_suspended {
             (false, false)
         } else if pstate_val <= 3 {
             (true, true)
         } else {
             // P4+, including P8
-            let poll_low_power = !manual_clocks_enabled || is_tweaking;
-            (poll_low_power, false)
+            (true, false)
         };
 
         let (frequency, memory_frequency, temperature, load, power) = if !should_poll_nvml {

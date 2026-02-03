@@ -169,10 +169,6 @@ impl ControlInterface {
                 let mut state = crate::GPU_DAEMON_STATE.lock().unwrap();
                 *state = Some(profile.gpu_settings.clone());
             }
-            if profile.gpu_settings.manual_clocks {
-                crate::hardware_detection::record_gpu_tweak();
-            }
-            crate::hardware_detection::record_gpu_save();
             crate::hardware_control::apply_profile(&profile)
         })().await;
 
@@ -434,7 +430,6 @@ impl ControlInterface {
     }
 
     async fn set_gpu_locked_clocks(&self, device_index: u32, min_clock: u32, max_clock: u32) -> Result<(), zbus::fdo::Error> {
-        crate::hardware_detection::record_gpu_tweak();
         log_api!(
             "SetGpuLockedClocks",
             crate::hardware_control::set_gpu_locked_clocks(device_index, min_clock, max_clock),
@@ -451,7 +446,6 @@ impl ControlInterface {
     }
 
     async fn get_gpu_clock_ranges(&self, device_index: u32) -> Result<String, zbus::fdo::Error> {
-        crate::hardware_detection::record_gpu_tweak();
         log_api_json!(
             "GetGpuClockRanges",
             crate::hardware_detection::get_gpu_clock_ranges(device_index),
@@ -460,7 +454,6 @@ impl ControlInterface {
     }
 
     async fn set_gpu_core_offset(&self, device_index: u32, offset: f32) -> Result<(), zbus::fdo::Error> {
-        crate::hardware_detection::record_gpu_tweak();
         log_api!(
             "SetGpuCoreOffset",
             crate::hardware_control::set_gpu_core_offset(device_index, offset),
@@ -469,7 +462,6 @@ impl ControlInterface {
     }
 
     async fn set_gpu_memory_offset(&self, device_index: u32, offset: f32) -> Result<(), zbus::fdo::Error> {
-        crate::hardware_detection::record_gpu_tweak();
         log_api!(
             "SetGpuMemoryOffset",
             crate::hardware_control::set_gpu_memory_offset(device_index, offset),
@@ -478,7 +470,6 @@ impl ControlInterface {
     }
 
     async fn set_gpu_power_limit(&self, device_index: u32, limit_watts: u32) -> Result<(), zbus::fdo::Error> {
-        crate::hardware_detection::record_gpu_tweak();
         log_api!(
             "SetGpuPowerLimit",
             crate::hardware_control::set_gpu_power_limit(device_index, limit_watts),
