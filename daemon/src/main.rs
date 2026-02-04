@@ -94,10 +94,20 @@ impl log::Log for DaemonLogger {
 
         {
             let mut logs = DAEMON_LOGS.lock().unwrap();
-            if logs.len() >= 2000 {
-                logs.pop_front();
+
+            // Deduplicate: avoid adding the same message twice in a row
+            let is_duplicate = logs.back().map_or(false, |last| {
+                last.level == record.level().to_string() &&
+                last.target == record.target().to_string() &&
+                last.message == record.args().to_string()
+            });
+
+            if !is_duplicate {
+                if logs.len() >= 2000 {
+                    logs.pop_front();
+                }
+                logs.push_back(entry);
             }
-            logs.push_back(entry);
         }
 
         // Only log to console if env_logger allows it
@@ -115,7 +125,7 @@ impl log::Log for DaemonLogger {
 async fn main() -> Result<()> {
     let mut builder = env_logger::Builder::from_default_env();
     if std::env::var("RUST_LOG").is_err() {
-        builder.filter_level(log::LevelFilter::Info);
+        builder.filter_level(log::LevelFilter::Warn);
         builder.filter(Some("zbus"), log::LevelFilter::Warn);
     }
     let inner = builder.build();
@@ -637,7 +647,7 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
             if *last != Some(0) {
                 crate::hardware_control::set_gpu_core_offset(0, 0.0)?;
                 *last = Some(0);
-                log::info!("Cleared dynamic GPU offset (P-state not 0)");
+                log::debug!("Cleared dynamic GPU offset (P-state not 0)");
             }
             drop(last);
             let mut stats = CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
@@ -670,9 +680,9 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
                 crate::hardware_control::set_gpu_core_offset(0, final_offset_i32 as f32)?;
                 *last = Some(final_offset_i32);
                 if final_offset_i32 == 0 {
-                    log::info!("Cleared dynamic GPU offset (P-state not 0)");
+                    log::debug!("Cleared dynamic GPU offset (P-state not 0)");
                 } else {
-                    log::info!("Applied new dynamic GPU offset: {} MHz", final_offset_i32);
+                    log::debug!("Applied new dynamic GPU offset: {} MHz", final_offset_i32);
                 }
             }
         }

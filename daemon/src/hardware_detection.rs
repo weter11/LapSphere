@@ -1370,6 +1370,8 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
                 max_memory_clock: None,
                 core_clock_range: None,
                 memory_clock_range: None,
+                core_offset_limits: None,
+                memory_offset_limits: None,
                 is_desktop: false,
                 architecture: None,
                 nvml_index: None,
@@ -1470,6 +1472,10 @@ pub fn get_gpu_clock_ranges(device_index: u32) -> Result<(u32, u32)> {
     let (mut min, mut max) = if let Some(range) = cached_range {
         range
     } else {
+        // If not in cache, check if GPU is suspended before waking it up
+        if is_gpu_suspended_by_index(device_index) {
+            return Err(anyhow!("GPU suspended and metadata not cached"));
+        }
         let nvml = get_nvml()?;
         let device = nvml.device_by_index(device_index)?;
         get_base_gpu_clock_ranges(&device)?
@@ -1499,6 +1505,10 @@ pub fn get_gpu_core_offset_limits(device_index: u32) -> Result<(i32, i32)> {
         return Ok(limits);
     }
 
+    if is_gpu_suspended_by_index(device_index) {
+        return Err(anyhow!("GPU suspended and metadata not cached"));
+    }
+
     let nvml = get_nvml()?;
     let device = nvml.device_by_index(device_index)?;
     let offset_info = device.clock_offset(Clock::Graphics, PerformanceState::Zero)?;
@@ -1516,10 +1526,35 @@ pub fn get_gpu_memory_offset_limits(device_index: u32) -> Result<(i32, i32)> {
         return Ok(limits);
     }
 
+    if is_gpu_suspended_by_index(device_index) {
+        return Err(anyhow!("GPU suspended and metadata not cached"));
+    }
+
     let nvml = get_nvml()?;
     let device = nvml.device_by_index(device_index)?;
     let offset_info = device.clock_offset(Clock::Memory, PerformanceState::Zero)?;
     Ok((offset_info.min_clock_offset_mhz, offset_info.max_clock_offset_mhz))
+}
+
+fn is_gpu_suspended_by_index(index: u32) -> bool {
+    let mut nvidia_pci_ids = Vec::new();
+    if let Ok(entries) = fs::read_dir("/sys/bus/pci/drivers/nvidia") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.contains(':') {
+                nvidia_pci_ids.push(name);
+            }
+        }
+    }
+    nvidia_pci_ids.sort();
+
+    if let Some(id) = nvidia_pci_ids.get(index as usize) {
+        let status_path = format!("/sys/bus/pci/drivers/nvidia/{}/power/runtime_status", id);
+        if let Ok(status) = fs::read_to_string(status_path) {
+            return status.trim().eq_ignore_ascii_case("suspended");
+        }
+    }
+    false
 }
 
 // NVIDIA Direct Driver Constants and Structs
@@ -2170,6 +2205,8 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 max_memory_clock: None,
                 core_clock_range: cached_metadata.as_ref().and_then(|m| m.core_clock_range),
                 memory_clock_range: cached_metadata.as_ref().and_then(|m| m.memory_clock_range),
+                core_offset_limits: cached_metadata.as_ref().and_then(|m| m.core_offset_limits),
+                memory_offset_limits: cached_metadata.as_ref().and_then(|m| m.memory_offset_limits),
                 is_desktop: false,
                 architecture: cached_metadata.as_ref().and_then(|m| m.architecture.clone()),
                 nvml_index: Some(i as u32),
@@ -2251,6 +2288,8 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 max_memory_clock: None,
                 core_clock_range: cached_metadata.as_ref().and_then(|m| m.core_clock_range),
                 memory_clock_range: cached_metadata.as_ref().and_then(|m| m.memory_clock_range),
+                core_offset_limits: cached_metadata.as_ref().and_then(|m| m.core_offset_limits),
+                memory_offset_limits: cached_metadata.as_ref().and_then(|m| m.memory_offset_limits),
                 is_desktop: false,
                 architecture: cached_metadata.as_ref().and_then(|m| m.architecture.clone()),
                 nvml_index: Some(i),
@@ -2400,7 +2439,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 let incomplete_offsets = meta.core_offset_limits.is_none() || meta.memory_offset_limits.is_none();
 
                 if incomplete_vram || incomplete_ranges || incomplete_offsets {
-                    log::info!(target: "hw.detect", "GPU {}: Cached metadata is incomplete, retrying detection", i);
+                    log::debug!(target: "hw.detect", "GPU {}: Cached metadata is incomplete, retrying detection", i);
                     let minor_number = device.minor_number().unwrap_or(i);
                     
                     let (vram_type, vram_vendor, vram_bus_width, _) = if incomplete_vram {
@@ -2518,6 +2557,8 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             ((min as f32 + offset).max(0.0) as u32, (max as f32 + offset).max(0.0) as u32)
         });
         let memory_clock_range = metadata.memory_clock_range;
+        let core_offset_limits = metadata.core_offset_limits;
+        let memory_offset_limits = metadata.memory_offset_limits;
         let v_bw = calculate_vram_bandwidth(v_type.as_ref(), v_bus, memory_clock_range);
 
         // Log VRAM info for diagnostics (rate-limited)
@@ -2573,6 +2614,8 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             max_memory_clock: None,
             core_clock_range,
             memory_clock_range,
+            core_offset_limits,
+            memory_offset_limits,
             is_desktop,
             architecture,
             nvml_index: Some(i),

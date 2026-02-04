@@ -470,8 +470,8 @@ fn draw_gpu_tuning(
         let nvidia_gpu = gpu_info.iter().find(|g| g.name.contains("NVIDIA"));
         let nvml_index = nvidia_gpu.and_then(|g| g.nvml_index).unwrap_or(0);
 
-        // Fetch ranges if they haven't been fetched yet
-        if state.gpu_clock_ranges.is_none() {
+        // Fetch ranges if they haven't been fetched yet and there was no error
+        if state.gpu_clock_ranges.is_none() && state.gpu_clock_ranges_error.is_none() {
             if let Some(client) = dbus_client {
                 let client = client.clone();
                 let tx = hw_update_tx.clone();
@@ -483,7 +483,7 @@ fn draw_gpu_tuning(
                 });
             }
         }
-        if state.gpu_core_offset_limits.is_none() {
+        if state.gpu_core_offset_limits.is_none() && state.gpu_core_offset_error.is_none() {
             if let Some(client) = dbus_client {
                 let client = client.clone();
                 let tx = hw_update_tx.clone();
@@ -495,7 +495,7 @@ fn draw_gpu_tuning(
                 });
             }
         }
-        if state.gpu_mem_offset_limits.is_none() {
+        if state.gpu_mem_offset_limits.is_none() && state.gpu_mem_offset_error.is_none() {
             if let Some(client) = dbus_client {
                 let client = client.clone();
                 let tx = hw_update_tx.clone();
@@ -522,9 +522,11 @@ fn draw_gpu_tuning(
                     ui,
                     profile,
                     state.gpu_clock_ranges,
+                    state.gpu_clock_ranges_error.clone(),
                     state.gpu_mem_clock_ranges,
                     state.gpu_core_offset_limits,
                     state.gpu_mem_offset_limits,
+                    state.gpu_mem_offset_error.clone(),
                     gpu,
                     dbus_client,
                     hw_update_tx.clone(),
@@ -542,8 +544,10 @@ fn draw_gpu_tuning(
                 profile,
                 &mut gpu_oc_poll,
                 state.gpu_clock_ranges,
+                state.gpu_clock_ranges_error.clone(),
                 None,
                 state.gpu_mem_offset_limits,
+                state.gpu_mem_offset_error.clone(),
                 nvidia_gpu_ref.as_ref(),
                 dbus_client,
                 hw_update_tx.clone(),
@@ -570,9 +574,11 @@ fn draw_gpu_standard_controls(
     ui: &mut Ui,
     profile: &mut Profile,
     gpu_clock_ranges: Option<(u32, u32)>,
+    gpu_clock_ranges_error: Option<String>,
     _gpu_mem_clock_ranges: Option<(u32, u32)>,
     gpu_core_offset_limits: Option<(i32, i32)>,
     gpu_mem_offset_limits: Option<(i32, i32)>,
+    gpu_mem_offset_error: Option<String>,
     gpu_info: &lapsphere_common::types::GpuInfo,
     dbus_client: Option<&DbusClient>,
     hw_update_tx: tokio::sync::mpsc::Sender<crate::app::HardwareUpdate>,
@@ -668,6 +674,8 @@ fn draw_gpu_standard_controls(
 
         profile.gpu_settings.min_gpu_clock = Some(min_gpu_clock);
         profile.gpu_settings.max_gpu_clock = Some(max_gpu_clock);
+    } else if let Some(err) = &gpu_clock_ranges_error {
+        ui.label(RichText::new(format!("GPU clock ranges: {}", err)).small().weak());
     } else {
         ui.label("Fetching GPU clock ranges...");
     }
@@ -689,6 +697,8 @@ fn draw_gpu_standard_controls(
                 }
             }
             profile.gpu_settings.memory_offset = Some(memory_offset);
+        } else if let Some(err) = &gpu_mem_offset_error {
+            ui.label(RichText::new(format!("GPU memory offset limits: {}", err)).small().weak());
         } else {
             ui.label("Fetching GPU memory offset limits...");
         }
@@ -724,8 +734,10 @@ fn draw_gpu_advanced_controls(
     profile: &mut Profile,
     gpu_overclock_poll_rate: &mut u64,
     gpu_clock_ranges: Option<(u32, u32)>,
+    gpu_clock_ranges_error: Option<String>,
     _gpu_mem_clock_ranges: Option<(u32, u32)>,
     gpu_mem_offset_limits: Option<(i32, i32)>,
+    gpu_mem_offset_error: Option<String>,
     gpu_info: Option<&lapsphere_common::types::GpuInfo>,
     dbus_client: Option<&DbusClient>,
     hw_update_tx: tokio::sync::mpsc::Sender<crate::app::HardwareUpdate>,
@@ -780,9 +792,11 @@ fn draw_gpu_advanced_controls(
             });
             profile.gpu_settings.advanced_min_gpu_clock = Some(min_gpu_clock);
             profile.gpu_settings.advanced_max_gpu_clock = Some(max_gpu_clock);
+        } else if let Some(err) = &gpu_clock_ranges_error {
+            ui.label(RichText::new(format!("GPU clock ranges: {}", err)).small().weak());
         } else {
             ui.label("Fetching GPU clock ranges...");
-    }
+        }
 
     ui.add_space(8.0);
     ui.label(RichText::new("GPU Memory Offset (Advanced):").strong());
@@ -798,6 +812,8 @@ fn draw_gpu_advanced_controls(
             }
         }
         profile.gpu_settings.advanced_memory_offset = Some(advanced_mem_offset);
+    } else if let Some(err) = &gpu_mem_offset_error {
+        ui.label(RichText::new(format!("GPU memory offset limits: {}", err)).small().weak());
     } else {
         ui.label("Fetching GPU memory offset limits...");
     }

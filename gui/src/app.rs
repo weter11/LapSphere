@@ -50,9 +50,12 @@ pub struct AppState {
     pub hardware_interface: Option<String>,
     pub keyboard_capabilities: Option<KeyboardCapabilities>,
     pub gpu_clock_ranges: Option<(u32, u32)>,
+    pub gpu_clock_ranges_error: Option<String>,
     pub gpu_mem_clock_ranges: Option<(u32, u32)>,
     pub gpu_core_offset_limits: Option<(i32, i32)>,
+    pub gpu_core_offset_error: Option<String>,
     pub gpu_mem_offset_limits: Option<(i32, i32)>,
+    pub gpu_mem_offset_error: Option<String>,
     pub available_start_thresholds: Vec<u8>,
     pub available_end_thresholds: Vec<u8>,
     pub available_tdp_profiles: Vec<String>,
@@ -111,9 +114,12 @@ impl AppState {
             mount_info: Vec::new(),
             hardware_interface: None,
             gpu_clock_ranges: None,
+            gpu_clock_ranges_error: None,
             gpu_mem_clock_ranges: None,
             gpu_core_offset_limits: None,
+            gpu_core_offset_error: None,
             gpu_mem_offset_limits: None,
+            gpu_mem_offset_error: None,
             available_start_thresholds: Vec::new(),
             available_end_thresholds: Vec::new(),
             available_tdp_profiles: Vec::new(),
@@ -504,6 +510,28 @@ impl LapSphereApp {
                 }
                 HardwareUpdate::GpuInfo(info) => {
                     self.state.gpu_info = info;
+
+                    // Auto-populate ranges and limits if we found them in the periodic update
+                    if let Some(nvidia) = self.state.gpu_info.iter().find(|g| g.name.contains("NVIDIA")) {
+                        if self.state.gpu_clock_ranges.is_none() {
+                            if let Some(range) = nvidia.core_clock_range {
+                                self.state.gpu_clock_ranges = Some(range);
+                                self.state.gpu_clock_ranges_error = None;
+                            }
+                        }
+                        if self.state.gpu_core_offset_limits.is_none() {
+                            if let Some(limits) = nvidia.core_offset_limits {
+                                self.state.gpu_core_offset_limits = Some(limits);
+                                self.state.gpu_core_offset_error = None;
+                            }
+                        }
+                        if self.state.gpu_mem_offset_limits.is_none() {
+                            if let Some(limits) = nvidia.memory_offset_limits {
+                                self.state.gpu_mem_offset_limits = Some(limits);
+                                self.state.gpu_mem_offset_error = None;
+                            }
+                        }
+                    }
                 }
                 HardwareUpdate::BatteryInfo(info) => {
                     self.state.battery_info = Some(info);
@@ -579,20 +607,29 @@ impl LapSphereApp {
                 }
                 HardwareUpdate::GpuClockRanges(result) => {
                     match result {
-                        Ok(ranges) => self.state.gpu_clock_ranges = Some(ranges),
-                        Err(e) => self.state.show_message(format!("Failed to get GPU clock ranges: {}", e), true),
+                        Ok(ranges) => {
+                            self.state.gpu_clock_ranges = Some(ranges);
+                            self.state.gpu_clock_ranges_error = None;
+                        }
+                        Err(e) => self.state.gpu_clock_ranges_error = Some(e),
                     }
                 }
                 HardwareUpdate::GpuCoreOffsetLimits(result) => {
                     match result {
-                        Ok(limits) => self.state.gpu_core_offset_limits = Some(limits),
-                        Err(e) => self.state.show_message(format!("Failed to get GPU core offset limits: {}", e), true),
+                        Ok(limits) => {
+                            self.state.gpu_core_offset_limits = Some(limits);
+                            self.state.gpu_core_offset_error = None;
+                        }
+                        Err(e) => self.state.gpu_core_offset_error = Some(e),
                     }
                 }
                 HardwareUpdate::GpuMemOffsetLimits(result) => {
                     match result {
-                        Ok(limits) => self.state.gpu_mem_offset_limits = Some(limits),
-                        Err(e) => self.state.show_message(format!("Failed to get GPU memory offset limits: {}", e), true),
+                        Ok(limits) => {
+                            self.state.gpu_mem_offset_limits = Some(limits);
+                            self.state.gpu_mem_offset_error = None;
+                        }
+                        Err(e) => self.state.gpu_mem_offset_error = Some(e),
                     }
                 }
                 HardwareUpdate::AvailableThresholds(start, end) => {

@@ -119,6 +119,8 @@ pub struct GpuInfo {
     pub max_memory_clock: Option<u32>,
     pub core_clock_range: Option<(u32, u32)>,
     pub memory_clock_range: Option<(u32, u32)>,
+    pub core_offset_limits: Option<(i32, i32)>,
+    pub memory_offset_limits: Option<(i32, i32)>,
     pub is_desktop: bool,
     pub architecture: Option<String>,
     pub nvml_index: Option<u32>,
