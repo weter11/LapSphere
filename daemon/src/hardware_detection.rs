@@ -35,6 +35,8 @@ struct NvidiaMetadata {
     vram_total: Option<u64>,
     core_clock_range: Option<(u32, u32)>,
     memory_clock_range: Option<(u32, u32)>,
+    core_offset_limits: Option<(i32, i32)>,
+    memory_offset_limits: Option<(i32, i32)>,
 }
 
 static NVIDIA_METADATA_CACHE: Lazy<Mutex<HashMap<u32, NvidiaMetadata>>> =
@@ -669,7 +671,7 @@ pub fn get_tdp_profiles() -> Result<Vec<String>> {
                     static LOGGED_ONCE: Mutex<bool> = Mutex::new(false);
                     let mut logged = LOGGED_ONCE.lock().unwrap();
                     if !*logged {
-                        log::info!(target: "hw.detect", "Available TDP profiles: {:?}", profiles);
+                        log::debug!(target: "hw.detect", "Available TDP profiles: {:?}", profiles);
                         *logged = true;
                     }
                     Ok(profiles)
@@ -685,6 +687,34 @@ pub fn get_tdp_profiles() -> Result<Vec<String>> {
             Ok(vec![])
         }
     }
+}
+
+/// Internal helper to get base memory clock ranges across all performance states
+fn get_base_memory_clock_ranges(device: &nvml_wrapper::Device) -> Result<(u32, u32)> {
+    let mut range = None;
+    if let Ok(supported_states) = device.supported_performance_states() {
+        let mut m_min = u32::MAX;
+        let mut m_max = 0;
+        for pstate in supported_states {
+            if let Ok((p_min, p_max)) = device.min_max_clock_of_pstate(Clock::Memory, pstate) {
+                if p_min < m_min { m_min = p_min; }
+                if p_max > m_max { m_max = p_max; }
+            }
+        }
+        if m_min != u32::MAX {
+            range = Some((m_min, m_max));
+        }
+    }
+
+    if range.is_none() {
+        if let Ok(clocks) = device.supported_memory_clocks() {
+            if let (Some(&c_min), Some(&c_max)) = (clocks.iter().min(), clocks.iter().max()) {
+                range = Some((c_min, c_max));
+            }
+        }
+    }
+
+    range.ok_or_else(|| anyhow!("Could not determine memory clock ranges"))
 }
 
 pub fn get_current_tdp_profile() -> Result<String> {
@@ -1431,10 +1461,19 @@ fn get_base_gpu_clock_ranges(device: &nvml_wrapper::Device) -> Result<(u32, u32)
 }
 
 pub fn get_gpu_clock_ranges(device_index: u32) -> Result<(u32, u32)> {
-    let nvml = get_nvml()?;
-    let device = nvml.device_by_index(device_index)?;
+    // Try cache first to avoid waking up GPU
+    let cached_range = {
+        let cache = NVIDIA_METADATA_CACHE.lock().unwrap();
+        cache.get(&device_index).and_then(|m| m.core_clock_range)
+    };
 
-    let (mut min, mut max) = get_base_gpu_clock_ranges(&device)?;
+    let (mut min, mut max) = if let Some(range) = cached_range {
+        range
+    } else {
+        let nvml = get_nvml()?;
+        let device = nvml.device_by_index(device_index)?;
+        get_base_gpu_clock_ranges(&device)?
+    };
 
     // Add current core offset if any to show real-time effective ranges in the UI
     let offset = {
@@ -1450,6 +1489,16 @@ pub fn get_gpu_clock_ranges(device_index: u32) -> Result<(u32, u32)> {
 
 
 pub fn get_gpu_core_offset_limits(device_index: u32) -> Result<(i32, i32)> {
+    // Try cache first
+    let cached_limits = {
+        let cache = NVIDIA_METADATA_CACHE.lock().unwrap();
+        cache.get(&device_index).and_then(|m| m.core_offset_limits)
+    };
+
+    if let Some(limits) = cached_limits {
+        return Ok(limits);
+    }
+
     let nvml = get_nvml()?;
     let device = nvml.device_by_index(device_index)?;
     let offset_info = device.clock_offset(Clock::Graphics, PerformanceState::Zero)?;
@@ -1457,6 +1506,16 @@ pub fn get_gpu_core_offset_limits(device_index: u32) -> Result<(i32, i32)> {
 }
 
 pub fn get_gpu_memory_offset_limits(device_index: u32) -> Result<(i32, i32)> {
+    // Try cache first
+    let cached_limits = {
+        let cache = NVIDIA_METADATA_CACHE.lock().unwrap();
+        cache.get(&device_index).and_then(|m| m.memory_offset_limits)
+    };
+
+    if let Some(limits) = cached_limits {
+        return Ok(limits);
+    }
+
     let nvml = get_nvml()?;
     let device = nvml.device_by_index(device_index)?;
     let offset_info = device.clock_offset(Clock::Memory, PerformanceState::Zero)?;
@@ -1811,7 +1870,7 @@ fn get_vram_info(minor_number: u32) -> (Option<String>, Option<String>, Option<u
             
             // Log summary of detection results
             if ram_type_val.is_some() || bus_width.is_some() || vendor_id.is_some() {
-                log::info!(target: "hw.detect", "Successfully retrieved partial VRAM info for minor {}: type={}, bus={}, vendor={}", 
+                log::debug!(target: "hw.detect", "Successfully retrieved partial VRAM info for minor {}: type={}, bus={}, vendor={}",
                     minor_number, 
                     ram_type_val.map(|v| format!("0x{:08x}", v)).unwrap_or_else(|| "None".to_string()),
                     bus_width.map(|v| format!("{} bits", v)).unwrap_or_else(|| "None".to_string()),
@@ -2334,32 +2393,62 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             let mut cache = NVIDIA_METADATA_CACHE.lock().unwrap();
             if let Some(meta) = cache.get(&i) {
                 log::debug!(target: "hw.detect", "GPU {}: Using cached metadata", i);
-                // Check if cached VRAM info is None - if so, retry getting it
+                // Check if cached metadata is incomplete - if so, retry getting it
                 // This handles cases where initial detection failed (GPU suspended, driver not ready, etc.)
-                if meta.vram_type.is_none() && meta.vram_vendor.is_none() && meta.vram_bus_width.is_none() {
-                    log::info!(target: "hw.detect", "GPU {}: Cached VRAM info is all None, retrying detection", i);
+                let incomplete_vram = meta.vram_type.is_none() && meta.vram_vendor.is_none() && meta.vram_bus_width.is_none();
+                let incomplete_ranges = meta.core_clock_range.is_none() || meta.memory_clock_range.is_none();
+                let incomplete_offsets = meta.core_offset_limits.is_none() || meta.memory_offset_limits.is_none();
+
+                if incomplete_vram || incomplete_ranges || incomplete_offsets {
+                    log::info!(target: "hw.detect", "GPU {}: Cached metadata is incomplete, retrying detection", i);
                     let minor_number = device.minor_number().unwrap_or(i);
-                    let (vram_type, vram_vendor, vram_bus_width, _) = get_vram_info(minor_number);
                     
-                    // If we successfully got VRAM info, update the cache
-                    if vram_type.is_some() || vram_vendor.is_some() || vram_bus_width.is_some() {
-                        log::info!(target: "hw.detect", "GPU {}: Successfully detected VRAM on retry - Type: {:?}, Vendor: {:?}, Bus: {:?}",
-                            i, vram_type, vram_vendor, vram_bus_width);
-                        let updated_meta = NvidiaMetadata {
-                            vram_type,
-                            vram_vendor,
-                            vram_bus_width,
-                            ..meta.clone()
-                        };
-                        cache.insert(i, updated_meta.clone());
-                        updated_meta
+                    let (vram_type, vram_vendor, vram_bus_width, _) = if incomplete_vram {
+                        get_vram_info(minor_number)
                     } else {
-                        log::warn!(target: "hw.detect", "GPU {}: VRAM detection retry also returned None - see errors above for details", i);
-                        meta.clone()
-                    }
+                        (meta.vram_type.clone(), meta.vram_vendor.clone(), meta.vram_bus_width, None)
+                    };
+
+                    let core_range = if meta.core_clock_range.is_none() {
+                        get_base_gpu_clock_ranges(&device).ok()
+                    } else {
+                        meta.core_clock_range
+                    };
+
+                    let mem_range = if meta.memory_clock_range.is_none() {
+                        get_base_memory_clock_ranges(&device).ok()
+                    } else {
+                        meta.memory_clock_range
+                    };
+
+                    let core_offset_limits = if meta.core_offset_limits.is_none() {
+                        device.clock_offset(Clock::Graphics, PerformanceState::Zero).ok()
+                            .map(|o| (o.min_clock_offset_mhz, o.max_clock_offset_mhz))
+                    } else {
+                        meta.core_offset_limits
+                    };
+
+                    let memory_offset_limits = if meta.memory_offset_limits.is_none() {
+                        device.clock_offset(Clock::Memory, PerformanceState::Zero).ok()
+                            .map(|o| (o.min_clock_offset_mhz, o.max_clock_offset_mhz))
+                    } else {
+                        meta.memory_offset_limits
+                    };
+
+                    let updated_meta = NvidiaMetadata {
+                        vram_type,
+                        vram_vendor,
+                        vram_bus_width,
+                        core_clock_range: core_range,
+                        memory_clock_range: mem_range,
+                        core_offset_limits,
+                        memory_offset_limits,
+                        ..meta.clone()
+                    };
+                    cache.insert(i, updated_meta.clone());
+                    updated_meta
                 } else {
-                    log::debug!(target: "hw.detect", "GPU {}: Using cached VRAM info - Type: {:?}, Vendor: {:?}, Bus: {:?}", 
-                        i, meta.vram_type, meta.vram_vendor, meta.vram_bus_width);
+                    log::debug!(target: "hw.detect", "GPU {}: Using cached metadata", i);
                     meta.clone()
                 }
             } else {
@@ -2382,30 +2471,13 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 let (vram_type, vram_vendor, vram_bus_width, _) = get_vram_info(minor_number);
 
                 let core_range = get_base_gpu_clock_ranges(&device).ok();
+                let mem_range = get_base_memory_clock_ranges(&device).ok();
 
-                let mut mem_range = None;
-                if let Ok(supported_states) = device.supported_performance_states() {
-                    let mut m_min = u32::MAX;
-                    let mut m_max = 0;
-                    for pstate in supported_states {
-                        if let Ok((p_min, p_max)) = device.min_max_clock_of_pstate(Clock::Memory, pstate) {
-                            if p_min < m_min { m_min = p_min; }
-                            if p_max > m_max { m_max = p_max; }
-                        }
-                    }
-                    if m_min != u32::MAX {
-                        mem_range = Some((m_min, m_max));
-                    }
-                }
 
-                // Fallback for memory clock range
-                if mem_range.is_none() {
-                    if let Ok(clocks) = device.supported_memory_clocks() {
-                        if let (Some(&c_min), Some(&c_max)) = (clocks.iter().min(), clocks.iter().max()) {
-                            mem_range = Some((c_min, c_max));
-                        }
-                    }
-                }
+                let core_offset_limits = device.clock_offset(Clock::Graphics, PerformanceState::Zero).ok()
+                    .map(|o| (o.min_clock_offset_mhz, o.max_clock_offset_mhz));
+                let memory_offset_limits = device.clock_offset(Clock::Memory, PerformanceState::Zero).ok()
+                    .map(|o| (o.min_clock_offset_mhz, o.max_clock_offset_mhz));
 
                 let meta = NvidiaMetadata {
                     architecture: arch,
@@ -2419,6 +2491,8 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                     vram_total,
                     core_clock_range: core_range,
                     memory_clock_range: mem_range,
+                    core_offset_limits,
+                    memory_offset_limits,
                 };
                 cache.insert(i, meta.clone());
                 meta
@@ -2462,11 +2536,11 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         if should_log_vram {
             if v_type.is_some() || v_vendor.is_some() || v_bus.is_some() {
                 if v_bw.is_none() && memory_clock_range.is_none() {
-                    log::info!(target: "hw.detect",
+                    log::debug!(target: "hw.detect",
                         "GPU {}: VRAM detected - Type: {:?}, Vendor: {:?}, Bus Width: {:?} bits, Bandwidth: N/A (memory clock range unknown)",
                         i, v_type, v_vendor, v_bus);
                 } else {
-                    log::info!(target: "hw.detect",
+                    log::debug!(target: "hw.detect",
                         "GPU {}: VRAM detected - Type: {:?}, Vendor: {:?}, Bus Width: {:?} bits, Bandwidth: {:?} GB/s",
                         i, v_type, v_vendor, v_bus, v_bw);
                 }

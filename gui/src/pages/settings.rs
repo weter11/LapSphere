@@ -98,7 +98,7 @@ fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
 
     ui.horizontal(|ui| {
         ui.label("Line Limit:");
-        if ui.add(Slider::new(&mut state.config.log_limit, 1..=10000)).changed() {
+        if ui.add(Slider::new(&mut state.config.log_limit, 1..=2000)).changed() {
             let _ = state.save_settings();
         }
     });
@@ -122,31 +122,7 @@ fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
 
     ui.add_space(8.0);
 
-    let search_lower = state.log_search_text.to_lowercase();
-    let has_search = !search_lower.is_empty();
 
-    let filtered_logs: Vec<_> = state.daemon_logs.iter().rev().filter(|entry| {
-        let level_upper = entry.level.to_uppercase();
-        let show_level = match level_upper.as_str() {
-            "ERROR" => state.log_filter_error,
-            "WARN" | "WARNING" => state.log_filter_warn,
-            "INFO" => state.log_filter_info,
-            "DEBUG" | "TRACE" => state.log_filter_debug,
-            _ => true,
-        };
-
-        if !show_level { return false; }
-
-        if has_search {
-            entry.message.to_lowercase().contains(&search_lower) ||
-            entry.target.to_lowercase().contains(&search_lower) ||
-            entry.level.to_lowercase().contains(&search_lower)
-        } else {
-            true
-        }
-    }).collect();
-
-    let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
 
     ScrollArea::vertical()
         .auto_shrink([false, false])

@@ -222,8 +222,8 @@ async fn main() -> Result<()> {
                     tuxedo_io::HardwareInterface::Uniwill => "Uniwill",
                     tuxedo_io::HardwareInterface::None => "None",
                 };
-                log::info!("Detected hardware interface: {}", interface);
-                log::info!("Number of fans: {}", io.get_fan_count());
+                log::debug!("Detected hardware interface: {}", interface);
+                log::debug!("Number of fans: {}", io.get_fan_count());
                 Some(io)
             }
             Err(e) => {
@@ -232,15 +232,15 @@ async fn main() -> Result<()> {
             }
         }
     } else {
-        log::warn!("/dev/tuxedo_io not available - some features will be disabled");
+        log::debug!("/dev/tuxedo_io not available - some features will be disabled");
         None
     };
 
     // Check battery charge control
     if battery_control::BatteryControl::is_available() {
-        log::info!("Battery charge control (flexicharger) is available");
+        log::debug!("Battery charge control (flexicharger) is available");
     } else {
-        log::info!("Battery charge control not available");
+        log::debug!("Battery charge control not available");
     }
 
     // Create and start polling scheduler
@@ -251,9 +251,9 @@ async fn main() -> Result<()> {
     SCHEDULER_HANDLE.set(scheduler_handle.clone()).ok();
     
     // Initial hardware poll to populate cache immediately
-    log::info!("Performing initial hardware detection...");
+    log::debug!("Performing initial hardware detection...");
     refresh_hardware_cache();
-    log::info!("Initial hardware detection complete");
+    log::debug!("Initial hardware detection complete");
 
     // Start scheduler in background
     tokio::spawn(async move {
@@ -275,7 +275,7 @@ async fn main() -> Result<()> {
     if let Err(e) = scheduler_handle.add_job(hw_monitor_job) {
         log::error!("Failed to add hardware monitor job: {}", e);
     } else {
-        log::info!("Hardware monitor polling job added");
+        log::debug!("Hardware monitor polling job added");
     }
 
     // Add fan control polling job if hardware is available
@@ -314,7 +314,7 @@ async fn main() -> Result<()> {
         if let Err(e) = scheduler_handle.add_job(fan_job) {
             log::error!("Failed to add fan control job: {}", e);
         } else {
-            log::info!("Fan control polling job added");
+            log::debug!("Fan control polling job added");
         }
     }
 
@@ -346,7 +346,7 @@ async fn main() -> Result<()> {
         move || {
             let tick = log_tick.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
             if tick % 60 == 0 {
-                log::warn!(target: "daemon", "heartbeat uptime_tick={}", tick);
+                log::debug!(target: "daemon", "heartbeat uptime_tick={}", tick);
             }
             gpu_poll_fn()
         }
@@ -361,7 +361,7 @@ async fn main() -> Result<()> {
     if let Err(e) = scheduler_handle.add_job(gpu_job) {
         log::error!("Failed to add GPU overclocking job: {}", e);
     } else {
-        log::info!("GPU overclocking polling job added");
+        log::debug!("GPU overclocking polling job added");
     }
 
     // Start DBus service
@@ -373,7 +373,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    log::info!("DBus service started");
+    log::debug!("DBus service started");
 
     // Launch GUI if requested
     if launch_gui {
