@@ -83,12 +83,22 @@ impl log::Log for DaemonLogger {
     }
 
     fn log(&self, record: &log::Record) {
-        // Always capture all log levels into the buffer (Error, Warn, Info, Debug)
-        // The global max level (Debug) controls what reaches this logger
+        // Always capture all log levels into the buffer (Error, Warn, Info, Debug, Trace)
+        // The global max level (Trace) controls what reaches this logger
+
+        let mut level = record.level().to_string();
+        let target = record.target().to_string();
+        let message = record.args().to_string();
+
+        // Move messages starting with zbus:: to trace
+        if target.starts_with("zbus") || message.starts_with("zbus::") {
+            level = "TRACE".to_string();
+        }
+
         let entry = LogEntry {
-            level: record.level().to_string(),
-            target: record.target().to_string(),
-            message: record.args().to_string(),
+            level: level.clone(),
+            target: target.clone(),
+            message: message.clone(),
             timestamp: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         };
 
@@ -97,9 +107,9 @@ impl log::Log for DaemonLogger {
 
             // Deduplicate: avoid adding the same message twice in a row
             let is_duplicate = logs.back().map_or(false, |last| {
-                last.level == record.level().to_string() &&
-                last.target == record.target().to_string() &&
-                last.message == record.args().to_string()
+                last.level == level &&
+                last.target == target &&
+                last.message == message
             });
 
             if !is_duplicate {
@@ -133,7 +143,7 @@ async fn main() -> Result<()> {
     let logger = DaemonLogger { inner };
 
     log::set_boxed_logger(Box::new(logger)).unwrap();
-    log::set_max_level(log::LevelFilter::Debug); // Allow up to Debug to reach our logger for buffer
+    log::set_max_level(log::LevelFilter::Trace); // Allow up to Trace to reach our logger for buffer
 
     log::info!("Starting LapSphere Daemon");
 

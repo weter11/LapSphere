@@ -27,7 +27,7 @@ pub fn set_cpu_governor(governor: &str) -> Result<()> {
             .map_err(|e| anyhow!("Failed to set governor for CPU {}: {}", i, e))?;
     }
     
-    log::debug!(target: "hw.cpu", "set_governor profile=\"{}\"", governor);
+    log::info!(target: "hw.cpu", "set_governor profile=\"{}\"", governor);
     Ok(())
 }
 
@@ -70,7 +70,7 @@ pub fn set_cpu_frequency_limits(min_freq: u64, max_freq: u64) -> Result<()> {
     }
     
     CPU_LIMITS_MODIFIED.store(true, Ordering::SeqCst);
-    log::debug!(target: "hw.cpu", "set_freq_limits min={} max={}", min_freq, max_freq);
+    log::info!(target: "hw.cpu", "set_freq_limits min={} max={}", min_freq, max_freq);
     Ok(())
 }
 
@@ -94,7 +94,7 @@ pub fn set_cpu_boost(enabled: bool) -> Result<()> {
     let amd_path = "/sys/devices/system/cpu/cpufreq/boost";
     if Path::new(amd_path).exists() {
         fs::write(amd_path, if enabled { "1" } else { "0" })?;
-        log::debug!(target: "hw.cpu", "set_amd_boost enabled={}", enabled);
+        log::info!(target: "hw.cpu", "set_amd_boost enabled={}", enabled);
         return Ok(());
     }
     
@@ -102,7 +102,7 @@ pub fn set_cpu_boost(enabled: bool) -> Result<()> {
     let intel_path = "/sys/devices/system/cpu/intel_pstate/no_turbo";
     if Path::new(intel_path).exists() {
         fs::write(intel_path, if enabled { "0" } else { "1" })?;
-        log::debug!(target: "hw.cpu", "set_intel_turbo enabled={}", enabled);
+        log::info!(target: "hw.cpu", "set_intel_turbo enabled={}", enabled);
         return Ok(());
     }
     
@@ -110,7 +110,7 @@ pub fn set_cpu_boost(enabled: bool) -> Result<()> {
     let amd_pstate_boost = "/sys/devices/system/cpu/amd_pstate/cpb_boost";
     if Path::new(amd_pstate_boost).exists() {
         fs::write(amd_pstate_boost, if enabled { "1" } else { "0" })?;
-        log::debug!(target: "hw.cpu", "set_amd_pstate_boost enabled={}", enabled);
+        log::info!(target: "hw.cpu", "set_amd_pstate_boost enabled={}", enabled);
         return Ok(());
     }
     
@@ -124,7 +124,7 @@ pub fn set_smt(enabled: bool) -> Result<()> {
     }
     
     fs::write(path, if enabled { "on" } else { "off" })?;
-    log::debug!(target: "hw.cpu", "set_smt enabled={}", enabled);
+    log::info!(target: "hw.cpu", "set_smt enabled={}", enabled);
     Ok(())
 }
 
@@ -139,7 +139,7 @@ pub fn set_amd_pstate_status(status: &str) -> Result<()> {
     }
     
     fs::write(path, status)?;
-    log::debug!(target: "hw.cpu", "set_amd_pstate_status status=\"{}\"", status);
+    log::info!(target: "hw.cpu", "set_amd_pstate_status status=\"{}\"", status);
     Ok(())
 }
 
@@ -154,7 +154,7 @@ pub fn set_intel_pstate_status(status: &str) -> Result<()> {
     }
 
     fs::write(path, status)?;
-    log::debug!(target: "hw.cpu", "set_intel_pstate_status status=\"{}\"", status);
+    log::info!(target: "hw.cpu", "set_intel_pstate_status status=\"{}\"", status);
     Ok(())
 }
 
@@ -237,7 +237,7 @@ pub fn apply_profile(profile: &Profile) -> Result<()> {
 
 pub fn apply_battery_settings(settings: &BatterySettings) -> Result<()> {
     if !crate::battery_control::BatteryControl::is_available() {
-        log::debug!(target: "hw.battery", "Battery control not available, skipping");
+        log::info!(target: "hw.battery", "Battery control not available, skipping");
         return Ok(());
     }
 
@@ -247,14 +247,14 @@ pub fn apply_battery_settings(settings: &BatterySettings) -> Result<()> {
         battery.set_charge_type("Custom")?;
         battery.set_charge_control_start_threshold(settings.charge_start_threshold)?;
         battery.set_charge_control_end_threshold(settings.charge_end_threshold)?;
-        log::debug!(target: "hw.battery",
+        log::info!(target: "hw.battery",
             "set_thresholds enabled=true start={} end={}",
             settings.charge_start_threshold,
             settings.charge_end_threshold
         );
     } else {
         battery.set_charge_type("Standard")?;
-        log::debug!(target: "hw.battery", "set_thresholds enabled=false mode=\"Standard\"");
+        log::info!(target: "hw.battery", "set_thresholds enabled=false mode=\"Standard\"");
     }
 
     Ok(())
@@ -262,7 +262,7 @@ pub fn apply_battery_settings(settings: &BatterySettings) -> Result<()> {
 
 fn apply_keyboard_settings(settings: &KeyboardSettings) -> Result<()> {
     if !settings.control_enabled {
-        log::debug!(target: "hw.kbd", "keyboard_control enabled=false");
+        log::info!(target: "hw.kbd", "keyboard_control enabled=false");
         if let Ok(kbd) = RgbKeyboardControl::new() {
             let white_mode = KeyboardMode::SingleColor {
                 r: 255,
@@ -277,7 +277,7 @@ fn apply_keyboard_settings(settings: &KeyboardSettings) -> Result<()> {
     
     if let Ok(kbd) = RgbKeyboardControl::new() {
         kbd.set_mode(&settings.mode)?;
-        log::debug!(target: "hw.kbd", "keyboard_settings applied=true");
+        log::info!(target: "hw.kbd", "keyboard_settings applied=true");
         Ok(())
     } else {
         log::warn!(target: "hw.kbd", "Keyboard control not available");
@@ -296,7 +296,7 @@ pub fn preview_keyboard_settings(settings: &KeyboardSettings) -> Result<()> {
 
 fn apply_screen_settings(settings: &ScreenSettings) -> Result<()> {
     if settings.system_control {
-        log::debug!(target: "hw.screen", "Using system screen brightness control");
+        log::info!(target: "hw.screen", "Using system screen brightness control");
         return Ok(());
     }
     
@@ -330,7 +330,7 @@ fn apply_screen_settings(settings: &ScreenSettings) -> Result<()> {
             // Then write to brightness
             match fs::write(&brightness_path, actual_brightness.to_string()) {
                 Ok(_) => {
-                    log::debug!(target: "hw.screen", "set_brightness level={}% path=\"{}\"", settings.brightness, base_path);
+                    log::info!(target: "hw.screen", "set_brightness level={}% path=\"{}\"", settings.brightness, base_path);
                     return Ok(());
                 }
                 Err(e) => {
@@ -354,7 +354,7 @@ pub fn set_tdp_profile(profile_name: &str) -> Result<()> {
     
     if let Some(profile_id) = profiles.iter().position(|p| p == profile_name) {
         io.set_performance_profile(profile_id as u32)?;
-        log::debug!(target: "hw.cpu", "set_tdp_profile name=\"{}\" id={}", profile_name, profile_id);
+        log::info!(target: "hw.cpu", "set_tdp_profile name=\"{}\" id={}", profile_name, profile_id);
         Ok(())
     } else {
         Err(anyhow!("Profile '{}' not found. Available: {:?}", profile_name, profiles))
@@ -367,11 +367,11 @@ pub fn set_fan_speed(fan_id: u32, speed_percent: u32) -> Result<()> {
     }
     
     let speed = speed_percent.min(100);
-    log::debug!(target: "hw.fan", "DBus request: set fan {} to {}%", fan_id, speed);
+    log::info!(target: "hw.fan", "DBus request: set fan {} to {}%", fan_id, speed);
     let io = TuxedoIo::new()?;
     io.set_fan_speed(fan_id, speed)?;
     
-    log::debug!(target: "hw.fan", "set_fan id={} speed={}%", fan_id, speed);
+    log::info!(target: "hw.fan", "set_fan id={} speed={}%", fan_id, speed);
     Ok(())
 }
 
@@ -383,27 +383,27 @@ pub fn set_fan_auto(_fan_id: u32) -> Result<()> {
     let io = TuxedoIo::new()?;
     io.set_fan_auto()?;
     
-    log::debug!(target: "hw.fan", "set_fans_auto");
+    log::info!(target: "hw.fan", "set_fans_auto");
     Ok(())
 }
 
 fn apply_fan_settings(settings: &FanSettings) -> Result<()> {
     if !TuxedoIo::is_available() {
-        log::debug!(target: "hw.fan", "Fan control not available (/dev/tuxedo_io not present)");
+        log::info!(target: "hw.fan", "Fan control not available (/dev/tuxedo_io not present)");
         return Ok(());
     }
     
-    log::debug!(target: "hw.fan", "Applying fan settings: enabled={}", settings.control_enabled);
+    log::info!(target: "hw.fan", "Applying fan settings: enabled={}", settings.control_enabled);
     
     // Update the global fan daemon state
     {
         let mut state = crate::FAN_DAEMON_STATE.lock().unwrap();
         if settings.control_enabled {
             *state = Some(settings.clone());
-            log::debug!(target: "hw.fan", "fan_daemon enabled=true curves={}", settings.curves.len());
+            log::info!(target: "hw.fan", "fan_daemon enabled=true curves={}", settings.curves.len());
         } else {
             *state = None;
-            log::debug!(target: "hw.fan", "fan_daemon enabled=false");
+            log::info!(target: "hw.fan", "fan_daemon enabled=false");
         }
     }
     
@@ -422,7 +422,7 @@ pub fn set_webcam_state(enabled: bool) -> Result<()> {
     let io = TuxedoIo::new()?;
     io.set_webcam_state(enabled)?;
     
-    log::debug!(target: "hw.detect", "set_webcam enabled={}", enabled);
+    log::info!(target: "hw.detect", "set_webcam enabled={}", enabled);
     Ok(())
 }
 
@@ -484,7 +484,7 @@ pub fn set_gpu_core_offset(device_index: u32, offset: f32) -> Result<()> {
         let entry = map.entry(device_index).or_insert((0.0, 0.0));
         entry.0 = offset;
     }
-    log::debug!(target: "hw.gpu", "set_core_offset gpu={} offset={} offset_rounded={}", device_index, offset, offset.round());
+    log::info!(target: "hw.gpu", "set_core_offset gpu={} offset={} offset_rounded={}", device_index, offset, offset.round());
     Ok(())
 }
 
@@ -497,7 +497,7 @@ pub fn set_gpu_memory_offset(device_index: u32, offset: f32) -> Result<()> {
         let entry = map.entry(device_index).or_insert((0.0, 0.0));
         entry.1 = offset;
     }
-    log::debug!(target: "hw.gpu", "set_mem_offset gpu={} offset={} offset_rounded={}", device_index, offset, offset.round());
+    log::info!(target: "hw.gpu", "set_mem_offset gpu={} offset={} offset_rounded={}", device_index, offset, offset.round());
     Ok(())
 }
 
@@ -505,7 +505,7 @@ pub fn set_gpu_power_limit(device_index: u32, limit_watts: u32) -> Result<()> {
     let nvml = get_nvml()?;
     let mut device = nvml.device_by_index(device_index)?;
     device.set_power_management_limit(limit_watts * 1000)?; // Watts to mW
-    log::debug!(target: "hw.gpu", "set_power_limit gpu={} limit={}W", device_index, limit_watts);
+    log::info!(target: "hw.gpu", "set_power_limit gpu={} limit={}W", device_index, limit_watts);
     Ok(())
 }
 
@@ -513,7 +513,7 @@ pub fn set_gpu_fan_speed(device_index: u32, fan_index: u32, speed_percent: u32) 
     let nvml = get_nvml()?;
     let mut device = nvml.device_by_index(device_index)?;
     device.set_fan_speed(fan_index, speed_percent)?;
-    log::debug!(target: "hw.gpu", "set_fan_speed gpu={} fan={} speed={}%", device_index, fan_index, speed_percent);
+    log::info!(target: "hw.gpu", "set_fan_speed gpu={} fan={} speed={}%", device_index, fan_index, speed_percent);
     Ok(())
 }
 
@@ -521,7 +521,7 @@ pub fn set_gpu_fan_auto(device_index: u32, fan_index: u32) -> Result<()> {
     let nvml = get_nvml()?;
     let mut device = nvml.device_by_index(device_index)?;
     device.set_default_fan_speed(fan_index)?;
-    log::debug!(target: "hw.gpu", "set_fan_auto gpu={} fan={}", device_index, fan_index);
+    log::info!(target: "hw.gpu", "set_fan_auto gpu={} fan={}", device_index, fan_index);
     Ok(())
 }
 
@@ -551,7 +551,7 @@ pub fn set_prime_profile(profile: &str) -> Result<()> {
             _ => profile,
         };
 
-        log::debug!(target: "hw.gpu", "set_prime_profile mode=\"{}\" tool=\"optimus-manager\"", opt_mode);
+        log::info!(target: "hw.gpu", "set_prime_profile mode=\"{}\" tool=\"optimus-manager\"", opt_mode);
         let output = std::process::Command::new(path)
             .arg("--switch")
             .arg(opt_mode)
@@ -571,7 +571,7 @@ pub fn set_prime_profile(profile: &str) -> Result<()> {
     if !output.status.success() {
         return Err(anyhow!("prime-select command failed: {}", String::from_utf8_lossy(&output.stderr)));
     }
-    log::debug!(target: "hw.gpu", "set_prime_profile mode=\"{}\" tool=\"prime-select\"", profile);
+    log::info!(target: "hw.gpu", "set_prime_profile mode=\"{}\" tool=\"prime-select\"", profile);
     Ok(())
 }
 
@@ -592,7 +592,7 @@ pub fn set_energy_performance_preference(epp: &str) -> Result<()> {
         }
     }
     
-    log::debug!(target: "hw.cpu", "set_epp preference=\"{}\"", epp);
+    log::info!(target: "hw.cpu", "set_epp preference=\"{}\"", epp);
     Ok(())
 }
 
@@ -682,7 +682,7 @@ impl RgbKeyboardControl {
         let color_str = format!("{} {} {}", red, green, blue);
         fs::write(&color_path, color_str)?;
         
-        log::debug!(target: "hw.kbd", "set_zone_color zone={} r={} g={} b={}", zone_idx, red, green, blue);
+        log::info!(target: "hw.kbd", "set_zone_color zone={} r={} g={} b={}", zone_idx, red, green, blue);
         Ok(())
     }
     
@@ -707,7 +707,7 @@ impl RgbKeyboardControl {
             let _ = fs::write(&brightness_path, actual_brightness.to_string());
         }
         
-        log::debug!(target: "hw.kbd", "set_brightness level={}%", brightness);
+        log::info!(target: "hw.kbd", "set_brightness level={}%", brightness);
         Ok(())
     }
     
@@ -764,7 +764,7 @@ impl RgbKeyboardControl {
                     let _ = self.set_zone_color(i, *r, *g, *b);
                 }
                 self.set_brightness(*brightness)?;
-                log::debug!(target: "hw.kbd", "set_mode mode=\"breathing\" speed={}", speed);
+                log::info!(target: "hw.kbd", "set_mode mode=\"breathing\" speed={}", speed);
             }
             KeyboardMode::Wave { brightness, speed } => {
                 if let Some(ref io) = self.tuxedo_io {
@@ -775,7 +775,7 @@ impl RgbKeyboardControl {
                 self.write_effect_mode(7, "wave")?;
                 self.write_effect_speed(*speed)?;
                 self.set_brightness(*brightness)?;
-                log::debug!(target: "hw.kbd", "set_mode mode=\"wave\" speed={}", speed);
+                log::info!(target: "hw.kbd", "set_mode mode=\"wave\" speed={}", speed);
             }
             KeyboardMode::Cycle { brightness, speed } => {
                 if let Some(ref io) = self.tuxedo_io {
@@ -786,7 +786,7 @@ impl RgbKeyboardControl {
                 self.write_effect_mode(2, "cycle")?;
                 self.write_effect_speed(*speed)?;
                 self.set_brightness(*brightness)?;
-                log::debug!(target: "hw.kbd", "set_mode mode=\"cycle\" speed={}", speed);
+                log::info!(target: "hw.kbd", "set_mode mode=\"cycle\" speed={}", speed);
             }
             KeyboardMode::Dance { brightness, speed } => {
                 if let Some(ref io) = self.tuxedo_io {
@@ -797,7 +797,7 @@ impl RgbKeyboardControl {
                 self.write_effect_mode(3, "dance")?;
                 self.write_effect_speed(*speed)?;
                 self.set_brightness(*brightness)?;
-                log::debug!(target: "hw.kbd", "set_mode mode=\"dance\" speed={}", speed);
+                log::info!(target: "hw.kbd", "set_mode mode=\"dance\" speed={}", speed);
             }
             KeyboardMode::Flash { r, g, b, brightness, speed } => {
                 if let Some(ref io) = self.tuxedo_io {
@@ -811,7 +811,7 @@ impl RgbKeyboardControl {
                     let _ = self.set_zone_color(i, *r, *g, *b);
                 }
                 self.set_brightness(*brightness)?;
-                log::debug!(target: "hw.kbd", "set_mode mode=\"flash\" speed={}", speed);
+                log::info!(target: "hw.kbd", "set_mode mode=\"flash\" speed={}", speed);
             }
             KeyboardMode::RandomColor { brightness, speed } => {
                 if let Some(ref io) = self.tuxedo_io {
@@ -822,7 +822,7 @@ impl RgbKeyboardControl {
                 self.write_effect_mode(5, "random")?;
                 self.write_effect_speed(*speed)?;
                 self.set_brightness(*brightness)?;
-                log::debug!(target: "hw.kbd", "set_mode mode=\"random\" speed={}", speed);
+                log::info!(target: "hw.kbd", "set_mode mode=\"random\" speed={}", speed);
             }
             KeyboardMode::Tempo { brightness, speed } => {
                 if let Some(ref io) = self.tuxedo_io {
@@ -833,7 +833,7 @@ impl RgbKeyboardControl {
                 self.write_effect_mode(6, "tempo")?;
                 self.write_effect_speed(*speed)?;
                 self.set_brightness(*brightness)?;
-                log::debug!(target: "hw.kbd", "set_mode mode=\"tempo\" speed={}", speed);
+                log::info!(target: "hw.kbd", "set_mode mode=\"tempo\" speed={}", speed);
             }
         }
         Ok(())
