@@ -480,7 +480,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn refresh_hardware_cache() {
+pub fn refresh_hardware_cache() {
     let cpu_info = hardware_detection::get_cpu_info().ok();
     let memory_info = hardware_detection::get_memory_info().ok();
     let gpu_info = hardware_detection::get_gpu_info().unwrap_or_default();

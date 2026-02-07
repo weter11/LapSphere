@@ -1,9 +1,99 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum GpuType {
-    Integrated,
-    Discrete,
+pub struct SystemInfo {
+    pub product_name: String,
+    pub product_sku: String,
+    pub manufacturer: String,
+    pub board_name: String,
+    pub bios_version: String,
+    pub kernel_modules: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LogEntry {
+    pub level: String,
+    pub target: String,
+    pub message: String,
+    pub timestamp: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CpuInfo {
+    pub name: String,
+    pub average_frequency: u64,
+    pub average_load: f32,
+    pub package_temp: f32,
+    pub package_power: Option<f32>,
+    pub power_source: Option<String>,
+    pub all_power_sources: Vec<PowerSource>,
+    pub cores: Vec<CoreInfo>,
+    pub physical_cores: u32,
+    pub logical_cores: u32,
+    pub governor: String,
+    pub available_governors: Vec<String>,
+    pub boost_enabled: bool,
+    pub smt_enabled: bool,
+    pub scaling_driver: String,
+    pub amd_pstate_status: Option<String>,
+    pub intel_pstate_status: Option<String>,
+    pub min_freq: Option<u64>,
+    pub max_freq: Option<u64>,
+    pub hw_min_freq: Option<u64>,
+    pub hw_max_freq: Option<u64>,
+    pub energy_performance_preference: Option<String>,
+    pub available_epp_options: Vec<String>,
+    pub scheduler: String,
+    pub available_schedulers: Vec<String>,
+    pub tdp0: Option<u32>,
+    pub tdp1: Option<u32>,
+    pub tdp2: Option<u32>,
+    pub tdp0_range: Option<(u32, u32)>,
+    pub tdp1_range: Option<(u32, u32)>,
+    pub tdp2_range: Option<(u32, u32)>,
+    pub capabilities: CpuCapabilities,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CpuCapabilities {
+    pub has_boost: bool,
+    pub has_cpuinfo_max_freq: bool,
+    pub has_cpuinfo_min_freq: bool,
+    pub has_scaling_driver: bool,
+    pub has_energy_performance_preference: bool,
+    pub has_scaling_governor: bool,
+    pub has_smt: bool,
+    pub has_scaling_min_freq: bool,
+    pub has_scaling_max_freq: bool,
+    pub has_available_governors: bool,
+    pub has_amd_pstate: bool,
+    pub has_intel_pstate: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PowerSource {
+    pub name: String,      // e.g., "RAPL", "amdgpu", "zenpower"
+    pub value: f32,        // Power in watts
+    pub description: String,  // e.g., "Intel RAPL", "AMD APU (CPU+iGPU)", "Zenpower driver"
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CoreInfo {
+    pub id: u32,
+    pub frequency: u64,
+    pub load: f32,
+    pub temperature: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemoryInfo {
+    pub total_gib: f64,
+    pub used_gib: f64,
+    pub free_gib: f64,
+    pub available_gib: f64,
+    pub used_percent: f32,
+    pub memory_type: Option<String>,
+    pub memory_frequency: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -14,8 +104,8 @@ pub struct GpuInfo {
     pub frequency: Option<u64>,
     pub memory_frequency: Option<u64>,
     pub temperature: Option<f32>,
-    pub hotspot_temperature: Option<f32>,
-    pub memory_temperature: Option<f32>,
+    pub hotspot_temperature: Option<f32>,  // GPU hotspot/junction temperature
+    pub memory_temperature: Option<f32>,   // VRAM temperature
     pub load: Option<f32>,
     pub power: Option<f32>,
     pub voltage: Option<f32>,
@@ -37,167 +127,21 @@ pub struct GpuInfo {
     pub driver_version: Option<String>,
     pub supported_p_states: Vec<String>,
     pub supports_power_limit: bool,
-    pub power_limit_range: Option<(u32, u32)>,
+    pub power_limit_range: Option<(u32, u32)>, // in Watts
     pub supports_gpu_offset: bool,
     pub supports_mem_offset: bool,
-    pub fan_speed_range: Option<(u32, u32)>,
+    pub fan_speed_range: Option<(u32, u32)>, // in %
     pub vram_type: Option<String>,
     pub vram_vendor: Option<String>,
-    pub vram_bus_width: Option<u32>,
-    pub vram_bandwidth: Option<f32>,
-    pub vram_total: Option<u64>,
+    pub vram_bus_width: Option<u32>, // bits
+    pub vram_bandwidth: Option<f32>, // GB/s
+    pub vram_total: Option<u64>,     // MiB
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct CpuInfo {
-    pub name: String,
-    pub average_frequency: u64,
-    pub average_load: f32,
-    pub package_temp: f32,
-    pub package_power: Option<f32>,
-    pub cores: Vec<CoreInfo>,
-    pub physical_cores: u32,
-    pub logical_cores: u32,
-    pub governor: String,
-    pub available_governors: Vec<String>,
-    pub boost_enabled: bool,
-    pub smt_enabled: bool,
-    pub scaling_driver: String,
-    pub amd_pstate_status: Option<String>,
-    pub intel_pstate_status: Option<String>,
-    pub min_freq: Option<u64>,
-    pub max_freq: Option<u64>,
-    pub hw_min_freq: Option<u64>,
-    pub hw_max_freq: Option<u64>,
-    pub all_power_sources: Vec<PowerSource>,
-    pub power_source: Option<String>,
-    pub energy_performance_preference: Option<String>,
-    pub available_epp_options: Vec<String>,
-    pub tdp0: Option<u32>,
-    pub tdp1: Option<u32>,
-    pub tdp2: Option<u32>,
-    pub tdp0_range: Option<(u32, u32)>,
-    pub tdp1_range: Option<(u32, u32)>,
-    pub tdp2_range: Option<(u32, u32)>,
-    pub capabilities: CpuCapabilities,
-    pub scheduler: String,
-    pub available_schedulers: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct CoreInfo {
-    pub id: u32,
-    pub frequency: u64,
-    pub load: f32,
-    pub temperature: f32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct PowerSource {
-    pub name: String,
-    pub value: f32,
-    pub description: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct CpuCapabilities {
-    pub has_boost: bool,
-    pub has_cpuinfo_max_freq: bool,
-    pub has_cpuinfo_min_freq: bool,
-    pub has_scaling_driver: bool,
-    pub has_energy_performance_preference: bool,
-    pub has_scaling_governor: bool,
-    pub has_smt: bool,
-    pub has_scaling_min_freq: bool,
-    pub has_scaling_max_freq: bool,
-    pub has_available_governors: bool,
-    pub has_amd_pstate: bool,
-    pub has_intel_pstate: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct MemoryInfo {
-    pub total_gib: f64,
-    pub used_gib: f64,
-    pub free_gib: f64,
-    pub available_gib: f64,
-    pub used_percent: f32,
-    pub memory_type: Option<String>,
-    pub memory_frequency: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SystemInfo {
-    pub product_name: String,
-    pub product_sku: String,
-    pub manufacturer: String,
-    pub board_name: String,
-    pub bios_version: String,
-    pub kernel_modules: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct FanInfo {
-    pub id: u32,
-    pub name: String,
-    pub rpm_or_percent: u32,
-    pub temperature: Option<f32>,
-    pub is_rpm: bool,
-    pub mode: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct WiFiInfo {
-    pub interface: String,
-    pub driver: String,
-    pub driver_version: Option<String>,
-    pub firmware_version: Option<String>,
-    pub temperature: Option<f32>,
-    pub signal_level: Option<i32>,
-    pub channel: Option<u32>,
-    pub channel_width: Option<u32>,
-    pub channel_freq: Option<u32>,
-    pub tx_rate: Option<f64>,
-    pub rx_rate: Option<f64>,
-    pub ssid: Option<String>,
-    pub tx_bitrate: Option<f64>,
-    pub rx_bitrate: Option<f64>,
-    pub rx_bytes: Option<u64>,
-    pub tx_bytes: Option<u64>,
-    pub network_controller: Option<String>,
-    pub subsystem: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum ConnectionType {
-    Wired,
-    Wireless,
-    Unknown,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum PowerStatus {
-    Charging,
-    Discharging,
-    Full,
-    Unknown,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum GamepadStatus {
-    Connected,
-    Disconnected,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct GamepadInfo {
-    pub name: String,
-    pub id: String,
-    pub uid: String,
-    pub status: GamepadStatus,
-    pub battery_level: Option<u8>,
-    pub connection_type: ConnectionType,
-    pub power_status: PowerStatus,
+pub enum GpuType {
+    Integrated,
+    Discrete,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -215,12 +159,35 @@ pub struct BatteryInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct MountInfo {
-    pub mount_point: String,
-    pub filesystem_type: String,
-    pub total_gb: u64,
-    pub used_gb: u64,
-    pub used_percent: f64,
+pub struct FanInfo {
+    pub id: u32,
+    pub name: String,
+    pub rpm_or_percent: u32,
+    pub temperature: Option<f32>,  // Temperature sensor for this fan
+    pub is_rpm: bool,              // true if rpm_or_percent is RPM, false if it's percentage
+    pub mode: Option<String>,      // "Auto", "Manual", etc.
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WiFiInfo {
+    pub interface: String,
+    pub driver: String,
+    pub driver_version: Option<String>,
+    pub firmware_version: Option<String>,
+    pub temperature: Option<f32>,
+    pub signal_level: Option<i32>,      // Signal level in dBm
+    pub channel: Option<u32>,           // Current channel
+    pub channel_width: Option<u32>,     // Channel width in MHz (20/40/80/160)
+    pub channel_freq: Option<u32>,      // Channel frequency in MHz
+    pub tx_rate: Option<f64>,           // Upload rate in Mbps (Actual throughput)
+    pub rx_rate: Option<f64>,           // Download rate in Mbps (Actual throughput)
+    pub ssid: Option<String>,
+    pub tx_bitrate: Option<f64>,        // Link speed in Mbps (PHY rate)
+    pub rx_bitrate: Option<f64>,        // Link speed in Mbps (PHY rate)
+    pub rx_bytes: Option<u64>,
+    pub tx_bytes: Option<u64>,
+    pub network_controller: Option<String>,
+    pub subsystem: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -235,12 +202,164 @@ pub struct StorageDevice {
     pub write_iops: Option<f64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct GamepadInfo {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub id: String, // Dynamic identifier (e.g. input0)
+    #[serde(default)]
+    pub uid: String, // Stable unique identifier (e.g. ID_PATH from udev)
+    #[serde(default)]
+    pub status: GamepadStatus,
+    #[serde(default)]
+    pub battery_level: Option<u8>,
+    #[serde(default)]
+    pub connection_type: ConnectionType,
+    #[serde(default)]
+    pub power_status: PowerStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub enum GamepadStatus {
+    Connected,
+    #[default]
+    Disconnected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub enum ConnectionType {
+    Wired,
+    Wireless,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub enum PowerStatus {
+    Charging,
+    Discharging,
+    Full,
+    #[default]
+    Unknown,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct LogEntry {
-    pub timestamp: String,
-    pub level: String,
-    pub target: String,
-    pub message: String,
+pub struct MountInfo {
+    pub mount_point: String,
+    pub filesystem_type: String,
+    pub total_gb: u64,
+    pub used_gb: u64,
+    pub used_percent: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Profile {
+    pub name: String,
+    pub is_default: bool,
+    pub cpu_settings: CpuSettings,
+    pub gpu_settings: GpuSettings,
+    pub keyboard_settings: KeyboardSettings,
+    pub screen_settings: ScreenSettings,
+    pub fan_settings: FanSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CpuSettings {
+    pub governor: Option<String>,
+    pub min_frequency: Option<u64>,
+    pub max_frequency: Option<u64>,
+    pub boost: Option<bool>,
+    pub smt: Option<bool>,
+    pub performance_profile: Option<String>,
+    pub tdp_profile: Option<String>,
+    pub energy_performance_preference: Option<String>,
+    pub tdp: Option<u32>,
+    pub tdp0: Option<u32>,
+    pub tdp1: Option<u32>,
+    pub tdp2: Option<u32>,
+    pub amd_pstate_status: Option<String>,
+    pub intel_pstate_status: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GpuSettings {
+    pub dgpu_tdp: Option<u32>,
+    pub min_gpu_clock: Option<u32>,
+    pub max_gpu_clock: Option<u32>,
+    pub min_mem_clock: Option<u32>,
+    pub max_mem_clock: Option<u32>,
+    pub manual_clocks: bool,
+    pub core_offset: Option<f32>,
+    pub memory_offset: Option<f32>,
+    pub power_limit: Option<u32>,
+    pub prime_profile: Option<String>,
+    #[serde(default)]
+    pub advanced_control: bool,
+    #[serde(default)]
+    pub advanced: GpuAdvancedSettings,
+    #[serde(default)]
+    pub advanced_min_gpu_clock: Option<u32>,
+    #[serde(default)]
+    pub advanced_max_gpu_clock: Option<u32>,
+    #[serde(default)]
+    pub advanced_min_mem_clock: Option<u32>,
+    #[serde(default)]
+    pub advanced_max_mem_clock: Option<u32>,
+    #[serde(default)]
+    pub advanced_memory_offset: Option<i32>,
+    #[serde(default)]
+    pub nvidia_fans: Vec<NvidiaFanSettings>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct NvidiaFanSettings {
+    pub device_index: u32,
+    pub fan_id: u32,
+    pub speed: u32,
+    pub manual: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GpuAdvancedSettings {
+    pub temperature_min: i32,
+    pub temperature_max: i32,
+    pub plimit_min: i32,
+    pub plimit_max: i32,
+    pub frequency_min: i32,
+    pub frequency_max: i32,
+    pub freq_offset_max: i32,
+    pub freq_offset_min: i32,
+    pub low_freq_min: i32,
+    pub low_freq_max: i32,
+    pub drain_offset_lmin: i32,
+    pub drain_offset_lmax: i32,
+    pub high_freq_min: i32,
+    pub high_freq_max: i32,
+    pub drain_offset_hmin: i32,
+    pub drain_offset_hmax: i32,
+    pub critical_temp_min: i32,
+    pub critical_temp_max: i32,
+    pub power_offset_max: i32,
+    pub power_offset_min: i32,
+    #[serde(default)]
+    pub drain_offset_control: bool,
+    #[serde(default)]
+    pub power_offset_control: bool,
+    #[serde(default)]
+    pub critical_temp_range_control: bool,
+    #[serde(default = "default_smart_rounding_threshold")]
+    pub smart_rounding_threshold: i32,
+}
+
+fn default_smart_rounding_threshold() -> i32 {
+    15
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct KeyboardSettings {
+    pub control_enabled: bool,
+    pub mode: KeyboardMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -284,133 +403,15 @@ pub enum KeyboardMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Profile {
-    pub name: String,
-    pub is_default: bool,
-    pub cpu_settings: CpuSettings,
-    pub gpu_settings: GpuSettings,
-    pub keyboard_settings: KeyboardSettings,
-    pub screen_settings: ScreenSettings,
-    pub fan_settings: FanSettings,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-pub struct CpuSettings {
-    pub governor: Option<String>,
-    pub min_frequency: Option<u64>,
-    pub max_frequency: Option<u64>,
-    pub boost: Option<bool>,
-    pub smt: Option<bool>,
-    pub performance_profile: Option<String>,
-    pub tdp_profile: Option<String>,
-    pub energy_performance_preference: Option<String>,
-    pub tdp: Option<u32>,
-    pub tdp0: Option<u32>,
-    pub tdp1: Option<u32>,
-    pub tdp2: Option<u32>,
-    pub amd_pstate_status: Option<String>,
-    pub intel_pstate_status: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-pub struct GpuSettings {
-    pub dgpu_tdp: Option<u32>,
-    pub min_gpu_clock: Option<u32>,
-    pub max_gpu_clock: Option<u32>,
-    pub min_mem_clock: Option<u32>,
-    pub max_mem_clock: Option<u32>,
-    pub manual_clocks: bool,
-    pub core_offset: Option<f32>,
-    pub memory_offset: Option<f32>,
-    pub power_limit: Option<u32>,
-    pub prime_profile: Option<String>,
-    #[serde(default)]
-    pub advanced_control: bool,
-    #[serde(default)]
-    pub advanced: GpuAdvancedSettings,
-    #[serde(default)]
-    pub advanced_min_gpu_clock: Option<u32>,
-    #[serde(default)]
-    pub advanced_max_gpu_clock: Option<u32>,
-    #[serde(default)]
-    pub advanced_min_mem_clock: Option<u32>,
-    #[serde(default)]
-    pub advanced_max_mem_clock: Option<u32>,
-    #[serde(default)]
-    pub advanced_memory_offset: Option<i32>,
-    #[serde(default)]
-    pub nvidia_fans: Vec<NvidiaFanSettings>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-pub struct NvidiaFanSettings {
-    pub device_index: u32,
-    pub fan_id: u32,
-    pub speed: u32,
-    pub manual: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-pub struct GpuAdvancedSettings {
-    pub temperature_min: i32,
-    pub temperature_max: i32,
-    pub plimit_min: i32,
-    pub plimit_max: i32,
-    pub frequency_min: i32,
-    pub frequency_max: i32,
-    pub freq_offset_max: i32,
-    pub freq_offset_min: i32,
-    pub low_freq_min: i32,
-    pub low_freq_max: i32,
-    pub drain_offset_lmin: i32,
-    pub drain_offset_lmax: i32,
-    pub high_freq_min: i32,
-    pub high_freq_max: i32,
-    pub drain_offset_hmin: i32,
-    pub drain_offset_hmax: i32,
-    pub critical_temp_min: i32,
-    pub critical_temp_max: i32,
-    pub power_offset_max: i32,
-    pub power_offset_min: i32,
-    pub drain_offset_control: bool,
-    pub power_offset_control: bool,
-    pub critical_temp_range_control: bool,
-    pub smart_rounding_threshold: i32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-pub struct KeyboardSettings {
-    pub control_enabled: bool,
-    pub mode: KeyboardMode,
-}
-
-impl Default for KeyboardMode {
-    fn default() -> Self {
-        KeyboardMode::SingleColor {
-            r: 255,
-            g: 255,
-            b: 255,
-            brightness: 50,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ScreenSettings {
     pub brightness: u8,
     pub system_control: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FanSettings {
     pub control_enabled: bool,
     pub curves: Vec<FanCurve>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-pub struct FanCurve {
-    pub fan_id: u32,
-    pub points: Vec<(u8, u8)>, // (temperature, speed) - 8 points
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -420,14 +421,10 @@ pub struct BatterySettings {
     pub charge_end_threshold: u8,
 }
 
-impl Default for BatterySettings {
-    fn default() -> Self {
-        Self {
-            control_enabled: false,
-            charge_start_threshold: 40,
-            charge_end_threshold: 80,
-        }
-    }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FanCurve {
+    pub fan_id: u32,
+    pub points: Vec<(u8, u8)>, // (temperature, speed) - 8 points
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -550,6 +547,16 @@ impl Default for AppConfig {
     }
 }
 
+impl Default for BatterySettings {
+    fn default() -> Self {
+        Self {
+            control_enabled: false,
+            charge_start_threshold: 40,
+            charge_end_threshold: 80,
+        }
+    }
+}
+
 impl Default for StatisticsSections {
     fn default() -> Self {
         Self {
@@ -596,6 +603,115 @@ impl Default for Profile {
             keyboard_settings: KeyboardSettings::default(),
             screen_settings: ScreenSettings::default(),
             fan_settings: FanSettings::default(),
+        }
+    }
+}
+
+impl Default for CpuSettings {
+    fn default() -> Self {
+        Self {
+            governor: None,
+            min_frequency: None,
+            max_frequency: None,
+            boost: None,
+            smt: None,
+            performance_profile: None,
+            tdp: None,
+            amd_pstate_status: None,
+            intel_pstate_status: None,
+            tdp_profile: None,
+            energy_performance_preference: None,
+            tdp0: None,
+            tdp1: None,
+            tdp2: None,
+        }
+    }
+}
+
+impl Default for GpuSettings {
+    fn default() -> Self {
+        Self {
+            dgpu_tdp: None,
+            min_gpu_clock: None,
+            max_gpu_clock: None,
+            min_mem_clock: None,
+            max_mem_clock: None,
+            manual_clocks: false,
+            core_offset: Some(0.0),
+            memory_offset: Some(0.0),
+            power_limit: None,
+            prime_profile: Some("on-demand".to_string()),
+            advanced_control: false,
+            advanced: GpuAdvancedSettings::default(),
+            advanced_min_gpu_clock: None,
+            advanced_max_gpu_clock: None,
+            advanced_min_mem_clock: None,
+            advanced_max_mem_clock: None,
+            advanced_memory_offset: Some(0),
+            nvidia_fans: vec![],
+        }
+    }
+}
+
+impl Default for GpuAdvancedSettings {
+    fn default() -> Self {
+        Self {
+            temperature_min: 20,
+            temperature_max: 80,
+            plimit_min: 20,
+            plimit_max: 120,
+            frequency_min: 900,
+            frequency_max: 1800,
+            freq_offset_max: 300,
+            freq_offset_min: 150,
+            low_freq_min: 1000,
+            low_freq_max: 1440,
+            drain_offset_lmin: -30,
+            drain_offset_lmax: 0,
+            high_freq_min: 1440,
+            high_freq_max: 1800,
+            drain_offset_hmin: 0,
+            drain_offset_hmax: 15,
+            critical_temp_min: 48,
+            critical_temp_max: 61,
+            power_offset_max: 35,
+            power_offset_min: 0,
+            drain_offset_control: false,
+            power_offset_control: false,
+            critical_temp_range_control: false,
+            smart_rounding_threshold: 15,
+        }
+    }
+}
+
+impl Default for KeyboardSettings {
+    fn default() -> Self {
+        Self {
+            control_enabled: false,
+            mode: KeyboardMode::SingleColor {
+                r: 255,
+                g: 255,
+                b: 255,
+                brightness: 50,
+            },
+        }
+    }
+}
+
+impl Default for ScreenSettings {
+    fn default() -> Self {
+        Self {
+            brightness: 50,
+            system_control: true,
+        }
+    }
+}
+
+impl Default for FanSettings {
+    fn default() -> Self {
+        Self {
+            control_enabled: false,
+            curves: vec![],
         }
     }
 }

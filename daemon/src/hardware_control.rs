@@ -29,6 +29,7 @@ pub fn set_cpu_governor(governor: &str) -> Result<()> {
     }
     
     log::info!(target: "hw.cpu", "set_governor profile=\"{}\"", governor);
+    crate::refresh_hardware_cache();
     Ok(())
 }
 
@@ -141,6 +142,7 @@ pub fn set_amd_pstate_status(status: &str) -> Result<()> {
     
     fs::write(path, status)?;
     log::info!(target: "hw.cpu", "set_amd_pstate_status status=\"{}\"", status);
+    crate::refresh_hardware_cache();
     Ok(())
 }
 
@@ -156,6 +158,7 @@ pub fn set_intel_pstate_status(status: &str) -> Result<()> {
 
     fs::write(path, status)?;
     log::info!(target: "hw.cpu", "set_intel_pstate_status status=\"{}\"", status);
+    crate::refresh_hardware_cache();
     Ok(())
 }
 
