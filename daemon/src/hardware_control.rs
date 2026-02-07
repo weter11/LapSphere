@@ -3,12 +3,13 @@ use nvml_wrapper::Nvml;
 use once_cell::sync::Lazy;
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use lapsphere_common::types::*;
 use crate::tuxedo_io::{TuxedoIo, HardwareInterface};
 
 static CPU_LIMITS_MODIFIED: AtomicBool = AtomicBool::new(false);
+static LAST_APPLIED_PROFILE: Lazy<Mutex<Option<Profile>>> = Lazy::new(|| Mutex::new(None));
 
 fn get_cpu_count() -> Result<u32> {
     let cpuinfo = fs::read_to_string("/proc/cpuinfo")?;
@@ -159,6 +160,18 @@ pub fn set_intel_pstate_status(status: &str) -> Result<()> {
 }
 
 pub fn apply_profile(profile: &Profile) -> Result<()> {
+    // Check if this profile is already applied to avoid redundant hardware calls
+    {
+        let mut last_profile = LAST_APPLIED_PROFILE.lock().unwrap();
+        if let Some(ref last) = *last_profile {
+            if last == profile {
+                log::info!(target: "hw.detect", "Profile '{}' is already applied, skipping", profile.name);
+                return Ok(());
+            }
+        }
+        *last_profile = Some(profile.clone());
+    }
+
     log::info!(target: "hw.detect", "Applying profile: {}", profile.name);
     
     // Apply CPU settings
@@ -200,9 +213,31 @@ pub fn apply_profile(profile: &Profile) -> Result<()> {
         set_cpu_frequency_limits(min, max)?;
     }
 
+    // Apply GPU settings
+    let nvidia_gpu_idx = {
+        let cache = crate::HARDWARE_CACHE.lock().unwrap();
+        cache.gpu_info.iter()
+            .find(|g| g.name.to_lowercase().contains("nvidia"))
+            .and_then(|g| g.nvml_index)
+            .unwrap_or(0)
+    };
+
     if let Some(limit) = profile.gpu_settings.power_limit {
-        let nvidia_gpu_idx = profile.gpu_settings.nvidia_fans.get(0).map(|f| f.device_index).unwrap_or(0);
         let _ = set_gpu_power_limit(nvidia_gpu_idx, limit);
+    }
+
+    if let Some(core_offset) = profile.gpu_settings.core_offset {
+        let _ = set_gpu_core_offset(nvidia_gpu_idx, core_offset as f32);
+    }
+
+    if let Some(memory_offset) = profile.gpu_settings.memory_offset {
+        let _ = set_gpu_memory_offset(nvidia_gpu_idx, memory_offset as f32);
+    }
+
+    if let (Some(min_clock), Some(max_clock)) = (profile.gpu_settings.min_gpu_clock, profile.gpu_settings.max_gpu_clock) {
+        let _ = set_gpu_locked_clocks(nvidia_gpu_idx, min_clock, max_clock);
+    } else {
+        let _ = reset_gpu_clocks(nvidia_gpu_idx);
     }
     
     if let Some(boost) = profile.cpu_settings.boost {

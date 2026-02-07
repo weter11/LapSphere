@@ -2,7 +2,7 @@
 pkgname=lapsphere
 pkgver=0.1.0
 pkgrel=1
-pkgdesc="Hardware control application for Clevo/Uniwill laptops"
+pkgdesc="Hardware control application for Uniwill/Clevo laptops"
 arch=('x86_64')
 url="https://github.com/weter11/lapsphere"
 license=('GPL2')

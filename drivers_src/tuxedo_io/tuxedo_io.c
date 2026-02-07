@@ -34,7 +34,7 @@
 #include "../uniwill_interfaces.h"
 #include "tuxedo_io_ioctl.h"
 
-MODULE_DESCRIPTION("Hardware interface for Clevo/Uniwill laptops");
+MODULE_DESCRIPTION("Hardware interface for Uniwill/Clevo laptops");
 MODULE_AUTHOR("TUXEDO Computers GmbH <tux@tuxedocomputers.com>");
 MODULE_VERSION("0.3.9");
 MODULE_LICENSE("GPL");

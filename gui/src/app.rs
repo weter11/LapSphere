@@ -132,7 +132,7 @@ impl AppState {
             log_filter_info: true,
             log_filter_warn: true,
             log_filter_error: true,
-            log_paused: false,
+            log_paused: true,
             log_search_text: String::new(),
             keyboard_capabilities: None,
             current_page: Page::Statistics,

@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=LapSphere
 GenericName=Hardware Control
-Comment=Control hardware features on Clevo/Uniwill laptops
+Comment=Control hardware features on Uniwill/Clevo laptops
 Exec=lapsphere
 Icon=lapsphere
 Terminal=false

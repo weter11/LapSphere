@@ -204,30 +204,6 @@ fn draw_help_info(ui: &mut Ui, state: &AppState) {
                     ui.end_row();
                 });
 
-            ui.add_space(12.0);
-            ui.separator();
-            ui.add_space(12.0);
-
-            ui.add_space(6.0);
-            ui.label("Standard mode controls apply locked clocks and memory offsets directly.");
-            ui.label("They are applied when you click Save in the Tuning tab.");
-
-            ui.add_space(12.0);
-            ui.separator();
-            ui.add_space(12.0);
-
-            ui.add_space(6.0);
-            let advanced_enabled = state
-                .current_profile()
-                .map(|profile| profile.gpu_settings.advanced_control)
-                .unwrap_or(false);
-            if advanced_enabled {
-                ui.label("Advanced dynamic offsets are enabled for the current profile.");
-            } else {
-                ui.label("Advanced dynamic offsets are disabled for the current profile.");
-            }
-            ui.label("Advanced mode uses its own locked clock and memory offset values.");
-            ui.label("Press F1 for the NVIDIA overclocking parameter reference.");
         });
 }
 
@@ -237,7 +213,7 @@ fn draw_about_info(ui: &mut Ui, state: &AppState) {
         .show(ui, |ui| {
             ui.label(RichText::new("About").strong().heading());
             ui.add_space(6.0);
-            ui.label("LapSphere provides hardware monitoring and tuning for Clevo/Uniwill laptops.");
+            ui.label("LapSphere provides hardware monitoring and tuning for Uniwill/Clevo laptops.");
             ui.label("Use the Profiles and Tuning tabs to customize performance, cooling, and lighting.");
             ui.label("Statistics and Hardware Info show live system telemetry.");
 

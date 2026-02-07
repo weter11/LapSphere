@@ -95,6 +95,11 @@ impl log::Log for DaemonLogger {
             level = "TRACE".to_string();
         }
 
+        // Move all massages hw. to info as requested
+        if target.starts_with("hw.") && level == "DEBUG" {
+            level = "INFO".to_string();
+        }
+
         let entry = LogEntry {
             level: level.clone(),
             target: target.clone(),
@@ -150,7 +155,7 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
     if args.contains(&"--help".to_string()) || args.contains(&"-h".to_string()) {
-        println!("LapSphere Daemon - Hardware Control for Clevo/Uniwill Laptops");
+        println!("LapSphere Daemon - Hardware Control for Uniwill/Clevo Laptops");
         println!("\nUsage: lapsphere-daemon [OPTIONS]");
         println!("\nOptions:");
         println!("  --gui       Launch the graphical user interface");
@@ -177,7 +182,7 @@ async fn main() -> Result<()> {
     // Check if running as root
     if unsafe { libc::geteuid() } != 0 {
         if !launch_gui && !launch_tray {
-            println!("--- Hardware Statistics for Clevo/Uniwill Laptops (Limited - non-root) ---");
+            println!("--- Hardware Statistics for Uniwill/Clevo Laptops (Limited - non-root) ---");
             match hardware_detection::get_cpu_info() {
                 Ok(cpu) => {
                     println!("CPU: {}", cpu.name);
@@ -201,7 +206,7 @@ async fn main() -> Result<()> {
     }
 
     if !launch_gui && !launch_tray {
-        println!("--- Hardware Statistics for Clevo/Uniwill Laptops ---");
+        println!("--- Hardware Statistics for Uniwill/Clevo Laptops ---");
         match hardware_detection::get_cpu_info() {
             Ok(cpu) => {
                 println!("CPU: {}", cpu.name);

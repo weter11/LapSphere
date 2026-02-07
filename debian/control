@@ -30,7 +30,7 @@ Depends: ${shlibs:Depends}, ${misc:Depends},
          ethtool,
          iw
 Recommends: tuxedo-drivers
-Description: Hardware control application for Clevo/Uniwill laptops
+Description: Hardware control application for Uniwill/Clevo laptops
  LapSphere provides a modern interface for controlling
  hardware features on Uniwill and Clevo laptops including:
   - CPU frequency and power management

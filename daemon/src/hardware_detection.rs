@@ -3214,6 +3214,19 @@ fn read_wifi_rates(interface: &str, tx_bytes: u64, rx_bytes: u64) -> (Option<f64
     rates
 }
 
+fn normalize_uid(uid: String) -> String {
+    let trimmed = uid.trim();
+    // Check if it looks like a MAC address (6 pairs of hex digits separated by colons or dashes, or just 12 hex digits)
+    let is_mac = (trimmed.len() == 17 && (trimmed.contains(':') || trimmed.contains('-'))) ||
+                 (trimmed.len() == 12 && trimmed.chars().all(|c| c.is_ascii_hexdigit()));
+
+    if is_mac {
+        trimmed.replace(':', "").replace('-', "").to_lowercase()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 pub fn get_gamepad_info() -> Result<Vec<GamepadInfo>> {
     let mut gamepads = Vec::new();
     let mut seen_uids = std::collections::HashSet::new();
@@ -3263,7 +3276,7 @@ pub fn get_gamepad_info() -> Result<Vec<GamepadInfo>> {
                                             }
                                         }
                                         // Priority: Serial Short > Serial > Path
-                                        udev_uid = id_serial_short.or(id_serial).or(id_path);
+                        udev_uid = id_serial_short.or(id_serial).or(id_path).map(normalize_uid);
 
                                         if is_gamepad {
                                             break;
@@ -3311,7 +3324,7 @@ pub fn get_gamepad_info() -> Result<Vec<GamepadInfo>> {
                         if let Ok(uniq) = fs::read_to_string(path.join("device/uniq")) {
                             let uniq = uniq.trim();
                             if !uniq.is_empty() && uniq != "00:00:00:00:00:00" {
-                                uid = uniq.to_string();
+                                uid = normalize_uid(uniq.to_string());
                             }
                         }
 
