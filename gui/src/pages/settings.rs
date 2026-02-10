@@ -98,7 +98,7 @@ fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
 
     ui.horizontal(|ui| {
         ui.label("Line Limit:");
-        if ui.add(Slider::new(&mut state.config.log_limit, 1..=10000)).changed() {
+        if ui.add(Slider::new(&mut state.config.log_limit, 1..=2000)).changed() {
             let _ = state.save_settings();
         }
     });
@@ -122,74 +122,57 @@ fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
 
     ui.add_space(8.0);
 
+
+
     let search_lower = state.log_search_text.to_lowercase();
     let has_search = !search_lower.is_empty();
 
-    let filtered_logs: Vec<_> = state.daemon_logs.iter().rev().filter(|entry| {
-        let level_upper = entry.level.to_uppercase();
-        let show_level = match level_upper.as_str() {
-            "ERROR" => state.log_filter_error,
-            "WARN" | "WARNING" => state.log_filter_warn,
-            "INFO" => state.log_filter_info,
-            "DEBUG" | "TRACE" => state.log_filter_debug,
-            _ => true,
-        };
+    let filtered_logs: Vec<_> = state.daemon_logs.iter().rev()
+        .filter(|entry| {
+            let level_upper = entry.level.to_uppercase();
+            let show_level = match level_upper.as_str() {
+                "ERROR" => state.log_filter_error,
+                "WARN" | "WARNING" => state.log_filter_warn,
+                "INFO" => state.log_filter_info,
+                "DEBUG" => state.log_filter_debug,
+                "TRACE" => state.log_filter_trace,
+                _ => true,
+            };
 
-        if !show_level { return false; }
+            if !show_level { return false; }
 
-        if has_search {
-            entry.message.to_lowercase().contains(&search_lower) ||
-            entry.target.to_lowercase().contains(&search_lower) ||
-            entry.level.to_lowercase().contains(&search_lower)
-        } else {
-            true
-        }
-    }).collect();
+            if has_search {
+                entry.message.to_lowercase().contains(&search_lower) ||
+                entry.target.to_lowercase().contains(&search_lower) ||
+                entry.level.to_lowercase().contains(&search_lower)
+            } else {
+                true
+            }
+        })
+        .take(state.config.log_limit)
+        .collect();
 
     let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
-
     ScrollArea::vertical()
         .auto_shrink([false, false])
-        .show(ui, |ui| {
-            let search_lower = state.log_search_text.to_lowercase();
-            let has_search = !search_lower.is_empty();
-            
-            for entry in state.daemon_logs.iter().rev().take(state.config.log_limit) {
+        .show_rows(ui, row_height, filtered_logs.len(), |ui, row_range| {
+            for i in row_range {
+                let entry = filtered_logs[i];
                 let level_upper = entry.level.to_uppercase();
-                let show_level = match level_upper.as_str() {
-                    "ERROR" => state.log_filter_error,
-                    "WARN" | "WARNING" => state.log_filter_warn,
-                    "INFO" => state.log_filter_info,
-                    "DEBUG" => state.log_filter_debug,
-                    "TRACE" => state.log_filter_trace,
-                    _ => true,
+                let color = match level_upper.as_str() {
+                    "ERROR" => egui::Color32::from_rgb(255, 100, 100),
+                    "WARN" | "WARNING" => egui::Color32::from_rgb(255, 200, 100),
+                    "DEBUG" => egui::Color32::from_rgb(150, 150, 150),
+                    "TRACE" => egui::Color32::from_rgb(100, 100, 100),
+                    _ => ui.visuals().text_color(),
                 };
 
-                // Apply search filter
-                let show_search = if has_search {
-                    entry.message.to_lowercase().contains(&search_lower) ||
-                    entry.target.to_lowercase().contains(&search_lower) ||
-                    entry.level.to_lowercase().contains(&search_lower)
-                } else {
-                    true
-                };
-
-                if show_level && show_search {
-                    let color = match level_upper.as_str() {
-                        "ERROR" => egui::Color32::from_rgb(255, 100, 100),
-                        "WARN" | "WARNING" => egui::Color32::from_rgb(255, 200, 100),
-                        "DEBUG" => egui::Color32::from_rgb(150, 150, 150),
-                        "TRACE" => egui::Color32::from_rgb(100, 100, 100),
-                        _ => ui.visuals().text_color(),
-                    };
-
-                    ui.horizontal_top(|ui| {
-                        ui.label(RichText::new(&entry.timestamp).weak().monospace());
-                        ui.label(RichText::new(&entry.level).color(color).strong().monospace());
-                        ui.label(RichText::new(&entry.target).color(egui::Color32::from_rgb(100, 150, 255)).monospace());
-                        ui.label(RichText::new(&entry.message).monospace());
-                    });
-                }
+                ui.horizontal_top(|ui| {
+                    ui.label(RichText::new(&entry.timestamp).weak().monospace());
+                    ui.label(RichText::new(&entry.level).color(color).strong().monospace());
+                    ui.label(RichText::new(&entry.target).color(egui::Color32::from_rgb(100, 150, 255)).monospace());
+                    ui.label(RichText::new(&entry.message).monospace());
+                });
             }
         });
 }
@@ -228,30 +211,6 @@ fn draw_help_info(ui: &mut Ui, state: &AppState) {
                     ui.end_row();
                 });
 
-            ui.add_space(12.0);
-            ui.separator();
-            ui.add_space(12.0);
-
-            ui.add_space(6.0);
-            ui.label("Standard mode controls apply locked clocks and memory offsets directly.");
-            ui.label("They are applied when you click Save in the Tuning tab.");
-
-            ui.add_space(12.0);
-            ui.separator();
-            ui.add_space(12.0);
-
-            ui.add_space(6.0);
-            let advanced_enabled = state
-                .current_profile()
-                .map(|profile| profile.gpu_settings.advanced_control)
-                .unwrap_or(false);
-            if advanced_enabled {
-                ui.label("Advanced dynamic offsets are enabled for the current profile.");
-            } else {
-                ui.label("Advanced dynamic offsets are disabled for the current profile.");
-            }
-            ui.label("Advanced mode uses its own locked clock and memory offset values.");
-            ui.label("Press F1 for the NVIDIA overclocking parameter reference.");
         });
 }
 
@@ -261,7 +220,7 @@ fn draw_about_info(ui: &mut Ui, state: &AppState) {
         .show(ui, |ui| {
             ui.label(RichText::new("About").strong().heading());
             ui.add_space(6.0);
-            ui.label("LapSphere provides hardware monitoring and tuning for Clevo/Uniwill laptops.");
+            ui.label("LapSphere provides hardware monitoring and tuning for Uniwill/Clevo laptops.");
             ui.label("Use the Profiles and Tuning tabs to customize performance, cooling, and lighting.");
             ui.label("Statistics and Hardware Info show live system telemetry.");
 

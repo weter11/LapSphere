@@ -3,12 +3,13 @@ use nvml_wrapper::Nvml;
 use once_cell::sync::Lazy;
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use lapsphere_common::types::*;
 use crate::tuxedo_io::{TuxedoIo, HardwareInterface};
 
 static CPU_LIMITS_MODIFIED: AtomicBool = AtomicBool::new(false);
+static LAST_APPLIED_PROFILE: Lazy<Mutex<Option<Profile>>> = Lazy::new(|| Mutex::new(None));
 
 fn get_cpu_count() -> Result<u32> {
     let cpuinfo = fs::read_to_string("/proc/cpuinfo")?;
@@ -28,6 +29,7 @@ pub fn set_cpu_governor(governor: &str) -> Result<()> {
     }
     
     log::info!(target: "hw.cpu", "set_governor profile=\"{}\"", governor);
+    crate::refresh_hardware_cache();
     Ok(())
 }
 
@@ -140,6 +142,7 @@ pub fn set_amd_pstate_status(status: &str) -> Result<()> {
     
     fs::write(path, status)?;
     log::info!(target: "hw.cpu", "set_amd_pstate_status status=\"{}\"", status);
+    crate::refresh_hardware_cache();
     Ok(())
 }
 
@@ -155,10 +158,23 @@ pub fn set_intel_pstate_status(status: &str) -> Result<()> {
 
     fs::write(path, status)?;
     log::info!(target: "hw.cpu", "set_intel_pstate_status status=\"{}\"", status);
+    crate::refresh_hardware_cache();
     Ok(())
 }
 
 pub fn apply_profile(profile: &Profile) -> Result<()> {
+    // Check if this profile is already applied to avoid redundant hardware calls
+    {
+        let mut last_profile = LAST_APPLIED_PROFILE.lock().unwrap();
+        if let Some(ref last) = *last_profile {
+            if last == profile {
+                log::info!(target: "hw.detect", "Profile '{}' is already applied, skipping", profile.name);
+                return Ok(());
+            }
+        }
+        *last_profile = Some(profile.clone());
+    }
+
     log::info!(target: "hw.detect", "Applying profile: {}", profile.name);
     
     // Apply CPU settings
@@ -200,9 +216,31 @@ pub fn apply_profile(profile: &Profile) -> Result<()> {
         set_cpu_frequency_limits(min, max)?;
     }
 
+    // Apply GPU settings
+    let nvidia_gpu_idx = {
+        let cache = crate::HARDWARE_CACHE.lock().unwrap();
+        cache.gpu_info.iter()
+            .find(|g| g.name.to_lowercase().contains("nvidia"))
+            .and_then(|g| g.nvml_index)
+            .unwrap_or(0)
+    };
+
     if let Some(limit) = profile.gpu_settings.power_limit {
-        let nvidia_gpu_idx = profile.gpu_settings.nvidia_fans.get(0).map(|f| f.device_index).unwrap_or(0);
         let _ = set_gpu_power_limit(nvidia_gpu_idx, limit);
+    }
+
+    if let Some(core_offset) = profile.gpu_settings.core_offset {
+        let _ = set_gpu_core_offset(nvidia_gpu_idx, core_offset as f32);
+    }
+
+    if let Some(memory_offset) = profile.gpu_settings.memory_offset {
+        let _ = set_gpu_memory_offset(nvidia_gpu_idx, memory_offset as f32);
+    }
+
+    if let (Some(min_clock), Some(max_clock)) = (profile.gpu_settings.min_gpu_clock, profile.gpu_settings.max_gpu_clock) {
+        let _ = set_gpu_locked_clocks(nvidia_gpu_idx, min_clock, max_clock);
+    } else {
+        let _ = reset_gpu_clocks(nvidia_gpu_idx);
     }
     
     if let Some(boost) = profile.cpu_settings.boost {
@@ -237,7 +275,7 @@ pub fn apply_profile(profile: &Profile) -> Result<()> {
 
 pub fn apply_battery_settings(settings: &BatterySettings) -> Result<()> {
     if !crate::battery_control::BatteryControl::is_available() {
-        log::debug!(target: "hw.battery", "Battery control not available, skipping");
+        log::info!(target: "hw.battery", "Battery control not available, skipping");
         return Ok(());
     }
 
@@ -296,7 +334,7 @@ pub fn preview_keyboard_settings(settings: &KeyboardSettings) -> Result<()> {
 
 fn apply_screen_settings(settings: &ScreenSettings) -> Result<()> {
     if settings.system_control {
-        log::debug!(target: "hw.screen", "Using system screen brightness control");
+        log::info!(target: "hw.screen", "Using system screen brightness control");
         return Ok(());
     }
     
@@ -367,7 +405,7 @@ pub fn set_fan_speed(fan_id: u32, speed_percent: u32) -> Result<()> {
     }
     
     let speed = speed_percent.min(100);
-    log::debug!(target: "hw.fan", "DBus request: set fan {} to {}%", fan_id, speed);
+    log::info!(target: "hw.fan", "DBus request: set fan {} to {}%", fan_id, speed);
     let io = TuxedoIo::new()?;
     io.set_fan_speed(fan_id, speed)?;
     
@@ -389,11 +427,11 @@ pub fn set_fan_auto(_fan_id: u32) -> Result<()> {
 
 fn apply_fan_settings(settings: &FanSettings) -> Result<()> {
     if !TuxedoIo::is_available() {
-        log::debug!(target: "hw.fan", "Fan control not available (/dev/tuxedo_io not present)");
+        log::info!(target: "hw.fan", "Fan control not available (/dev/tuxedo_io not present)");
         return Ok(());
     }
     
-    log::debug!(target: "hw.fan", "Applying fan settings: enabled={}", settings.control_enabled);
+    log::info!(target: "hw.fan", "Applying fan settings: enabled={}", settings.control_enabled);
     
     // Update the global fan daemon state
     {

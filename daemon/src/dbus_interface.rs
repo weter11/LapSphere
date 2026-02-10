@@ -190,7 +190,7 @@ impl ControlInterface {
     }
 
     async fn apply_profile(&self, profile_json: &str) -> Result<(), zbus::fdo::Error> {
-        log::info!(target: "api.call", "ApplyProfile");
+        log::debug!(target: "api.call", "ApplyProfile");
         let start = std::time::Instant::now();
         let res = (|| async {
             let profile: Profile = serde_json::from_str(profile_json)?;
@@ -204,7 +204,7 @@ impl ControlInterface {
 
         let duration = start.elapsed().as_millis();
         match &res {
-            Ok(_) => log::info!(target: "api.ok", "ApplyProfile duration_ms={}", duration),
+            Ok(_) => log::debug!(target: "api.ok", "ApplyProfile duration_ms={}", duration),
             Err(e) => log::warn!(target: "api.fail", "ApplyProfile reason=\"{}\" duration_ms={}", e, duration),
         }
         res.map_err(|e| zbus::fdo::Error::Failed(e.to_string()))

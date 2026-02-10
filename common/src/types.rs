@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SystemInfo {
     pub product_name: String,
     pub product_sku: String,
@@ -10,7 +10,7 @@ pub struct SystemInfo {
     pub kernel_modules: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LogEntry {
     pub level: String,
     pub target: String,
@@ -18,7 +18,7 @@ pub struct LogEntry {
     pub timestamp: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CpuInfo {
     pub name: String,
     pub average_frequency: u64,
@@ -54,7 +54,7 @@ pub struct CpuInfo {
     pub capabilities: CpuCapabilities,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CpuCapabilities {
     pub has_boost: bool,
     pub has_cpuinfo_max_freq: bool,
@@ -70,14 +70,14 @@ pub struct CpuCapabilities {
     pub has_intel_pstate: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PowerSource {
     pub name: String,      // e.g., "RAPL", "amdgpu", "zenpower"
     pub value: f32,        // Power in watts
     pub description: String,  // e.g., "Intel RAPL", "AMD APU (CPU+iGPU)", "Zenpower driver"
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CoreInfo {
     pub id: u32,
     pub frequency: u64,
@@ -85,7 +85,7 @@ pub struct CoreInfo {
     pub temperature: f32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MemoryInfo {
     pub total_gib: f64,
     pub used_gib: f64,
@@ -96,7 +96,7 @@ pub struct MemoryInfo {
     pub memory_frequency: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GpuInfo {
     pub name: String,
     pub gpu_type: GpuType,
@@ -119,6 +119,8 @@ pub struct GpuInfo {
     pub max_memory_clock: Option<u32>,
     pub core_clock_range: Option<(u32, u32)>,
     pub memory_clock_range: Option<(u32, u32)>,
+    pub core_offset_limits: Option<(i32, i32)>,
+    pub memory_offset_limits: Option<(i32, i32)>,
     pub is_desktop: bool,
     pub architecture: Option<String>,
     pub nvml_index: Option<u32>,
@@ -142,7 +144,7 @@ pub enum GpuType {
     Discrete,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BatteryInfo {
     pub status: String,
     pub voltage_mv: u64,
@@ -156,7 +158,7 @@ pub struct BatteryInfo {
     pub charge_end_threshold: Option<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FanInfo {
     pub id: u32,
     pub name: String,
@@ -166,7 +168,7 @@ pub struct FanInfo {
     pub mode: Option<String>,      // "Auto", "Manual", etc.
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WiFiInfo {
     pub interface: String,
     pub driver: String,
@@ -188,7 +190,7 @@ pub struct WiFiInfo {
     pub subsystem: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StorageDevice {
     pub device: String,
     pub model: String,
@@ -242,7 +244,7 @@ pub enum PowerStatus {
     Unknown,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MountInfo {
     pub mount_point: String,
     pub filesystem_type: String,
@@ -251,7 +253,7 @@ pub struct MountInfo {
     pub used_percent: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Profile {
     pub name: String,
     pub is_default: bool,
@@ -262,7 +264,7 @@ pub struct Profile {
     pub fan_settings: FanSettings,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CpuSettings {
     pub governor: Option<String>,
     pub min_frequency: Option<u64>,
@@ -280,7 +282,7 @@ pub struct CpuSettings {
     pub intel_pstate_status: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GpuSettings {
     pub dgpu_tdp: Option<u32>,
     pub min_gpu_clock: Option<u32>,
@@ -318,7 +320,7 @@ pub struct NvidiaFanSettings {
     pub manual: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GpuAdvancedSettings {
     pub temperature_min: i32,
     pub temperature_max: i32,
@@ -354,7 +356,7 @@ fn default_smart_rounding_threshold() -> i32 {
     15
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct KeyboardSettings {
     pub control_enabled: bool,
     pub mode: KeyboardMode,
@@ -400,7 +402,7 @@ pub enum KeyboardMode {
     Wave { brightness: u8, speed: u8 },  // WAVE (7)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ScreenSettings {
     pub brightness: u8,
     pub system_control: bool,
@@ -412,7 +414,7 @@ pub struct FanSettings {
     pub curves: Vec<FanCurve>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BatterySettings {
     pub control_enabled: bool,
     pub charge_start_threshold: u8,
@@ -425,7 +427,7 @@ pub struct FanCurve {
     pub points: Vec<(u8, u8)>, // (temperature, speed) - 8 points
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppConfig {
     pub theme: Theme,
     pub start_minimized: bool,
@@ -469,7 +471,7 @@ pub enum Theme {
     Dark,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StatisticsSections {
     pub show_system_info: bool,
     pub show_cpu: bool,

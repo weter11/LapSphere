@@ -83,21 +83,46 @@ impl log::Log for DaemonLogger {
     }
 
     fn log(&self, record: &log::Record) {
-        // Always capture all log levels into the buffer (Error, Warn, Info, Debug)
-        // The global max level (Debug) controls what reaches this logger
+        // Always capture all log levels into the buffer (Error, Warn, Info, Debug, Trace)
+        // The global max level (Trace) controls what reaches this logger
+
+        let mut level = record.level().to_string();
+        let target = record.target().to_string();
+        let message = record.args().to_string();
+
+        // Move messages starting with zbus:: to trace
+        if target.starts_with("zbus") || message.starts_with("zbus::") {
+            level = "TRACE".to_string();
+        }
+
+        // Move all massages hw. to info as requested
+        if target.starts_with("hw.") && level == "DEBUG" {
+            level = "INFO".to_string();
+        }
+
         let entry = LogEntry {
-            level: record.level().to_string(),
-            target: record.target().to_string(),
-            message: record.args().to_string(),
+            level: level.clone(),
+            target: target.clone(),
+            message: message.clone(),
             timestamp: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         };
 
         {
             let mut logs = DAEMON_LOGS.lock().unwrap();
-            if logs.len() >= 2000 {
-                logs.pop_front();
+
+            // Deduplicate: avoid adding the same message twice in a row
+            let is_duplicate = logs.back().map_or(false, |last| {
+                last.level == level &&
+                last.target == target &&
+                last.message == message
+            });
+
+            if !is_duplicate {
+                if logs.len() >= 2000 {
+                    logs.pop_front();
+                }
+                logs.push_back(entry);
             }
-            logs.push_back(entry);
         }
 
         // Only log to console if env_logger allows it
@@ -115,7 +140,7 @@ impl log::Log for DaemonLogger {
 async fn main() -> Result<()> {
     let mut builder = env_logger::Builder::from_default_env();
     if std::env::var("RUST_LOG").is_err() {
-        builder.filter_level(log::LevelFilter::Info);
+        builder.filter_level(log::LevelFilter::Warn);
         builder.filter(Some("zbus"), log::LevelFilter::Warn);
     }
     let inner = builder.build();
@@ -123,14 +148,14 @@ async fn main() -> Result<()> {
     let logger = DaemonLogger { inner };
 
     log::set_boxed_logger(Box::new(logger)).unwrap();
-    log::set_max_level(log::LevelFilter::Debug); // Allow up to Debug to reach our logger for buffer
+    log::set_max_level(log::LevelFilter::Trace); // Allow up to Trace to reach our logger for buffer
 
     log::info!("Starting LapSphere Daemon");
 
     let args: Vec<String> = std::env::args().collect();
 
     if args.contains(&"--help".to_string()) || args.contains(&"-h".to_string()) {
-        println!("LapSphere Daemon - Hardware Control for Clevo/Uniwill Laptops");
+        println!("LapSphere Daemon - Hardware Control for Uniwill/Clevo Laptops");
         println!("\nUsage: lapsphere-daemon [OPTIONS]");
         println!("\nOptions:");
         println!("  --gui       Launch the graphical user interface");
@@ -157,7 +182,7 @@ async fn main() -> Result<()> {
     // Check if running as root
     if unsafe { libc::geteuid() } != 0 {
         if !launch_gui && !launch_tray {
-            println!("--- Hardware Statistics for Clevo/Uniwill Laptops (Limited - non-root) ---");
+            println!("--- Hardware Statistics for Uniwill/Clevo Laptops (Limited - non-root) ---");
             match hardware_detection::get_cpu_info() {
                 Ok(cpu) => {
                     println!("CPU: {}", cpu.name);
@@ -181,7 +206,7 @@ async fn main() -> Result<()> {
     }
 
     if !launch_gui && !launch_tray {
-        println!("--- Hardware Statistics for Clevo/Uniwill Laptops ---");
+        println!("--- Hardware Statistics for Uniwill/Clevo Laptops ---");
         match hardware_detection::get_cpu_info() {
             Ok(cpu) => {
                 println!("CPU: {}", cpu.name);
@@ -222,8 +247,8 @@ async fn main() -> Result<()> {
                     tuxedo_io::HardwareInterface::Uniwill => "Uniwill",
                     tuxedo_io::HardwareInterface::None => "None",
                 };
-                log::info!("Detected hardware interface: {}", interface);
-                log::info!("Number of fans: {}", io.get_fan_count());
+                log::debug!("Detected hardware interface: {}", interface);
+                log::debug!("Number of fans: {}", io.get_fan_count());
                 Some(io)
             }
             Err(e) => {
@@ -232,15 +257,15 @@ async fn main() -> Result<()> {
             }
         }
     } else {
-        log::warn!("/dev/tuxedo_io not available - some features will be disabled");
+        log::debug!("/dev/tuxedo_io not available - some features will be disabled");
         None
     };
 
     // Check battery charge control
     if battery_control::BatteryControl::is_available() {
-        log::info!("Battery charge control (flexicharger) is available");
+        log::debug!("Battery charge control (flexicharger) is available");
     } else {
-        log::info!("Battery charge control not available");
+        log::debug!("Battery charge control not available");
     }
 
     // Create and start polling scheduler
@@ -251,9 +276,9 @@ async fn main() -> Result<()> {
     SCHEDULER_HANDLE.set(scheduler_handle.clone()).ok();
     
     // Initial hardware poll to populate cache immediately
-    log::info!("Performing initial hardware detection...");
+    log::debug!("Performing initial hardware detection...");
     refresh_hardware_cache();
-    log::info!("Initial hardware detection complete");
+    log::debug!("Initial hardware detection complete");
 
     // Start scheduler in background
     tokio::spawn(async move {
@@ -275,7 +300,7 @@ async fn main() -> Result<()> {
     if let Err(e) = scheduler_handle.add_job(hw_monitor_job) {
         log::error!("Failed to add hardware monitor job: {}", e);
     } else {
-        log::info!("Hardware monitor polling job added");
+        log::debug!("Hardware monitor polling job added");
     }
 
     // Add fan control polling job if hardware is available
@@ -314,7 +339,7 @@ async fn main() -> Result<()> {
         if let Err(e) = scheduler_handle.add_job(fan_job) {
             log::error!("Failed to add fan control job: {}", e);
         } else {
-            log::info!("Fan control polling job added");
+            log::debug!("Fan control polling job added");
         }
     }
 
@@ -346,7 +371,7 @@ async fn main() -> Result<()> {
         move || {
             let tick = log_tick.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
             if tick % 60 == 0 {
-                log::warn!(target: "daemon", "heartbeat uptime_tick={}", tick);
+                log::debug!(target: "daemon", "heartbeat uptime_tick={}", tick);
             }
             gpu_poll_fn()
         }
@@ -361,7 +386,7 @@ async fn main() -> Result<()> {
     if let Err(e) = scheduler_handle.add_job(gpu_job) {
         log::error!("Failed to add GPU overclocking job: {}", e);
     } else {
-        log::info!("GPU overclocking polling job added");
+        log::debug!("GPU overclocking polling job added");
     }
 
     // Start DBus service
@@ -373,7 +398,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    log::info!("DBus service started");
+    log::debug!("DBus service started");
 
     // Launch GUI if requested
     if launch_gui {
@@ -455,7 +480,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn refresh_hardware_cache() {
+pub fn refresh_hardware_cache() {
     let cpu_info = hardware_detection::get_cpu_info().ok();
     let memory_info = hardware_detection::get_memory_info().ok();
     let gpu_info = hardware_detection::get_gpu_info().unwrap_or_default();
@@ -637,7 +662,7 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
             if *last != Some(0) {
                 crate::hardware_control::set_gpu_core_offset(0, 0.0)?;
                 *last = Some(0);
-                log::info!("Cleared dynamic GPU offset (P-state not 0)");
+                log::debug!("Cleared dynamic GPU offset (P-state not 0)");
             }
             drop(last);
             let mut stats = CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
@@ -670,9 +695,9 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
                 crate::hardware_control::set_gpu_core_offset(0, final_offset_i32 as f32)?;
                 *last = Some(final_offset_i32);
                 if final_offset_i32 == 0 {
-                    log::info!("Cleared dynamic GPU offset (P-state not 0)");
+                    log::debug!("Cleared dynamic GPU offset (P-state not 0)");
                 } else {
-                    log::info!("Applied new dynamic GPU offset: {} MHz", final_offset_i32);
+                    log::debug!("Applied new dynamic GPU offset: {} MHz", final_offset_i32);
                 }
             }
         }
