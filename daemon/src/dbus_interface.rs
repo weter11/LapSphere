@@ -140,7 +140,7 @@ impl ControlInterface {
     async fn set_cpu_governor(&self, governor: &str) -> Result<(), zbus::fdo::Error> {
         log_api!(
             "SetCpuGovernor",
-            crate::hardware_control::set_cpu_governor(governor),
+            crate::hardware_control::set_cpu_governor(governor).await,
             |_| format!("governor=\"{}\"", governor)
         )
     }
@@ -152,7 +152,7 @@ impl ControlInterface {
     ) -> Result<(), zbus::fdo::Error> {
         log_api!(
             "SetCpuFrequencyLimits",
-            crate::hardware_control::set_cpu_frequency_limits(min_freq, max_freq),
+            crate::hardware_control::set_cpu_frequency_limits(min_freq, max_freq).await,
             |_| format!("min={} max={}", min_freq, max_freq)
         )
     }
@@ -160,7 +160,7 @@ impl ControlInterface {
     async fn set_cpu_boost(&self, enabled: bool) -> Result<(), zbus::fdo::Error> {
         log_api!(
             "SetCpuBoost",
-            crate::hardware_control::set_cpu_boost(enabled),
+            crate::hardware_control::set_cpu_boost(enabled).await,
             |_| format!("enabled={}", enabled)
         )
     }
@@ -168,7 +168,7 @@ impl ControlInterface {
     async fn set_smt(&self, enabled: bool) -> Result<(), zbus::fdo::Error> {
         log_api!(
             "SetSmt",
-            crate::hardware_control::set_smt(enabled),
+            crate::hardware_control::set_smt(enabled).await,
             |_| format!("enabled={}", enabled)
         )
     }
@@ -176,7 +176,7 @@ impl ControlInterface {
     async fn set_amd_pstate_status(&self, status: &str) -> Result<(), zbus::fdo::Error> {
         log_api!(
             "SetAmdPstateStatus",
-            crate::hardware_control::set_amd_pstate_status(status),
+            crate::hardware_control::set_amd_pstate_status(status).await,
             |_| format!("status=\"{}\"", status)
         )
     }
@@ -184,7 +184,7 @@ impl ControlInterface {
     async fn set_intel_pstate_status(&self, status: &str) -> Result<(), zbus::fdo::Error> {
         log_api!(
             "SetIntelPstateStatus",
-            crate::hardware_control::set_intel_pstate_status(status),
+            crate::hardware_control::set_intel_pstate_status(status).await,
             |_| format!("status=\"{}\"", status)
         )
     }
@@ -199,7 +199,7 @@ impl ControlInterface {
                 let mut state = crate::GPU_DAEMON_STATE.lock().unwrap();
                 *state = Some(profile.gpu_settings.clone());
             }
-            crate::hardware_control::apply_profile(&profile)
+            crate::hardware_control::apply_profile(&profile).await
         })().await;
 
         let duration = start.elapsed().as_millis();
@@ -213,7 +213,7 @@ impl ControlInterface {
     async fn get_tdp_profiles(&self) -> Result<String, zbus::fdo::Error> {
         log_api_json!(
             "GetTdpProfiles",
-            crate::hardware_detection::get_tdp_profiles(),
+            crate::hardware_detection::get_tdp_profiles().await,
             |i: &Vec<String>| format!("count={}", i.len())
         )
     }
@@ -221,7 +221,7 @@ impl ControlInterface {
     async fn get_current_tdp_profile(&self) -> Result<String, zbus::fdo::Error> {
         log_api!(
             "GetCurrentTdpProfile",
-            crate::hardware_detection::get_current_tdp_profile(),
+            crate::hardware_detection::get_current_tdp_profile().await,
             |i: &String| format!("profile=\"{}\"", i)
         )
     }
@@ -229,7 +229,7 @@ impl ControlInterface {
     async fn set_tdp_profile(&self, profile: &str) -> Result<(), zbus::fdo::Error> {
         log_api!(
             "SetTdpProfile",
-            crate::hardware_control::set_tdp_profile(profile),
+            crate::hardware_control::set_tdp_profile(profile).await,
             |_| format!("profile=\"{}\"", profile)
         )
     }
@@ -272,7 +272,7 @@ impl ControlInterface {
     async fn set_fan_speed(&self, fan_id: u32, speed: u32) -> Result<(), zbus::fdo::Error> {
         log_api!(
             "SetFanSpeed",
-            crate::hardware_control::set_fan_speed(fan_id, speed),
+            crate::hardware_control::set_fan_speed(fan_id, speed).await,
             |_| format!("id={} speed={}", fan_id, speed)
         )
     }
@@ -280,7 +280,7 @@ impl ControlInterface {
     async fn set_fan_auto(&self, fan_id: u32) -> Result<(), zbus::fdo::Error> {
         log_api!(
             "SetFanAuto",
-            crate::hardware_control::set_fan_auto(fan_id),
+            crate::hardware_control::set_fan_auto(fan_id).await,
             |_| format!("id={}", fan_id)
         )
     }
@@ -288,7 +288,7 @@ impl ControlInterface {
     async fn set_all_fans_auto(&self) -> Result<(), zbus::fdo::Error> {
         log_api!(
             "SetAllFansAuto",
-            crate::hardware_control::set_fan_auto(0),
+            crate::hardware_control::set_fan_auto(0).await,
             |_| "".to_string()
         )
     }
@@ -296,7 +296,7 @@ impl ControlInterface {
     async fn set_gpu_fan_speed(&self, device_index: u32, fan_index: u32, speed: u32) -> Result<(), zbus::fdo::Error> {
         log_api!(
             "SetGpuFanSpeed",
-            crate::hardware_control::set_gpu_fan_speed(device_index, fan_index, speed),
+            crate::hardware_control::set_gpu_fan_speed(device_index, fan_index, speed).await,
             |_| format!("gpu={} fan={} speed={}", device_index, fan_index, speed)
         )
     }
@@ -304,7 +304,7 @@ impl ControlInterface {
     async fn set_gpu_fan_auto(&self, device_index: u32, fan_index: u32) -> Result<(), zbus::fdo::Error> {
         log_api!(
             "SetGpuFanAuto",
-            crate::hardware_control::set_gpu_fan_auto(device_index, fan_index),
+            crate::hardware_control::set_gpu_fan_auto(device_index, fan_index).await,
             |_| format!("gpu={} fan={}", device_index, fan_index)
         )
     }
@@ -312,7 +312,7 @@ impl ControlInterface {
     async fn get_webcam_state(&self) -> Result<bool, zbus::fdo::Error> {
         log_api!(
             "GetWebcamState",
-            crate::hardware_control::get_webcam_state(),
+            crate::hardware_control::get_webcam_state().await,
             |i: &bool| format!("enabled={}", i)
         )
     }
@@ -320,7 +320,7 @@ impl ControlInterface {
     async fn set_webcam_state(&self, enabled: bool) -> Result<(), zbus::fdo::Error> {
         log_api!(
             "SetWebcamState",
-            crate::hardware_control::set_webcam_state(enabled),
+            crate::hardware_control::set_webcam_state(enabled).await,
             |_| format!("enabled={}", enabled)
         )
     }
@@ -437,7 +437,7 @@ impl ControlInterface {
     async fn get_keyboard_capabilities(&self) -> Result<String, zbus::fdo::Error> {
         log_api_json!(
             "GetKeyboardCapabilities",
-            Ok::<_, anyhow::Error>(crate::hardware_detection::get_keyboard_capabilities()),
+            Ok::<_, anyhow::Error>(crate::hardware_detection::get_keyboard_capabilities().await),
             |i: &KeyboardCapabilities| format!("type={:?} zones={}", i.keyboard_type, i.num_zones)
         )
     }
@@ -446,10 +446,10 @@ impl ControlInterface {
     async fn preview_keyboard_settings(&self, settings_json: &str) -> Result<(), zbus::fdo::Error> {
         log_api!(
             "PreviewKeyboardSettings",
-            (|| {
+            (async {
                 let settings: KeyboardSettings = serde_json::from_str(settings_json)?;
-                crate::hardware_control::preview_keyboard_settings(&settings)
-            })(),
+                crate::hardware_control::preview_keyboard_settings(&settings).await
+            }).await,
             |_| "".to_string()
         )
     }
@@ -457,10 +457,10 @@ impl ControlInterface {
     async fn set_battery_settings(&self, settings_json: &str) -> Result<(), zbus::fdo::Error> {
         log_api!(
             "SetBatterySettings",
-            (|| {
+            (async {
                 let settings: BatterySettings = serde_json::from_str(settings_json)?;
-                crate::hardware_control::apply_battery_settings(&settings)
-            })(),
+                crate::hardware_control::apply_battery_settings(&settings).await
+            }).await,
             |_| "".to_string()
         )
     }
@@ -468,7 +468,7 @@ impl ControlInterface {
     async fn set_gpu_locked_clocks(&self, device_index: u32, min_clock: u32, max_clock: u32) -> Result<(), zbus::fdo::Error> {
         log_api!(
             "SetGpuLockedClocks",
-            crate::hardware_control::set_gpu_locked_clocks(device_index, min_clock, max_clock),
+            crate::hardware_control::set_gpu_locked_clocks(device_index, min_clock, max_clock).await,
             |_| format!("gpu={} min={} max={}", device_index, min_clock, max_clock)
         )
     }
@@ -476,7 +476,7 @@ impl ControlInterface {
     async fn reset_gpu_clocks(&self, device_index: u32) -> Result<(), zbus::fdo::Error> {
         log_api!(
             "ResetGpuClocks",
-            crate::hardware_control::reset_gpu_clocks(device_index),
+            crate::hardware_control::reset_gpu_clocks(device_index).await,
             |_| format!("gpu={}", device_index)
         )
     }
@@ -484,7 +484,7 @@ impl ControlInterface {
     async fn get_gpu_clock_ranges(&self, device_index: u32) -> Result<String, zbus::fdo::Error> {
         log_api_json!(
             "GetGpuClockRanges",
-            crate::hardware_detection::get_gpu_clock_ranges(device_index),
+            crate::hardware_detection::get_gpu_clock_ranges(device_index).await,
             |i: &(u32, u32)| format!("gpu={} range={}..{}", device_index, i.0, i.1)
         )
     }
@@ -492,7 +492,7 @@ impl ControlInterface {
     async fn set_gpu_core_offset(&self, device_index: u32, offset: f32) -> Result<(), zbus::fdo::Error> {
         log_api!(
             "SetGpuCoreOffset",
-            crate::hardware_control::set_gpu_core_offset(device_index, offset),
+            crate::hardware_control::set_gpu_core_offset(device_index, offset).await,
             |_| format!("gpu={} offset={}", device_index, offset)
         )
     }
@@ -500,7 +500,7 @@ impl ControlInterface {
     async fn set_gpu_memory_offset(&self, device_index: u32, offset: f32) -> Result<(), zbus::fdo::Error> {
         log_api!(
             "SetGpuMemoryOffset",
-            crate::hardware_control::set_gpu_memory_offset(device_index, offset),
+            crate::hardware_control::set_gpu_memory_offset(device_index, offset).await,
             |_| format!("gpu={} offset={}", device_index, offset)
         )
     }
@@ -508,7 +508,7 @@ impl ControlInterface {
     async fn set_gpu_power_limit(&self, device_index: u32, limit_watts: u32) -> Result<(), zbus::fdo::Error> {
         log_api!(
             "SetGpuPowerLimit",
-            crate::hardware_control::set_gpu_power_limit(device_index, limit_watts),
+            crate::hardware_control::set_gpu_power_limit(device_index, limit_watts).await,
             |_| format!("gpu={} limit={}W", device_index, limit_watts)
         )
     }
@@ -516,7 +516,7 @@ impl ControlInterface {
     async fn get_gpu_core_offset_limits(&self, device_index: u32) -> Result<(i32, i32), zbus::fdo::Error> {
         log_api!(
             "GetGpuCoreOffsetLimits",
-            crate::hardware_detection::get_gpu_core_offset_limits(device_index),
+            crate::hardware_detection::get_gpu_core_offset_limits(device_index).await,
             |i: &(i32, i32)| format!("gpu={} limits={}..{}", device_index, i.0, i.1)
         )
     }
@@ -524,7 +524,7 @@ impl ControlInterface {
     async fn get_gpu_memory_offset_limits(&self, device_index: u32) -> Result<(i32, i32), zbus::fdo::Error> {
         log_api!(
             "GetGpuMemoryOffsetLimits",
-            crate::hardware_detection::get_gpu_memory_offset_limits(device_index),
+            crate::hardware_detection::get_gpu_memory_offset_limits(device_index).await,
             |i: &(i32, i32)| format!("gpu={} limits={}..{}", device_index, i.0, i.1)
         )
     }
@@ -532,7 +532,7 @@ impl ControlInterface {
     async fn set_prime_profile(&self, profile: &str) -> Result<(), zbus::fdo::Error> {
         log_api!(
             "SetPrimeProfile",
-            crate::hardware_control::set_prime_profile(profile),
+            crate::hardware_control::set_prime_profile(profile).await,
             |_| format!("profile=\"{}\"", profile)
         )
     }
@@ -544,6 +544,9 @@ impl ControlInterface {
             (|| {
                 if let Some(handle) = crate::SCHEDULER_HANDLE.get() {
                     let interval = std::time::Duration::from_millis(interval_ms);
+                    if component == "storage" {
+                        let _ = handle.update_interval("mount".to_string(), interval);
+                    }
                     handle.update_interval(component.to_string(), interval)
                         .map_err(|e| anyhow::anyhow!(e))
                 } else {

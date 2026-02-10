@@ -658,35 +658,37 @@ fn read_available_epp_options() -> Vec<String> {
     }
 }
 
-pub fn get_tdp_profiles() -> Result<Vec<String>> {
-    if !TuxedoIo::is_available() {
-        log::debug!(target: "hw.detect", "TDP profiles not available (/dev/tuxedo_io not present)");
-        return Ok(vec![]);
-    }
-    
-    match TuxedoIo::new() {
-        Ok(io) => {
-            match io.get_available_profiles() {
-                Ok(profiles) => {
-                    static LOGGED_ONCE: Mutex<bool> = Mutex::new(false);
-                    let mut logged = LOGGED_ONCE.lock().unwrap();
-                    if !*logged {
-                        log::debug!(target: "hw.detect", "Available TDP profiles: {:?}", profiles);
-                        *logged = true;
+pub async fn get_tdp_profiles() -> Result<Vec<String>> {
+    tokio::task::spawn_blocking(move || {
+        if !TuxedoIo::is_available() {
+            log::debug!(target: "hw.detect", "TDP profiles not available (/dev/tuxedo_io not present)");
+            return Ok(vec![]);
+        }
+
+        match TuxedoIo::new() {
+            Ok(io) => {
+                match io.get_available_profiles() {
+                    Ok(profiles) => {
+                        static LOGGED_ONCE: Mutex<bool> = Mutex::new(false);
+                        let mut logged = LOGGED_ONCE.lock().unwrap();
+                        if !*logged {
+                            log::debug!(target: "hw.detect", "Available TDP profiles: {:?}", profiles);
+                            *logged = true;
+                        }
+                        Ok(profiles)
                     }
-                    Ok(profiles)
-                }
-                Err(e) => {
-                    log::warn!(target: "hw.detect", "Failed to get TDP profiles: {}", e);
-                    Ok(vec![])
+                    Err(e) => {
+                        log::warn!(target: "hw.detect", "Failed to get TDP profiles: {}", e);
+                        Ok(vec![])
+                    }
                 }
             }
+            Err(e) => {
+                log::warn!(target: "hw.detect", "Failed to open /dev/tuxedo_io: {}", e);
+                Ok(vec![])
+            }
         }
-        Err(e) => {
-            log::warn!(target: "hw.detect", "Failed to open /dev/tuxedo_io: {}", e);
-            Ok(vec![])
-        }
-    }
+    }).await?
 }
 
 /// Internal helper to get base memory clock ranges across all performance states
@@ -717,130 +719,134 @@ fn get_base_memory_clock_ranges(device: &nvml_wrapper::Device) -> Result<(u32, u
     range.ok_or_else(|| anyhow!("Could not determine memory clock ranges"))
 }
 
-pub fn get_current_tdp_profile() -> Result<String> {
-    if !TuxedoIo::is_available() {
-        return Err(anyhow!("TDP profiles not available"));
-    }
-    
-    let io = TuxedoIo::new()?;
-    let profiles = get_tdp_profiles()?;
-    if profiles.is_empty() {
-        return Err(anyhow!("No TDP profiles available"));
-    }
+pub async fn get_current_tdp_profile() -> Result<String> {
+    tokio::task::spawn_blocking(move || {
+        if !TuxedoIo::is_available() {
+            return Err(anyhow!("TDP profiles not available"));
+        }
 
-    if io.get_interface() == HardwareInterface::Uniwill {
-        if let Ok(profile_id) = io.get_uw_performance_profile() {
-            // profile_id: 1=powersave, 2=enthusiast, 3=overboost
-            let idx = (profile_id.saturating_sub(1)) as usize;
-            if idx < profiles.len() {
-                return Ok(profiles[idx].clone());
+        let io = TuxedoIo::new()?;
+        let profiles = io.get_available_profiles()?;
+        if profiles.is_empty() {
+            return Err(anyhow!("No TDP profiles available"));
+        }
+
+        if io.get_interface() == HardwareInterface::Uniwill {
+            if let Ok(profile_id) = io.get_uw_performance_profile() {
+                // profile_id: 1=powersave, 2=enthusiast, 3=overboost
+                let idx = (profile_id.saturating_sub(1)) as usize;
+                if idx < profiles.len() {
+                    return Ok(profiles[idx].clone());
+                }
             }
         }
-    }
-    
-    // Fallback to the first profile
-    Ok(profiles[0].clone())
+
+        // Fallback to the first profile
+        Ok(profiles[0].clone())
+    }).await?
 }
 
 
-pub fn get_all_fan_info() -> Result<Vec<FanInfo>> {
-    let mut all_fans = Vec::new();
+pub async fn get_all_fan_info() -> Result<Vec<FanInfo>> {
+    tokio::task::spawn_blocking(move || {
+        let mut all_fans = Vec::new();
 
-    // 1. Get system fans (Tuxedo/Uniwill/Clevo)
-    if TuxedoIo::is_available() {
-        if let Ok(io) = TuxedoIo::new() {
-            let fan_settings = crate::FAN_DAEMON_STATE.lock().unwrap();
-            let manual_mode = fan_settings.as_ref().map_or(false, |s| s.control_enabled);
+        // 1. Get system fans (Tuxedo/Uniwill/Clevo)
+        if TuxedoIo::is_available() {
+            if let Ok(io) = TuxedoIo::new() {
+                let fan_settings = crate::FAN_DAEMON_STATE.lock().unwrap();
+                let manual_mode = fan_settings.as_ref().map_or(false, |s| s.control_enabled);
 
-            for fan_id in 0..io.get_fan_count() {
-                if let Ok(speed) = io.get_fan_speed(fan_id) {
-                    let temperature = io.get_fan_temperature(fan_id).ok().map(|t| t as f32);
-                    all_fans.push(FanInfo {
-                        id: fan_id,
-                        name: format!("System Fan {}", fan_id),
-                        rpm_or_percent: speed,
-                        temperature,
-                        is_rpm: false,
-                        mode: Some(if manual_mode { "Manual".to_string() } else { "Auto".to_string() }),
-                    });
-                }
-            }
-        }
-    }
-
-    // 2. Get NVIDIA GPU fans
-    let gpu_settings = crate::GPU_DAEMON_STATE.lock().unwrap();
-
-    // Check suspension status first to avoid waking up GPU
-    let mut nvidia_active = false;
-    if let Ok(entries) = fs::read_dir("/sys/bus/pci/drivers/nvidia") {
-        for entry in entries.flatten() {
-            if entry.file_name().to_string_lossy().contains(':') {
-                let status_path = entry.path().join("power/runtime_status");
-                if let Ok(status) = fs::read_to_string(status_path) {
-                    if status.trim() != "suspended" {
-                        nvidia_active = true;
-                        break;
+                for fan_id in 0..io.get_fan_count() {
+                    if let Ok(speed) = io.get_fan_speed(fan_id) {
+                        let temperature = io.get_fan_temperature(fan_id).ok().map(|t| t as f32);
+                        all_fans.push(FanInfo {
+                            id: fan_id,
+                            name: format!("System Fan {}", fan_id),
+                            rpm_or_percent: speed,
+                            temperature,
+                            is_rpm: false,
+                            mode: Some(if manual_mode { "Manual".to_string() } else { "Auto".to_string() }),
+                        });
                     }
                 }
             }
         }
-    }
 
-    if nvidia_active {
-        if let Ok(nvml) = get_nvml() {
-            if let Ok(device_count) = nvml.device_count() {
-                for i in 0..device_count {
-                    // Check specific GPU status again
-                    let mut is_suspended = true;
-                    if let Ok(pci_info) = nvml.device_by_index(i).and_then(|d| d.pci_info()) {
-                        let bus_id = pci_info.bus_id.to_lowercase();
-                        let status_path = format!("/sys/bus/pci/devices/{}/power/runtime_status", bus_id);
-                        if let Ok(status) = fs::read_to_string(status_path) {
-                            if status.trim() != "suspended" {
-                                is_suspended = false;
-                            }
+        // 2. Get NVIDIA GPU fans
+        let gpu_settings = crate::GPU_DAEMON_STATE.lock().unwrap();
+
+        // Check suspension status first to avoid waking up GPU
+        let mut nvidia_active = false;
+        if let Ok(entries) = fs::read_dir("/sys/bus/pci/drivers/nvidia") {
+            for entry in entries.flatten() {
+                if entry.file_name().to_string_lossy().contains(':') {
+                    let status_path = entry.path().join("power/runtime_status");
+                    if let Ok(status) = fs::read_to_string(status_path) {
+                        if status.trim() != "suspended" {
+                            nvidia_active = true;
+                            break;
                         }
                     }
+                }
+            }
+        }
 
-                    if is_suspended { continue; }
+        if nvidia_active {
+            if let Ok(nvml) = get_nvml() {
+                if let Ok(device_count) = nvml.device_count() {
+                    for i in 0..device_count {
+                        // Check specific GPU status again
+                        let mut is_suspended = true;
+                        if let Ok(pci_info) = nvml.device_by_index(i).and_then(|d| d.pci_info()) {
+                            let bus_id = pci_info.bus_id.to_lowercase();
+                            let status_path = format!("/sys/bus/pci/devices/{}/power/runtime_status", bus_id);
+                            if let Ok(status) = fs::read_to_string(status_path) {
+                                if status.trim() != "suspended" {
+                                    is_suspended = false;
+                                }
+                            }
+                        }
 
-                    if let Ok(device) = nvml.device_by_index(i) {
-                        if let Ok(num_fans) = device.num_fans() {
-                            for f in 0..num_fans {
-                                let speed = device.fan_speed(f).unwrap_or(0);
+                        if is_suspended { continue; }
 
-                                let mode = if let Some(settings) = &*gpu_settings {
-                                    if settings.nvidia_fans.iter().any(|s| s.device_index == i && s.fan_id == f && s.manual) {
-                                        "Manual".to_string()
+                        if let Ok(device) = nvml.device_by_index(i) {
+                            if let Ok(num_fans) = device.num_fans() {
+                                for f in 0..num_fans {
+                                    let speed = device.fan_speed(f).unwrap_or(0);
+
+                                    let mode = if let Some(settings) = &*gpu_settings {
+                                        if settings.nvidia_fans.iter().any(|s| s.device_index == i && s.fan_id == f && s.manual) {
+                                            "Manual".to_string()
+                                        } else {
+                                            "Auto".to_string()
+                                        }
                                     } else {
                                         "Auto".to_string()
-                                    }
-                                } else {
-                                    "Auto".to_string()
-                                };
+                                    };
 
-                                all_fans.push(FanInfo {
-                                    id: 100 + i * 10 + f, // Unique ID for GPU fans
-                                    name: format!("NVIDIA GPU {} Fan {}", i, f),
-                                    rpm_or_percent: speed,
-                                    temperature: device.temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu).ok().map(|t| t as f32),
-                                    is_rpm: false,
-                                    mode: Some(mode),
-                                });
+                                    all_fans.push(FanInfo {
+                                        id: 100 + i * 10 + f, // Unique ID for GPU fans
+                                        name: format!("NVIDIA GPU {} Fan {}", i, f),
+                                        rpm_or_percent: speed,
+                                        temperature: device.temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu).ok().map(|t| t as f32),
+                                        is_rpm: false,
+                                        mode: Some(mode),
+                                    });
+                                }
                             }
                         }
                     }
                 }
             }
         }
-    }
 
-    Ok(all_fans)
+        Ok(all_fans)
+    }).await?
 }
 
 
-pub fn get_cpu_info() -> Result<CpuInfo> {
+pub async fn get_cpu_info() -> Result<CpuInfo> {
     let name = get_cpu_name();
     let (physical_cores, logical_cores) = get_cpu_topology();
     
@@ -1054,7 +1060,7 @@ fn get_memory_type_and_freq() -> (Option<String>, Option<u64>) {
 }
 
 
-pub fn get_memory_info() -> Result<MemoryInfo> {
+pub async fn get_memory_info() -> Result<MemoryInfo> {
     let sys = System::new();
     let (total_gib, free_gib, available_gib, used_gib, used_percent) = match sys.memory() {
         Ok(mem) => {
@@ -1112,7 +1118,7 @@ fn has_ite_keyboard() -> bool {
     false
 }
 
-pub fn get_keyboard_capabilities() -> KeyboardCapabilities {
+pub async fn get_keyboard_capabilities() -> KeyboardCapabilities {
     let mut capabilities = KeyboardCapabilities {
         keyboard_type: KeyboardType::None,
         supports_brightness: false,
@@ -1215,7 +1221,7 @@ pub fn get_keyboard_capabilities() -> KeyboardCapabilities {
     capabilities
 }
 
-pub fn get_system_info() -> Result<SystemInfo> {
+pub async fn get_system_info() -> Result<SystemInfo> {
     static CACHED_SYSTEM_INFO: Mutex<Option<SystemInfo>> = Mutex::new(None);
 
     {
@@ -1280,12 +1286,12 @@ pub fn get_system_info() -> Result<SystemInfo> {
     Ok(info)
 }
 
-pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
+pub async fn get_gpu_info() -> Result<Vec<GpuInfo>> {
     let mut gpus = Vec::new();
     
     // First, try to get NVIDIA GPU info via NVML
     if Path::new("/sys/bus/pci/drivers/nvidia").exists() {
-        if let Ok(nvidia_gpus) = get_nvidia_gpu_info() {
+        if let Ok(nvidia_gpus) = get_nvidia_gpu_info().await {
             for gpu in nvidia_gpus {
                 gpus.push(gpu);
             }
@@ -1462,7 +1468,7 @@ fn get_base_gpu_clock_ranges(device: &nvml_wrapper::Device) -> Result<(u32, u32)
     }
 }
 
-pub fn get_gpu_clock_ranges(device_index: u32) -> Result<(u32, u32)> {
+pub async fn get_gpu_clock_ranges(device_index: u32) -> Result<(u32, u32)> {
     // Try cache first to avoid waking up GPU
     let cached_range = {
         let cache = NVIDIA_METADATA_CACHE.lock().unwrap();
@@ -1472,13 +1478,15 @@ pub fn get_gpu_clock_ranges(device_index: u32) -> Result<(u32, u32)> {
     let (mut min, mut max) = if let Some(range) = cached_range {
         range
     } else {
-        // If not in cache, check if GPU is suspended before waking it up
-        if is_gpu_suspended_by_index(device_index) {
-            return Err(anyhow!("GPU suspended and metadata not cached"));
-        }
-        let nvml = get_nvml()?;
-        let device = nvml.device_by_index(device_index)?;
-        get_base_gpu_clock_ranges(&device)?
+        tokio::task::spawn_blocking(move || {
+            // If not in cache, check if GPU is suspended before waking it up
+            if is_gpu_suspended_by_index(device_index) {
+                return Err(anyhow!("GPU suspended and metadata not cached"));
+            }
+            let nvml = get_nvml()?;
+            let device = nvml.device_by_index(device_index)?;
+            get_base_gpu_clock_ranges(&device)
+        }).await??
     };
 
     // Add current core offset if any to show real-time effective ranges in the UI
@@ -1494,7 +1502,7 @@ pub fn get_gpu_clock_ranges(device_index: u32) -> Result<(u32, u32)> {
 }
 
 
-pub fn get_gpu_core_offset_limits(device_index: u32) -> Result<(i32, i32)> {
+pub async fn get_gpu_core_offset_limits(device_index: u32) -> Result<(i32, i32)> {
     // Try cache first
     let cached_limits = {
         let cache = NVIDIA_METADATA_CACHE.lock().unwrap();
@@ -1505,17 +1513,19 @@ pub fn get_gpu_core_offset_limits(device_index: u32) -> Result<(i32, i32)> {
         return Ok(limits);
     }
 
-    if is_gpu_suspended_by_index(device_index) {
-        return Err(anyhow!("GPU suspended and metadata not cached"));
-    }
+    tokio::task::spawn_blocking(move || {
+        if is_gpu_suspended_by_index(device_index) {
+            return Err(anyhow!("GPU suspended and metadata not cached"));
+        }
 
-    let nvml = get_nvml()?;
-    let device = nvml.device_by_index(device_index)?;
-    let offset_info = device.clock_offset(Clock::Graphics, PerformanceState::Zero)?;
-    Ok((offset_info.min_clock_offset_mhz, offset_info.max_clock_offset_mhz))
+        let nvml = get_nvml()?;
+        let device = nvml.device_by_index(device_index)?;
+        let offset_info = device.clock_offset(Clock::Graphics, PerformanceState::Zero)?;
+        Ok((offset_info.min_clock_offset_mhz, offset_info.max_clock_offset_mhz))
+    }).await?
 }
 
-pub fn get_gpu_memory_offset_limits(device_index: u32) -> Result<(i32, i32)> {
+pub async fn get_gpu_memory_offset_limits(device_index: u32) -> Result<(i32, i32)> {
     // Try cache first
     let cached_limits = {
         let cache = NVIDIA_METADATA_CACHE.lock().unwrap();
@@ -1526,14 +1536,16 @@ pub fn get_gpu_memory_offset_limits(device_index: u32) -> Result<(i32, i32)> {
         return Ok(limits);
     }
 
-    if is_gpu_suspended_by_index(device_index) {
-        return Err(anyhow!("GPU suspended and metadata not cached"));
-    }
+    tokio::task::spawn_blocking(move || {
+        if is_gpu_suspended_by_index(device_index) {
+            return Err(anyhow!("GPU suspended and metadata not cached"));
+        }
 
-    let nvml = get_nvml()?;
-    let device = nvml.device_by_index(device_index)?;
-    let offset_info = device.clock_offset(Clock::Memory, PerformanceState::Zero)?;
-    Ok((offset_info.min_clock_offset_mhz, offset_info.max_clock_offset_mhz))
+        let nvml = get_nvml()?;
+        let device = nvml.device_by_index(device_index)?;
+        let offset_info = device.clock_offset(Clock::Memory, PerformanceState::Zero)?;
+        Ok((offset_info.min_clock_offset_mhz, offset_info.max_clock_offset_mhz))
+    }).await?
 }
 
 fn is_gpu_suspended_by_index(index: u32) -> bool {
@@ -2125,11 +2137,13 @@ fn get_nvidia_extended_stats(gpu_index: u32) -> (Option<f32>, Option<f32>, Optio
     }
 }
 
-fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
+async fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
     let (manual_clocks_enabled, _advanced_control_enabled) = {
         let state = crate::GPU_DAEMON_STATE.lock().unwrap();
         state.as_ref().map_or((false, false), |s| (s.manual_clocks, s.advanced_control))
     };
+
+    tokio::task::spawn_blocking(move || {
 
     // 1. Check sysfs for NVIDIA devices and their status to avoid waking up suspended GPUs
     let mut nvidia_pci_ids = Vec::new();
@@ -2655,6 +2669,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
     }
 
     Ok(gpus)
+    }).await?
 }
 
 fn read_gpu_frequency(device_path: &str) -> Option<u64> {
@@ -2827,7 +2842,7 @@ fn get_pci_info(interface: &str) -> (Option<String>, Option<String>) {
     (None, None)
 }
 
-pub fn get_wifi_info() -> Result<Vec<WiFiInfo>> {
+pub async fn get_wifi_info() -> Result<Vec<WiFiInfo>> {
     let mut wifi_devices = Vec::new();
     
     // Find WiFi network interfaces
@@ -3227,7 +3242,7 @@ fn normalize_uid(uid: String) -> String {
     }
 }
 
-pub fn get_gamepad_info() -> Result<Vec<GamepadInfo>> {
+pub async fn get_gamepad_info() -> Result<Vec<GamepadInfo>> {
     let mut gamepads = Vec::new();
     let mut seen_uids = std::collections::HashSet::new();
 
@@ -3424,7 +3439,7 @@ fn find_battery_for_input(input_path: &Path) -> (Option<u8>, PowerStatus) {
     (None, PowerStatus::Unknown)
 }
 
-pub fn get_battery_info() -> Result<BatteryInfo> {
+pub async fn get_battery_info() -> Result<BatteryInfo> {
     let base = if Path::new("/sys/class/power_supply/BAT0").exists() {
         "/sys/class/power_supply/BAT0"
     } else if Path::new("/sys/class/power_supply/BAT1").exists() {
@@ -3462,7 +3477,7 @@ pub fn get_battery_info() -> Result<BatteryInfo> {
     })
 }
 
-pub fn get_mount_info() -> Result<Vec<MountInfo>> {
+pub async fn get_mount_info() -> Result<Vec<MountInfo>> {
     let sys = System::new();
     let mut mounts_info = Vec::new();
 
@@ -3610,7 +3625,7 @@ fn calculate_storage_rates(
     rates
 }
 
-pub fn get_storage_device_info() -> Result<Vec<StorageDevice>> {
+pub async fn get_storage_device_info() -> Result<Vec<StorageDevice>> {
     let mut storage_devices = Vec::new();
 
     for entry in std::fs::read_dir("/sys/block")? {

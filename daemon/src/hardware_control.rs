@@ -19,64 +19,70 @@ fn get_cpu_count() -> Result<u32> {
     Ok(count as u32)
 }
 
-pub fn set_cpu_governor(governor: &str) -> Result<()> {
-    let cpu_count = get_cpu_count()?;
-    
-    for i in 0..cpu_count {
-        let path = format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_governor", i);
-        fs::write(&path, governor)
-            .map_err(|e| anyhow!("Failed to set governor for CPU {}: {}", i, e))?;
-    }
-    
-    log::info!(target: "hw.cpu", "set_governor profile=\"{}\"", governor);
-    crate::refresh_hardware_cache();
-    Ok(())
-}
+pub async fn set_cpu_governor(governor: &str) -> Result<()> {
+    let governor = governor.to_string();
+    tokio::task::spawn_blocking(move || {
+        let cpu_count = get_cpu_count()?;
 
-pub fn set_cpu_frequency_limits(min_freq: u64, max_freq: u64) -> Result<()> {
-    let cpu_count = get_cpu_count()?;
-    
-    // IMPORTANT: Set max first, then min to avoid conflicts
-    // If current min > new max, setting max first will fail
-    // If current max < new min, setting min first will fail
-    
-    // First, read current values
-    let current_min = fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq")
-        .ok()
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .unwrap_or(min_freq);
-    
-    let current_max = fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq")
-        .ok()
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .unwrap_or(max_freq);
-    
-    for i in 0..cpu_count {
-        let min_path = format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_min_freq", i);
-        let max_path = format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_max_freq", i);
-        
-        // Determine order based on current vs new values
-        if max_freq < current_max || min_freq > current_min {
-            // Set max first
-            fs::write(&max_path, max_freq.to_string())
-                .map_err(|e| anyhow!("Failed to set max frequency for CPU {}: {}", i, e))?;
-            fs::write(&min_path, min_freq.to_string())
-                .map_err(|e| anyhow!("Failed to set min frequency for CPU {}: {}", i, e))?;
-        } else {
-            // Set min first
-            fs::write(&min_path, min_freq.to_string())
-                .map_err(|e| anyhow!("Failed to set min frequency for CPU {}: {}", i, e))?;
-            fs::write(&max_path, max_freq.to_string())
-                .map_err(|e| anyhow!("Failed to set max frequency for CPU {}: {}", i, e))?;
+        for i in 0..cpu_count {
+            let path = format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_governor", i);
+            fs::write(&path, &governor)
+                .map_err(|e| anyhow!("Failed to set governor for CPU {}: {}", i, e))?;
         }
-    }
-    
-    CPU_LIMITS_MODIFIED.store(true, Ordering::SeqCst);
-    log::info!(target: "hw.cpu", "set_freq_limits min={} max={}", min_freq, max_freq);
+
+        log::info!(target: "hw.cpu", "set_governor profile=\"{}\"", governor);
+        Ok::<(), anyhow::Error>(())
+    }).await??;
+    crate::refresh_hardware_cache().await;
     Ok(())
 }
 
-pub fn restore_cpu_frequency_limits() -> Result<()> {
+pub async fn set_cpu_frequency_limits(min_freq: u64, max_freq: u64) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        let cpu_count = get_cpu_count()?;
+        
+        // IMPORTANT: Set max first, then min to avoid conflicts
+        // If current min > new max, setting max first will fail
+        // If current max < new min, setting min first will fail
+
+        // First, read current values
+        let current_min = fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(min_freq);
+
+        let current_max = fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(max_freq);
+
+        for i in 0..cpu_count {
+            let min_path = format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_min_freq", i);
+            let max_path = format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_max_freq", i);
+
+            // Determine order based on current vs new values
+            if max_freq < current_max || min_freq > current_min {
+                // Set max first
+                fs::write(&max_path, max_freq.to_string())
+                    .map_err(|e| anyhow!("Failed to set max frequency for CPU {}: {}", i, e))?;
+                fs::write(&min_path, min_freq.to_string())
+                    .map_err(|e| anyhow!("Failed to set min frequency for CPU {}: {}", i, e))?;
+            } else {
+                // Set min first
+                fs::write(&min_path, min_freq.to_string())
+                    .map_err(|e| anyhow!("Failed to set min frequency for CPU {}: {}", i, e))?;
+                fs::write(&max_path, max_freq.to_string())
+                    .map_err(|e| anyhow!("Failed to set max frequency for CPU {}: {}", i, e))?;
+            }
+        }
+
+        CPU_LIMITS_MODIFIED.store(true, Ordering::SeqCst);
+        log::info!(target: "hw.cpu", "set_freq_limits min={} max={}", min_freq, max_freq);
+        Ok(())
+    }).await?
+}
+
+pub async fn restore_cpu_frequency_limits() -> Result<()> {
     if !CPU_LIMITS_MODIFIED.load(Ordering::SeqCst) {
         return Ok(());
     }
@@ -85,13 +91,13 @@ pub fn restore_cpu_frequency_limits() -> Result<()> {
     let (hw_min, hw_max) = crate::hardware_detection::read_hw_frequency_limits()?;
 
     if let (Some(min), Some(max)) = (hw_min, hw_max) {
-        set_cpu_frequency_limits(min, max)?;
+        set_cpu_frequency_limits(min, max).await?;
     }
 
     Ok(())
 }
 
-pub fn set_cpu_boost(enabled: bool) -> Result<()> {
+pub async fn set_cpu_boost(enabled: bool) -> Result<()> {
     // AMD cpufreq boost
     let amd_path = "/sys/devices/system/cpu/cpufreq/boost";
     if Path::new(amd_path).exists() {
@@ -119,7 +125,7 @@ pub fn set_cpu_boost(enabled: bool) -> Result<()> {
     Err(anyhow!("Boost control not available"))
 }
 
-pub fn set_smt(enabled: bool) -> Result<()> {
+pub async fn set_smt(enabled: bool) -> Result<()> {
     let path = "/sys/devices/system/cpu/smt/control";
     if !Path::new(path).exists() {
         return Err(anyhow!("SMT control not available"));
@@ -130,39 +136,47 @@ pub fn set_smt(enabled: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn set_amd_pstate_status(status: &str) -> Result<()> {
-    let path = "/sys/devices/system/cpu/amd_pstate/status";
-    if !Path::new(path).exists() {
-        return Err(anyhow!("AMD pstate not available"));
-    }
-    
-    if !["passive", "active", "guided"].contains(&status) {
-        return Err(anyhow!("Invalid AMD pstate status: {}", status));
-    }
-    
-    fs::write(path, status)?;
-    log::info!(target: "hw.cpu", "set_amd_pstate_status status=\"{}\"", status);
-    crate::refresh_hardware_cache();
+pub async fn set_amd_pstate_status(status: &str) -> Result<()> {
+    let status = status.to_string();
+    tokio::task::spawn_blocking(move || {
+        let path = "/sys/devices/system/cpu/amd_pstate/status";
+        if !Path::new(path).exists() {
+            return Err(anyhow!("AMD pstate not available"));
+        }
+
+        if !["passive", "active", "guided"].contains(&status.as_str()) {
+            return Err(anyhow!("Invalid AMD pstate status: {}", status));
+        }
+
+        fs::write(path, &status)?;
+        log::info!(target: "hw.cpu", "set_amd_pstate_status status=\"{}\"", status);
+        Ok::<(), anyhow::Error>(())
+    }).await??;
+    crate::refresh_hardware_cache().await;
     Ok(())
 }
 
-pub fn set_intel_pstate_status(status: &str) -> Result<()> {
-    let path = "/sys/devices/system/cpu/intel_pstate/status";
-    if !Path::new(path).exists() {
-        return Err(anyhow!("Intel pstate not available"));
-    }
+pub async fn set_intel_pstate_status(status: &str) -> Result<()> {
+    let status = status.to_string();
+    tokio::task::spawn_blocking(move || {
+        let path = "/sys/devices/system/cpu/intel_pstate/status";
+        if !Path::new(path).exists() {
+            return Err(anyhow!("Intel pstate not available"));
+        }
 
-    if !["passive", "active"].contains(&status) {
-        return Err(anyhow!("Invalid Intel pstate status: {}", status));
-    }
+        if !["passive", "active"].contains(&status.as_str()) {
+            return Err(anyhow!("Invalid Intel pstate status: {}", status));
+        }
 
-    fs::write(path, status)?;
-    log::info!(target: "hw.cpu", "set_intel_pstate_status status=\"{}\"", status);
-    crate::refresh_hardware_cache();
+        fs::write(path, &status)?;
+        log::info!(target: "hw.cpu", "set_intel_pstate_status status=\"{}\"", status);
+        Ok::<(), anyhow::Error>(())
+    }).await??;
+    crate::refresh_hardware_cache().await;
     Ok(())
 }
 
-pub fn apply_profile(profile: &Profile) -> Result<()> {
+pub async fn apply_profile(profile: &Profile) -> Result<()> {
     // Check if this profile is already applied to avoid redundant hardware calls
     {
         let mut last_profile = LAST_APPLIED_PROFILE.lock().unwrap();
@@ -179,11 +193,11 @@ pub fn apply_profile(profile: &Profile) -> Result<()> {
     
     // Apply CPU settings
     if let Some(ref governor) = profile.cpu_settings.governor {
-        set_cpu_governor(governor)?;
+        set_cpu_governor(governor).await?;
     }
     
     if let Some(ref tdp_profile) = profile.cpu_settings.tdp_profile {
-        set_tdp_profile(tdp_profile)?;
+        set_tdp_profile(tdp_profile).await?;
     }
 
     if let Ok(io) = TuxedoIo::new() {
@@ -201,19 +215,19 @@ pub fn apply_profile(profile: &Profile) -> Result<()> {
     }
     
     if let Some(ref amd_status) = profile.cpu_settings.amd_pstate_status {
-        set_amd_pstate_status(amd_status)?;
+        set_amd_pstate_status(amd_status).await?;
     }
 
     if let Some(ref intel_status) = profile.cpu_settings.intel_pstate_status {
-        set_intel_pstate_status(intel_status)?;
+        set_intel_pstate_status(intel_status).await?;
     }
     
     if let Some(ref epp) = profile.cpu_settings.energy_performance_preference {
-        set_energy_performance_preference(epp)?;
+        set_energy_performance_preference(epp).await?;
     }
     
     if let (Some(min), Some(max)) = (profile.cpu_settings.min_frequency, profile.cpu_settings.max_frequency) {
-        set_cpu_frequency_limits(min, max)?;
+        set_cpu_frequency_limits(min, max).await?;
     }
 
     // Apply GPU settings
@@ -226,29 +240,29 @@ pub fn apply_profile(profile: &Profile) -> Result<()> {
     };
 
     if let Some(limit) = profile.gpu_settings.power_limit {
-        let _ = set_gpu_power_limit(nvidia_gpu_idx, limit);
+        let _ = set_gpu_power_limit(nvidia_gpu_idx, limit).await;
     }
 
     if let Some(core_offset) = profile.gpu_settings.core_offset {
-        let _ = set_gpu_core_offset(nvidia_gpu_idx, core_offset as f32);
+        let _ = set_gpu_core_offset(nvidia_gpu_idx, core_offset as f32).await;
     }
 
     if let Some(memory_offset) = profile.gpu_settings.memory_offset {
-        let _ = set_gpu_memory_offset(nvidia_gpu_idx, memory_offset as f32);
+        let _ = set_gpu_memory_offset(nvidia_gpu_idx, memory_offset as f32).await;
     }
 
     if let (Some(min_clock), Some(max_clock)) = (profile.gpu_settings.min_gpu_clock, profile.gpu_settings.max_gpu_clock) {
-        let _ = set_gpu_locked_clocks(nvidia_gpu_idx, min_clock, max_clock);
+        let _ = set_gpu_locked_clocks(nvidia_gpu_idx, min_clock, max_clock).await;
     } else {
-        let _ = reset_gpu_clocks(nvidia_gpu_idx);
+        let _ = reset_gpu_clocks(nvidia_gpu_idx).await;
     }
     
     if let Some(boost) = profile.cpu_settings.boost {
-        set_cpu_boost(boost)?;
+        set_cpu_boost(boost).await?;
     }
     
     if let Some(smt) = profile.cpu_settings.smt {
-        set_smt(smt)?;
+        set_smt(smt).await?;
     }
     
     // Apply keyboard settings
@@ -258,14 +272,14 @@ pub fn apply_profile(profile: &Profile) -> Result<()> {
     apply_screen_settings(&profile.screen_settings)?;
     
     // Apply fan settings - update daemon state
-    apply_fan_settings(&profile.fan_settings)?;
+    apply_fan_settings(&profile.fan_settings).await?;
 
     // Apply NVIDIA fan settings
     for fan_setting in &profile.gpu_settings.nvidia_fans {
         if fan_setting.manual {
-            let _ = set_gpu_fan_speed(fan_setting.device_index, fan_setting.fan_id, fan_setting.speed);
+            let _ = set_gpu_fan_speed(fan_setting.device_index, fan_setting.fan_id, fan_setting.speed).await;
         } else {
-            let _ = set_gpu_fan_auto(fan_setting.device_index, fan_setting.fan_id);
+            let _ = set_gpu_fan_auto(fan_setting.device_index, fan_setting.fan_id).await;
         }
     }
     
@@ -273,7 +287,7 @@ pub fn apply_profile(profile: &Profile) -> Result<()> {
     Ok(())
 }
 
-pub fn apply_battery_settings(settings: &BatterySettings) -> Result<()> {
+pub async fn apply_battery_settings(settings: &BatterySettings) -> Result<()> {
     if !crate::battery_control::BatteryControl::is_available() {
         log::info!(target: "hw.battery", "Battery control not available, skipping");
         return Ok(());
@@ -323,7 +337,7 @@ fn apply_keyboard_settings(settings: &KeyboardSettings) -> Result<()> {
     }
 }
 
-pub fn preview_keyboard_settings(settings: &KeyboardSettings) -> Result<()> {
+pub async fn preview_keyboard_settings(settings: &KeyboardSettings) -> Result<()> {
     if let Ok(kbd) = RgbKeyboardControl::new() {
         kbd.set_mode(&settings.mode)?;
         Ok(())
@@ -382,7 +396,7 @@ fn apply_screen_settings(settings: &ScreenSettings) -> Result<()> {
     Err(anyhow!("No writable backlight control found"))
 }
 
-pub fn set_tdp_profile(profile_name: &str) -> Result<()> {
+pub async fn set_tdp_profile(profile_name: &str) -> Result<()> {
     if !TuxedoIo::is_available() {
         return Err(anyhow!("TDP profiles not available"));
     }
@@ -399,33 +413,37 @@ pub fn set_tdp_profile(profile_name: &str) -> Result<()> {
     }
 }
 
-pub fn set_fan_speed(fan_id: u32, speed_percent: u32) -> Result<()> {
-    if !TuxedoIo::is_available() {
-        return Err(anyhow!("Fan control not available"));
-    }
-    
-    let speed = speed_percent.min(100);
-    log::info!(target: "hw.fan", "DBus request: set fan {} to {}%", fan_id, speed);
-    let io = TuxedoIo::new()?;
-    io.set_fan_speed(fan_id, speed)?;
-    
-    log::info!(target: "hw.fan", "set_fan id={} speed={}%", fan_id, speed);
-    Ok(())
+pub async fn set_fan_speed(fan_id: u32, speed_percent: u32) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        if !TuxedoIo::is_available() {
+            return Err(anyhow!("Fan control not available"));
+        }
+
+        let speed = speed_percent.min(100);
+        log::info!(target: "hw.fan", "DBus request: set fan {} to {}%", fan_id, speed);
+        let io = TuxedoIo::new()?;
+        io.set_fan_speed(fan_id, speed)?;
+
+        log::info!(target: "hw.fan", "set_fan id={} speed={}%", fan_id, speed);
+        Ok(())
+    }).await?
 }
 
-pub fn set_fan_auto(_fan_id: u32) -> Result<()> {
-    if !TuxedoIo::is_available() {
-        return Err(anyhow!("Fan control not available"));
-    }
-    
-    let io = TuxedoIo::new()?;
-    io.set_fan_auto()?;
-    
-    log::info!(target: "hw.fan", "set_fans_auto");
-    Ok(())
+pub async fn set_fan_auto(_fan_id: u32) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        if !TuxedoIo::is_available() {
+            return Err(anyhow!("Fan control not available"));
+        }
+
+        let io = TuxedoIo::new()?;
+        io.set_fan_auto()?;
+
+        log::info!(target: "hw.fan", "set_fans_auto");
+        Ok(())
+    }).await?
 }
 
-fn apply_fan_settings(settings: &FanSettings) -> Result<()> {
+async fn apply_fan_settings(settings: &FanSettings) -> Result<()> {
     if !TuxedoIo::is_available() {
         log::info!(target: "hw.fan", "Fan control not available (/dev/tuxedo_io not present)");
         return Ok(());
@@ -446,40 +464,44 @@ fn apply_fan_settings(settings: &FanSettings) -> Result<()> {
     }
     
     if !settings.control_enabled {
-        set_fan_auto(0)?;
+        set_fan_auto(0).await?;
     }
     
     Ok(())
 }
 
-pub fn set_webcam_state(enabled: bool) -> Result<()> {
-    if !TuxedoIo::is_available() {
-        return Err(anyhow!("Webcam control not available"));
-    }
-    
-    let io = TuxedoIo::new()?;
-    io.set_webcam_state(enabled)?;
-    
-    log::info!(target: "hw.detect", "set_webcam enabled={}", enabled);
-    Ok(())
+pub async fn set_webcam_state(enabled: bool) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        if !TuxedoIo::is_available() {
+            return Err(anyhow!("Webcam control not available"));
+        }
+
+        let io = TuxedoIo::new()?;
+        io.set_webcam_state(enabled)?;
+
+        log::info!(target: "hw.detect", "set_webcam enabled={}", enabled);
+        Ok::<(), anyhow::Error>(())
+    }).await?
 }
 
-pub fn get_webcam_state() -> Result<bool> {
-    if !TuxedoIo::is_available() {
-        // Return true as default if driver not present
-        return Ok(true);
-    }
-    
-    let io = TuxedoIo::new()?;
-    if io.get_interface() != HardwareInterface::Clevo {
-        // Return true for non-Clevo hardware (standard state)
-        return Ok(true);
-    }
+pub async fn get_webcam_state() -> Result<bool> {
+    tokio::task::spawn_blocking(move || {
+        if !TuxedoIo::is_available() {
+            // Return true as default if driver not present
+            return Ok(true);
+        }
 
-    match io.get_webcam_state() {
-        Ok(state) => Ok(state),
-        Err(_) => Ok(true), // Fallback to true on error
-    }
+        let io = TuxedoIo::new()?;
+        if io.get_interface() != HardwareInterface::Clevo {
+            // Return true for non-Clevo hardware (standard state)
+            return Ok(true);
+        }
+
+        match io.get_webcam_state() {
+            Ok(state) => Ok(state),
+            Err(_) => Ok(true), // Fallback to true on error
+        }
+    }).await?
 }
 
 
@@ -495,72 +517,86 @@ pub fn get_nvml() -> Result<&'static Nvml> {
     }
 }
 
-pub fn set_gpu_locked_clocks(device_index: u32, min_clock: u32, max_clock: u32) -> Result<()> {
-    let nvml = get_nvml()?;
-    let mut device = nvml.device_by_index(device_index)?;
-    device.set_gpu_locked_clocks(GpuLockedClocksSetting::Numeric {
-        min_clock_mhz: min_clock,
-        max_clock_mhz: max_clock,
-    })?;
-    Ok(())
+pub async fn set_gpu_locked_clocks(device_index: u32, min_clock: u32, max_clock: u32) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        let nvml = get_nvml()?;
+        let mut device = nvml.device_by_index(device_index)?;
+        device.set_gpu_locked_clocks(GpuLockedClocksSetting::Numeric {
+            min_clock_mhz: min_clock,
+            max_clock_mhz: max_clock,
+        })?;
+        Ok(())
+    }).await?
 }
 
 
-pub fn reset_gpu_clocks(device_index: u32) -> Result<()> {
-    let nvml = get_nvml()?;
-    let mut device = nvml.device_by_index(device_index)?;
-    device.reset_gpu_locked_clocks()?;
-    Ok(())
+pub async fn reset_gpu_clocks(device_index: u32) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        let nvml = get_nvml()?;
+        let mut device = nvml.device_by_index(device_index)?;
+        device.reset_gpu_locked_clocks()?;
+        Ok(())
+    }).await?
 }
 
-pub fn set_gpu_core_offset(device_index: u32, offset: f32) -> Result<()> {
-    let nvml = get_nvml()?;
-    let mut device = nvml.device_by_index(device_index)?;
-    device.set_clock_offset(Clock::Graphics, PerformanceState::Zero, offset.round() as i32)?;
-    {
-        let mut map = crate::MANUAL_GPU_OFFSETS.lock().unwrap();
-        let entry = map.entry(device_index).or_insert((0.0, 0.0));
-        entry.0 = offset;
-    }
-    log::info!(target: "hw.gpu", "set_core_offset gpu={} offset={} offset_rounded={}", device_index, offset, offset.round());
-    Ok(())
+pub async fn set_gpu_core_offset(device_index: u32, offset: f32) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        let nvml = get_nvml()?;
+        let mut device = nvml.device_by_index(device_index)?;
+        device.set_clock_offset(Clock::Graphics, PerformanceState::Zero, offset.round() as i32)?;
+        {
+            let mut map = crate::MANUAL_GPU_OFFSETS.lock().unwrap();
+            let entry = map.entry(device_index).or_insert((0.0, 0.0));
+            entry.0 = offset;
+        }
+        log::info!(target: "hw.gpu", "set_core_offset gpu={} offset={} offset_rounded={}", device_index, offset, offset.round());
+        Ok(())
+    }).await?
 }
 
-pub fn set_gpu_memory_offset(device_index: u32, offset: f32) -> Result<()> {
-    let nvml = get_nvml()?;
-    let mut device = nvml.device_by_index(device_index)?;
-    device.set_clock_offset(Clock::Memory, PerformanceState::Zero, offset.round() as i32)?;
-    {
-        let mut map = crate::MANUAL_GPU_OFFSETS.lock().unwrap();
-        let entry = map.entry(device_index).or_insert((0.0, 0.0));
-        entry.1 = offset;
-    }
-    log::info!(target: "hw.gpu", "set_mem_offset gpu={} offset={} offset_rounded={}", device_index, offset, offset.round());
-    Ok(())
+pub async fn set_gpu_memory_offset(device_index: u32, offset: f32) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        let nvml = get_nvml()?;
+        let mut device = nvml.device_by_index(device_index)?;
+        device.set_clock_offset(Clock::Memory, PerformanceState::Zero, offset.round() as i32)?;
+        {
+            let mut map = crate::MANUAL_GPU_OFFSETS.lock().unwrap();
+            let entry = map.entry(device_index).or_insert((0.0, 0.0));
+            entry.1 = offset;
+        }
+        log::info!(target: "hw.gpu", "set_mem_offset gpu={} offset={} offset_rounded={}", device_index, offset, offset.round());
+        Ok(())
+    }).await?
 }
 
-pub fn set_gpu_power_limit(device_index: u32, limit_watts: u32) -> Result<()> {
-    let nvml = get_nvml()?;
-    let mut device = nvml.device_by_index(device_index)?;
-    device.set_power_management_limit(limit_watts * 1000)?; // Watts to mW
-    log::info!(target: "hw.gpu", "set_power_limit gpu={} limit={}W", device_index, limit_watts);
-    Ok(())
+pub async fn set_gpu_power_limit(device_index: u32, limit_watts: u32) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        let nvml = get_nvml()?;
+        let mut device = nvml.device_by_index(device_index)?;
+        device.set_power_management_limit(limit_watts * 1000)?; // Watts to mW
+        log::info!(target: "hw.gpu", "set_power_limit gpu={} limit={}W", device_index, limit_watts);
+        Ok(())
+    }).await?
 }
 
-pub fn set_gpu_fan_speed(device_index: u32, fan_index: u32, speed_percent: u32) -> Result<()> {
-    let nvml = get_nvml()?;
-    let mut device = nvml.device_by_index(device_index)?;
-    device.set_fan_speed(fan_index, speed_percent)?;
-    log::info!(target: "hw.gpu", "set_fan_speed gpu={} fan={} speed={}%", device_index, fan_index, speed_percent);
-    Ok(())
+pub async fn set_gpu_fan_speed(device_index: u32, fan_index: u32, speed_percent: u32) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        let nvml = get_nvml()?;
+        let mut device = nvml.device_by_index(device_index)?;
+        device.set_fan_speed(fan_index, speed_percent)?;
+        log::info!(target: "hw.gpu", "set_fan_speed gpu={} fan={} speed={}%", device_index, fan_index, speed_percent);
+        Ok(())
+    }).await?
 }
 
-pub fn set_gpu_fan_auto(device_index: u32, fan_index: u32) -> Result<()> {
-    let nvml = get_nvml()?;
-    let mut device = nvml.device_by_index(device_index)?;
-    device.set_default_fan_speed(fan_index)?;
-    log::info!(target: "hw.gpu", "set_fan_auto gpu={} fan={}", device_index, fan_index);
-    Ok(())
+pub async fn set_gpu_fan_auto(device_index: u32, fan_index: u32) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        let nvml = get_nvml()?;
+        let mut device = nvml.device_by_index(device_index)?;
+        device.set_default_fan_speed(fan_index)?;
+        log::info!(target: "hw.gpu", "set_fan_auto gpu={} fan={}", device_index, fan_index);
+        Ok(())
+    }).await?
 }
 
 fn find_binary(cmd: &str) -> Option<String> {
@@ -574,64 +610,70 @@ fn find_binary(cmd: &str) -> Option<String> {
     None
 }
 
-pub fn set_prime_profile(profile: &str) -> Result<()> {
-    let valid_profiles = ["on-demand", "nvidia", "intel"];
-    if !valid_profiles.contains(&profile) {
-        return Err(anyhow!("Invalid prime profile: {}", profile));
-    }
-
-    // Check for optimus-manager first (common on Arch)
-    if let Some(path) = find_binary("optimus-manager") {
-        let opt_mode = match profile {
-            "on-demand" => "hybrid",
-            "intel" => "integrated",
-            "nvidia" => "nvidia",
-            _ => profile,
-        };
-
-        log::info!(target: "hw.gpu", "set_prime_profile mode=\"{}\" tool=\"optimus-manager\"", opt_mode);
-        let output = std::process::Command::new(path)
-            .arg("--switch")
-            .arg(opt_mode)
-            .arg("--no-confirm")
-            .output()?;
-
-        if !output.status.success() {
-            return Err(anyhow!("optimus-manager command failed: {}", String::from_utf8_lossy(&output.stderr)));
+pub async fn set_prime_profile(profile: &str) -> Result<()> {
+    let profile = profile.to_string();
+    tokio::task::spawn_blocking(move || {
+        let valid_profiles = ["on-demand", "nvidia", "intel"];
+        if !valid_profiles.contains(&profile.as_str()) {
+            return Err(anyhow!("Invalid prime profile: {}", profile));
         }
-        return Ok(());
-    }
 
-    // Fallback to prime-select (Ubuntu/Debian)
-    let output = std::process::Command::new("prime-select")
-        .arg(profile)
-        .output()?;
-    if !output.status.success() {
-        return Err(anyhow!("prime-select command failed: {}", String::from_utf8_lossy(&output.stderr)));
-    }
-    log::info!(target: "hw.gpu", "set_prime_profile mode=\"{}\" tool=\"prime-select\"", profile);
-    Ok(())
+        // Check for optimus-manager first (common on Arch)
+        if let Some(path) = find_binary("optimus-manager") {
+            let opt_mode = match profile.as_str() {
+                "on-demand" => "hybrid",
+                "intel" => "integrated",
+                "nvidia" => "nvidia",
+                _ => &profile,
+            };
+
+            log::info!(target: "hw.gpu", "set_prime_profile mode=\"{}\" tool=\"optimus-manager\"", opt_mode);
+            let output = std::process::Command::new(path)
+                .arg("--switch")
+                .arg(opt_mode)
+                .arg("--no-confirm")
+                .output()?;
+
+            if !output.status.success() {
+                return Err(anyhow!("optimus-manager command failed: {}", String::from_utf8_lossy(&output.stderr)));
+            }
+            return Ok(());
+        }
+
+        // Fallback to prime-select (Ubuntu/Debian)
+        let output = std::process::Command::new("prime-select")
+            .arg(&profile)
+            .output()?;
+        if !output.status.success() {
+            return Err(anyhow!("prime-select command failed: {}", String::from_utf8_lossy(&output.stderr)));
+        }
+        log::info!(target: "hw.gpu", "set_prime_profile mode=\"{}\" tool=\"prime-select\"", profile);
+        Ok(())
+    }).await?
 }
 
-pub fn set_energy_performance_preference(epp: &str) -> Result<()> {
-    let cpu_count = get_cpu_count()?;
-    
-    let valid_values = ["performance", "balance_performance", "balance_power", "power", 
-                       "default", "balance-performance", "balance-power"];
-    if !valid_values.contains(&epp) {
-        return Err(anyhow!("Invalid EPP value: {}", epp));
-    }
-    
-    for i in 0..cpu_count {
-        let path = format!("/sys/devices/system/cpu/cpu{}/cpufreq/energy_performance_preference", i);
-        if Path::new(&path).exists() {
-            fs::write(&path, epp)
-                .map_err(|e| anyhow!("Failed to set EPP for CPU {}: {}", i, e))?;
+pub async fn set_energy_performance_preference(epp: &str) -> Result<()> {
+    let epp = epp.to_string();
+    tokio::task::spawn_blocking(move || {
+        let cpu_count = get_cpu_count()?;
+
+        let valid_values = ["performance", "balance_performance", "balance_power", "power",
+                           "default", "balance-performance", "balance-power"];
+        if !valid_values.contains(&epp.as_str()) {
+            return Err(anyhow!("Invalid EPP value: {}", epp));
         }
-    }
-    
-    log::info!(target: "hw.cpu", "set_epp preference=\"{}\"", epp);
-    Ok(())
+
+        for i in 0..cpu_count {
+            let path = format!("/sys/devices/system/cpu/cpu{}/cpufreq/energy_performance_preference", i);
+            if Path::new(&path).exists() {
+                fs::write(&path, &epp)
+                    .map_err(|e| anyhow!("Failed to set EPP for CPU {}: {}", i, e))?;
+            }
+        }
+
+        log::info!(target: "hw.cpu", "set_epp preference=\"{}\"", epp);
+        Ok(())
+    }).await?
 }
 
 #[derive(Debug, Clone)]

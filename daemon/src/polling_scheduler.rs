@@ -4,6 +4,11 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use anyhow::Result;
+use std::future::Future;
+use std::pin::Pin;
+
+pub type PollFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+pub type PollFn = Arc<dyn Fn() -> PollFuture + Send + Sync>;
 
 /// A single polling job with its schedule and action
 pub struct PollJob {
@@ -14,25 +19,26 @@ pub struct PollJob {
     /// Interval between runs
     pub interval: Duration,
     /// The actual polling function
-    pub poll_fn: Arc<dyn Fn() -> Result<()> + Send + Sync>,
+    pub poll_fn: PollFn,
 }
 
 impl PollJob {
-    pub fn new<F>(id: String, interval: Duration, poll_fn: F) -> Self
+    pub fn new<F, Fut>(id: String, interval: Duration, poll_fn: F) -> Self
     where
-        F: Fn() -> Result<()> + Send + Sync + 'static,
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
     {
         Self {
             id,
             next_run: Instant::now(),
             interval,
-            poll_fn: Arc::new(poll_fn),
+            poll_fn: Arc::new(move || Box::pin(poll_fn())),
         }
     }
 
     /// Execute the poll function and update next_run
-    pub fn execute(&mut self) -> Result<()> {
-        let result = (self.poll_fn)();
+    pub async fn execute(&mut self) -> Result<()> {
+        let result = (self.poll_fn)().await;
         // Always reschedule, even on error
         self.next_run = Instant::now() + self.interval;
         result
@@ -124,7 +130,7 @@ impl PollingScheduler {
             tokio::select! {
                 _ = tokio::time::sleep(sleep_duration) => {
                     // Time to execute job(s)
-                    self.execute_due_jobs();
+                    self.execute_due_jobs().await;
                 }
                 Some(cmd) = self.command_rx.recv() => {
                     match cmd {
@@ -152,31 +158,35 @@ impl PollingScheduler {
     }
 
     /// Execute all jobs that are due
-    fn execute_due_jobs(&self) {
+    async fn execute_due_jobs(&self) {
         let now = Instant::now();
-        let mut jobs = self.jobs.write().unwrap();
         let mut due_jobs = Vec::new();
 
-        // Collect all due jobs
-        while let Some(job) = jobs.peek() {
-            if job.next_run <= now {
-                due_jobs.push(jobs.pop().unwrap());
-            } else {
-                break;
+        {
+            let mut jobs = self.jobs.write().unwrap();
+            // Collect all due jobs
+            while let Some(job) = jobs.peek() {
+                if job.next_run <= now {
+                    due_jobs.push(jobs.pop().unwrap());
+                } else {
+                    break;
+                }
             }
         }
 
         // Execute jobs and re-insert them
         for mut job in due_jobs {
-            match job.execute() {
+            let id = job.id.clone();
+            match job.execute().await {
                 Ok(_) => {
-                    log::trace!("Executed poll job: {}", job.id);
+                    log::trace!("Executed poll job: {}", id);
                 }
                 Err(e) => {
-                    log::error!("Error executing poll job {}: {}", job.id, e);
+                    log::error!("Error executing poll job {}: {}", id, e);
                     // Reschedule even on error (execute() already updated next_run)
                 }
             }
+            let mut jobs = self.jobs.write().unwrap();
             jobs.push(job);
         }
     }

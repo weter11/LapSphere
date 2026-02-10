@@ -52,6 +52,49 @@ pub static SCHEDULER_HANDLE: once_cell::sync::OnceCell<polling_scheduler::Schedu
 pub static GPU_DAEMON_STATE: once_cell::sync::Lazy<Arc<Mutex<Option<lapsphere_common::types::GpuSettings>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
 
+#[derive(serde::Deserialize)]
+struct SettingsFile {
+    #[serde(default)]
+    statistics_sections: StatisticsSections,
+}
+
+fn load_settings() -> StatisticsSections {
+    let config_dir = if let Ok(sudo_user) = std::env::var("SUDO_USER") {
+        if let Ok(output) = std::process::Command::new("getent")
+            .args(["passwd", &sudo_user])
+            .output()
+        {
+            let s = String::from_utf8_lossy(&output.stdout);
+            if let Some(line) = s.lines().next() {
+                let parts: Vec<&str> = line.split(':').collect();
+                if parts.len() >= 6 {
+                    let mut p = std::path::PathBuf::from(parts[5]);
+                    p.push(".config/lapsphere");
+                    p
+                } else {
+                    std::path::PathBuf::from("/root/.config/lapsphere")
+                }
+            } else {
+                std::path::PathBuf::from("/root/.config/lapsphere")
+            }
+        } else {
+            std::path::PathBuf::from("/root/.config/lapsphere")
+        }
+    } else {
+        let mut p = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/root".to_string()));
+        p.push(".config/lapsphere");
+        p
+    };
+
+    let settings_path = config_dir.join("settings.json");
+    if let Ok(content) = std::fs::read_to_string(settings_path) {
+        if let Ok(settings) = serde_json::from_str::<SettingsFile>(&content) {
+            return settings.statistics_sections;
+        }
+    }
+    StatisticsSections::default()
+}
+
 pub struct GpuOverclockStats {
     pub freq_offset: i32,
     pub drain_offset: i32,
@@ -183,7 +226,7 @@ async fn main() -> Result<()> {
     if unsafe { libc::geteuid() } != 0 {
         if !launch_gui && !launch_tray {
             println!("--- Hardware Statistics for Uniwill/Clevo Laptops (Limited - non-root) ---");
-            match hardware_detection::get_cpu_info() {
+            match hardware_detection::get_cpu_info().await {
                 Ok(cpu) => {
                     println!("CPU: {}", cpu.name);
                     println!("  Load: {:.1}%", cpu.average_load);
@@ -191,7 +234,7 @@ async fn main() -> Result<()> {
                 }
                 Err(e) => println!("Error getting CPU info: {}", e),
             }
-            match hardware_detection::get_memory_info() {
+            match hardware_detection::get_memory_info().await {
                 Ok(mem) => {
                     println!("Memory: {:.1} / {:.1} GiB ({:.1}%)",
                         mem.used_gib, mem.total_gib, mem.used_percent);
@@ -207,7 +250,7 @@ async fn main() -> Result<()> {
 
     if !launch_gui && !launch_tray {
         println!("--- Hardware Statistics for Uniwill/Clevo Laptops ---");
-        match hardware_detection::get_cpu_info() {
+        match hardware_detection::get_cpu_info().await {
             Ok(cpu) => {
                 println!("CPU: {}", cpu.name);
                 println!("  Load: {:.1}%", cpu.average_load);
@@ -219,7 +262,7 @@ async fn main() -> Result<()> {
             Err(e) => println!("Error getting CPU info: {}", e),
         }
 
-        match hardware_detection::get_memory_info() {
+        match hardware_detection::get_memory_info().await {
             Ok(mem) => {
                 println!("Memory: {:.1} / {:.1} GiB ({:.1}%)",
                     mem.used_gib, mem.total_gib, mem.used_percent);
@@ -227,7 +270,7 @@ async fn main() -> Result<()> {
             Err(e) => println!("Error getting memory info: {}", e),
         }
 
-        if let Ok(gpus) = hardware_detection::get_gpu_info() {
+        if let Ok(gpus) = hardware_detection::get_gpu_info().await {
             for gpu in gpus {
                 println!("GPU: {}", gpu.name);
                 if let Some(load) = gpu.load { println!("  Load: {:.1}%", load); }
@@ -275,9 +318,12 @@ async fn main() -> Result<()> {
     // Store handle globally for DBus interface to use
     SCHEDULER_HANDLE.set(scheduler_handle.clone()).ok();
     
+    // Load initial polling rates from settings
+    let stats_config = load_settings();
+
     // Initial hardware poll to populate cache immediately
     log::debug!("Performing initial hardware detection...");
-    refresh_hardware_cache();
+    refresh_hardware_cache().await;
     log::debug!("Initial hardware detection complete");
 
     // Start scheduler in background
@@ -285,22 +331,40 @@ async fn main() -> Result<()> {
         scheduler.run().await;
     });
 
-    // Add hardware monitor polling job
-    let hw_monitor_fn = || {
-        refresh_hardware_cache();
-        Ok(())
-    };
+    // Register individual polling jobs
+    let jobs = vec![
+        ("cpu", Duration::from_millis(stats_config.cpu_poll_rate)),
+        ("memory", Duration::from_millis(stats_config.memory_poll_rate)),
+        ("gpu", Duration::from_millis(stats_config.gpu_poll_rate)),
+        ("battery", Duration::from_millis(stats_config.battery_poll_rate)),
+        ("fans", Duration::from_millis(stats_config.fans_poll_rate)),
+        ("wifi", Duration::from_millis(stats_config.wifi_poll_rate)),
+        ("gamepads", Duration::from_millis(stats_config.gamepad_poll_rate)),
+        ("storage", Duration::from_millis(stats_config.storage_poll_rate)),
+        ("mount", Duration::from_millis(stats_config.storage_poll_rate)),
+    ];
 
-    let hw_monitor_job = PollJob::new(
-        "hardware_monitor".to_string(),
-        Duration::from_millis(1000), // Poll every 1 second
-        hw_monitor_fn,
-    );
+    for (id, interval) in &jobs {
+        let id_str = id.to_string();
+        let interval_val = *interval;
 
-    if let Err(e) = scheduler_handle.add_job(hw_monitor_job) {
-        log::error!("Failed to add hardware monitor job: {}", e);
-    } else {
-        log::debug!("Hardware monitor polling job added");
+        // We need to capture the function in a closure that returns a Future
+        let job = match *id {
+            "cpu" => PollJob::new(id_str, interval_val, || async { refresh_cpu_cache().await; Ok(()) }),
+            "memory" => PollJob::new(id_str, interval_val, || async { refresh_memory_cache().await; Ok(()) }),
+            "gpu" => PollJob::new(id_str, interval_val, || async { refresh_gpu_cache().await; Ok(()) }),
+            "battery" => PollJob::new(id_str, interval_val, || async { refresh_battery_cache().await; Ok(()) }),
+            "fans" => PollJob::new(id_str, interval_val, || async { refresh_fan_cache().await; Ok(()) }),
+            "wifi" => PollJob::new(id_str, interval_val, || async { refresh_wifi_cache().await; Ok(()) }),
+            "gamepads" => PollJob::new(id_str, interval_val, || async { refresh_gamepad_cache().await; Ok(()) }),
+            "storage" => PollJob::new(id_str, interval_val, || async { refresh_storage_cache().await; Ok(()) }),
+            "mount" => PollJob::new(id_str, interval_val, || async { refresh_mount_cache().await; Ok(()) }),
+            _ => unreachable!(),
+        };
+
+        if let Err(e) = scheduler_handle.add_job(job) {
+            log::error!("Failed to add job {}: {}", id, e);
+        }
     }
 
     // Add fan control polling job if hardware is available
@@ -309,24 +373,27 @@ async fn main() -> Result<()> {
         let poll_fn = {
             let fan_io = fan_io.clone();
             move || {
-                let settings = {
-                    let state = FAN_DAEMON_STATE.lock().unwrap();
-                    state.clone()
-                };
+                let fan_io = fan_io.clone();
+                async move {
+                    let settings = {
+                        let state = FAN_DAEMON_STATE.lock().unwrap();
+                        state.clone()
+                    };
 
-                if let Some(ref fan_settings) = settings {
-                    if fan_settings.control_enabled {
-                        // Sort curves for each fan
-                        let sorted_curves: Vec<Vec<(u8, u8)>> = fan_settings.curves.iter().map(|c| {
-                            let mut points = c.points.clone();
-                            points.sort_by_key(|p| p.0);
-                            points
-                        }).collect();
+                    if let Some(ref fan_settings) = settings {
+                        if fan_settings.control_enabled {
+                            // Sort curves for each fan
+                            let sorted_curves: Vec<Vec<(u8, u8)>> = fan_settings.curves.iter().map(|c| {
+                                let mut points = c.points.clone();
+                                points.sort_by_key(|p| p.0);
+                                points
+                            }).collect();
 
-                        apply_fan_curves(&fan_io, fan_settings, &sorted_curves)?;
+                            apply_fan_curves(fan_io.clone(), fan_settings.clone(), sorted_curves.clone()).await?;
+                        }
                     }
+                    Ok(())
                 }
-                Ok(())
             }
         };
 
@@ -344,14 +411,14 @@ async fn main() -> Result<()> {
     }
 
     // Add GPU overclocking polling job
-    let gpu_poll_fn = || {
+    let gpu_poll_fn = || async {
         let settings = {
             let state = GPU_DAEMON_STATE.lock().unwrap();
             state.clone()
         };
 
         if let Some(ref gpu_settings) = settings {
-            apply_gpu_overclocking(gpu_settings)?;
+            apply_gpu_overclocking(gpu_settings).await?;
         } else {
             {
                 let mut stats = CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
@@ -369,17 +436,20 @@ async fn main() -> Result<()> {
     let gpu_job_poll = {
         let log_tick = log_tick.clone();
         move || {
-            let tick = log_tick.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-            if tick % 60 == 0 {
-                log::debug!(target: "daemon", "heartbeat uptime_tick={}", tick);
+            let log_tick = log_tick.clone();
+            async move {
+                let tick = log_tick.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                if tick % 60 == 0 {
+                    log::debug!(target: "daemon", "heartbeat uptime_tick={}", tick);
+                }
+                gpu_poll_fn().await
             }
-            gpu_poll_fn()
         }
     };
 
     let gpu_job = PollJob::new(
         "gpu_overclock".to_string(),
-        Duration::from_millis(1000), // Default 1s
+        Duration::from_millis(stats_config.gpu_overclock_poll_rate),
         gpu_job_poll,
     );
 
@@ -473,67 +543,115 @@ async fn main() -> Result<()> {
     log::info!("Shutting down daemon");
 
     // Cleanup
-    if let Err(e) = crate::hardware_control::restore_cpu_frequency_limits() {
+    if let Err(e) = crate::hardware_control::restore_cpu_frequency_limits().await {
         log::error!("Failed to restore CPU frequency limits on exit: {}", e);
     }
 
     Ok(())
 }
 
-pub fn refresh_hardware_cache() {
-    let cpu_info = hardware_detection::get_cpu_info().ok();
-    let memory_info = hardware_detection::get_memory_info().ok();
-    let gpu_info = hardware_detection::get_gpu_info().unwrap_or_default();
-    let battery_info = hardware_detection::get_battery_info().ok();
-    let fan_info = hardware_detection::get_all_fan_info().unwrap_or_default();
-    let wifi_info = hardware_detection::get_wifi_info().unwrap_or_default();
-    let gamepad_info = hardware_detection::get_gamepad_info().unwrap_or_default();
-    let storage_device_info = hardware_detection::get_storage_device_info().unwrap_or_default();
-    let mount_info = hardware_detection::get_mount_info().unwrap_or_default();
-    let system_info = hardware_detection::get_system_info().ok();
-
-    {
-        let mut cache = HARDWARE_CACHE.lock().unwrap();
-        cache.cpu_info = cpu_info;
-        cache.memory_info = memory_info;
-        cache.gpu_info = gpu_info;
-        cache.battery_info = battery_info;
-        cache.fan_info = fan_info;
-        cache.wifi_info = wifi_info;
-        cache.gamepad_info = gamepad_info;
-        cache.storage_device_info = storage_device_info;
-        cache.mount_info = mount_info;
-        cache.system_info = system_info;
-    }
+pub async fn refresh_hardware_cache() {
+    refresh_cpu_cache().await;
+    refresh_memory_cache().await;
+    refresh_gpu_cache().await;
+    refresh_battery_cache().await;
+    refresh_fan_cache().await;
+    refresh_wifi_cache().await;
+    refresh_gamepad_cache().await;
+    refresh_storage_cache().await;
+    refresh_mount_cache().await;
+    refresh_system_cache().await;
 }
 
-fn apply_fan_curves(io: &tuxedo_io::TuxedoIo, settings: &FanSettings, sorted_curves: &[Vec<(u8, u8)>]) -> Result<()> {
-    for (i, curve) in settings.curves.iter().enumerate() {
-        if curve.fan_id >= io.get_fan_count() {
-            continue;
-        }
-        
-        let temp = match io.get_fan_temperature(curve.fan_id) {
-            Ok(t) => t as f32,
-            Err(e) => {
-                log::warn!("Failed to read fan {} temperature: {}", curve.fan_id, e);
+pub async fn refresh_cpu_cache() {
+    let cpu_info = hardware_detection::get_cpu_info().await.ok();
+    let mut cache = HARDWARE_CACHE.lock().unwrap();
+    cache.cpu_info = cpu_info;
+}
+
+pub async fn refresh_memory_cache() {
+    let memory_info = hardware_detection::get_memory_info().await.ok();
+    let mut cache = HARDWARE_CACHE.lock().unwrap();
+    cache.memory_info = memory_info;
+}
+
+pub async fn refresh_gpu_cache() {
+    let gpu_info = hardware_detection::get_gpu_info().await.unwrap_or_default();
+    let mut cache = HARDWARE_CACHE.lock().unwrap();
+    cache.gpu_info = gpu_info;
+}
+
+pub async fn refresh_battery_cache() {
+    let battery_info = hardware_detection::get_battery_info().await.ok();
+    let mut cache = HARDWARE_CACHE.lock().unwrap();
+    cache.battery_info = battery_info;
+}
+
+pub async fn refresh_fan_cache() {
+    let fan_info = hardware_detection::get_all_fan_info().await.unwrap_or_default();
+    let mut cache = HARDWARE_CACHE.lock().unwrap();
+    cache.fan_info = fan_info;
+}
+
+pub async fn refresh_wifi_cache() {
+    let wifi_info = hardware_detection::get_wifi_info().await.unwrap_or_default();
+    let mut cache = HARDWARE_CACHE.lock().unwrap();
+    cache.wifi_info = wifi_info;
+}
+
+pub async fn refresh_gamepad_cache() {
+    let gamepad_info = hardware_detection::get_gamepad_info().await.unwrap_or_default();
+    let mut cache = HARDWARE_CACHE.lock().unwrap();
+    cache.gamepad_info = gamepad_info;
+}
+
+pub async fn refresh_storage_cache() {
+    let storage_device_info = hardware_detection::get_storage_device_info().await.unwrap_or_default();
+    let mut cache = HARDWARE_CACHE.lock().unwrap();
+    cache.storage_device_info = storage_device_info;
+}
+
+pub async fn refresh_mount_cache() {
+    let mount_info = hardware_detection::get_mount_info().await.unwrap_or_default();
+    let mut cache = HARDWARE_CACHE.lock().unwrap();
+    cache.mount_info = mount_info;
+}
+
+pub async fn refresh_system_cache() {
+    let system_info = hardware_detection::get_system_info().await.ok();
+    let mut cache = HARDWARE_CACHE.lock().unwrap();
+    cache.system_info = system_info;
+}
+
+async fn apply_fan_curves(io: Arc<tuxedo_io::TuxedoIo>, settings: FanSettings, sorted_curves: Vec<Vec<(u8, u8)>>) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        for (i, curve) in settings.curves.iter().enumerate() {
+            if curve.fan_id >= io.get_fan_count() {
                 continue;
             }
-        };
-        
-        let speed = calculate_fan_speed(&sorted_curves[i], temp);
-        
-        if let Err(e) = io.set_fan_speed(curve.fan_id, speed as u32) {
-            log::error!("Failed to set fan {} speed: {}", curve.fan_id, e);
-        } else {
-            log::debug!("Fan {}: temp={}°C, speed={}%", curve.fan_id, temp, speed);
+
+            let temp = match io.get_fan_temperature(curve.fan_id) {
+                Ok(t) => t as f32,
+                Err(e) => {
+                    log::warn!("Failed to read fan {} temperature: {}", curve.fan_id, e);
+                    continue;
+                }
+            };
+
+            let speed = calculate_fan_speed(&sorted_curves[i], temp);
+
+            if let Err(e) = io.set_fan_speed(curve.fan_id, speed as u32) {
+                log::error!("Failed to set fan {} speed: {}", curve.fan_id, e);
+            } else {
+                log::debug!("Fan {}: temp={}°C, speed={}%", curve.fan_id, temp, speed);
+            }
         }
-    }
-    
-    Ok(())
+
+        Ok::<(), anyhow::Error>(())
+    }).await?
 }
 
-fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -> Result<()> {
+async fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -> Result<()> {
     // Clear stats and last offset if advanced control or manual clocks are disabled
     if !gpu_settings.advanced_control || !gpu_settings.manual_clocks {
         {
@@ -553,8 +671,8 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
 
             if needs_clear {
                 log::info!("Manual clocks disabled, resetting GPU offsets to 0");
-                let _ = crate::hardware_control::set_gpu_core_offset(0, 0.0);
-                let _ = crate::hardware_control::set_gpu_memory_offset(0, 0.0);
+                let _ = crate::hardware_control::set_gpu_core_offset(0, 0.0).await;
+                let _ = crate::hardware_control::set_gpu_memory_offset(0, 0.0).await;
                 {
                     let mut map = MANUAL_GPU_OFFSETS.lock().unwrap();
                     map.insert(0, (0.0, 0.0));
@@ -566,7 +684,7 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
 
     // 1. Get current GPU stats (temperature, power, frequency)
     // We only do this if advanced control is enabled
-    let gpus = crate::hardware_detection::get_gpu_info()?;
+    let gpus = crate::hardware_detection::get_gpu_info().await?;
     let nvidia_gpu = gpus.iter().find(|g| g.name.to_lowercase().contains("nvidia"));
 
     if let Some(gpu) = nvidia_gpu {
@@ -658,13 +776,16 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
         let total_offset = freq_offset + drain_offset + power_offset;
 
         if status_lower != "p0" {
-            let mut last = LAST_APPLIED_OFFSET.lock().unwrap();
-            if *last != Some(0) {
-                crate::hardware_control::set_gpu_core_offset(0, 0.0)?;
+            let needs_clear = {
+                let last = LAST_APPLIED_OFFSET.lock().unwrap();
+                *last != Some(0)
+            };
+            if needs_clear {
+                crate::hardware_control::set_gpu_core_offset(0, 0.0).await?;
+                let mut last = LAST_APPLIED_OFFSET.lock().unwrap();
                 *last = Some(0);
                 log::debug!("Cleared dynamic GPU offset (P-state not 0)");
             }
-            drop(last);
             let mut stats = CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
             *stats = None;
             return Ok(());
@@ -689,16 +810,18 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
         let final_offset_i32 = final_offset as i32;
 
         // ONLY APPLY IF CHANGED (fix stuttering)
-        {
+        let needs_apply = {
+            let last = LAST_APPLIED_OFFSET.lock().unwrap();
+            *last != Some(final_offset_i32)
+        };
+        if needs_apply {
+            crate::hardware_control::set_gpu_core_offset(0, final_offset_i32 as f32).await?;
             let mut last = LAST_APPLIED_OFFSET.lock().unwrap();
-            if *last != Some(final_offset_i32) {
-                crate::hardware_control::set_gpu_core_offset(0, final_offset_i32 as f32)?;
-                *last = Some(final_offset_i32);
-                if final_offset_i32 == 0 {
-                    log::debug!("Cleared dynamic GPU offset (P-state not 0)");
-                } else {
-                    log::debug!("Applied new dynamic GPU offset: {} MHz", final_offset_i32);
-                }
+            *last = Some(final_offset_i32);
+            if final_offset_i32 == 0 {
+                log::debug!("Cleared dynamic GPU offset (P-state not 0)");
+            } else {
+                log::debug!("Applied new dynamic GPU offset: {} MHz", final_offset_i32);
             }
         }
 
