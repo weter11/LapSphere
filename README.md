@@ -224,6 +224,9 @@ NVIDIA GPU features require a supported NVIDIA driver and card. AMD and Intel iG
 
 ---
 
+## Caution for Uniwill
+Be carefully if your laptop is Uniwill to use it with, where speed limit in RPM instead of percent, that feature is hard to implement correctly, Tuxedo know speed limits on every there laptop, I'm lacking that info.
+
 ## License
 
 GPL-2.0 — see `debian/copyright`.
