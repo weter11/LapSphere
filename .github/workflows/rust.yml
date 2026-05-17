@@ -58,6 +58,7 @@ jobs:
         name: lapsphere-ubuntu-24.04-deb
         path: artifacts/*.deb
         retention-days: 90
+        compression-level: 0
 
   build-arch:
     runs-on: ubuntu-latest
@@ -96,3 +97,4 @@ jobs:
         name: lapsphere-arch-pkg
         path: "*.pkg.tar.zst"
         retention-days: 90
+        compression-level: 0

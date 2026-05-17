@@ -22,15 +22,15 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>)
                 
                 // Frame with highlight for current profile
                 let frame = if is_current {
-                    Frame::none()
+                    Frame::new()
                         .fill(ui.style().visuals.selection.bg_fill.gamma_multiply(0.3))
                         .stroke(ui.style().visuals.selection.stroke)
-                        .rounding(6.0)
+                        .corner_radius(6.0)
                         .inner_margin(12.0)
                 } else {
-                    Frame::none()
+                    Frame::new()
                         .fill(ui.style().visuals.faint_bg_color)
-                        .rounding(6.0)
+                        .corner_radius(6.0)
                         .inner_margin(12.0)
                 };
                 

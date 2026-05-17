@@ -68,7 +68,7 @@ fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
                 .map(|l| format!("[{}] {}: {}", l.timestamp, l.level, l.message))
                 .collect::<Vec<_>>()
                 .join("\n");
-            ctx.output_mut(|o| o.copied_text = log_text);
+            ctx.copy_text(log_text);
         }
 
         if ui.button(if state.log_paused { "▶ Resume Output" } else { "⏸ Pause Output" }).clicked() {
