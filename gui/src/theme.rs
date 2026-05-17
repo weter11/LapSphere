@@ -58,14 +58,10 @@ impl LapSphereTheme {
     }
 
     fn hinted_fonts() -> FontDefinitions {
-        use egui::FontTweak;
-
         let mut fonts = FontDefinitions::default();
         for font in fonts.font_data.values_mut() {
-            font.tweak = FontTweak {
-                scale: 1.02,
-                ..font.tweak
-            };
+            let font_data = std::sync::Arc::make_mut(font);
+            font_data.tweak.scale = 1.02;
         }
         fonts
     }
