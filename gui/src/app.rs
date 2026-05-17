@@ -700,7 +700,7 @@ impl LapSphereApp {
                 let mono_font = FontId::new(top_bar_size, FontFamily::Monospace);
                 let text_font = FontId::new(top_bar_size, FontFamily::Proportional);
                 let text_color = ui.visuals().text_color();
-                let right_width = ui.fonts(|fonts| {
+                let right_width = ctx.fonts_mut(|fonts| {
                     let time_width = fonts.layout_no_wrap(time_str.clone(), mono_font.clone(), text_color).size().x;
                     let date_width = fonts.layout_no_wrap(date_str.clone(), mono_font.clone(), text_color).size().x;
                     let profile_width = fonts.layout_no_wrap(profile_str.clone(), text_font.clone(), text_color).size().x;
