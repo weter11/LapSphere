@@ -19,7 +19,7 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
 
     - name: Install build dependencies
       run: |
@@ -53,7 +53,7 @@ jobs:
           cp ../lapsphere_*.deb artifacts/
 
     - name: Upload Debian package
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: lapsphere-ubuntu-24.04-deb
         path: artifacts/*.deb
@@ -72,7 +72,7 @@ jobs:
           pacman -S --noconfirm base-devel rustup pkgconf dbus gtk3 libadwaita pango cairo gdk-pixbuf2 atk graphene wayland libxkbcommon git sudo
 
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
 
     - name: Build Arch Linux package
       run: |
@@ -92,7 +92,7 @@ jobs:
           su builduser -c "rustup default stable && makepkg --noconfirm -s"
 
     - name: Upload Arch package
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: lapsphere-arch-pkg
         path: "*.pkg.tar.zst"
