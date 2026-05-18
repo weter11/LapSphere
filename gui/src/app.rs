@@ -1,5 +1,5 @@
 use chrono::Local;
-use egui::{Align, CentralPanel, Context, FontFamily, FontId, Layout, RichText, TextStyle, TopBottomPanel};
+use egui::{Align, CentralPanel, Context, FontFamily, FontId, Layout, RichText, TextStyle};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -459,7 +459,7 @@ impl LapSphereApp {
         state.coordinator_handle = coordinator_handle.clone();
         
         // Apply theme
-        let theme = LapSphereTheme::new(&state.config.theme, cc.egui_ctx.style().visuals.dark_mode);
+        let theme = LapSphereTheme::new(&state.config.theme, cc.egui_ctx.global_style().visuals.dark_mode);
         theme.apply_with_font_size(&cc.egui_ctx, &state.config.font_size);
 
         // Apply current profile to daemon on startup to ensure background jobs are active
@@ -662,11 +662,11 @@ impl LapSphereApp {
         }
     }
     
-    fn draw_top_bar(&mut self, ctx: &Context) {
+    fn draw_top_bar(&mut self, ui: &mut egui::Ui) {
         let mut dismiss_update = false;
         if let Some(version) = &self.state.new_version_available {
             let version = version.clone();
-            TopBottomPanel::top("update_banner").show(ctx, |ui| {
+            egui::Panel::top("update_banner").show_inside(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.add_space(12.0);
                     ui.label(RichText::new(format!("🚀 Update Available: v{}", version)).strong().color(egui::Color32::from_rgb(255, 200, 0)));
@@ -687,7 +687,7 @@ impl LapSphereApp {
             self.state.new_version_available = None;
         }
 
-        TopBottomPanel::top("top_bar").show(ctx, |ui| {
+        egui::Panel::top("top_bar").show_inside(ui, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.add_space(8.0);
@@ -695,12 +695,12 @@ impl LapSphereApp {
                 let time_str = Local::now().format("%H:%M:%S").to_string();
                 let date_str = Local::now().format("%Y-%m-%d").to_string();
                 let profile_str = format!("Profile: {}", self.state.config.current_profile);
-                let base_size = TextStyle::Small.resolve(ui.style()).size;
+                let base_size = TextStyle::Small.resolve(&ui.global_style()).size;
                 let top_bar_size = base_size + 1.0;
                 let mono_font = FontId::new(top_bar_size, FontFamily::Monospace);
-                let text_font = FontId::new(top_bar_size, FontFamily::Proportional);
                 let text_color = ui.visuals().text_color();
-                let right_width = ctx.fonts_mut(|fonts| {
+                let text_font = FontId::new(top_bar_size, FontFamily::Proportional);
+                let right_width = ui.ctx().fonts_mut(|fonts| {
                     let time_width = fonts.layout_no_wrap(time_str.clone(), mono_font.clone(), text_color).size().x;
                     let date_width = fonts.layout_no_wrap(date_str.clone(), mono_font.clone(), text_color).size().x;
                     let profile_width = fonts.layout_no_wrap(profile_str.clone(), text_font.clone(), text_color).size().x;
@@ -743,7 +743,7 @@ impl LapSphereApp {
         // Status message bar (if any)
         if let Some(ref msg) = self.state.status_message.clone() {
             if msg.shown_at.elapsed() < Duration::from_secs(5) {
-                TopBottomPanel::top("status_bar").show(ctx, |ui| {
+                egui::Panel::top("status_bar").show_inside(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.add_space(12.0);
                         let color = if msg.is_error {
@@ -807,7 +807,8 @@ impl LapSphereApp {
 }
 
 impl eframe::App for LapSphereApp {
-    fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         if self.startup_frames > 0 {
             let start_in_tray = std::env::args().any(|arg| arg == "--tray");
             if self.state.config.start_minimized || start_in_tray {
@@ -817,14 +818,14 @@ impl eframe::App for LapSphereApp {
         }
 
         // Handle keyboard shortcuts
-        self.shortcuts.handle_shortcuts(ctx, &mut self.state);
+        self.shortcuts.handle_shortcuts(&ctx, &mut self.state);
         
         // Handle background hardware updates
         self.handle_hardware_updates();
 
         self.state.clamp_fan_selection();
 
-        self.handle_tray_events(ctx);
+        self.handle_tray_events(&ctx);
         
         if ctx.input(|input| input.viewport().close_requested())
             && self.state.config.tray_enabled
@@ -835,19 +836,19 @@ impl eframe::App for LapSphereApp {
         }
 
         // Draw top bar
-        self.draw_top_bar(ctx);
+        self.draw_top_bar(ui);
         
         // Update theme if it's Auto to react to system theme changes
         if self.state.config.theme == Theme::Auto {
-            let is_dark = ctx.style().visuals.dark_mode;
+            let is_dark = ctx.global_style().visuals.dark_mode;
             if is_dark != self.theme.visuals.dark_mode {
                 self.theme = LapSphereTheme::new(&self.state.config.theme, is_dark);
-                self.theme.apply_with_font_size(ctx, &self.state.config.font_size);
+                self.theme.apply_with_font_size(&ctx, &self.state.config.font_size);
             }
         }
 
         // Draw main content
-        CentralPanel::default().show(ctx, |ui| {
+        CentralPanel::default().show_inside(ui, |ui| {
             match self.state.current_page {
                 Page::Statistics => {
                     statistics::draw(ui, &mut self.state);
@@ -860,7 +861,7 @@ impl eframe::App for LapSphereApp {
                     tuning::draw(ui, &mut self.state, self.dbus_client.as_ref(), hw_update_tx);
                 }
                 Page::Settings => {
-                    settings::draw(ui, &mut self.state, &mut self.theme, ctx, self.dbus_client.as_ref());
+                    settings::draw(ui, &mut self.state, &mut self.theme, &ctx, self.dbus_client.as_ref());
                 }
             }
         });

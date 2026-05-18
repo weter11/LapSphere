@@ -25,12 +25,12 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>)
                     Frame::new()
                         .fill(ui.style().visuals.selection.bg_fill.gamma_multiply(0.3))
                         .stroke(ui.style().visuals.selection.stroke)
-                        .corner_radius(6.0)
+                        .corner_radius(6)
                         .inner_margin(12.0)
                 } else {
                     Frame::new()
                         .fill(ui.style().visuals.faint_bg_color)
-                        .corner_radius(6.0)
+                        .corner_radius(6)
                         .inner_margin(12.0)
                 };
                 

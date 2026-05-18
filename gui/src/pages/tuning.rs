@@ -1,4 +1,4 @@
-use egui::{Ui, ScrollArea, RichText, Slider, ComboBox, TopBottomPanel, Grid};
+use egui::{Ui, ScrollArea, RichText, Slider, ComboBox, Grid};
 use crate::app::AppState;
 use crate::dbus_client::DbusClient;
 use lapsphere_common::types::{KeyboardMode, Profile, FanCurve, KeyboardCapabilities, FanInfo};
@@ -18,7 +18,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>,
     let is_standard = profile_name == "Standard";
     
     // Top bar with profile name, save, and reset buttons
-    TopBottomPanel::top("tuning_header").show_inside(ui, |ui| {
+    egui::Panel::top("tuning_header").show_inside(ui, |ui| {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.heading(format!("Editing: {}", profile_name));

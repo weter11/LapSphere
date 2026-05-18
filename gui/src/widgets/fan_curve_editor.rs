@@ -122,9 +122,10 @@ impl FanCurveEditor {
                 };
                 
                 plot_ui.points(
-                    Points::new(format!("Point {}", idx + 1), points)
+                    Points::new("", points)
                         .color(color)
                         .radius(if is_selected { 8.0 } else { 6.0 })
+                        .name(format!("Point {}", idx + 1))
                 );
             }
             
