@@ -105,7 +105,7 @@ impl FanCurveEditor {
                 .collect();
             
             plot_ui.line(
-                Line::new(line_points)
+                Line::new("", line_points)
                     .color(Color32::from_rgb(65, 120, 200))
                     .width(2.0)
             );
@@ -122,7 +122,7 @@ impl FanCurveEditor {
                 };
                 
                 plot_ui.points(
-                    Points::new(points)
+                    Points::new("", points)
                         .color(color)
                         .radius(if is_selected { 8.0 } else { 6.0 })
                         .name(format!("Point {}", idx + 1))
@@ -190,7 +190,7 @@ impl FanCurveEditor {
             PlotPoint::new(0.0, 100.0),
         ];
         plot_ui.polygon(
-            Polygon::new(PlotPoints::Owned(cool_zone))
+            Polygon::new("", PlotPoints::Owned(cool_zone))
                 .fill_color(Color32::from_rgba_unmultiplied(100, 150, 255, 20))
                 .stroke(Stroke::NONE)
         );
@@ -203,7 +203,7 @@ impl FanCurveEditor {
             PlotPoint::new(50.0, 100.0),
         ];
         plot_ui.polygon(
-            Polygon::new(PlotPoints::Owned(warm_zone))
+            Polygon::new("", PlotPoints::Owned(warm_zone))
                 .fill_color(Color32::from_rgba_unmultiplied(100, 255, 100, 20))
                 .stroke(Stroke::NONE)
         );
@@ -216,7 +216,7 @@ impl FanCurveEditor {
             PlotPoint::new(70.0, 100.0),
         ];
         plot_ui.polygon(
-            Polygon::new(PlotPoints::Owned(hot_zone))
+            Polygon::new("", PlotPoints::Owned(hot_zone))
                 .fill_color(Color32::from_rgba_unmultiplied(255, 255, 100, 20))
                 .stroke(Stroke::NONE)
         );
@@ -229,7 +229,7 @@ impl FanCurveEditor {
             PlotPoint::new(85.0, 100.0),
         ];
         plot_ui.polygon(
-            Polygon::new(PlotPoints::Owned(critical_zone))
+            Polygon::new("", PlotPoints::Owned(critical_zone))
                 .fill_color(Color32::from_rgba_unmultiplied(255, 100, 100, 20))
                 .stroke(Stroke::NONE)
         );

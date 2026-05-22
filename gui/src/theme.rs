@@ -1,4 +1,4 @@
-use egui::{Context, Visuals, Color32, Rounding, Stroke, FontId, FontFamily, TextStyle, Vec2, FontDefinitions};
+use egui::{Context, Visuals, Color32, CornerRadius, Stroke, FontId, FontFamily, TextStyle, Vec2, FontDefinitions};
 use lapsphere_common::types::Theme;
 
 pub struct LapSphereTheme {
@@ -19,7 +19,7 @@ impl LapSphereTheme {
     pub fn apply_with_font_size(&self, ctx: &Context, font_size: &lapsphere_common::types::FontSize) {
         use lapsphere_common::types::FontSize;
         
-        let mut style = (*ctx.style()).clone();
+        let mut style = (*ctx.global_style()).clone();
         style.visuals = self.visuals.clone();
         style.spacing.item_spacing = Vec2::new(6.0, 2.0);
         
@@ -53,7 +53,7 @@ impl LapSphereTheme {
         );
         
         style.text_styles = text_styles;
-        ctx.set_style(style);
+        ctx.set_global_style(style);
         ctx.set_fonts(Self::hinted_fonts());
     }
 
@@ -62,9 +62,9 @@ impl LapSphereTheme {
 
         let mut fonts = FontDefinitions::default();
         for font in fonts.font_data.values_mut() {
-            font.tweak = FontTweak {
-                scale: 1.02,
-                ..font.tweak
+            let font_data = std::sync::Arc::make_mut(font);
+            font_data.tweak = FontTweak {
+                scale: 1.02, ..font_data.tweak.clone()
             };
         }
         fonts
@@ -80,7 +80,7 @@ impl LapSphereTheme {
                     bg_fill: Color32::from_rgb(32, 33, 36),
                     weak_bg_fill: Color32::from_rgb(32, 33, 36),
                     bg_stroke: Stroke::new(1.0, Color32::from_rgb(60, 63, 68)),
-                    rounding: Rounding::same(6.0),
+                    corner_radius: CornerRadius::same(6),
                     fg_stroke: Stroke::new(1.0, Color32::from_rgb(220, 220, 220)),
                     expansion: 0.0,
                 },
@@ -88,7 +88,7 @@ impl LapSphereTheme {
                     bg_fill: Color32::from_rgb(45, 47, 52),
                     weak_bg_fill: Color32::from_rgb(45, 47, 52),
                     bg_stroke: Stroke::new(1.0, Color32::from_rgb(70, 73, 78)),
-                    rounding: Rounding::same(6.0),
+                    corner_radius: CornerRadius::same(6),
                     fg_stroke: Stroke::new(1.0, Color32::from_rgb(200, 200, 200)),
                     expansion: 0.0,
                 },
@@ -96,7 +96,7 @@ impl LapSphereTheme {
                     bg_fill: Color32::from_rgb(55, 58, 64),
                     weak_bg_fill: Color32::from_rgb(55, 58, 64),
                     bg_stroke: Stroke::new(1.0, Color32::from_rgb(90, 93, 98)),
-                    rounding: Rounding::same(6.0),
+                    corner_radius: CornerRadius::same(6),
                     fg_stroke: Stroke::new(1.5, Color32::from_rgb(230, 230, 230)),
                     expansion: 1.0,
                 },
@@ -104,7 +104,7 @@ impl LapSphereTheme {
                     bg_fill: Color32::from_rgb(65, 120, 200),
                     weak_bg_fill: Color32::from_rgb(65, 120, 200),
                     bg_stroke: Stroke::new(1.0, Color32::from_rgb(85, 140, 220)),
-                    rounding: Rounding::same(6.0),
+                    corner_radius: CornerRadius::same(6),
                     fg_stroke: Stroke::new(2.0, Color32::WHITE),
                     expansion: 1.0,
                 },
@@ -112,7 +112,7 @@ impl LapSphereTheme {
                     bg_fill: Color32::from_rgb(50, 52, 58),
                     weak_bg_fill: Color32::from_rgb(50, 52, 58),
                     bg_stroke: Stroke::new(1.0, Color32::from_rgb(80, 83, 88)),
-                    rounding: Rounding::same(6.0),
+                    corner_radius: CornerRadius::same(6),
                     fg_stroke: Stroke::new(1.0, Color32::from_rgb(220, 220, 220)),
                     expansion: 0.0,
                 },
@@ -131,21 +131,21 @@ impl LapSphereTheme {
             window_fill: Color32::from_rgb(25, 26, 29),
             window_stroke: Stroke::new(1.0, Color32::from_rgb(50, 52, 56)),
             window_shadow: egui::epaint::Shadow {
-                offset: egui::vec2(0.0, 8.0),
-                blur: 16.0,
-                spread: 0.0,
+                offset: [0, 8],
+                blur: 16,
+                spread: 0,
                 color: Color32::from_black_alpha(100),
             },
-            window_rounding: Rounding::same(8.0),
+            window_corner_radius: CornerRadius::same(8),
             
             // Panel
             panel_fill: Color32::from_rgb(28, 29, 32),
             
             // Popup
             popup_shadow: egui::epaint::Shadow {
-                offset: egui::vec2(0.0, 4.0),
-                blur: 12.0,
-                spread: 0.0,
+                offset: [0, 4],
+                blur: 12,
+                spread: 0,
                 color: Color32::from_black_alpha(120),
             },
             
@@ -172,7 +172,7 @@ impl LapSphereTheme {
                     bg_fill: Color32::from_gray(252),
                     weak_bg_fill: Color32::from_gray(252),
                     bg_stroke: Stroke::new(1.0, Color32::from_gray(210)),
-                    rounding: Rounding::same(6.0),
+                    corner_radius: CornerRadius::same(6),
                     fg_stroke: Stroke::new(1.0, Color32::from_gray(20)),
                     expansion: 0.0,
                 },
@@ -180,7 +180,7 @@ impl LapSphereTheme {
                     bg_fill: Color32::from_gray(236),
                     weak_bg_fill: Color32::from_gray(236),
                     bg_stroke: Stroke::new(1.0, Color32::from_gray(195)),
-                    rounding: Rounding::same(6.0),
+                    corner_radius: CornerRadius::same(6),
                     fg_stroke: Stroke::new(1.0, Color32::from_gray(30)),
                     expansion: 0.0,
                 },
@@ -188,7 +188,7 @@ impl LapSphereTheme {
                     bg_fill: Color32::from_gray(226),
                     weak_bg_fill: Color32::from_gray(226),
                     bg_stroke: Stroke::new(1.0, Color32::from_gray(175)),
-                    rounding: Rounding::same(6.0),
+                    corner_radius: CornerRadius::same(6),
                     fg_stroke: Stroke::new(1.5, Color32::BLACK),
                     expansion: 1.0,
                 },
@@ -196,7 +196,7 @@ impl LapSphereTheme {
                     bg_fill: Color32::from_rgb(90, 150, 220),
                     weak_bg_fill: Color32::from_rgb(90, 150, 220),
                     bg_stroke: Stroke::new(1.0, Color32::from_rgb(60, 120, 190)),
-                    rounding: Rounding::same(6.0),
+                    corner_radius: CornerRadius::same(6),
                     fg_stroke: Stroke::new(2.0, Color32::from_gray(20)),
                     expansion: 1.0,
                 },
@@ -204,7 +204,7 @@ impl LapSphereTheme {
                     bg_fill: Color32::from_gray(238),
                     weak_bg_fill: Color32::from_gray(238),
                     bg_stroke: Stroke::new(1.0, Color32::from_gray(190)),
-                    rounding: Rounding::same(6.0),
+                    corner_radius: CornerRadius::same(6),
                     fg_stroke: Stroke::new(1.0, Color32::from_gray(20)),
                     expansion: 0.0,
                 },
@@ -220,12 +220,12 @@ impl LapSphereTheme {
             window_fill: Color32::from_gray(245),
             window_stroke: Stroke::new(1.0, Color32::from_gray(210)),
             window_shadow: egui::epaint::Shadow {
-                offset: egui::vec2(0.0, 8.0),
-                blur: 16.0,
-                spread: 0.0,
+                offset: [0, 8],
+                blur: 16,
+                spread: 0,
                 color: Color32::from_black_alpha(30),
             },
-            window_rounding: Rounding::same(8.0),
+            window_corner_radius: CornerRadius::same(8),
 
             panel_fill: Color32::from_gray(252),
 

@@ -71,7 +71,7 @@ impl KeyboardShortcuts {
             if !self.show_help {
                 return;
             }
-            if class == egui::ViewportClass::Embedded {
+            if class == egui::ViewportClass::EmbeddedWindow {
                 egui::Window::new("NVIDIA Overclocking Help")
                     .open(&mut self.show_help)
                     .default_width(550.0)

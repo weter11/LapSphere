@@ -68,7 +68,7 @@ fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
                 .map(|l| format!("[{}] {}: {}", l.timestamp, l.level, l.message))
                 .collect::<Vec<_>>()
                 .join("\n");
-            ctx.output_mut(|o| o.copied_text = log_text);
+            ctx.copy_text(log_text);
         }
 
         if ui.button(if state.log_paused { "▶ Resume Output" } else { "⏸ Pause Output" }).clicked() {
@@ -177,7 +177,7 @@ fn draw_logs_view(ui: &mut Ui, state: &mut AppState, ctx: &Context) {
         });
 }
 
-fn draw_help_info(ui: &mut Ui, state: &AppState) {
+fn draw_help_info(ui: &mut Ui, _state: &AppState) {
     ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -307,7 +307,7 @@ fn draw_main_settings(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTh
             let _ = state.save_settings();
             
             // Apply theme immediately
-            *theme = LapSphereTheme::new(&new_theme, ctx.style().visuals.dark_mode);
+            *theme = LapSphereTheme::new(&new_theme, ctx.global_style().visuals.dark_mode);
             theme.apply_with_font_size(ctx, &state.config.font_size);
         }
     });
