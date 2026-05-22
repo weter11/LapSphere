@@ -389,14 +389,8 @@ fn draw_main_settings(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTh
     ui.separator();
     ui.add_space(12.0);
 
-    // Gamepads database
-    ui.label(RichText::new("Gamepads").strong().heading());
-    ui.add_space(6.0);
-    if ui.button("🗑 Remove database with previously connected gamepads").clicked() {
-        state.config.remembered_gamepads.clear();
-        let _ = state.save_settings();
-        state.show_message("Gamepad database cleared", false);
-    }
+    // Gamepads
+    draw_gamepad_settings(ui, state);
 
     ui.add_space(12.0);
     ui.separator();
@@ -1028,6 +1022,82 @@ fn hardware_interface_label(interface: Option<&str>) -> &'static str {
         Some(info) if info.contains("Clevo") => "Clevo",
         Some(info) if info.contains("Uniwill") => "Uniwill",
         _ => "Unknown",
+    }
+}
+
+fn draw_gamepad_settings(ui: &mut Ui, state: &mut AppState) {
+    ui.label(RichText::new("🎮 Gamepads").strong().heading());
+    ui.add_space(6.0);
+
+    if state.config.remembered_gamepads.is_empty() {
+        ui.label("No gamepads discovered yet.");
+    } else {
+        ui.label("Manage logical device groupings. Gamepads with the same Logical ID will be treated as the same device in Statistics.");
+        ui.add_space(4.0);
+
+        ScrollArea::vertical()
+            .max_height(300.0)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                Grid::new("gamepad_mapping_grid")
+                    .num_columns(3)
+                    .spacing([20.0, 8.0])
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("Device Name").strong());
+                        ui.label(RichText::new("Hardware Info").strong());
+                        ui.label(RichText::new("Logical ID (Grouping)").strong());
+                        ui.end_row();
+
+                        let mut changes = Vec::new();
+
+                        for gamepad in &state.config.remembered_gamepads {
+                            ui.label(&gamepad.name);
+
+                            ui.vertical(|ui| {
+                                if let (Some(v), Some(p)) = (gamepad.vendor_id, gamepad.product_id) {
+                                    ui.label(RichText::new(format!("ID: {:04x}:{:04x}", v, p)).small().monospace());
+                                }
+                                if let Some(serial) = &gamepad.serial {
+                                    ui.label(RichText::new(format!("SN: {}", serial)).small().monospace());
+                                }
+                                ui.label(RichText::new(format!("UID: {}", gamepad.uid)).small().weak().monospace());
+                            });
+
+                            let mut logical_id = state.config.gamepad_mappings.get(&gamepad.uid).cloned().unwrap_or_else(|| state.get_logical_id(gamepad));
+                            if ui.text_edit_singleline(&mut logical_id).changed() {
+                                changes.push((gamepad.uid.clone(), logical_id));
+                            }
+                            ui.end_row();
+                        }
+
+                        if !changes.is_empty() {
+                            for (uid, logical_id) in changes {
+                                state.config.gamepad_mappings.insert(uid, logical_id);
+                            }
+                            let _ = state.save_settings();
+                        }
+                    });
+            });
+
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui.button("🔄 Reset to Default Grouping").on_hover_text("Groups by serial number if available, otherwise by hardware ID").clicked() {
+                state.config.gamepad_mappings.clear();
+                for gamepad in &state.config.remembered_gamepads {
+                    let logical_id = state.get_logical_id(gamepad);
+                    state.config.gamepad_mappings.insert(gamepad.uid.clone(), logical_id);
+                }
+                let _ = state.save_settings();
+            }
+
+            if ui.button("🗑 Clear Gamepad Database").clicked() {
+                state.config.remembered_gamepads.clear();
+                state.config.gamepad_mappings.clear();
+                let _ = state.save_settings();
+                state.show_message("Gamepad database cleared", false);
+            }
+        });
     }
 }
 

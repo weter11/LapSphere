@@ -218,6 +218,12 @@ pub struct GamepadInfo {
     pub connection_type: ConnectionType,
     #[serde(default)]
     pub power_status: PowerStatus,
+    #[serde(default)]
+    pub vendor_id: Option<u16>,
+    #[serde(default)]
+    pub product_id: Option<u16>,
+    #[serde(default)]
+    pub serial: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -447,6 +453,8 @@ pub struct AppConfig {
     pub log_filter_trace: bool,
     #[serde(default)]
     pub remembered_gamepads: Vec<GamepadInfo>,
+    #[serde(default)]
+    pub gamepad_mappings: std::collections::HashMap<String, String>, // UID -> Logical ID mapping
 }
 
 fn default_log_limit() -> usize {
@@ -543,6 +551,7 @@ impl Default for AppConfig {
             log_limit: default_log_limit(),
             log_filter_trace: default_log_filter_trace(),
             remembered_gamepads: vec![],
+            gamepad_mappings: std::collections::HashMap::new(),
         }
     }
 }
