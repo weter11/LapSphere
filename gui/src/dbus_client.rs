@@ -313,226 +313,246 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
             }
         };
 
+        // One shared proxy for the lifetime of the connection.
+        // Rebuilding zbus::Proxy on every call leaks memory: a probe issuing
+        // fresh proxies per call grew +64 MB RSS in 250 calls, while a cached
+        // proxy stayed flat over 2000+ calls (GUI RSS used to grow ~200 MB/h).
+        let proxy: zbus::Proxy<'_> = match zbus::Proxy::new(
+            &connection,
+            "io.lapsphere.Control",
+            "/io/lapsphere/Control",
+            "io.lapsphere.Control",
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                log::error!("Failed to create Control proxy: {}. Retrying in 2 seconds...", e);
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                continue;
+            }
+        };
+
         while let Some(command) = command_rx.recv().await {
             let res: Result<(), anyhow::Error> = match command {
                 DbusCommand::GetSystemInfo { reply } => {
-                    let result = get_system_info_impl(&connection).await;
+                    let result = get_system_info_impl(&proxy).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::GetGamepadInfo { reply } => {
-                    let result = get_gamepad_info_impl(&connection).await;
+                    let result = get_gamepad_info_impl(&proxy).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::GetMemoryInfo { reply } => {
-                    let result = get_memory_info_impl(&connection).await;
+                    let result = get_memory_info_impl(&proxy).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::GetCpuInfo { reply } => {
-                    let result = get_cpu_info_impl(&connection).await;
+                    let result = get_cpu_info_impl(&proxy).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::GetGpuInfo { reply } => {
-                    let result = get_gpu_info_impl(&connection).await;
+                    let result = get_gpu_info_impl(&proxy).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::GetFanInfo { reply } => {
-                    let result = get_fan_info_impl(&connection).await;
+                    let result = get_fan_info_impl(&proxy).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::GetBatteryInfo { reply } => {
-                    let result = get_battery_info_impl(&connection).await;
+                    let result = get_battery_info_impl(&proxy).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::GetStorageDeviceInfo { reply } => {
-                    let result = get_storage_device_info_impl(&connection).await;
+                    let result = get_storage_device_info_impl(&proxy).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::GetMountInfo { reply } => {
-                    let result = get_mount_info_impl(&connection).await;
+                    let result = get_mount_info_impl(&proxy).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::GetWifiInfo { reply } => {
-                    let result = get_wifi_info_impl(&connection).await;
+                    let result = get_wifi_info_impl(&proxy).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::GetTdpProfiles { reply } => {
-                    let result = get_tdp_profiles_impl(&connection).await;
+                    let result = get_tdp_profiles_impl(&proxy).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::GetHardwareInterfaceInfo { reply } => {
-                    let result = get_hardware_interface_info_impl(&connection).await;
+                    let result = get_hardware_interface_info_impl(&proxy).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::GetKeyboardCapabilities { reply } => {
-                    let result = get_keyboard_capabilities_impl(&connection).await;
+                    let result = get_keyboard_capabilities_impl(&proxy).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::ApplyProfile { profile, reply } => {
-                    let result = apply_profile_impl(&connection, &profile).await;
+                    let result = apply_profile_impl(&proxy, &profile).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::SetAmdPstateStatus { status, reply } => {
-                    let result = set_amd_pstate_status_impl(&connection, &status).await;
+                    let result = set_amd_pstate_status_impl(&proxy, &status).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::SetIntelPstateStatus { status, reply } => {
-                    let result = set_intel_pstate_status_impl(&connection, &status).await;
+                    let result = set_intel_pstate_status_impl(&proxy, &status).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::PreviewKeyboard { settings, reply } => {
-                    let result = preview_keyboard_impl(&connection, &settings).await;
+                    let result = preview_keyboard_impl(&proxy, &settings).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::GetBatteryAvailableStartThresholds { reply } => {
-                    let result = get_battery_available_start_thresholds_impl(&connection).await;
+                    let result = get_battery_available_start_thresholds_impl(&proxy).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::GetBatteryAvailableEndThresholds { reply } => {
-                    let result = get_battery_available_end_thresholds_impl(&connection).await;
+                    let result = get_battery_available_end_thresholds_impl(&proxy).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::SetBatterySettings { settings, reply } => {
-                    let result = set_battery_settings_impl(&connection, settings).await;
+                    let result = set_battery_settings_impl(&proxy, settings).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::SetAllFansAuto { reply } => {
-                    let result = set_all_fans_auto_impl(&connection).await;
+                    let result = set_all_fans_auto_impl(&proxy).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::SetGpuLockedClocks { device_index, min_clock, max_clock, reply } => {
-                    let result = set_gpu_locked_clocks_impl(&connection, device_index, min_clock, max_clock).await;
+                    let result = set_gpu_locked_clocks_impl(&proxy, device_index, min_clock, max_clock).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::ResetGpuClocks { device_index, reply } => {
-                    let result = reset_gpu_clocks_impl(&connection, device_index).await;
+                    let result = reset_gpu_clocks_impl(&proxy, device_index).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::GetGpuClockRanges { device_index, reply } => {
-                    let result = get_gpu_clock_ranges_impl(&connection, device_index).await;
+                    let result = get_gpu_clock_ranges_impl(&proxy, device_index).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::SetGpuCoreOffset { device_index, offset, reply } => {
-                    let result = set_gpu_core_offset_impl(&connection, device_index, offset).await;
+                    let result = set_gpu_core_offset_impl(&proxy, device_index, offset).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::SetGpuMemoryOffset { device_index, offset, reply } => {
-                    let result = set_gpu_memory_offset_impl(&connection, device_index, offset).await;
+                    let result = set_gpu_memory_offset_impl(&proxy, device_index, offset).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::GetGpuCoreOffsetLimits { device_index, reply } => {
-                    let result = get_gpu_core_offset_limits_impl(&connection, device_index).await;
+                    let result = get_gpu_core_offset_limits_impl(&proxy, device_index).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::GetGpuMemoryOffsetLimits { device_index, reply } => {
-                    let result = get_gpu_memory_offset_limits_impl(&connection, device_index).await;
+                    let result = get_gpu_memory_offset_limits_impl(&proxy, device_index).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::SetPrimeProfile { profile, reply } => {
-                    let result = set_prime_profile_impl(&connection, &profile).await;
+                    let result = set_prime_profile_impl(&proxy, &profile).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::UpdatePollingInterval { component, interval_ms, reply } => {
-                    let result = update_polling_interval_impl(&connection, &component, interval_ms).await;
+                    let result = update_polling_interval_impl(&proxy, &component, interval_ms).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::ShutdownDaemon { reply } => {
-                    let result = shutdown_daemon_impl(&connection).await;
+                    let result = shutdown_daemon_impl(&proxy).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::GetWebcamState { reply } => {
-                    let result = get_webcam_state_impl(&connection).await;
+                    let result = get_webcam_state_impl(&proxy).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::SetWebcamState { enabled, reply } => {
-                    let result = set_webcam_state_impl(&connection, enabled).await;
+                    let result = set_webcam_state_impl(&proxy, enabled).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::GetDaemonLogs { reply } => {
-                    let result = get_daemon_logs_impl(&connection).await;
+                    let result = get_daemon_logs_impl(&proxy).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::SetGpuFanSpeed { device_index, fan_index, speed, reply } => {
-                    let result = set_gpu_fan_speed_impl(&connection, device_index, fan_index, speed).await;
+                    let result = set_gpu_fan_speed_impl(&proxy, device_index, fan_index, speed).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::SetGpuFanAuto { device_index, fan_index, reply } => {
-                    let result = set_gpu_fan_auto_impl(&connection, device_index, fan_index).await;
+                    let result = set_gpu_fan_auto_impl(&proxy, device_index, fan_index).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
                 DbusCommand::SetGpuPowerLimit { device_index, limit_watts, reply } => {
-                    let result = set_gpu_power_limit_impl(&connection, device_index, limit_watts).await;
+                    let result = set_gpu_power_limit_impl(&proxy, device_index, limit_watts).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
@@ -567,432 +587,190 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
 }
 
 // Implementation functions
-async fn get_system_info_impl(conn: &Connection) -> Result<SystemInfo> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
-    
+async fn get_system_info_impl(proxy: &zbus::Proxy<'_>) -> Result<SystemInfo> {
     let json: String = proxy.call("GetSystemInfo", &()).await?;
     Ok(serde_json::from_str(&json)?)
 }
 
-async fn get_memory_info_impl(conn: &Connection) -> Result<MemoryInfo> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
-
+async fn get_memory_info_impl(proxy: &zbus::Proxy<'_>) -> Result<MemoryInfo> {
     let json: String = proxy.call("GetMemoryInfo", &()).await?;
     Ok(serde_json::from_str(&json)?)
 }
 
-async fn get_cpu_info_impl(conn: &Connection) -> Result<CpuInfo> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
-    
+async fn get_cpu_info_impl(proxy: &zbus::Proxy<'_>) -> Result<CpuInfo> {
     let json: String = proxy.call("GetCpuInfo", &()).await?;
     Ok(serde_json::from_str(&json)?)
 }
 
-async fn get_gpu_info_impl(conn: &Connection) -> Result<Vec<GpuInfo>> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
-    
+async fn get_gpu_info_impl(proxy: &zbus::Proxy<'_>) -> Result<Vec<GpuInfo>> {
     let json: String = proxy.call("GetGpuInfo", &()).await?;
     Ok(serde_json::from_str(&json)?)
 }
 
-async fn get_fan_info_impl(conn: &Connection) -> Result<Vec<FanInfo>> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
-    
+async fn get_fan_info_impl(proxy: &zbus::Proxy<'_>) -> Result<Vec<FanInfo>> {
     let json: String = proxy.call("GetFanInfo", &()).await?;
     Ok(serde_json::from_str(&json)?)
 }
 
-async fn get_battery_info_impl(conn: &Connection) -> Result<BatteryInfo> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
-
+async fn get_battery_info_impl(proxy: &zbus::Proxy<'_>) -> Result<BatteryInfo> {
     let json: String = proxy.call("GetBatteryInfo", &()).await?;
     Ok(serde_json::from_str(&json)?)
 }
 
-async fn get_storage_device_info_impl(conn: &Connection) -> Result<Vec<StorageDevice>> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
-
+async fn get_storage_device_info_impl(proxy: &zbus::Proxy<'_>) -> Result<Vec<StorageDevice>> {
     let json: String = proxy.call("GetStorageDeviceInfo", &()).await?;
     Ok(serde_json::from_str(&json)?)
 }
 
-async fn get_mount_info_impl(conn: &Connection) -> Result<Vec<MountInfo>> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
-
+async fn get_mount_info_impl(proxy: &zbus::Proxy<'_>) -> Result<Vec<MountInfo>> {
     let json: String = proxy.call("GetMountInfo", &()).await?;
     Ok(serde_json::from_str(&json)?)
 }
 
-async fn get_wifi_info_impl(conn: &Connection) -> Result<Vec<WiFiInfo>> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
-
+async fn get_wifi_info_impl(proxy: &zbus::Proxy<'_>) -> Result<Vec<WiFiInfo>> {
     let json: String = proxy.call("GetWifiInfo", &()).await?;
     Ok(serde_json::from_str(&json)?)
 }
 
-async fn get_gamepad_info_impl(conn: &Connection) -> Result<Vec<GamepadInfo>> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
-
+async fn get_gamepad_info_impl(proxy: &zbus::Proxy<'_>) -> Result<Vec<GamepadInfo>> {
     let json: String = proxy.call("GetGamepadInfo", &()).await?;
     Ok(serde_json::from_str(&json)?)
 }
 
-async fn get_tdp_profiles_impl(conn: &Connection) -> Result<Vec<String>> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
-
+async fn get_tdp_profiles_impl(proxy: &zbus::Proxy<'_>) -> Result<Vec<String>> {
     let json: String = proxy.call("GetTdpProfiles", &()).await?;
     Ok(serde_json::from_str(&json)?)
 }
 
-async fn get_hardware_interface_info_impl(conn: &Connection) -> Result<String> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
-
+async fn get_hardware_interface_info_impl(proxy: &zbus::Proxy<'_>) -> Result<String> {
     let info: String = proxy.call("GetHardwareInterfaceInfo", &()).await?;
     Ok(info)
 }
 
-async fn get_keyboard_capabilities_impl(conn: &Connection) -> Result<KeyboardCapabilities> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
-
+async fn get_keyboard_capabilities_impl(proxy: &zbus::Proxy<'_>) -> Result<KeyboardCapabilities> {
     let json: String = proxy.call("GetKeyboardCapabilities", &()).await?;
     Ok(serde_json::from_str(&json)?)
 }
 
-async fn apply_profile_impl(conn: &Connection, profile: &Profile) -> Result<()> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
-    
+async fn apply_profile_impl(proxy: &zbus::Proxy<'_>, profile: &Profile) -> Result<()> {
     let json = serde_json::to_string(profile)?;
     proxy.call::<_, _, ()>("ApplyProfile", &(json.as_str(),)).await?;
     Ok(())
 }
 
-async fn preview_keyboard_impl(conn: &Connection, settings: &KeyboardSettings) -> Result<()> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
-    
+async fn preview_keyboard_impl(proxy: &zbus::Proxy<'_>, settings: &KeyboardSettings) -> Result<()> {
     let json = serde_json::to_string(settings)?;
     proxy.call::<_, _, ()>("PreviewKeyboardSettings", &(json.as_str(),)).await?;
     Ok(())
 }
 
-async fn set_amd_pstate_status_impl(conn: &Connection, status: &str) -> Result<()> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
-
+async fn set_amd_pstate_status_impl(proxy: &zbus::Proxy<'_>, status: &str) -> Result<()> {
     proxy.call::<_, _, ()>("SetAmdPstateStatus", &(status,)).await?;
     Ok(())
 }
 
-async fn set_intel_pstate_status_impl(conn: &Connection, status: &str) -> Result<()> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
-
+async fn set_intel_pstate_status_impl(proxy: &zbus::Proxy<'_>, status: &str) -> Result<()> {
     proxy.call::<_, _, ()>("SetIntelPstateStatus", &(status,)).await?;
     Ok(())
 }
 
-async fn get_battery_available_start_thresholds_impl(conn: &Connection) -> Result<Vec<u8>> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
-
+async fn get_battery_available_start_thresholds_impl(proxy: &zbus::Proxy<'_>) -> Result<Vec<u8>> {
     let json: String = proxy.call("GetBatteryAvailableStartThresholds", &()).await?;
     Ok(serde_json::from_str(&json)?)
 }
 
-async fn get_battery_available_end_thresholds_impl(conn: &Connection) -> Result<Vec<u8>> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
-
+async fn get_battery_available_end_thresholds_impl(proxy: &zbus::Proxy<'_>) -> Result<Vec<u8>> {
     let json: String = proxy.call("GetBatteryAvailableEndThresholds", &()).await?;
     Ok(serde_json::from_str(&json)?)
 }
 
-async fn set_battery_settings_impl(conn: &Connection, settings: BatterySettings) -> Result<()> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
-
+async fn set_battery_settings_impl(proxy: &zbus::Proxy<'_>, settings: BatterySettings) -> Result<()> {
     let json = serde_json::to_string(&settings)?;
     proxy.call::<_, _, ()>("SetBatterySettings", &(json.as_str(),)).await?;
     Ok(())
 }
 
-async fn set_all_fans_auto_impl(conn: &Connection) -> Result<()> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
+async fn set_all_fans_auto_impl(proxy: &zbus::Proxy<'_>) -> Result<()> {
     proxy.call::<_, _, ()>("SetAllFansAuto", &()).await?;
     Ok(())
 }
 
-async fn set_gpu_locked_clocks_impl(conn: &Connection, device_index: u32, min_clock: u32, max_clock: u32) -> Result<()> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
+async fn set_gpu_locked_clocks_impl(proxy: &zbus::Proxy<'_>, device_index: u32, min_clock: u32, max_clock: u32) -> Result<()> {
     proxy.call::<_, _, ()>("SetGpuLockedClocks", &(device_index, min_clock, max_clock)).await?;
     Ok(())
 }
 
-async fn reset_gpu_clocks_impl(conn: &Connection, device_index: u32) -> Result<()> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
+async fn reset_gpu_clocks_impl(proxy: &zbus::Proxy<'_>, device_index: u32) -> Result<()> {
     proxy.call::<_, _, ()>("ResetGpuClocks", &(device_index,)).await?;
     Ok(())
 }
 
-async fn get_gpu_clock_ranges_impl(conn: &Connection, device_index: u32) -> Result<(u32, u32)> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
+async fn get_gpu_clock_ranges_impl(proxy: &zbus::Proxy<'_>, device_index: u32) -> Result<(u32, u32)> {
     let json: String = proxy.call("GetGpuClockRanges", &(device_index,)).await?;
     Ok(serde_json::from_str(&json)?)
 }
 
-async fn set_gpu_core_offset_impl(conn: &Connection, device_index: u32, offset: f32) -> Result<()> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
+async fn set_gpu_core_offset_impl(proxy: &zbus::Proxy<'_>, device_index: u32, offset: f32) -> Result<()> {
     proxy.call::<_, _, ()>("SetGpuCoreOffset", &(device_index, offset)).await?;
     Ok(())
 }
 
-async fn set_gpu_memory_offset_impl(conn: &Connection, device_index: u32, offset: f32) -> Result<()> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
+async fn set_gpu_memory_offset_impl(proxy: &zbus::Proxy<'_>, device_index: u32, offset: f32) -> Result<()> {
     proxy.call::<_, _, ()>("SetGpuMemoryOffset", &(device_index, offset)).await?;
     Ok(())
 }
 
-async fn get_gpu_core_offset_limits_impl(conn: &Connection, device_index: u32) -> Result<(i32, i32)> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
+async fn get_gpu_core_offset_limits_impl(proxy: &zbus::Proxy<'_>, device_index: u32) -> Result<(i32, i32)> {
     let limits: (i32, i32) = proxy.call("GetGpuCoreOffsetLimits", &(device_index,)).await?;
     Ok(limits)
 }
 
-async fn get_gpu_memory_offset_limits_impl(conn: &Connection, device_index: u32) -> Result<(i32, i32)> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
+async fn get_gpu_memory_offset_limits_impl(proxy: &zbus::Proxy<'_>, device_index: u32) -> Result<(i32, i32)> {
     let limits: (i32, i32) = proxy.call("GetGpuMemoryOffsetLimits", &(device_index,)).await?;
     Ok(limits)
 }
 
-async fn set_prime_profile_impl(conn: &Connection, profile: &str) -> Result<()> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
+async fn set_prime_profile_impl(proxy: &zbus::Proxy<'_>, profile: &str) -> Result<()> {
     proxy.call::<_, _, ()>("SetPrimeProfile", &(profile,)).await?;
     Ok(())
 }
 
-async fn update_polling_interval_impl(conn: &Connection, component: &str, interval_ms: u64) -> Result<()> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
+async fn update_polling_interval_impl(proxy: &zbus::Proxy<'_>, component: &str, interval_ms: u64) -> Result<()> {
     proxy.call::<_, _, ()>("UpdatePollingInterval", &(component, interval_ms)).await?;
     Ok(())
 }
 
-async fn get_webcam_state_impl(conn: &Connection) -> Result<bool> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
+async fn get_webcam_state_impl(proxy: &zbus::Proxy<'_>) -> Result<bool> {
     let state: bool = proxy.call("GetWebcamState", &()).await?;
     Ok(state)
 }
 
-async fn set_webcam_state_impl(conn: &Connection, enabled: bool) -> Result<()> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
+async fn set_webcam_state_impl(proxy: &zbus::Proxy<'_>, enabled: bool) -> Result<()> {
     proxy.call::<_, _, ()>("SetWebcamState", &(enabled,)).await?;
     Ok(())
 }
 
-async fn get_daemon_logs_impl(conn: &Connection) -> Result<Vec<LogEntry>> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
+async fn get_daemon_logs_impl(proxy: &zbus::Proxy<'_>) -> Result<Vec<LogEntry>> {
     let json: String = proxy.call("GetDaemonLogs", &()).await?;
     Ok(serde_json::from_str(&json)?)
 }
 
-async fn shutdown_daemon_impl(conn: &Connection) -> Result<()> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
+async fn shutdown_daemon_impl(proxy: &zbus::Proxy<'_>) -> Result<()> {
     proxy.call::<_, _, ()>("ShutdownDaemon", &()).await?;
     Ok(())
 }
 
-async fn set_gpu_fan_speed_impl(conn: &Connection, device_index: u32, fan_index: u32, speed: u32) -> Result<()> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
+async fn set_gpu_fan_speed_impl(proxy: &zbus::Proxy<'_>, device_index: u32, fan_index: u32, speed: u32) -> Result<()> {
     proxy.call::<_, _, ()>("SetGpuFanSpeed", &(device_index, fan_index, speed)).await?;
     Ok(())
 }
 
-async fn set_gpu_fan_auto_impl(conn: &Connection, device_index: u32, fan_index: u32) -> Result<()> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
+async fn set_gpu_fan_auto_impl(proxy: &zbus::Proxy<'_>, device_index: u32, fan_index: u32) -> Result<()> {
     proxy.call::<_, _, ()>("SetGpuFanAuto", &(device_index, fan_index)).await?;
     Ok(())
 }
 
-async fn set_gpu_power_limit_impl(conn: &Connection, device_index: u32, limit_watts: u32) -> Result<()> {
-    let proxy = zbus::Proxy::new(
-        conn,
-        "io.lapsphere.Control",
-        "/io/lapsphere/Control",
-        "io.lapsphere.Control",
-    ).await?;
+async fn set_gpu_power_limit_impl(proxy: &zbus::Proxy<'_>, device_index: u32, limit_watts: u32) -> Result<()> {
     proxy.call::<_, _, ()>("SetGpuPowerLimit", &(device_index, limit_watts)).await?;
     Ok(())
 }
