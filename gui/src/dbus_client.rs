@@ -333,6 +333,12 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
             }
         };
 
+        // Counts consecutive failed calls across the life of this connection.
+        // A long streak means the service is gone even if the error text is
+        // something we do not recognize; see safety-net below.
+        let mut consecutive_failures: u32 = 0;
+        let mut needs_backoff = false;
+
         while let Some(command) = command_rx.recv().await {
             let res: Result<(), anyhow::Error> = match command {
                 DbusCommand::GetSystemInfo { reply } => {
@@ -563,18 +569,51 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
                 let err_str = e.to_string();
                 log::error!("DBus call failed: {}", err_str);
 
-                // Only reconnect on connection-level errors, not logical/method errors
-                // Method errors usually contain the interface name or "MethodError"
-                let is_connection_error = err_str.contains("connection")
-                    || err_str.contains("Closed")
-                    || err_str.contains("Broken pipe")
-                    || err_str.contains("io.lapsphere.Control not found");
+                // Reconnect on connection-level failures AND on the
+                // service-absent family: when io.lapsphere.Control is not
+                // currently on the bus (D-Bus activation race after daemon
+                // exit/restart), zbus fails with DBusError(Name("ServiceUnknown"))
+                // / NameHasNoOwner, which is recoverable - a fresh connection +
+                // proxy picks the service up as soon as it reappears.
+                // Previously only "connection"/"Closed"/"Broken pipe"/"not found"
+                // substrings matched, so a ServiceUnknown storm wedged the GUI
+                // in permanent failure until full relaunch.
+                let lower = err_str.to_lowercase();
+                let is_connection_error = lower.contains("connection")
+                    || lower.contains("closed")
+                    || lower.contains("broken pipe")
+                    || lower.contains("serviceunknown")
+                    || lower.contains("service unknown")
+                    || lower.contains("namehasnoowner")
+                    || lower.contains("name has no owner")
+                    || lower.contains("io.lapsphere.control")
+                    || lower.contains("timed out")
+                    || lower.contains("timeout");
 
-                if is_connection_error {
-                    log::warn!("DBus connection lost. Attempting to reconnect...");
+                // Safety net: any unrecognized error repeated this many times
+                // in a row almost certainly means the shared proxy/connection
+                // is dead even though we failed to classify the text. Recycle
+                // rather than stay wedged forever.
+                if is_connection_error || consecutive_failures >= 10 {
+                    if !is_connection_error {
+                        log::warn!("{} consecutive DBus failures with unrecognized error; forcing reconnect", consecutive_failures);
+                    } else {
+                        log::warn!("DBus connection lost ({}). Attempting to reconnect...", err_str);
+                    }
+                    needs_backoff = true;
                     break;
                 }
+
+                consecutive_failures += 1;
+            } else {
+                consecutive_failures = 0;
             }
+        }
+
+        // Back off before reconnecting so we do not hot-spin while the daemon
+        // is down (D-Bus activation retries + our own loop both burn CPU).
+        if needs_backoff {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
 
         // If command_rx is closed, exit the worker
