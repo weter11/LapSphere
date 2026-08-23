@@ -8,8 +8,22 @@ pub struct DbusClient {
     command_tx: mpsc::UnboundedSender<DbusCommand>,
 }
 
+// Shared handle so free functions that persist settings (which run outside
+// the LapSphereApp struct) can push poll-rate updates to the daemon without
+// threading the client through every call site.
+static SHARED_CLIENT: std::sync::OnceLock<DbusClient> = std::sync::OnceLock::new();
+
+pub fn set_shared_client(client: DbusClient) {
+    let _ = SHARED_CLIENT.set(client);
+}
+
+pub fn shared_client() -> Option<&'static DbusClient> {
+    SHARED_CLIENT.get()
+}
+
 // Commands sent from UI to background task
 pub enum DbusCommand {
+    SyncDaemonPollSettings { settings_json: String, reply: oneshot::Sender<Result<()>> },
     GetSystemInfo { reply: oneshot::Sender<Result<SystemInfo>> },
     GetMemoryInfo { reply: oneshot::Sender<Result<MemoryInfo>> },
     GetCpuInfo { reply: oneshot::Sender<Result<CpuInfo>> },
@@ -194,6 +208,15 @@ impl DbusClient {
     pub fn set_all_fans_auto(&self) -> oneshot::Receiver<Result<()>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.command_tx.send(DbusCommand::SetAllFansAuto { reply: tx });
+        rx
+    }
+
+    /// Push statistics_sections poll rates to the daemon so job intervals
+    /// update live (fire-and-forget; daemon falls back to its own defaults
+    /// if this fails).
+    pub fn sync_daemon_poll_settings(&self, settings_json: String) -> oneshot::Receiver<Result<()>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::SyncDaemonPollSettings { settings_json, reply: tx });
         rx
     }
 
@@ -451,6 +474,12 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
                 }
                 DbusCommand::GetBatteryAvailableEndThresholds { reply } => {
                     let result = get_battery_available_end_thresholds_impl(&proxy).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::SyncDaemonPollSettings { settings_json, reply } => {
+                    let result = sync_daemon_poll_settings_impl(&proxy, &settings_json).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
@@ -721,6 +750,11 @@ async fn get_battery_available_start_thresholds_impl(proxy: &zbus::Proxy<'_>) ->
 async fn get_battery_available_end_thresholds_impl(proxy: &zbus::Proxy<'_>) -> Result<Vec<u8>> {
     let json: String = proxy.call("GetBatteryAvailableEndThresholds", &()).await?;
     Ok(serde_json::from_str(&json)?)
+}
+
+async fn sync_daemon_poll_settings_impl(proxy: &zbus::Proxy<'_>, settings_json: &str) -> Result<()> {
+    proxy.call::<_, _, ()>("SyncDaemonPollSettings", &(settings_json,)).await?;
+    Ok(())
 }
 
 async fn set_battery_settings_impl(proxy: &zbus::Proxy<'_>, settings: BatterySettings) -> Result<()> {
