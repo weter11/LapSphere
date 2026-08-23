@@ -195,6 +195,18 @@ pub fn load_config(&mut self) {
         self.config.profiles.iter()
             .position(|p| p.name == self.config.current_profile)
     }
+
+    pub fn get_logical_id(&self, gamepad: &GamepadInfo) -> String {
+        if let Some(logical_id) = self.config.gamepad_mappings.get(&gamepad.uid) {
+            logical_id.clone()
+        } else if let Some(serial) = &gamepad.serial {
+            format!("serial:{}", serial)
+        } else if let (Some(v), Some(p)) = (gamepad.vendor_id, gamepad.product_id) {
+            format!("hw:{:04x}:{:04x}", v, p)
+        } else {
+            gamepad.uid.clone()
+        }
+    }
 }
 
 pub struct LapSphereApp {
@@ -551,13 +563,19 @@ impl LapSphereApp {
                                remembered.battery_level != connected.battery_level ||
                                remembered.power_status != connected.power_status ||
                                remembered.connection_type != connected.connection_type ||
-                               remembered.name != connected.name
+                               remembered.name != connected.name ||
+                               remembered.serial != connected.serial ||
+                               remembered.vendor_id != connected.vendor_id ||
+                               remembered.product_id != connected.product_id
                             {
                                 remembered.status = GamepadStatus::Connected;
                                 remembered.name = connected.name.clone();
                                 remembered.battery_level = connected.battery_level;
                                 remembered.power_status = connected.power_status.clone();
                                 remembered.connection_type = connected.connection_type.clone();
+                                remembered.serial = connected.serial.clone();
+                                remembered.vendor_id = connected.vendor_id;
+                                remembered.product_id = connected.product_id;
                                 changed = true;
                             }
                         } else if remembered.status != GamepadStatus::Disconnected {
@@ -569,6 +587,18 @@ impl LapSphereApp {
                     // Add new ones
                     for connected in connected_gamepads {
                         if !self.state.config.remembered_gamepads.iter().any(|r| r.uid == connected.uid) {
+                            // Ensure it has a logical mapping
+                            if !self.state.config.gamepad_mappings.contains_key(&connected.uid) {
+                                let logical_id = if let Some(serial) = &connected.serial {
+                                    format!("serial:{}", serial)
+                                } else if let (Some(v), Some(p)) = (connected.vendor_id, connected.product_id) {
+                                    format!("hw:{:04x}:{:04x}", v, p)
+                                } else {
+                                    connected.uid.clone()
+                                };
+                                self.state.config.gamepad_mappings.insert(connected.uid.clone(), logical_id);
+                            }
+
                             self.state.config.remembered_gamepads.push(connected);
                             changed = true;
                         }
@@ -900,6 +930,7 @@ struct SettingsConfig {
     log_limit: usize,
     log_filter_trace: bool,
     remembered_gamepads: Vec<GamepadInfo>,
+    gamepad_mappings: std::collections::HashMap<String, String>,
 }
 
 impl Default for SettingsConfig {
@@ -918,6 +949,7 @@ impl Default for SettingsConfig {
             log_limit: config.log_limit,
             log_filter_trace: config.log_filter_trace,
             remembered_gamepads: config.remembered_gamepads.clone(),
+            gamepad_mappings: config.gamepad_mappings.clone(),
         }
     }
 }
@@ -937,6 +969,7 @@ impl From<&AppConfig> for SettingsConfig {
             log_limit: config.log_limit,
             log_filter_trace: config.log_filter_trace,
             remembered_gamepads: config.remembered_gamepads.clone(),
+            gamepad_mappings: config.gamepad_mappings.clone(),
         }
     }
 }
@@ -955,6 +988,7 @@ impl SettingsConfig {
         config.log_limit = self.log_limit;
         config.log_filter_trace = self.log_filter_trace;
         config.remembered_gamepads = self.remembered_gamepads.clone();
+        config.gamepad_mappings = self.gamepad_mappings.clone();
     }
 }
 

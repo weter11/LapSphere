@@ -3342,6 +3342,18 @@ pub fn get_gamepad_info() -> Result<Vec<GamepadInfo>> {
 
                             let (battery_level, power_status) = find_battery_for_input(&path);
 
+                            let vendor_id = fs::read_to_string(path.join("id/vendor"))
+                                .ok()
+                                .and_then(|s| u16::from_str_radix(s.trim(), 16).ok());
+                            let product_id = fs::read_to_string(path.join("id/product"))
+                                .ok()
+                                .and_then(|s| u16::from_str_radix(s.trim(), 16).ok());
+                            let serial = fs::read_to_string(path.join("device/serial"))
+                                .or_else(|_| fs::read_to_string(path.join("device/uniq")))
+                                .ok()
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty() && s != "00:00:00:00:00:00");
+
                             gamepads.push(GamepadInfo {
                                 name: device_name,
                                 id: input_name,
@@ -3350,6 +3362,9 @@ pub fn get_gamepad_info() -> Result<Vec<GamepadInfo>> {
                                 battery_level,
                                 connection_type,
                                 power_status,
+                                vendor_id,
+                                product_id,
+                                serial,
                             });
                             seen_uids.insert(uid);
                         }

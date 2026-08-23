@@ -741,33 +741,58 @@ fn draw_gamepad_info(ui: &mut Ui, state: &AppState) {
         .default_open(true)
         .show(ui, |ui| {
             if !state.config.remembered_gamepads.is_empty() {
-                for (idx, gamepad) in state.config.remembered_gamepads.iter().enumerate() {
+                use std::collections::HashMap;
+                let mut logical_groups: HashMap<String, Vec<&lapsphere_common::types::GamepadInfo>> = HashMap::new();
+
+                for gamepad in &state.config.remembered_gamepads {
+                    let logical_id = state.get_logical_id(gamepad);
+                    logical_groups.entry(logical_id).or_default().push(gamepad);
+                }
+
+                let mut sorted_groups: Vec<_> = logical_groups.into_iter().collect();
+                sorted_groups.sort_by(|(id_a, _), (id_b, _)| id_a.cmp(id_b));
+
+                for (idx, (logical_id, devices)) in sorted_groups.iter().enumerate() {
                     if idx > 0 {
                         ui.add_space(4.0);
                         ui.separator();
                         ui.add_space(4.0);
                     }
-                    ui.label(RichText::new(&gamepad.name).strong());
-                    Grid::new(format!("gamepad_grid_{}", gamepad.name))
+
+                    let active_device = devices.iter()
+                        .find(|d| d.status == GamepadStatus::Connected)
+                        .unwrap_or(&devices[0]);
+
+                    let is_connected = devices.iter().any(|d| d.status == GamepadStatus::Connected);
+
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(&active_device.name).strong());
+                        if devices.len() > 1 {
+                            ui.label(RichText::new(format!("({} interfaces linked)", devices.len())).small().weak());
+                        }
+                    });
+
+                    Grid::new(format!("gamepad_grid_{}", logical_id))
                         .num_columns(2)
                         .spacing([36.0, 6.0])
                         .striped(true)
                         .show(ui, |ui| {
                             ui.label("Status:");
-                            let status_color = match gamepad.status {
-                                GamepadStatus::Connected => Color32::from_rgb(80, 200, 120),
-                                GamepadStatus::Disconnected => Color32::from_rgb(200, 80, 80),
+                            let status_color = if is_connected {
+                                Color32::from_rgb(80, 200, 120)
+                            } else {
+                                Color32::from_rgb(200, 80, 80)
                             };
-                            ui.colored_label(status_color, format!("{:?}", gamepad.status));
+                            ui.colored_label(status_color, if is_connected { "Connected" } else { "Disconnected" });
                             ui.end_row();
 
-                            if gamepad.status == GamepadStatus::Connected {
+                            if is_connected {
                                 ui.label("Connection:");
-                                ui.label(format!("{:?}", gamepad.connection_type));
+                                ui.label(format!("{:?}", active_device.connection_type));
                                 ui.end_row();
 
                                 ui.label("Battery:");
-                                if let Some(level) = gamepad.battery_level {
+                                if let Some(level) = active_device.battery_level {
                                     ui.horizontal(|ui| {
                                         ui.add(ProgressBar::new(level as f32 / 100.0)
                                             .text(format!("{}%", level))
@@ -779,7 +804,7 @@ fn draw_gamepad_info(ui: &mut Ui, state: &AppState) {
                                 ui.end_row();
 
                                 ui.label("Power Status:");
-                                ui.label(format!("{:?}", gamepad.power_status));
+                                ui.label(format!("{:?}", active_device.power_status));
                                 ui.end_row();
                             }
                         });
