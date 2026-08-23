@@ -586,7 +586,6 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
                     || lower.contains("service unknown")
                     || lower.contains("namehasnoowner")
                     || lower.contains("name has no owner")
-                    || lower.contains("org.freedesktop.dbus.error")
                     || lower.contains("io.lapsphere.control")
                     || lower.contains("timed out")
                     || lower.contains("timeout");
