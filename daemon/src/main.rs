@@ -40,6 +40,12 @@ pub static HARDWARE_CACHE: once_cell::sync::Lazy<Arc<Mutex<HardwareCache>>> =
         system_info: None,
     })));
 
+// Set by GetGpuInfoFull D-Bus call to force one full NVML query on the next
+// hardware_monitor tick (on-demand override for the GUI stats panel).
+// The monitor job consumes and clears it, so the override is one-shot.
+pub static FULL_NVML_REFRESH_REQUESTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 // Global fan daemon state
 pub static FAN_DAEMON_STATE: once_cell::sync::Lazy<Arc<Mutex<Option<FanSettings>>>> = 
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));

@@ -86,6 +86,35 @@ impl ControlInterface {
         )
     }
 
+    /// On-demand full NVML query (RTD3-aware hybrid strategy).
+    ///
+    /// The default GetGpuInfo serves the 1 Hz monitor cache, which skips NVML
+    /// while the dGPU is active-but-idle (so the kernel's 20 s autosuspend
+    /// timer can expire and the GPU can drop into RTD3 suspend). When the GUI
+    /// stats panel needs live values (voltage, clocks, temps), it calls this:
+    /// it arms FULL_NVML_REFRESH_REQUESTED, which the next detection pass
+    /// consumes for exactly ONE full NVML query. Note: if the dGPU is
+    /// currently suspended, this deliberately wakes it (explicit user demand
+    /// beats power saving) — the same trade-off nvidia-smi makes.
+    async fn get_gpu_info_full(&self) -> Result<String, zbus::fdo::Error> {
+        log::debug!(target: "api.call", "GetGpuInfoFull: arming one-shot full NVML refresh");
+        crate::FULL_NVML_REFRESH_REQUESTED.store(true, std::sync::atomic::Ordering::Relaxed);
+
+        // Run the full pass right here — it consumes the override flag and
+        // returns live values including voltage. Blocking work goes to the
+        // blocking pool to keep the async reactor responsive.
+        let info = tokio::task::spawn_blocking(crate::hardware_detection::get_gpu_info)
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(format!("GPU refresh task failed: {}", e)))?
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+
+        // Publish into the shared cache so plain GetGpuInfo serves the same
+        // fresh payload until the next monitor tick.
+        crate::HARDWARE_CACHE.lock().unwrap().gpu_info = info.clone();
+
+        serde_json::to_string(&info).map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
+
     async fn get_battery_info(&self) -> Result<String, zbus::fdo::Error> {
         let info = crate::HARDWARE_CACHE.lock().unwrap().battery_info.clone()
             .ok_or_else(|| zbus::fdo::Error::Failed("Battery info not available".to_string()))?;
