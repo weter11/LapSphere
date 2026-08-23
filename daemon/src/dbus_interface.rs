@@ -583,6 +583,37 @@ impl ControlInterface {
         )
     }
 
+    /// Sync daemon poll-job intervals from the GUI's statistics_sections JSON.
+    ///
+    /// Called by the GUI after it saves settings.json so interval changes take
+    /// effect immediately without a daemon restart. Only changed jobs are
+    /// rescheduled; the RTD3 hybrid NVML gating in hardware_detection is
+    /// interval-independent and stays fully active at any rate.
+    async fn sync_daemon_poll_settings(&self, settings_json: &str) -> Result<(), zbus::fdo::Error> {
+        log_api!(
+            "SyncDaemonPollSettings",
+            (|| {
+                match crate::daemon_settings::from_statistics_json(settings_json) {
+                    Ok(next) => {
+                        let applied = crate::daemon_settings::sync_from(
+                            &crate::DAEMON_POLL_SETTINGS,
+                            crate::SCHEDULER_HANDLE.get(),
+                            next,
+                        );
+                        if applied.is_empty() {
+                            log::debug!("SyncDaemonPollSettings: no interval changes");
+                        }
+                        Ok(())
+                    }
+                    Err(e) => Err(anyhow::anyhow!(
+                        "invalid statistics_sections payload: {e}"
+                    )),
+                }
+            })(),
+            |_| format!("settings_json_len={}", settings_json.len())
+        )
+    }
+
     async fn shutdown_daemon(&self) -> Result<(), zbus::fdo::Error> {
         if is_systemd_managed() {
             return Ok(());

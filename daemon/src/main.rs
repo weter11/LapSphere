@@ -1,4 +1,5 @@
 mod dbus_interface;
+mod daemon_settings;
 mod hardware_control;
 mod hardware_detection;
 mod tuxedo_io;
@@ -8,7 +9,6 @@ mod polling_scheduler;
 use anyhow::Result;
 use tokio::signal;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use std::collections::{VecDeque, HashMap};
 use lapsphere_common::types::*;
 use polling_scheduler::{PollingScheduler, PollJob};
@@ -53,6 +53,14 @@ pub static FAN_DAEMON_STATE: once_cell::sync::Lazy<Arc<Mutex<Option<FanSettings>
 // Global polling scheduler handle
 pub static SCHEDULER_HANDLE: once_cell::sync::OnceCell<polling_scheduler::SchedulerHandle> = 
     once_cell::sync::OnceCell::new();
+
+// Active daemon poll-interval settings, synced from the GUI's settings.json
+// (see daemon_settings for the field mapping and legacy defaults).
+pub static DAEMON_POLL_SETTINGS: once_cell::sync::Lazy<
+    Arc<Mutex<daemon_settings::DaemonPollSettings>>,
+> = once_cell::sync::Lazy::new(|| {
+    Arc::new(Mutex::new(daemon_settings::DaemonPollSettings::load()))
+});
 
 // Global GPU daemon state
 pub static GPU_DAEMON_STATE: once_cell::sync::Lazy<Arc<Mutex<Option<lapsphere_common::types::GpuSettings>>>> =
@@ -299,7 +307,9 @@ async fn main() -> Result<()> {
 
     let hw_monitor_job = PollJob::new(
         "hardware_monitor".to_string(),
-        Duration::from_millis(1000), // Poll every 1 second
+        // Feeds CPU + Memory + GPU (+ everything else) from one shared cache,
+        // so it runs at the fastest of the consumer section rates.
+        DAEMON_POLL_SETTINGS.lock().unwrap().hardware_monitor(),
         hw_monitor_fn,
     );
 
@@ -338,7 +348,7 @@ async fn main() -> Result<()> {
 
         let fan_job = PollJob::new(
             "fan_control".to_string(),
-            Duration::from_secs(2),
+            DAEMON_POLL_SETTINGS.lock().unwrap().fan_control(),
             poll_fn,
         );
 
@@ -385,7 +395,7 @@ async fn main() -> Result<()> {
 
     let gpu_job = PollJob::new(
         "gpu_overclock".to_string(),
-        Duration::from_millis(1000), // Default 1s
+        DAEMON_POLL_SETTINGS.lock().unwrap().gpu_overclock(),
         gpu_job_poll,
     );
 

@@ -250,6 +250,7 @@ impl LapSphereApp {
         let dbus_client = match DbusClient::new() {
             Ok(client) => {
                 log::info!("✅ Connected to LapSphere daemon");
+                crate::dbus_client::set_shared_client(client.clone());
                 Some(client)
             }
             Err(e) => {
@@ -1075,6 +1076,15 @@ fn save_settings_to_disk(config: &AppConfig) -> anyhow::Result<()> {
     let settings_path = format!("{}/settings.json", config_dir);
     let json = serde_json::to_string_pretty(&SettingsConfig::from(config))?;
     std::fs::write(settings_path, json)?;
+
+    // Push the new poll rates to the daemon so job intervals update live
+    // (fire-and-forget; the daemon keeps its own defaults when this fails
+    // or no daemon connection exists yet, e.g. during startup migration).
+    if let Some(client) = crate::dbus_client::shared_client() {
+        if let Ok(sections) = serde_json::to_string(&config.statistics_sections) {
+            let _ = client.sync_daemon_poll_settings(sections);
+        }
+    }
 
     // Handle autostart
     #[cfg(target_os = "linux")]
