@@ -70,8 +70,16 @@ jobs:
     - name: Upload unzipped binaries
       uses: actions/upload-artifact@v7
       with:
-        name: lapsphere-ubuntu-24.04-binaries
-        path: artifacts/unzipped/*
+        name: lapsphere-ubuntu-24.04-bin-lapsphere-daemon
+        path: artifacts/unzipped/lapsphere-daemon
+        retention-days: 90
+        compression-level: 0
+
+    - name: Upload unzipped GUI binary
+      uses: actions/upload-artifact@v7
+      with:
+        name: lapsphere-ubuntu-24.04-bin-lapsphere
+        path: artifacts/unzipped/lapsphere
         retention-days: 90
         compression-level: 0
 
@@ -117,9 +125,16 @@ jobs:
     - name: Upload unzipped binaries
       uses: actions/upload-artifact@v7
       with:
-        name: lapsphere-arch-binaries
+        name: lapsphere-arch-bin-lapsphere-daemon
         path: |
-          usr/bin/lapsphere-daemon
-          usr/bin/lapsphere
+          pkg/lapsphere/usr/bin/lapsphere-daemon
+        retention-days: 90
+        compression-level: 0
+
+    - name: Upload unzipped GUI binary
+      uses: actions/upload-artifact@v7
+      with:
+        name: lapsphere-arch-bin-lapsphere
+        path: pkg/lapsphere/usr/bin/lapsphere
         retention-days: 90
         compression-level: 0
