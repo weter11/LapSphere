@@ -1,5 +1,6 @@
 mod app;
 mod dbus_client;
+mod gamepad_registry;
 mod theme;
 mod pages;
 mod keyboard_shortcuts;
