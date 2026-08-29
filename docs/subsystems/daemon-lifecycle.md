@@ -16,7 +16,7 @@ Scope: `daemon/src/main.rs`, `dbus_interface.rs`, `polling_scheduler.rs`,
    `[verified]`
 6. `tokio::spawn` starts the scheduler. The monitor, optional fan-control, and
    GPU-overclock jobs are then submitted through its handle. `[verified]`
-7. A system DBus connection is created; a second `tokio::spawn` registers the
+7. A system D-Bus connection is created; a second `tokio::spawn` registers the
    object and requests `io.lapsphere.Control`. `[verified]`
 8. With `--gui`, a child process is spawned and another Tokio task waits for
    it. `[verified]`
@@ -29,23 +29,23 @@ Scope: `daemon/src/main.rs`, `dbus_interface.rs`, `polling_scheduler.rs`,
   process-global values protected by mutexes or atomics. `[verified]`
 - The fan callback captures an `Arc` clone of the initialized `TuxedoIo`.
   `[verified]`
-- The DBus connection is owned by `main` and a clone moved into the service
+- The D-Bus connection is owned by `main` and a clone moved into the service
   task. `[verified]`
-- `BatteryControl` is constructed per battery DBus operation and retains only a
+- `BatteryControl` is constructed per battery D-Bus operation and retains only a
   `PathBuf`; no persistent battery handle is retained. `[verified]`
 - `hardware_control.rs` keeps one lazy process-lifetime NVML value. `[verified]`
 
-## Scheduler and DBus concurrency
+## Scheduler and D-Bus concurrency
 
 The scheduler executes due jobs synchronously in its own task. It removes all
 due jobs, calls each callback, and re-inserts each with `next_run = now +
 interval`, including after errors. Jobs do not spawn a task per poll tick.
 `[verified]`
 
-DBus methods are async and can run while the scheduler polls. Cache/state
+D-Bus methods are async and can run while the scheduler polls. Cache/state
 overlap is coordinated by the relevant mutex or atomic, and cache reads clone
 before serialization. `[verified]` There is no single lock around hardware
-control, so a DBus mutation and a polling callback can touch the same kernel or
+control, so a D-Bus mutation and a polling callback can touch the same kernel or
 NVML resource concurrently. `[verified]`
 
 The scheduler command channel is unbounded; commands are applied by its one
@@ -55,10 +55,10 @@ receiver in receive order. `[verified]`
 
 `main` awaits Ctrl-C and restores CPU frequency limits if they were modified.
 `[verified]` It does not send `SchedulerCommand::Shutdown`, join the scheduler
-task, join the DBus task, or explicitly join the GUI waiter. `[verified]`
+task, join the D-Bus task, or explicitly join the GUI waiter. `[verified]`
 Remaining cleanup therefore relies on process termination. `[assumed]`
 
-The DBus shutdown method starts a temporary thread that sleeps 200 ms and
+The D-Bus shutdown method starts a temporary thread that sleeps 200 ms and
 raises SIGINT when the daemon is not systemd-managed; under systemd it returns
 without signalling. `[verified]` Repeated accepted calls can create repeated
 threads before they fire. `[assumed]`
@@ -77,7 +77,7 @@ threads before they fire. `[assumed]`
 - Jobs retain their callbacks until removed or process exit. The fan callback
   retains its `TuxedoIo` `Arc`, and `main` has no removal/shutdown path.
   `[verified]` An FD/resource leak is `[assumed]`, not proven here.
-- `GetGpuInfoFull` creates one blocking task per DBus call with no visible
+- `GetGpuInfoFull` creates one blocking task per D-Bus call with no visible
   in-flight guard. `[verified]` Resource amplification under bursts is
   `[assumed]`.
 - Battery objects are local and dropped at call return. This is allocation
