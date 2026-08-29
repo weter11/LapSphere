@@ -60,12 +60,12 @@ a request fails, the prior successful value normally remains visible.
 
 `DbusClient::new` creates an unbounded command channel and spawns one worker; it
 returns successfully without establishing the system-bus connection itself.
-[verified] The worker repeatedly creates a system-bus connection and a shared
+`[verified]` The worker repeatedly creates a system-bus connection and a shared
 Control proxy. Connection/proxy setup failures wait two seconds before retrying.
 `[verified]`
 
 Each public client method enqueues a command and returns a oneshot receiver.
-[verified] The worker sends either the decoded JSON result or an error through
+`[verified]` The worker sends either the decoded JSON result or an error through
 that receiver. `[verified]` A call-level failure is logged; connection/service
 loss, timeout, and several service-absence error forms cause the worker to
 discard the proxy/connection, back off for two seconds, and reconnect. Ten
