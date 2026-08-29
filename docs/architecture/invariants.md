@@ -107,3 +107,46 @@ is not confirmed; treating that serialization as guaranteed is `[assumed]`.
 
 **Implication:** Cleanup of scheduler-owned callbacks before process exit is
 not guaranteed. `[assumed]`
+
+## GUI state synchronization
+
+### 14. Ordinary GUI hardware snapshots replace fields
+
+**Rule:** Successful ordinary hardware responses replace their corresponding
+`AppState` field; the GUI does not merge those vectors by device key.
+`[verified]`
+
+**Enforced where:** `gui/src/app.rs::handle_hardware_updates()` assigns the
+`HardwareUpdate` payloads directly to the CPU, GPU, Wi-Fi, fan, storage, mount,
+and related fields. `[verified]`
+
+### 15. Remembered gamepads are UID-merged and append-only
+
+**Rule:** The GUI matches remembered gamepads to a response by exact UID, marks
+missing remembered entries disconnected, updates matching records, appends
+unseen records, and does not remove old records. `[verified]`
+
+**Enforced where:** `gui/src/app.rs::handle_hardware_updates()` processes
+`HardwareUpdate::GamepadInfo`; the result is persisted through
+`save_settings()`. `[verified]`
+
+**Implication:** The GUI assumes daemon UIDs remain stable. Daemon UID churn is
+amplified into persistent disconnected/new records; the GUI has no independent
+physical-device identity reconciliation. `[verified]`
+
+### 16. Failed refreshes preserve last-known GUI values
+
+**Rule:** A failed D-Bus refresh produces logging/error handling but no generic
+state invalidation; the prior successful hardware value remains in `AppState`.
+`[verified]`
+
+**Implication:** During a daemon outage or restart, displayed hardware state may
+be stale until a later successful poll. `[assumed]`
+
+### 17. GUI and daemon polling clocks are separate
+
+**Rule:** GUI refresh intervals are owned by `RefreshCoordinator`; saving
+settings separately sends poll-rate JSON to the daemon. `[verified]`
+
+**Implication:** Matching configured rates does not establish synchronized
+execution or a coordinated refresh boundary. `[assumed]`
