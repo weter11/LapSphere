@@ -39,7 +39,8 @@ Every statement is marked `[verified]` when traced in source/manifests or `[assu
 ## `nvidia/`
 
 - **Responsibility:** Provide GPU VRAM usage and hotspot temperature through an undocumented NVIDIA interface, a community-discovered method that is not part of NVIDIA's public API, plus additional NVIDIA driver features not currently used elsewhere. `[maintainer-confirmed]`
-- **Status:** This is not dead or unwanted code. It is currently disconnected from the build: it is not a workspace member and has no `mod` references from `daemon/` or `gui/`. `[maintainer-confirmed]` (wiring facts remain `[verified]`)
+- **Status:** This is not dead or unwanted code; it is an integration gap because it is currently disconnected from the build. `[maintainer-confirmed]`
+- **Wiring:** It is not a workspace member and has no `mod` references from `daemon/` or `gui/`. `[verified]` (root manifest and module search)
 - **Open question:** Whether and how to wire this into `daemon/`'s NVIDIA path remains undecided. `[maintainer-confirmed]`
 - **Dependencies in:** No repository dependency was found. `[verified]` (workspace/module search)
 - **Dependencies out:** External crates and a Linux NVIDIA userspace/device interface are referenced by the files. `[verified]` (`nvidia/*.rs`)
