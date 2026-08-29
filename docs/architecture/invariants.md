@@ -91,9 +91,9 @@ declared mutexes; the one-shot NVML request is atomic. `[verified]`
 **Enforced where:** globals in `daemon/src/main.rs` and accesses in
 `dbus_interface.rs`, `hardware_control.rs`, and polling callbacks. `[verified]`
 
-### 12. DBus calls and polling may overlap hardware I/O
+### 12. D-Bus calls and polling may overlap hardware I/O
 
-**Rule:** No source-confirmed invariant prevents a DBus operation from running
+**Rule:** No source-confirmed invariant prevents a D-Bus operation from running
 concurrently with a scheduler callback touching the same hardware resource.
 `[verified]`
 

@@ -1,7 +1,7 @@
 # Known Problems (Backlog)
 
 Seeded from PR #92's hardware-detection deep-dive. Read
-`docs/architecture/invariants.md` and
+[`docs/architecture/invariants.md`](../architecture/invariants.md) and
 the hardware-detection source for full detail. This file contains
 pointers and priorities, not the full analysis.
 
@@ -63,7 +63,7 @@ investigation candidates from the daemon lifecycle deep-dive.
 - **`nvidia/` orphan directory:** Provides GPU VRAM/hotspot temperature through
   an undocumented NVIDIA interface plus other driver features, but is not wired
   into the workspace build. Track the integration decision separately; see
-  `docs/architecture/modules.md`. `[verified]`
+  [`docs/architecture/modules.md`](../architecture/modules.md). `[verified]`
 
 ## Maintenance
 
