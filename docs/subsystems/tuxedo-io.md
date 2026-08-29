@@ -3,9 +3,8 @@
 ## Scope and evidence
 
 This document covers `daemon/src/tuxedo_io.rs` and the matching declarations
-in `drivers_src/tuxedo_io/tuxedo_io_ioctl.h`. `[verified]` Claims are
-`[verified]` when directly traced and `[assumed]` when inferred. No fixes are
-proposed.
+in `drivers_src/tuxedo_io/tuxedo_io_ioctl.h`. Claims are marked `[verified]`
+when directly traced and `[assumed]` when inferred. No fixes are proposed.
 
 ## Device lifecycle and interface selection
 
@@ -78,4 +77,3 @@ unsupported platform remains constructible with `None` and zero fans.
 4. **Architecture-specific encoding (medium):** request numbers hard-code an
    8-byte pointer size, matching the intended 64-bit Linux deployment.
    `[verified]`
-
