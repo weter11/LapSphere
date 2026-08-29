@@ -150,3 +150,77 @@ settings separately sends poll-rate JSON to the daemon. `[verified]`
 
 **Implication:** Matching configured rates does not establish synchronized
 execution or a coordinated refresh boundary. `[assumed]`
+
+## Shared daemon/GUI data contracts
+
+### 18. Shared structs are JSON field-name contracts
+
+**Rule:** Public structs in `common/src/types.rs` use Serde's default field
+names and are exchanged as JSON strings over D-Bus and in GUI configuration
+files. `[verified]`
+
+**Enforced where:** `common/src/types.rs` derives `Serialize` and
+`Deserialize`; daemon D-Bus methods serialize snapshots/settings and GUI
+client methods deserialize them. `[verified]`
+
+**Implication:** Renaming a field, changing its type, or changing an
+`Option`/vector shape without coordinated daemon and GUI changes breaks the
+transport or silently changes snapshot meaning. `[assumed]`
+
+### 19. Hardware snapshot shapes are load-bearing
+
+**Rule:** `SystemInfo`, `CpuInfo` (including `CpuCapabilities`, `CoreInfo`, and
+`PowerSource`), `MemoryInfo`, `GpuInfo`, `BatteryInfo`, `FanInfo`, `WiFiInfo`,
+`StorageDevice`, `MountInfo`, and `GamepadInfo` are shared snapshot contracts.
+`[verified]` `GpuInfo` includes daemon-populated optional hotspot,
+memory-temperature, voltage, VRAM metadata, capability/range, and
+`nvml_index` fields consumed by GUI code. `[verified]`
+
+### 20. Enum spellings and variants are wire values
+
+**Rule:** Variants of `GpuType`, `GamepadStatus`, `ConnectionType`,
+`PowerStatus`, `KeyboardType`, `KeyboardMode`, `FontSize`, and `Theme` are
+serialized enum values; variant names and `KeyboardMode` payload shapes must
+remain aligned. `[verified]`
+
+**Enforced where:** daemon matches `KeyboardMode` variants for hardware
+control, while GUI constructs and matches the same variants and deserializes
+daemon responses. `[verified]`
+
+**Implication:** Renaming/removing a variant can turn valid JSON into a
+deserialization failure; an added variant can be incompatible with an older
+peer. `[assumed]`
+
+### 21. Settings are persistent compatibility contracts
+
+**Rule:** `AppConfig` and nested `Profile`, CPU/GPU/keyboard/screen/fan
+settings, `GpuAdvancedSettings`, `NvidiaFanSettings`, `FanCurve`, and
+`BatterySettings` define the GUI disk format and daemon settings payloads.
+`[verified]`
+
+Fields marked `#[serde(default)]` or explicit default functions are
+backward-compatibility points; fields without defaults are required during
+deserialization. `[verified]` `StatisticsSections` also carries section names
+and millisecond polling rates mirrored into daemon scheduler settings.
+`[verified]`
+
+### 22. Defaults do not establish validation
+
+**Rule:** `Default` implementations provide initial values, but shared types
+contain no cross-field validation or version tag. `[verified]`
+
+**Implication:** Both peers must preserve conventions such as frequency,
+temperature, and power units, tuple ordering, fan IDs, and section-name
+strings; a type-compatible semantic change can fail silently. `[assumed]`
+
+## Ranked shared-contract findings
+
+1. **Wire-shape mismatch (high):** Serde field names, optionality, tuple shape,
+   and enum representation are the daemon/GUI protocol. `[verified]`
+2. **GPU contract coupling (high):** `GpuInfo` carries ordinary NVML values
+   and optional NVIDIA extensions; dropping fields loses telemetry. `[verified]`
+3. **Persistent settings compatibility (high):** `AppConfig` and nested
+   settings are disk and D-Bus contracts, with only selected fields defaulted.
+   `[verified]`
+4. **Semantic drift risk (medium):** units, IDs, and string conventions are
+   not encoded in types or versioned. `[verified]`
