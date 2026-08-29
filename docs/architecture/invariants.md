@@ -52,7 +52,7 @@ Every claim is marked `[verified]` when traced in `daemon/src/hardware_detection
 
 ### 7. System and memory metadata are process-local caches
 
-**Rule:** System identity and memory type/speed metadata do not refresh after their first successful/cache initialization within the process. `[verified]`
+**Rule:** System identity and memory type/speed metadata do not refresh after their first successful initialization or cache population within the process. `[verified]`
 
 **Enforced where:** `get_system_info()` uses `CACHED_SYSTEM_INFO`; `get_memory_type_and_freq()` uses `CACHED_MEM_METADATA`. `[verified]`
 
@@ -65,4 +65,3 @@ Every claim is marked `[verified]` when traced in `daemon/src/hardware_detection
 ## Verification of the seeded entry
 
 The prior seeded claim that gamepad identity is guaranteed per physical device is **not confirmed as an invariant by current source**. `[verified]` The source attempts stable identity resolution and suppresses exact duplicate UIDs within one pass, but sibling event nodes can have different udev-property availability, the fallback uses `inputN` paths, `device/uniq` is conditional, and no cross-pass registry exists. `[verified]`
-
