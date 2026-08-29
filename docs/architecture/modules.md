@@ -38,12 +38,11 @@ Every statement is marked `[verified]` when traced in source/manifests or `[assu
 
 ## `nvidia/`
 
-- **Responsibility:** No independently wired workspace-crate responsibility is established. `[verified]` (not listed in root workspace; no module declaration references it)
-- **Owns:** Standalone Rust files that describe NVIDIA driver/NVAPI operations when read in isolation. `[verified]` (`nvidia/driver.rs`; `nvidia/nvapi.rs`; `nvidia/nvidia.rs`)
-- **Does not own:** The active daemon NVIDIA integration as currently wired; that integration is implemented under `daemon/src`. `[verified]` (daemon source search; root manifest)
+- **Responsibility:** Provide GPU VRAM usage and hotspot temperature through an undocumented NVIDIA interface, a community-discovered method that is not part of NVIDIA's public API, plus additional NVIDIA driver features not currently used elsewhere. `[maintainer-confirmed]`
+- **Status:** This is not dead or unwanted code. It is currently disconnected from the build: it is not a workspace member and has no `mod` references from `daemon/` or `gui/`. `[maintainer-confirmed]` (wiring facts remain `[verified]`)
+- **Open question:** Whether and how to wire this into `daemon/`'s NVIDIA path remains undecided. `[maintainer-confirmed]`
 - **Dependencies in:** No repository dependency was found. `[verified]` (workspace/module search)
 - **Dependencies out:** External crates and a Linux NVIDIA userspace/device interface are referenced by the files. `[verified]` (`nvidia/*.rs`)
-- **Status:** Any intended relationship between this directory and the daemon is an architectural gap to resolve in a later deep-dive. `[assumed]`
 
 ## `drivers_src/` — external driver boundary
 
@@ -53,4 +52,3 @@ Every statement is marked `[verified]` when traced in source/manifests or `[assu
 - **Dependencies in:** Daemon `TuxedoIo` calls through `/dev/tuxedo_io`. `[verified]` (`daemon/src/tuxedo_io.rs`)
 - **Dependencies out:** Kernel/device support and the external tuxedo-drivers build environment. `[verified]` (`drivers_src/Kbuild`; driver interface header)
 - **Boundary note:** This entry documents only the exposed device path and ioctl families; driver internals are intentionally out of scope. `[verified]` (task scope; header and daemon boundary)
-
