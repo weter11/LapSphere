@@ -1,4 +1,4 @@
-# Detection invariants
+# Architecture invariants
 
 Every claim is marked `[verified]` when traced in `daemon/src/hardware_detection.rs`, or `[assumed]` when inferred. No fixes are proposed here.
 
@@ -65,3 +65,45 @@ Every claim is marked `[verified]` when traced in `daemon/src/hardware_detection
 ## Verification of the seeded entry
 
 The prior seeded claim that gamepad identity is guaranteed per physical device is **not confirmed as an invariant by current source**. `[verified]` The source attempts stable identity resolution and suppresses exact duplicate UIDs within one pass, but sibling event nodes can have different udev-property availability, the fallback uses `inputN` paths, `device/uniq` is conditional, and no cross-pass registry exists. `[verified]`
+
+## Lifecycle and concurrency
+
+### 9. The scheduler owns job execution
+
+**Rule:** Poll callbacks execute in the scheduler loop, not in a new task per
+tick; due jobs are rescheduled after execution, including on error. `[verified]`
+
+**Enforced where:** `daemon/src/polling_scheduler.rs::run()` and
+`execute_due_jobs()`. `[verified]`
+
+### 10. Scheduler commands have one receiver
+
+**Rule:** Add, update, remove, and shutdown commands are applied by the
+scheduler task in channel receive order. `[verified]`
+
+**Enforced where:** `PollingScheduler::run()` and `SchedulerHandle`. `[verified]`
+
+### 11. Shared daemon state is mutex/atomic protected
+
+**Rule:** Shared cache, settings, fan/GPU state, offsets, and logs use their
+declared mutexes; the one-shot NVML request is atomic. `[verified]`
+
+**Enforced where:** globals in `daemon/src/main.rs` and accesses in
+`dbus_interface.rs`, `hardware_control.rs`, and polling callbacks. `[verified]`
+
+### 12. DBus calls and polling may overlap hardware I/O
+
+**Rule:** No source-confirmed invariant prevents a DBus operation from running
+concurrently with a scheduler callback touching the same hardware resource.
+`[verified]`
+
+**Implication:** “A DBus call and polling tick never touch Z at the same time”
+is not confirmed; treating that serialization as guaranteed is `[assumed]`.
+
+### 13. Graceful scheduler shutdown is not wired
+
+**Rule:** Main restores CPU frequency limits but does not send the scheduler
+`Shutdown` command or join its task. `[verified]`
+
+**Implication:** Cleanup of scheduler-owned callbacks before process exit is
+not guaranteed. `[assumed]`
