@@ -83,4 +83,3 @@ replacement or consolidation decision, not a simple import. `[assumed]`
 4. **Driver/ABI sensitivity (medium):** undocumented query IDs, fixed C
    layouts, and direct RM ioctls can fail by driver/GPU/power state; callers
    generally degrade to optional fields or errors. `[verified]`
-
