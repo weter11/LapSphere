@@ -14,7 +14,7 @@ registers refresh components with a `RefreshCoordinator`. `[verified]` The
 configured millisecond rates are used for CPU, GPU, memory, fans, battery,
 Wi-Fi, gamepads, storage, mount, and GPU overclock. Webcam and daemon logs are
 registered at five seconds. `[verified]` Mounts share the storage poll rate.
-[verified]
+`[verified]`
 
 Each component starts with `last_refresh = None`, so its first refresh is due
 immediately. Thereafter the coordinator sleeps until the earliest due component,
@@ -23,10 +23,10 @@ callback spawns a separate Tokio task for the D-Bus request, so requests from
 different components can overlap even though the D-Bus worker processes its
 command queue one command at a time. `[verified]` A callback is marked complete
 for scheduling purposes before its asynchronous D-Bus request completes.
-[verified]
+`[verified]`
 
 Changing rates in the settings UI updates the GUI coordinator interval for the
-matching component. `[verified]` Saving settings also fire-and-forgets the
+matching component. `[verified]` Saving settings also fires and forgets the
 serialized statistics settings to the daemon through `SyncDaemonPollSettings`;
 failure does not prevent the GUI save. `[verified]` The GUI coordinator and
 daemon scheduler are therefore separate cadence owners. `[verified]`
@@ -54,7 +54,7 @@ string on failure. `[verified]`
 There is no general GUI-side freshness timestamp, invalidation marker, or
 retry/error state attached to retained hardware values. `[verified]` Thus, when
 a request fails, the prior successful value normally remains visible.
-[assumed]
+`[assumed]`
 
 ## D-Bus transport and lifecycle
 
@@ -62,26 +62,26 @@ a request fails, the prior successful value normally remains visible.
 returns successfully without establishing the system-bus connection itself.
 [verified] The worker repeatedly creates a system-bus connection and a shared
 Control proxy. Connection/proxy setup failures wait two seconds before retrying.
-[verified]
+`[verified]`
 
 Each public client method enqueues a command and returns a oneshot receiver.
 [verified] The worker sends either the decoded JSON result or an error through
 that receiver. `[verified]` A call-level failure is logged; connection/service
 loss, timeout, and several service-absence error forms cause the worker to
 discard the proxy/connection, back off for two seconds, and reconnect. Ten
-consecutive otherwise-unrecognized failures also force reconnection. `[verified]
+consecutive otherwise-unrecognized failures also force reconnection. `[verified]`
 
 During a disconnect or daemon restart, requests already being processed receive
 errors and queued requests wait for the worker's reconnect loop. `[verified]`
 There is no explicit GUI state clear or “disconnected” update. `[verified]`
 After the daemon returns, later successful polls repopulate/replace fields.
-[assumed] The GUI can therefore display stale last-known data during the outage,
+`[assumed]` The GUI can therefore display stale last-known data during the outage,
 and components whose next poll has not yet arrived remain stale after recovery.
-[assumed]
+`[assumed]`
 
 If the worker's command sender is closed, enqueueing silently discards the send
 error while the caller still receives a receiver. `[verified]` The worker exits
-when its command channel closes. `[verified]
+when its command channel closes. `[verified]`
 
 ## Merge semantics, especially gamepads
 
