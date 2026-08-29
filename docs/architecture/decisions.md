@@ -22,8 +22,7 @@ means directly traced; `[assumed]` means inferred.
 - **Status:** Accepted retrospectively `[verified]`
 - **Decision:** The daemon publishes `io.lapsphere.Control` at
   `/io/lapsphere/Control` on the system bus, and the GUI communicates with the
-  daemon through that interface. Shared payloads are serialized as JSON strings
-  and decoded using the common types. `[verified]`
+  daemon through that interface. `[verified]`
 - **Reason:** A system-bus service provides a process boundary between the
   privileged daemon and user GUI while supporting service activation and
   asynchronous requests. `[assumed]`
