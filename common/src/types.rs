@@ -183,6 +183,12 @@ pub struct MemoryInfo {
 /// Populated via NVML (NVIDIA), amdgpu sysfs, or Intel GPU sysfs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GpuInfo {
+    #[serde(default)]
+    pub pci_bus_id: Option<String>,
+    #[serde(default)]
+    pub process_snapshot: GpuProcessSnapshot,
+    #[serde(default)]
+    pub vram_memory: Option<GpuMemorySnapshot>,
     /// Device name (e.g., "NVIDIA GeForce RTX 3070 Laptop GPU").
     pub name: String,
     /// Integrated vs discrete classification.
@@ -259,6 +265,30 @@ pub struct GpuInfo {
     pub vram_bandwidth: Option<f32>,
     /// Total VRAM in MiB.
     pub vram_total: Option<u64>,
+}
+
+/// Open handles are candidates, not proof of GPU work or a sleep blocker.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct GpuProcessSnapshot {
+    pub processes: Vec<GpuProcess>,
+    pub complete: bool,
+    pub sampled_at_unix_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GpuProcess {
+    pub pid: u32,
+    pub name: String,
+    pub device_nodes: Vec<String>,
+}
+
+/// Driver memory figures, in MiB, cached from an already-authorized poll.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GpuMemorySnapshot {
+    pub free_mib: u64,
+    pub used_mib: u64,
+    pub total_mib: u64,
+    pub sampled_at_unix_secs: u64,
 }
 
 /// GPU classification: integrated (iGPU) or discrete (dGPU).

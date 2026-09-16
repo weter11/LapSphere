@@ -326,7 +326,8 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                             ui.label("Status:");
                             ui.label(&gpu.status);
                             ui.end_row();
-                            
+                            draw_gpu_diagnostics(ui, gpu);
+
                             if let Some(freq) = gpu.frequency {
                                 ui.label("Core Frequency:");
                                 ui.horizontal(|ui| {
@@ -441,6 +442,69 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                 ui.label("No GPU detected");
             }
         });
+}
+
+fn draw_gpu_diagnostics(ui: &mut Ui, gpu: &lapsphere_common::types::GpuInfo) {
+ui.label("VRAM available / total:");
+if let Some(memory) = &gpu.vram_memory {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+    ui.label(format!("{} / {} MiB (used: {} MiB; sampled {}s ago)",
+        memory.free_mib, memory.total_mib, memory.used_mib,
+        now.saturating_sub(memory.sampled_at_unix_secs)))
+        .on_hover_text("Last driver sample from an already-authorized GPU poll. Not refreshed while sleeping; available memory is not inferred from process allocations.");
+} else {
+    ui.label(format!("Unknown / {}", gpu.vram_total.map(|v| format!("{v} MiB")).unwrap_or_else(|| "Unknown".into())));
+}
+ui.end_row();
+ui.label("GPU device holders:");
+ui.vertical(|ui| {
+    ui.label("Open handles — possible sleep blockers, not proof of GPU activity.");
+    for process in &gpu.process_snapshot.processes {
+        ui.label(format!("{} (PID {})", process.name, process.pid))
+            .on_hover_text(process.device_nodes.join(", "));
+    }
+    if gpu.process_snapshot.processes.is_empty() {
+        ui.label(if gpu.process_snapshot.complete { "No open device holders found." } else { "Process information unavailable or incomplete." });
+    }
+    if !gpu.process_snapshot.complete {
+        ui.label("Partial visibility: inaccessible processes or device mapping unavailable.");
+    }
+    if gpu.process_snapshot.sampled_at_unix_secs > 0 {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+        ui.small(format!("Passive /proc scan; sampled {}s ago", now.saturating_sub(gpu.process_snapshot.sampled_at_unix_secs)));
+    }
+});
+ui.end_row();
+}
+
+#[cfg(test)]
+mod gpu_diagnostic_tests {
+    use super::*;
+    use lapsphere_common::types::*;
+    #[test]
+    fn legacy_wire_payload_and_diagnostic_states_render_without_hardware() {
+        let mut gpu: GpuInfo = serde_json::from_str(include_str!("../../tests/fixtures/gpu_legacy.json")).unwrap();
+        assert!(gpu.vram_memory.is_none());
+        assert!(!gpu.process_snapshot.complete);
+        for populated in [false, true] {
+            if populated {
+                gpu.vram_memory = Some(GpuMemorySnapshot { free_mib: 700, used_mib: 200, total_mib: 1024, sampled_at_unix_secs: 1 });
+                gpu.process_snapshot = GpuProcessSnapshot {
+                    processes: vec![GpuProcess { pid: 123, name: "browser".into(), device_nodes: vec!["/dev/nvidia0".into()] }],
+                    complete: true, sampled_at_unix_secs: 1,
+                };
+            }
+            let ctx = egui::Context::default();
+            let output = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    egui::Grid::new("diagnostic_test").show(ui, |ui| draw_gpu_diagnostics(ui, &gpu));
+                });
+            });
+            assert!(!output.shapes.is_empty());
+            let encoded = serde_json::to_string(&gpu).unwrap();
+            assert_eq!(serde_json::from_str::<GpuInfo>(&encoded).unwrap(), gpu);
+        }
+    }
 }
 
 fn draw_battery_info(ui: &mut Ui, state: &AppState) {

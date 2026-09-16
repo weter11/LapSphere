@@ -1401,6 +1401,9 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
             let voltage = read_gpu_voltage(&device_path);
             
             gpus.push(GpuInfo {
+                pci_bus_id: fs::canonicalize(&device_path).ok().and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned())),
+                process_snapshot: GpuProcessSnapshot::default(),
+                vram_memory: None,
                 name,
                 gpu_type,
                 status,
@@ -1443,6 +1446,7 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
         }
     }
     
+    crate::gpu_activity::attach(&mut gpus);
     if gpus.is_empty() {
         return Err(anyhow!("No GPUs detected"));
     }
@@ -2244,6 +2248,9 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 };
             
             gpus.push(GpuInfo {
+                pci_bus_id: nvidia_pci_ids.get(i as usize).cloned(),
+                process_snapshot: GpuProcessSnapshot::default(),
+                vram_memory: None,
                 name,
                 gpu_type: GpuType::Discrete,
                 status,
@@ -2361,6 +2368,9 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                         });
 
                     let mut gpu_info = GpuInfo {
+                        pci_bus_id: nvidia_pci_ids.get(i as usize).cloned(),
+                        process_snapshot: GpuProcessSnapshot::default(),
+                        vram_memory: None,
                         name,
                         gpu_type: GpuType::Discrete,
                         status: status.clone(),
@@ -2484,6 +2494,9 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 };
             
             gpus.push(GpuInfo {
+                pci_bus_id: nvidia_pci_ids.get(i as usize).cloned(),
+                process_snapshot: GpuProcessSnapshot::default(),
+                vram_memory: None,
                 name,
                 gpu_type: GpuType::Discrete,
                 status: "suspended".to_string(),
@@ -2544,6 +2557,15 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             }
         }
 
+        let pci_identity = device.pci_info().ok().and_then(|p| {
+            let (_, rest) = p.bus_id.split_once(':')?;
+            Some(format!("{:04x}:{}", p.domain, rest).to_lowercase())
+        });
+        if let Some(ref pci) = pci_identity {
+            if let Ok(memory) = device.memory_info() {
+                crate::gpu_activity::record_memory(pci, memory.free, memory.used, memory.total);
+            }
+        }
         let gpu_type = GpuType::Discrete;
 
         // Get performance state
@@ -2835,6 +2857,9 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         }
 
         let mut gpu_info = GpuInfo {
+                pci_bus_id: pci_identity,
+                process_snapshot: GpuProcessSnapshot::default(),
+                vram_memory: None,
             name: name.clone(),
             gpu_type,
             status,

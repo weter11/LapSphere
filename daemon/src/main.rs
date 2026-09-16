@@ -2,6 +2,7 @@ mod dbus_interface;
 mod daemon_settings;
 mod hardware_control;
 mod hardware_detection;
+mod gpu_activity;
 mod tuxedo_io;
 mod battery_control;
 mod polling_scheduler;
