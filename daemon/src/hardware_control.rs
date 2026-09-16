@@ -11,6 +11,25 @@ use crate::tuxedo_io::{TuxedoIo, HardwareInterface};
 static CPU_LIMITS_MODIFIED: AtomicBool = AtomicBool::new(false);
 static LAST_APPLIED_PROFILE: Lazy<Mutex<Option<Profile>>> = Lazy::new(|| Mutex::new(None));
 
+/// Lock a shared daemon mutex, recovering from poisoning instead of panicking.
+///
+/// A `.lock().unwrap()` on a poisoned mutex (i.e. a thread panicked while
+/// holding the guard) propagates the poison as a panic *in this thread*,
+/// taking the whole daemon down. The daemon outlives any single hardware
+/// call, so every global lock site must instead extract the inner value,
+/// clear the poison, log, and carry on with the last-known-good contents.
+fn lock_or_recover<'a, T>(mutex: &'a Mutex<T>, label: &str) -> std::sync::MutexGuard<'a, T> {
+    match mutex.lock() {
+        Ok(g) => g,
+        Err(e) => {
+            log::error!(target: "hw.lock", "{} mutex poisoned — clearing poison and recovering", label);
+            let g = e.into_inner();
+            mutex.clear_poison();
+            g
+        }
+    }
+}
+
 /// ---------------------------------------------------------------------------
 /// sysfs write safety guard (task-safety-sysfs-writes)
 ///
@@ -448,7 +467,7 @@ pub fn apply_profile(profile: &Profile) -> Result<()> {
     // skipped, leaving the machine in a partial hardware state. See task
     // fix-hwc-stale-applied-profile.
     {
-        let last_profile = LAST_APPLIED_PROFILE.lock().unwrap();
+        let last_profile = lock_or_recover(&LAST_APPLIED_PROFILE, "LAST_APPLIED_PROFILE");
         if let Some(ref last) = *last_profile {
             if last == profile {
                 log::info!(target: "hw.detect", "Profile '{}' is already applied, skipping", profile.name);
@@ -462,7 +481,7 @@ pub fn apply_profile(profile: &Profile) -> Result<()> {
     match result {
         Ok(()) => {
             // Record the profile only now that every hardware step succeeded.
-            let mut last_profile = LAST_APPLIED_PROFILE.lock().unwrap();
+            let mut last_profile = lock_or_recover(&LAST_APPLIED_PROFILE, "LAST_APPLIED_PROFILE");
             *last_profile = Some(profile.clone());
             log::info!(target: "hw.detect", "Profile '{}' applied successfully", profile.name);
             Ok(())
@@ -471,7 +490,7 @@ pub fn apply_profile(profile: &Profile) -> Result<()> {
             // A partial apply must NOT be remembered as "applied": otherwise the
             // next identical apply would hit the early-return above and leave the
             // machine in the partial state forever.
-            let mut last_profile = LAST_APPLIED_PROFILE.lock().unwrap();
+            let mut last_profile = lock_or_recover(&LAST_APPLIED_PROFILE, "LAST_APPLIED_PROFILE");
             *last_profile = None;
             log::error!(target: "hw.detect", "Profile '{}' apply failed: {} — cleared last-applied marker", profile.name, e);
             Err(e)
@@ -739,7 +758,7 @@ fn apply_fan_settings(settings: &FanSettings) -> Result<()> {
     
     // Update the global fan daemon state
     {
-        let mut state = crate::FAN_DAEMON_STATE.lock().unwrap();
+        let mut state = lock_or_recover(&crate::FAN_DAEMON_STATE, "FAN_DAEMON_STATE");
         if settings.control_enabled {
             *state = Some(settings.clone());
             log::info!(target: "hw.fan", "fan_daemon enabled=true curves={}", settings.curves.len());
@@ -822,7 +841,7 @@ pub fn set_gpu_core_offset(device_index: u32, offset: f32) -> Result<()> {
     let mut device = nvml.device_by_index(device_index)?;
     device.set_clock_offset(Clock::Graphics, PerformanceState::Zero, offset.round() as i32)?;
     {
-        let mut map = crate::MANUAL_GPU_OFFSETS.lock().unwrap();
+        let mut map = lock_or_recover(&crate::MANUAL_GPU_OFFSETS, "MANUAL_GPU_OFFSETS");
         let entry = map.entry(device_index).or_insert((0.0, 0.0));
         entry.0 = offset;
     }
@@ -835,7 +854,7 @@ pub fn set_gpu_memory_offset(device_index: u32, offset: f32) -> Result<()> {
     let mut device = nvml.device_by_index(device_index)?;
     device.set_clock_offset(Clock::Memory, PerformanceState::Zero, offset.round() as i32)?;
     {
-        let mut map = crate::MANUAL_GPU_OFFSETS.lock().unwrap();
+        let mut map = lock_or_recover(&crate::MANUAL_GPU_OFFSETS, "MANUAL_GPU_OFFSETS");
         let entry = map.entry(device_index).or_insert((0.0, 0.0));
         entry.1 = offset;
     }
@@ -1300,7 +1319,7 @@ mod tests {
         assert!(apply_profile(&p).is_err());
 
         {
-            let marker = LAST_APPLIED_PROFILE.lock().unwrap();
+            let marker = lock_or_recover(&LAST_APPLIED_PROFILE, "LAST_APPLIED_PROFILE");
             assert!(marker.is_none(), "LAST_APPLIED_PROFILE must be None after a failed apply");
         }
     }
@@ -1310,5 +1329,38 @@ mod tests {
         // The skip branch is keyed on Profile PartialEq; guard against a
         // future derive change silently breaking the contract.
         assert_eq!(&failing_profile(), &failing_profile());
+    }
+
+    /// Regression: poisoning LAST_APPLIED_PROFILE must not panic the daemon.
+    ///
+    /// A `.lock().unwrap()` here used to propagate the poison as a panic in
+    /// the calling thread, killing the daemon. The recovery contract is
+    /// into_inner() + clear_poison() + error log + carry on.
+    #[test]
+    fn poisoned_last_applied_profile_is_recovered_not_panic() {
+        // Poison the mutex the real way: a thread that panics while holding
+        // the guard. Unwinding drops the guard (so the mutex is unlocked) but
+        // marks it poisoned — exactly the state a `.lock().unwrap()` used to
+        // propagate as a daemon-killing panic.
+        let marker_value = failing_profile();
+        let handle = std::thread::spawn(move || {
+            let mut g = LAST_APPLIED_PROFILE.lock().unwrap();
+            *g = Some(marker_value);
+            panic!("simulated holder panic (intentional)");
+        });
+        let _ = handle.join();
+
+        // lock_or_recover must NOT panic: it takes the inner value, clears the
+        // poison, logs, and hands back a usable guard.
+        {
+            let g = lock_or_recover(&LAST_APPLIED_PROFILE, "LAST_APPLIED_PROFILE");
+            assert!(g.is_some(), "recovery must return the pre-poison value");
+        }
+
+        // The next plain lock must succeed again — poison cleared.
+        {
+            let g = LAST_APPLIED_PROFILE.lock().unwrap();
+            assert!(g.is_some());
+        }
     }
 }
