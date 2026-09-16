@@ -509,7 +509,18 @@ pub fn refresh_hardware_cache() {
     let system_info = hardware_detection::get_system_info().ok();
 
     {
-        let mut cache = HARDWARE_CACHE.lock().unwrap();
+        // Recover from a poisoned mutex rather than panicking the monitor
+        // task. Clearing the poison keeps the D-Bus read paths serving fresh
+        // data; a stale-but-present cache beats a permanently blind daemon.
+        let mut cache = match HARDWARE_CACHE.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                log::error!(target: "hw.cache", "HARDWARE_CACHE poisoned — clearing poison and recovering");
+                let g = e.into_inner();
+                HARDWARE_CACHE.clear_poison();
+                g
+            }
+        };
         cache.cpu_info = cpu_info;
         cache.memory_info = memory_info;
         cache.gpu_info = gpu_info;
