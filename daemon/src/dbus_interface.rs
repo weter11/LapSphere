@@ -308,7 +308,9 @@ impl ControlInterface {
                 if !crate::tuxedo_io::TuxedoIo::is_available() {
                     return Err(anyhow::anyhow!("tuxedo_io not available"));
                 }
-                crate::tuxedo_io::TuxedoIo::new()?.get_fan_temperature(fan_id)
+                crate::tuxedo_io::TuxedoIo::shared()
+                    .ok_or_else(|| anyhow::anyhow!("tuxedo_io not available"))?
+                    .get_fan_temperature(fan_id)
             })(),
             |i: &u32| format!("id={} temp={}C", fan_id, i)
         )
@@ -466,7 +468,8 @@ impl ControlInterface {
                 if !crate::tuxedo_io::TuxedoIo::is_available() {
                     return Ok("None".to_string());
                 }
-                let io = crate::tuxedo_io::TuxedoIo::new()?;
+                let io = crate::tuxedo_io::TuxedoIo::shared()
+                    .ok_or_else(|| anyhow::anyhow!("tuxedo_io not available"))?;
                 let interface = match io.get_interface() {
                     crate::tuxedo_io::HardwareInterface::Clevo => "Clevo",
                     crate::tuxedo_io::HardwareInterface::Uniwill => "Uniwill",
