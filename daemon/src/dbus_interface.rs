@@ -241,7 +241,7 @@ impl ControlInterface {
             let profile: Profile = serde_json::from_str(profile_json)?;
             // Update GPU daemon state for dynamic overclocking
             {
-                let mut state = crate::GPU_DAEMON_STATE.lock().unwrap();
+                let mut state = crate::hardware_control::lock_or_recover(&crate::GPU_DAEMON_STATE, "GPU_DAEMON_STATE");
                 *state = Some(profile.gpu_settings.clone());
             }
             crate::hardware_control::apply_profile(&profile)
@@ -374,7 +374,7 @@ impl ControlInterface {
 
     async fn get_daemon_logs(&self) -> Result<String, zbus::fdo::Error> {
         // No explicit API logging for logs retrieval to avoid recursion and noise
-        let logs = crate::DAEMON_LOGS.lock().unwrap();
+        let logs = crate::hardware_control::lock_or_recover(&crate::DAEMON_LOGS, "DAEMON_LOGS");
         let logs_vec: Vec<LogEntry> = logs.iter().cloned().collect();
         serde_json::to_string(&logs_vec)
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))

@@ -83,7 +83,7 @@ static IDLE_METRICS_CACHE: Lazy<Mutex<HashMap<u32, IdleCacheEntry>>> =
 /// Freshness probe without touching the GPU (safe to call from any path).
 #[allow(dead_code)]
 fn idle_cache_fresh_for(index: u32) -> bool {
-    let cache = IDLE_METRICS_CACHE.lock().unwrap();
+    let cache = crate::hardware_control::lock_or_recover(&IDLE_METRICS_CACHE, "IDLE_METRICS_CACHE");
     cache
         .get(&index)
         .map(|e| e.captured_at.elapsed().as_secs() < IDLE_CACHE_TTL_SECS)
@@ -165,7 +165,7 @@ fn calculate_cpu_load() -> Result<HashMap<u32, f32>> {
     let current_stats = read_cpu_stats()?;
     
     // Get previous stats from thread-safe storage
-    let mut prev_stats_lock = PREVIOUS_CPU_STATS.lock().unwrap();
+    let mut prev_stats_lock = crate::hardware_control::lock_or_recover(&PREVIOUS_CPU_STATS, "PREVIOUS_CPU_STATS");
     
     let loads = if let Some(ref prev_stats) = *prev_stats_lock {
         // Calculate load based on delta from previous call
@@ -410,7 +410,7 @@ fn try_rapl() -> Result<f32> {
                 if let Ok(energy_str) = fs::read_to_string(path.join("energy_uj")) {
                     if let Ok(energy) = energy_str.trim().parse::<f64>() {
                         let now = Instant::now();
-                        let mut prev_lock = PREVIOUS_RAPL_STATS.lock().unwrap();
+                        let mut prev_lock = crate::hardware_control::lock_or_recover(&PREVIOUS_RAPL_STATS, "PREVIOUS_RAPL_STATS");
 
                         let power = if let Some((prev_energy, prev_time)) = *prev_lock {
                             let elapsed = now.duration_since(prev_time).as_secs_f64();
@@ -717,7 +717,7 @@ pub fn get_tdp_profiles() -> Result<Vec<String>> {
             match io.get_available_profiles() {
                 Ok(profiles) => {
                     static LOGGED_ONCE: Mutex<bool> = Mutex::new(false);
-                    let mut logged = LOGGED_ONCE.lock().unwrap();
+                    let mut logged = crate::hardware_control::lock_or_recover(&LOGGED_ONCE, "LOGGED_ONCE");
                     if !*logged {
                         log::debug!(target: "hw.detect", "Available TDP profiles: {:?}", profiles);
                         *logged = true;
@@ -797,7 +797,7 @@ pub fn get_all_fan_info() -> Result<Vec<FanInfo>> {
     // 1. Get system fans (Tuxedo/Uniwill/Clevo)
     if TuxedoIo::is_available() {
         if let Some(io) = TuxedoIo::shared() {
-            let fan_settings = crate::FAN_DAEMON_STATE.lock().unwrap();
+            let fan_settings = crate::hardware_control::lock_or_recover(&crate::FAN_DAEMON_STATE, "FAN_DAEMON_STATE");
             let manual_mode = fan_settings.as_ref().map_or(false, |s| s.control_enabled);
 
             for fan_id in 0..io.get_fan_count() {
@@ -817,7 +817,7 @@ pub fn get_all_fan_info() -> Result<Vec<FanInfo>> {
     }
 
     // 2. Get NVIDIA GPU fans
-    let gpu_settings = crate::GPU_DAEMON_STATE.lock().unwrap();
+    let gpu_settings = crate::hardware_control::lock_or_recover(&crate::GPU_DAEMON_STATE, "GPU_DAEMON_STATE");
 
     // Check suspension status first to avoid waking up GPU
     let mut nvidia_active = false;
@@ -1271,7 +1271,7 @@ pub fn get_system_info() -> Result<SystemInfo> {
     static CACHED_SYSTEM_INFO: Mutex<Option<SystemInfo>> = Mutex::new(None);
 
     {
-        let cache = CACHED_SYSTEM_INFO.lock().unwrap();
+        let cache = crate::hardware_control::lock_or_recover(&CACHED_SYSTEM_INFO, "CACHED_SYSTEM_INFO");
         if let Some(info) = &*cache {
             return Ok(info.clone());
         }
@@ -1325,7 +1325,7 @@ pub fn get_system_info() -> Result<SystemInfo> {
     };
 
     {
-        let mut cache = CACHED_SYSTEM_INFO.lock().unwrap();
+        let mut cache = crate::hardware_control::lock_or_recover(&CACHED_SYSTEM_INFO, "CACHED_SYSTEM_INFO");
         *cache = Some(info.clone());
     }
 
@@ -1517,7 +1517,7 @@ fn get_base_gpu_clock_ranges(device: &nvml_wrapper::Device) -> Result<(u32, u32)
 pub fn get_gpu_clock_ranges(device_index: u32) -> Result<(u32, u32)> {
     // Try cache first to avoid waking up GPU
     let cached_range = {
-        let cache = NVIDIA_METADATA_CACHE.lock().unwrap();
+        let cache = crate::hardware_control::lock_or_recover(&NVIDIA_METADATA_CACHE, "NVIDIA_METADATA_CACHE");
         cache.get(&device_index).and_then(|m| m.core_clock_range)
     };
 
@@ -1535,7 +1535,7 @@ pub fn get_gpu_clock_ranges(device_index: u32) -> Result<(u32, u32)> {
 
     // Add current core offset if any to show real-time effective ranges in the UI
     let offset = {
-        let map = crate::MANUAL_GPU_OFFSETS.lock().unwrap();
+        let map = crate::hardware_control::lock_or_recover(&crate::MANUAL_GPU_OFFSETS, "MANUAL_GPU_OFFSETS");
         map.get(&device_index).map(|(c, _)| *c).unwrap_or(0.0)
     };
 
@@ -1549,7 +1549,7 @@ pub fn get_gpu_clock_ranges(device_index: u32) -> Result<(u32, u32)> {
 pub fn get_gpu_core_offset_limits(device_index: u32) -> Result<(i32, i32)> {
     // Try cache first
     let cached_limits = {
-        let cache = NVIDIA_METADATA_CACHE.lock().unwrap();
+        let cache = crate::hardware_control::lock_or_recover(&NVIDIA_METADATA_CACHE, "NVIDIA_METADATA_CACHE");
         cache.get(&device_index).and_then(|m| m.core_offset_limits)
     };
 
@@ -1570,7 +1570,7 @@ pub fn get_gpu_core_offset_limits(device_index: u32) -> Result<(i32, i32)> {
 pub fn get_gpu_memory_offset_limits(device_index: u32) -> Result<(i32, i32)> {
     // Try cache first
     let cached_limits = {
-        let cache = NVIDIA_METADATA_CACHE.lock().unwrap();
+        let cache = crate::hardware_control::lock_or_recover(&NVIDIA_METADATA_CACHE, "NVIDIA_METADATA_CACHE");
         cache.get(&device_index).and_then(|m| m.memory_offset_limits)
     };
 
@@ -2179,7 +2179,7 @@ fn get_nvidia_extended_stats(gpu_index: u32) -> (Option<f32>, Option<f32>, Optio
 
 fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
     let (manual_clocks_enabled, _advanced_control_enabled) = {
-        let state = crate::GPU_DAEMON_STATE.lock().unwrap();
+        let state = crate::hardware_control::lock_or_recover(&crate::GPU_DAEMON_STATE, "GPU_DAEMON_STATE");
         state.as_ref().map_or((false, false), |s| (s.manual_clocks, s.advanced_control))
     };
 
@@ -2221,13 +2221,13 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
     // If all detected NVIDIA GPUs are suspended, bypass NVML completely to keep them asleep
     if all_suspended && !force_full_poll {
         let mut gpus = Vec::new();
-        let names = NVIDIA_NAMES_CACHE.lock().unwrap();
+        let names = crate::hardware_control::lock_or_recover(&NVIDIA_NAMES_CACHE, "NVIDIA_NAMES_CACHE");
         for (i, status) in statuses.into_iter().enumerate() {
             let name = names.get(i).cloned().unwrap_or_else(|| "NVIDIA GPU".to_string());
             
             // Retrieve cached metadata (including VRAM info) if available
             let cached_metadata = {
-                let cache = NVIDIA_METADATA_CACHE.lock().unwrap();
+                let cache = crate::hardware_control::lock_or_recover(&NVIDIA_METADATA_CACHE, "NVIDIA_METADATA_CACHE");
                 cache.get(&(i as u32)).cloned()
             };
             
@@ -2315,8 +2315,8 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 "NVIDIA GPU(s) active-but-idle with fresh snapshot: bypassing NVML (RTD3 idle tier)");
             let mut gpus = Vec::new();
             {
-                let names = NVIDIA_NAMES_CACHE.lock().unwrap();
-                let cache_guard = IDLE_METRICS_CACHE.lock().unwrap();
+                let names = crate::hardware_control::lock_or_recover(&NVIDIA_NAMES_CACHE, "NVIDIA_NAMES_CACHE");
+                let cache_guard = crate::hardware_control::lock_or_recover(&IDLE_METRICS_CACHE, "IDLE_METRICS_CACHE");
                 for (i, status) in statuses.iter().enumerate() {
                     let name = names
                         .get(i)
@@ -2324,7 +2324,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                         .unwrap_or_else(|| "NVIDIA GPU".to_string());
 
                     let cached_metadata = {
-                        let meta_cache = NVIDIA_METADATA_CACHE.lock().unwrap();
+                        let meta_cache = crate::hardware_control::lock_or_recover(&NVIDIA_METADATA_CACHE, "NVIDIA_METADATA_CACHE");
                         meta_cache.get(&(i as u32)).cloned()
                     };
 
@@ -2418,14 +2418,14 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                     if gpu_info.name.to_lowercase().contains("nvidia")
                         && manual_clocks_enabled
                     {
-                        let stats_lock = crate::CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
+                        let stats_lock = crate::hardware_control::lock_or_recover(&crate::CURRENT_GPU_OVERCLOCK_STATS, "CURRENT_GPU_OVERCLOCK_STATS");
                         if let Some(ref stats) = *stats_lock {
                             gpu_info.freq_offset = Some(stats.freq_offset);
                             gpu_info.drain_offset = Some(stats.drain_offset);
                             gpu_info.power_offset = Some(stats.power_offset);
                             gpu_info.total_offset = Some(stats.total_offset);
                         } else {
-                            let manual_map = crate::MANUAL_GPU_OFFSETS.lock().unwrap();
+                            let manual_map = crate::hardware_control::lock_or_recover(&crate::MANUAL_GPU_OFFSETS, "MANUAL_GPU_OFFSETS");
                             if let Some(offsets) = manual_map.get(&(i as u32)) {
                                 let core: f32 = offsets.0;
                                 gpu_info.total_offset = Some(core.round() as i32);
@@ -2461,13 +2461,13 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         // stub — otherwise the flag burns without producing live values.
         if is_suspended && !force_full_poll {
             let name = {
-                let cache = NVIDIA_NAMES_CACHE.lock().unwrap();
+                let cache = crate::hardware_control::lock_or_recover(&NVIDIA_NAMES_CACHE, "NVIDIA_NAMES_CACHE");
                 cache.get(i as usize).cloned().unwrap_or_else(|| "NVIDIA GPU".to_string())
             };
             
             // Retrieve cached metadata (including VRAM info) if available
             let cached_metadata = {
-                let cache = NVIDIA_METADATA_CACHE.lock().unwrap();
+                let cache = crate::hardware_control::lock_or_recover(&NVIDIA_METADATA_CACHE, "NVIDIA_METADATA_CACHE");
                 cache.get(&i).cloned()
             };
             
@@ -2536,7 +2536,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
 
         // Update name cache
         {
-            let mut cache = NVIDIA_NAMES_CACHE.lock().unwrap();
+            let mut cache = crate::hardware_control::lock_or_recover(&NVIDIA_NAMES_CACHE, "NVIDIA_NAMES_CACHE");
             if cache.len() <= i as usize {
                 cache.push(name.clone());
             } else {
@@ -2647,7 +2647,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         // timestamp here would leave the entry permanently stale and turn
         // the TTL re-poll into a 1 Hz NVML hot loop.)
         {
-            let mut cache = IDLE_METRICS_CACHE.lock().unwrap();
+            let mut cache = crate::hardware_control::lock_or_recover(&IDLE_METRICS_CACHE, "IDLE_METRICS_CACHE");
             cache.insert(
                 i,
                 IdleCacheEntry {
@@ -2671,7 +2671,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
 
         // Get metadata from cache or fetch it
         let metadata = {
-            let mut cache = NVIDIA_METADATA_CACHE.lock().unwrap();
+            let mut cache = crate::hardware_control::lock_or_recover(&NVIDIA_METADATA_CACHE, "NVIDIA_METADATA_CACHE");
             if let Some(meta) = cache.get(&i) {
                 log::debug!(target: "hw.detect", "GPU {}: Using cached metadata", i);
                 // Check if cached metadata is incomplete - if so, retry getting it
@@ -2793,7 +2793,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         // Apply current offset to the cached base range for real-time reporting
         let core_clock_range = metadata.core_clock_range.map(|(min, max)| {
             let offset = {
-                let map = crate::MANUAL_GPU_OFFSETS.lock().unwrap();
+                let map = crate::hardware_control::lock_or_recover(&crate::MANUAL_GPU_OFFSETS, "MANUAL_GPU_OFFSETS");
                 map.get(&i).map(|(c, _)| *c).unwrap_or(0.0)
             };
             ((min as f32 + offset).max(0.0) as u32, (max as f32 + offset).max(0.0) as u32)
@@ -2806,7 +2806,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         // Log VRAM info for diagnostics (rate-limited)
         static LAST_VRAM_LOG: Lazy<Mutex<HashMap<u32, Instant>>> = Lazy::new(|| Mutex::new(HashMap::new()));
         let should_log_vram = {
-            let mut last_log = LAST_VRAM_LOG.lock().unwrap();
+            let mut last_log = crate::hardware_control::lock_or_recover(&LAST_VRAM_LOG, "LAST_VRAM_LOG");
             match last_log.get(&i) {
                 Some(instant) if instant.elapsed() < std::time::Duration::from_secs(60) => false,
                 _ => {
@@ -2877,7 +2877,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
 
         // Fill in offsets if they exist in global state (assuming first NVIDIA GPU for now)
         if name.to_lowercase().contains("nvidia") && manual_clocks_enabled {
-            let stats_lock = crate::CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
+            let stats_lock = crate::hardware_control::lock_or_recover(&crate::CURRENT_GPU_OVERCLOCK_STATS, "CURRENT_GPU_OVERCLOCK_STATS");
             if let Some(ref stats) = *stats_lock {
                 gpu_info.freq_offset = Some(stats.freq_offset);
                 gpu_info.drain_offset = Some(stats.drain_offset);
@@ -2885,7 +2885,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                 gpu_info.total_offset = Some(stats.total_offset);
             } else {
                 // Fallback to manual offsets if dynamic is not active
-                let manual_map = crate::MANUAL_GPU_OFFSETS.lock().unwrap();
+                let manual_map = crate::hardware_control::lock_or_recover(&crate::MANUAL_GPU_OFFSETS, "MANUAL_GPU_OFFSETS");
                 if let Some(offsets) = manual_map.get(&i) {
                     let core: f32 = offsets.0;
                     gpu_info.total_offset = Some(core.round() as i32);
@@ -3431,7 +3431,7 @@ fn read_wifi_bytes(interface: &str) -> Option<(u64, u64)> {
 
 fn read_wifi_rates(interface: &str, tx_bytes: u64, rx_bytes: u64) -> (Option<f64>, Option<f64>) {
     let now = Instant::now();
-    let mut stats = PREVIOUS_NET_STATS.lock().unwrap();
+    let mut stats = crate::hardware_control::lock_or_recover(&PREVIOUS_NET_STATS, "PREVIOUS_NET_STATS");
     let rates = if let Some(prev) = stats.get(interface) {
         let elapsed = now.duration_since(prev.timestamp).as_secs_f64();
         if elapsed > 0.0 {
@@ -3825,7 +3825,7 @@ fn calculate_storage_rates(
     sector_size: u64,
 ) -> (Option<f64>, Option<f64>, Option<f64>, Option<f64>) {
     let now = Instant::now();
-    let mut stats = PREVIOUS_STORAGE_STATS.lock().unwrap();
+    let mut stats = crate::hardware_control::lock_or_recover(&PREVIOUS_STORAGE_STATS, "PREVIOUS_STORAGE_STATS");
     let rates = if let Some(prev) = stats.get(device) {
         let elapsed = now.duration_since(prev.timestamp).as_secs_f64();
         if elapsed > 0.0 {

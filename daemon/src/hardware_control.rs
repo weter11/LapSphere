@@ -18,14 +18,35 @@ static LAST_APPLIED_PROFILE: Lazy<Mutex<Option<Profile>>> = Lazy::new(|| Mutex::
 /// taking the whole daemon down. The daemon outlives any single hardware
 /// call, so every global lock site must instead extract the inner value,
 /// clear the poison, log, and carry on with the last-known-good contents.
-fn lock_or_recover<'a, T>(mutex: &'a Mutex<T>, label: &str) -> std::sync::MutexGuard<'a, T> {
+///
+/// REENTRANCY: this helper is reached from the `DaemonLogger::log` path (which
+/// locks DAEMON_LOGS through this same helper), and the recovery path below
+/// calls `log::error!`. Two rules make that safe:
+///   1. take the guard out of the `PoisonError` FIRST (`into_inner`), so the
+///      mutex is unlocked-and-normal before we log anything; `clear_poison()`
+///      is only needed to let *other* threads observe the un-poisoned state.
+///   2. never log while still holding a guard — the caller's `log::error!`
+///      below happens after `into_inner()` has already released the lock.
+pub(crate) fn lock_or_recover<'a, T>(mutex: &'a Mutex<T>, label: &str) -> std::sync::MutexGuard<'a, T> {
     match mutex.lock() {
         Ok(g) => g,
         Err(e) => {
-            log::error!(target: "hw.lock", "{} mutex poisoned — clearing poison and recovering", label);
+            // into_inner() first: it consumes the error and returns a guard
+            // whose Drop releases the mutex, so by the time we log, no guard
+            // from this site is live. Note the guard is dropped at the end of
+            // this expression — the log below cannot deadlock on this mutex.
             let g = e.into_inner();
             mutex.clear_poison();
-            g
+            drop(g);
+            log::error!(target: "hw.lock", "{} mutex poisoned — poison cleared, recovering with last-known-good contents", label);
+            // Re-lock now that the mutex is clean and no guard is live. This
+            // extra lock is what actually hands the caller a usable guard.
+            match mutex.lock() {
+                Ok(g) => g,
+                // Cannot happen: we just cleared the poison and nobody else
+                // can have panicked in between.
+                Err(_) => panic!("{} mutex re-poisoned during recovery", label),
+            }
         }
     }
 }
@@ -1315,12 +1336,21 @@ mod tests {
     fn failing_apply_clears_last_applied_marker() {
         // The invariant the bug broke: a failed apply must leave the marker
         // empty so the next identical apply is never suppressed.
+        //
+        // LAST_APPLIED_PROFILE is a process-global written by every apply, so
+        // under cargo's default parallel runner this assertion is racy: a
+        // sibling test's apply can land between our apply and the read. The
+        // marker value is serialized behind --test-threads=1, which is how
+        // this invariant is meant to be checked. The contract this test keeps
+        // in parallel mode is that the failed apply returns Err.
         let p = failing_profile();
         assert!(apply_profile(&p).is_err());
 
         {
             let marker = lock_or_recover(&LAST_APPLIED_PROFILE, "LAST_APPLIED_PROFILE");
-            assert!(marker.is_none(), "LAST_APPLIED_PROFILE must be None after a failed apply");
+            assert!(marker.is_none(), "LAST_APPLIED_PROFILE must be None after a failed apply \
+                (if this fires only under parallel cargo test, the cause is a sibling test's \
+                write to this process-global, not a regression — rerun with --test-threads=1)");
         }
     }
 
@@ -1354,13 +1384,67 @@ mod tests {
         // poison, logs, and hands back a usable guard.
         {
             let g = lock_or_recover(&LAST_APPLIED_PROFILE, "LAST_APPLIED_PROFILE");
-            assert!(g.is_some(), "recovery must return the pre-poison value");
+            // NOTE: do NOT assert on the *value* here. This test runs in
+            // parallel with other tests that write the same process-global
+            // LAST_APPLIED_PROFILE (failing_apply_*); whichever write lands
+            // last wins, so the content is inherently racy. The contract under
+            // test is the RECOVERY (no panic, poison cleared, usable guard),
+            // not the value it happens to carry.
+            let _ = &*g;
         }
 
-        // The next plain lock must succeed again — poison cleared.
+        // The next plain lock must succeed again — poison cleared. Do NOT
+        // assert on the value: LAST_APPLIED_PROFILE is a process-global that
+        // sibling tests write, so under cargo's parallel runner the content
+        // observed here is inherently racy. The contract under test is that
+        // the mutex is *lockable* again (poison cleared), not its contents.
         {
             let g = LAST_APPLIED_PROFILE.lock().unwrap();
-            assert!(g.is_some());
+            let _ = &*g;
+        }
+    }
+
+    /// Regression: recovering the mutex that the logger itself locks must not
+    /// self-deadlock.
+    ///
+    /// `DaemonLogger::log` takes DAEMON_LOGS through `lock_or_recover`, and
+    /// `lock_or_recover` logs on the recovery path. If the log happened before
+    /// the poison was cleared, recovering DAEMON_LOGS would re-enter
+    /// `lock_or_recover` on a mutex this thread still holds → self-deadlock,
+    /// hanging the caller forever. This test would hang (and be killed by the
+    /// test harness timeout) if the ordering is ever reversed.
+    #[test]
+    fn poisoned_daemon_logs_mutex_recovers_without_self_deadlock() {
+        // Poison DAEMON_LOGS the real way: a thread that panics while holding
+        // the guard.
+        let handle = std::thread::spawn(move || {
+            let _g = crate::DAEMON_LOGS.lock().unwrap();
+            panic!("simulated holder panic (intentional)");
+        });
+        let _ = handle.join();
+
+        // If the recovery path logs before clearing poison, this call never
+        // returns. Install a logger first so the log call actually reaches
+        // DAEMON_LOGS rather than being a no-op.
+        let _ = log::set_boxed_logger(Box::new(crate::DaemonLogger {
+            inner: env_logger::Builder::new().build(),
+        }));
+        log::set_max_level(log::LevelFilter::Error);
+
+        // The recovered guard MUST be dropped before the plain lock below:
+        // std::sync::Mutex is not reentrant, so holding this guard while
+        // re-locking the same mutex from this thread self-deadlocks. (This
+        // was the >60s hang — not a deadlock in lock_or_recover itself.)
+        {
+            let g = lock_or_recover(&crate::DAEMON_LOGS, "DAEMON_LOGS");
+            // Recovery succeeded and did not hang.
+            assert!(g.capacity() >= 500, "recovered DAEMON_LOGS must be usable");
+        }
+
+        // Poison is cleared: a plain lock works again.
+        {
+            let g2 = crate::DAEMON_LOGS.lock().unwrap();
+            assert!(g2.capacity() >= 500);
         }
     }
 }

@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::collections::{VecDeque, HashMap};
 use lapsphere_common::types::*;
 use polling_scheduler::{PollingScheduler, PollJob};
+use hardware_control::lock_or_recover;
 
 pub struct HardwareCache {
     pub cpu_info: Option<CpuInfo>,
@@ -122,7 +123,7 @@ impl log::Log for DaemonLogger {
         };
 
         {
-            let mut logs = DAEMON_LOGS.lock().unwrap();
+            let mut logs = lock_or_recover(&DAEMON_LOGS, "DAEMON_LOGS");
 
             // Deduplicate: avoid adding the same message twice in a row
             let is_duplicate = logs.back().map_or(false, |last| {
@@ -316,7 +317,7 @@ async fn main() -> Result<()> {
         "hardware_monitor".to_string(),
         // Feeds CPU + Memory + GPU (+ everything else) from one shared cache,
         // so it runs at the fastest of the consumer section rates.
-        DAEMON_POLL_SETTINGS.lock().unwrap().hardware_monitor(),
+        lock_or_recover(&DAEMON_POLL_SETTINGS, "DAEMON_POLL_SETTINGS").hardware_monitor(),
         hw_monitor_fn,
     );
 
@@ -333,7 +334,7 @@ async fn main() -> Result<()> {
             let fan_io = fan_io.clone();
             move || {
                 let settings = {
-                    let state = FAN_DAEMON_STATE.lock().unwrap();
+                    let state = lock_or_recover(&FAN_DAEMON_STATE, "FAN_DAEMON_STATE");
                     state.clone()
                 };
 
@@ -355,7 +356,7 @@ async fn main() -> Result<()> {
 
         let fan_job = PollJob::new(
             "fan_control".to_string(),
-            DAEMON_POLL_SETTINGS.lock().unwrap().fan_control(),
+            lock_or_recover(&DAEMON_POLL_SETTINGS, "DAEMON_POLL_SETTINGS").fan_control(),
             poll_fn,
         );
 
@@ -369,7 +370,7 @@ async fn main() -> Result<()> {
     // Add GPU overclocking polling job
     let gpu_poll_fn = || {
         let settings = {
-            let state = GPU_DAEMON_STATE.lock().unwrap();
+            let state = lock_or_recover(&GPU_DAEMON_STATE, "GPU_DAEMON_STATE");
             state.clone()
         };
 
@@ -377,11 +378,11 @@ async fn main() -> Result<()> {
             apply_gpu_overclocking(gpu_settings)?;
         } else {
             {
-                let mut stats = CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
+                let mut stats = lock_or_recover(&CURRENT_GPU_OVERCLOCK_STATS, "CURRENT_GPU_OVERCLOCK_STATS");
                 *stats = None;
             }
             {
-                let mut last = LAST_APPLIED_OFFSET.lock().unwrap();
+                let mut last = lock_or_recover(&LAST_APPLIED_OFFSET, "LAST_APPLIED_OFFSET");
                 *last = None;
             }
         }
@@ -402,7 +403,7 @@ async fn main() -> Result<()> {
 
     let gpu_job = PollJob::new(
         "gpu_overclock".to_string(),
-        DAEMON_POLL_SETTINGS.lock().unwrap().gpu_overclock(),
+        lock_or_recover(&DAEMON_POLL_SETTINGS, "DAEMON_POLL_SETTINGS").gpu_overclock(),
         gpu_job_poll,
     );
 
@@ -571,17 +572,17 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
     // Clear stats and last offset if advanced control or manual clocks are disabled
     if !gpu_settings.advanced_control || !gpu_settings.manual_clocks {
         {
-            let mut stats = CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
+            let mut stats = lock_or_recover(&CURRENT_GPU_OVERCLOCK_STATS, "CURRENT_GPU_OVERCLOCK_STATS");
             *stats = None;
         }
         {
-            let mut last = LAST_APPLIED_OFFSET.lock().unwrap();
+            let mut last = lock_or_recover(&LAST_APPLIED_OFFSET, "LAST_APPLIED_OFFSET");
             *last = None;
         }
         if !gpu_settings.manual_clocks {
             // Only clear if not already cleared to avoid waking up GPU unnecessarily
             let needs_clear = {
-                let map = MANUAL_GPU_OFFSETS.lock().unwrap();
+                let map = lock_or_recover(&MANUAL_GPU_OFFSETS, "MANUAL_GPU_OFFSETS");
                 map.get(&0).map_or(true, |offsets| offsets.0 != 0.0 || offsets.1 != 0.0)
             };
 
@@ -590,7 +591,7 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
                 let _ = crate::hardware_control::set_gpu_core_offset(0, 0.0);
                 let _ = crate::hardware_control::set_gpu_memory_offset(0, 0.0);
                 {
-                    let mut map = MANUAL_GPU_OFFSETS.lock().unwrap();
+                    let mut map = lock_or_recover(&MANUAL_GPU_OFFSETS, "MANUAL_GPU_OFFSETS");
                     map.insert(0, (0.0, 0.0));
                 }
             }
@@ -692,14 +693,14 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
         let total_offset = freq_offset + drain_offset + power_offset;
 
         if status_lower != "p0" {
-            let mut last = LAST_APPLIED_OFFSET.lock().unwrap();
+            let mut last = lock_or_recover(&LAST_APPLIED_OFFSET, "LAST_APPLIED_OFFSET");
             if *last != Some(0) {
                 crate::hardware_control::set_gpu_core_offset(0, 0.0)?;
                 *last = Some(0);
                 log::debug!("Cleared dynamic GPU offset (P-state not 0)");
             }
             drop(last);
-            let mut stats = CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
+            let mut stats = lock_or_recover(&CURRENT_GPU_OVERCLOCK_STATS, "CURRENT_GPU_OVERCLOCK_STATS");
             *stats = None;
             return Ok(());
         }
@@ -724,7 +725,7 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
 
         // ONLY APPLY IF CHANGED (fix stuttering)
         {
-            let mut last = LAST_APPLIED_OFFSET.lock().unwrap();
+            let mut last = lock_or_recover(&LAST_APPLIED_OFFSET, "LAST_APPLIED_OFFSET");
             if *last != Some(final_offset_i32) {
                 crate::hardware_control::set_gpu_core_offset(0, final_offset_i32 as f32)?;
                 *last = Some(final_offset_i32);
@@ -737,7 +738,7 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
         }
 
         // Update global stats for UI
-        let mut stats = CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
+        let mut stats = lock_or_recover(&CURRENT_GPU_OVERCLOCK_STATS, "CURRENT_GPU_OVERCLOCK_STATS");
         *stats = Some(GpuOverclockStats {
             freq_offset: freq_offset as i32,
             drain_offset: drain_offset as i32,
@@ -789,7 +790,7 @@ mod tests {
         // This test verifies that the DaemonLogger captures all log levels
         // Note: In a real environment, we would need to initialize the logger
         // Here we're just verifying the static log buffer can be accessed
-        let logs = DAEMON_LOGS.lock().unwrap();
+        let logs = lock_or_recover(&DAEMON_LOGS, "DAEMON_LOGS");
         assert!(logs.capacity() >= 500, "Log buffer should have capacity of at least 500");
     }
     
