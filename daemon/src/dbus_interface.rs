@@ -6,6 +6,21 @@ use nix::sys::signal::{raise, Signal};
 
 const SHUTDOWN_SIGNAL_DELAY_MS: u64 = 200;
 
+/// Acquire the hardware cache guard, converting a poisoned mutex into a
+/// controlled D-Bus error instead of panicking the daemon.
+macro_rules! cache_guard {
+    () => {{
+        match crate::HARDWARE_CACHE.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                return Err(zbus::fdo::Error::Failed(
+                    "hardware cache mutex poisoned".to_string(),
+                ))
+            }
+        }
+    }};
+}
+
 macro_rules! log_api {
     ($method:expr, $call:expr, $ok_msg:expr) => {{
         log::debug!(target: "api.call", "{}", $method);
@@ -44,7 +59,8 @@ pub struct ControlInterface;
 #[interface(name = "io.lapsphere.Control")]
 impl ControlInterface {
     async fn get_system_info(&self) -> Result<String, zbus::fdo::Error> {
-        let info = crate::HARDWARE_CACHE.lock().unwrap().system_info.clone()
+        let guard = cache_guard!();
+        let info = guard.system_info.clone()
             .ok_or_else(|| zbus::fdo::Error::Failed("System info not available".to_string()))?;
 
         log_api_json!(
@@ -55,7 +71,7 @@ impl ControlInterface {
     }
 
     async fn get_memory_info(&self) -> Result<String, zbus::fdo::Error> {
-        let info = crate::HARDWARE_CACHE.lock().unwrap().memory_info.clone()
+        let info = cache_guard!().memory_info.clone()
             .ok_or_else(|| zbus::fdo::Error::Failed("Memory info not available".to_string()))?;
 
         log_api_json!(
@@ -66,7 +82,7 @@ impl ControlInterface {
     }
 
     async fn get_cpu_info(&self) -> Result<String, zbus::fdo::Error> {
-        let info = crate::HARDWARE_CACHE.lock().unwrap().cpu_info.clone()
+        let info = cache_guard!().cpu_info.clone()
             .ok_or_else(|| zbus::fdo::Error::Failed("CPU info not available".to_string()))?;
 
         log_api_json!(
@@ -77,7 +93,7 @@ impl ControlInterface {
     }
 
     async fn get_gpu_info(&self) -> Result<String, zbus::fdo::Error> {
-        let info = crate::HARDWARE_CACHE.lock().unwrap().gpu_info.clone();
+        let info = cache_guard!().gpu_info.clone();
 
         log_api_json!(
             "GetGpuInfo",
@@ -110,13 +126,13 @@ impl ControlInterface {
 
         // Publish into the shared cache so plain GetGpuInfo serves the same
         // fresh payload until the next monitor tick.
-        crate::HARDWARE_CACHE.lock().unwrap().gpu_info = info.clone();
+        cache_guard!().gpu_info = info.clone();
 
         serde_json::to_string(&info).map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
 
     async fn get_battery_info(&self) -> Result<String, zbus::fdo::Error> {
-        let info = crate::HARDWARE_CACHE.lock().unwrap().battery_info.clone()
+        let info = cache_guard!().battery_info.clone()
             .ok_or_else(|| zbus::fdo::Error::Failed("Battery info not available".to_string()))?;
 
         log_api_json!(
@@ -127,7 +143,7 @@ impl ControlInterface {
     }
 
     async fn get_storage_device_info(&self) -> Result<String, zbus::fdo::Error> {
-        let info = crate::HARDWARE_CACHE.lock().unwrap().storage_device_info.clone();
+        let info = cache_guard!().storage_device_info.clone();
 
         log_api_json!(
             "GetStorageDeviceInfo",
@@ -137,7 +153,7 @@ impl ControlInterface {
     }
 
     async fn get_mount_info(&self) -> Result<String, zbus::fdo::Error> {
-        let info = crate::HARDWARE_CACHE.lock().unwrap().mount_info.clone();
+        let info = cache_guard!().mount_info.clone();
 
         log_api_json!(
             "GetMountInfo",
@@ -147,7 +163,7 @@ impl ControlInterface {
     }
 
     async fn get_wifi_info(&self) -> Result<String, zbus::fdo::Error> {
-        let info = crate::HARDWARE_CACHE.lock().unwrap().wifi_info.clone();
+        let info = cache_guard!().wifi_info.clone();
 
         log_api_json!(
             "GetWifiInfo",
@@ -157,7 +173,7 @@ impl ControlInterface {
     }
 
     async fn get_gamepad_info(&self) -> Result<String, zbus::fdo::Error> {
-        let info = crate::HARDWARE_CACHE.lock().unwrap().gamepad_info.clone();
+        let info = cache_guard!().gamepad_info.clone();
 
         log_api_json!(
             "GetGamepadInfo",
@@ -264,7 +280,7 @@ impl ControlInterface {
     }
 
     async fn get_fan_speeds(&self) -> Result<String, zbus::fdo::Error> {
-        let info: Vec<(u32, u32)> = crate::HARDWARE_CACHE.lock().unwrap().fan_info.iter()
+        let info: Vec<(u32, u32)> = cache_guard!().fan_info.iter()
             .map(|f| (f.id, f.rpm_or_percent))
             .collect();
 
@@ -276,7 +292,7 @@ impl ControlInterface {
     }
 
     async fn get_fan_info(&self) -> Result<String, zbus::fdo::Error> {
-        let info = crate::HARDWARE_CACHE.lock().unwrap().fan_info.clone();
+        let info = cache_guard!().fan_info.clone();
 
         log_api_json!(
             "GetFanInfo",

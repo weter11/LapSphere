@@ -11,6 +11,277 @@ use crate::tuxedo_io::{TuxedoIo, HardwareInterface};
 static CPU_LIMITS_MODIFIED: AtomicBool = AtomicBool::new(false);
 static LAST_APPLIED_PROFILE: Lazy<Mutex<Option<Profile>>> = Lazy::new(|| Mutex::new(None));
 
+/// ---------------------------------------------------------------------------
+/// sysfs write safety guard (task-safety-sysfs-writes)
+///
+/// Every daemon write to /sysfs is routed through `guard_sysfs_write`, which
+/// enforces two independent protections *before* any bytes hit disk:
+///   1. PATH ALLOWLIST - only a fixed set of control attributes may ever be
+///      written; anything else is refused outright.
+///   2. VALUE RANGE CHECK - the payload must match the allowed vocabulary for
+///      that attribute (sanctioned governor string, boolean, status word, or a
+///      numeric within its hardware bounds). Out-of-range values are rejected,
+///      never clamped silently.
+/// ---------------------------------------------------------------------------
+
+/// Governor names we will ever permit writing to scaling_governor. Unknown
+/// tokens are refused so a bad/untrusted value cannot hang CPUs.
+const GOVERNOR_ALLOWLIST: &[&str] = &[
+    "performance", "powersave", "balanced", "ondemand", "user", "schedutil",
+    "userspace", "conservative", "interactive", "scheyonic", "energy_perf",
+];
+
+/// cpufreq frequency attributes guarded against out-of-hardware-range values.
+fn is_freq_attribute(path: &str) -> bool {
+    path.ends_with("scaling_min_freq")
+        || path.ends_with("scaling_max_freq")
+        || path.ends_with("cpuinfo_min_freq")
+        || path.ends_with("cpuinfo_max_freq")
+}
+
+/// Power-management boolean toggles written as "0"/"1".
+fn is_bool_toggle(path: &str) -> bool {
+    path.ends_with("cpufreq/boost")
+        || path.ends_with("intel_pstate/no_turbo")
+        || path.ends_with("amd_pstate/cpb_boost")
+}
+
+/// Intel p-state status words ("passive"/"active").
+fn is_intel_pstate_status(path: &str) -> bool {
+    path.ends_with("intel_pstate/status")
+}
+
+/// AMD p-state status words ("passive"/"active"/"guided").
+fn is_amd_pstate_status(path: &str) -> bool {
+    path.ends_with("amd_pstate/status")
+}
+
+/// SMT control ("on"/"off").
+fn is_smt_control(path: &str) -> bool {
+    path.ends_with("smt/control")
+}
+
+/// Numeric backlight brightness attrs; bounded by sibling max_brightness.
+fn is_brightness_attr(path: &str) -> bool {
+    path.ends_with("/brightness") || path.ends_with("/actual_brightness")
+}
+
+/// LED mode/speed attrs; small non-negative byte integers.
+fn is_led_mode_or_speed(path: &str) -> bool {
+    path.ends_with("/mode") || path.ends_with("/speed")
+}
+
+/// Whole-path allowlist ('*' wildcard spans exactly one path segment).
+const APPROVED_SYSFS_PATHS: &[&str] = &[
+    "/sys/devices/system/cpu/*/cpufreq/scaling_governor",
+    "/sys/devices/system/cpu/*/cpufreq/scaling_min_freq",
+    "/sys/devices/system/cpu/*/cpufreq/scaling_max_freq",
+    "/sys/devices/system/cpu/*/cpufreq/cpuinfo_min_freq",
+    "/sys/devices/system/cpu/*/cpufreq/cpuinfo_max_freq",
+    "/sys/devices/system/cpu/*/cpufreq/energy_performance_preference",
+    "/sys/devices/system/cpu/*/cpufreq/energy_performance_available_preferences",
+    "/sys/devices/system/cpu/cpufreq/boost",
+    "/sys/devices/system/cpu/intel_pstate/no_turbo",
+    "/sys/devices/system/cpu/amd_pstate/cpb_boost",
+    "/sys/devices/system/cpu/smt/control",
+    "/sys/devices/system/cpu/amd_pstate/status",
+    "/sys/devices/system/cpu/intel_pstate/status",
+    "/sys/class/backlight/*/brightness",
+    "/sys/class/backlight/*/actual_brightness",
+    "/sys/class/leds/*/multi_intensity",
+    "/sys/class/leds/*/brightness",
+    "/sys/class/leds/*/mode",
+    "/sys/class/leds/*/speed",
+];
+
+/// Split on '/', keeping empty segments for uniform comparison.
+fn split_path(p: &str) -> Vec<&str> {
+    p.split('/').collect()
+}
+
+/// Does `path` match an allowlist template whose '*' wildcard spans one segment?
+fn matches_template(path: &str, tmpl: &str) -> bool {
+    let mut a = split_path(path);
+    let mut b = split_path(tmpl);
+    if a.len() != b.len() {
+        return false;
+    }
+    for (x, y) in a.iter().zip(b.iter()) {
+        if *y == "*" {
+            continue; // wildcard matches any single non-empty segment
+        }
+        if x.is_empty() || *x != *y {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_allowed_sysfs_path(path: &str) -> bool {
+    APPROVED_SYSFS_PATHS.iter().any(|t| matches_template(path, t))
+}
+
+/// Parse a u64 payload, used by both frequency and brightness range checks.
+fn parse_u64(contents: &str) -> Result<u64> {
+    contents.trim().parse::<u64>().map_err(|_| {
+        anyhow!("non-numeric value \"{}\"", contents)
+    })
+}
+
+/// Range-check a frequency attribute against the given hardware window.
+/// Returns Ok(()) when the value is in-range; Err when out-of-range or
+/// unparseable. Callers decide whether an unreadable window is fatal.
+fn within_hw_freq(contents: &str, path: &str, hw_min: u64, hw_max: u64) -> Result<()> {
+    let raw = parse_u64(contents)?;
+    if raw < hw_min || raw > hw_max {
+        return Err(anyhow!(
+            "freq {} out of [{},{}] for {}",
+            raw,
+            hw_min,
+            hw_max,
+            path
+        ));
+    }
+    Ok(())
+}
+
+/// Range-check a backlight brightness value against the reported maximum.
+fn within_brightness(contents: &str, path: &str, max_b: u32) -> Result<()> {
+    let val: u32 = contents
+        .trim()
+        .parse()
+        .map_err(|_| anyhow!("non-numeric brightness \"{}\" for {}", contents, path))?;
+    if val > max_b {
+        return Err(anyhow!(
+            "brightness {} exceeds max {} for {}",
+            val,
+            max_b,
+            path
+        ));
+    }
+    Ok(())
+}
+
+/// Read CPU0 hardware frequency bounds once for range checking.
+fn read_hw_freq_bounds() -> Option<(u64, u64)> {
+    let min_s = fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq").ok()?;
+    let max_s = fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq").ok()?;
+    let min: u64 = min_s.trim().parse().ok()?;
+    let max: u64 = max_s.trim().parse().ok()?;
+    Some((min, max))
+}
+
+/// Maximum brightness the hardware reports (sibling of the writable attr).
+fn read_max_brightness(base: &str) -> Option<u32> {
+    let s = fs::read_to_string(format!("{base}/max_brightness")).ok()?;
+    s.trim().parse().ok()
+}
+
+/// Central gate: refuse anything not on the allowlist, then enforce value rules.
+fn guard_sysfs_write(path: &str, contents: &str) -> Result<()> {
+    if !is_allowed_sysfs_path(path) {
+        return Err(anyhow!(
+            "blocked non-allowlisted sysfs write to {}",
+            path
+        ));
+    }
+
+    // Governor string must be an explicitly sanctioned value.
+    if path.ends_with("scaling_governor") {
+        if !GOVERNOR_ALLOWLIST.contains(&contents) {
+            return Err(anyhow!(
+                "governor \"{}\" rejected for {}; allowed: {:?}",
+                contents,
+                path,
+                GOVERNOR_ALLOWLIST
+            ));
+        }
+    }
+
+    // Frequency attributes must sit within the hardware's [min,max] window.
+    if is_freq_attribute(path) {
+        match read_hw_freq_bounds() {
+            Some((hw_min, hw_max)) => {
+                within_hw_freq(contents, path, hw_min, hw_max)?;
+            }
+            None => {
+                log::warn!(target: "hw.cpu",
+                    "skipping freq range-check at {} (cpuinfo limits unreadable)", path);
+            }
+        }
+    }
+
+    // Backlight brightness bounded by reported max_brightness.
+    if is_brightness_attr(path) {
+        let trimmed = path.strip_suffix("/actual_brightness").unwrap();
+        let trimmed = trimmed.strip_suffix("/brightness").unwrap();
+        match read_max_brightness(trimmed) {
+            Some(max_b) => {
+                within_brightness(contents, path, max_b)?;
+            }
+            None => {
+                log::warn!(target: "hw.screen",
+                    "skipping brightness range-check at {} (max_brightness unreadable)", path);
+            }
+        }
+    }
+
+    // Boolean toggles are strictly 0/1.
+    if is_bool_toggle(path) {
+        if contents != "0" && contents != "1" {
+            return Err(anyhow!(
+                "bool toggle {} expects \"0\" or \"1\", got \"{}\"",
+                path,
+                contents
+            ));
+        }
+    }
+
+    // Intel p-state status word.
+    if is_intel_pstate_status(path) {
+        if !["passive", "active"].contains(&contents) {
+            return Err(anyhow!(
+                "intel pstate status \"{}\" invalid for {}",
+                contents,
+                path
+            ));
+        }
+    }
+
+    // AMD p-state status word.
+    if is_amd_pstate_status(path) {
+        if !["passive", "active", "guided"].contains(&contents) {
+            return Err(anyhow!(
+                "amd pstate status \"{}\" invalid for {}",
+                contents,
+                path
+            ));
+        }
+    }
+
+    // SMT control.
+    if is_smt_control(path) {
+        if contents != "on" && contents != "off" {
+            return Err(anyhow!(
+                "smt/control expects \"on\" or \"off\", got \"{}\"",
+                contents
+            ));
+        }
+    }
+
+    // LED mode/speed small byte integers.
+    if is_led_mode_or_speed(path) {
+        if !contents.parse::<u8>().is_ok() {
+            return Err(anyhow!(
+                "led mode/speed must be a byte integer, got \"{}\"",
+                contents
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn get_cpu_count() -> Result<u32> {
     let cpuinfo = fs::read_to_string("/proc/cpuinfo")?;
     let count = cpuinfo.lines()
@@ -21,11 +292,12 @@ fn get_cpu_count() -> Result<u32> {
 
 pub fn set_cpu_governor(governor: &str) -> Result<()> {
     let cpu_count = get_cpu_count()?;
-    
+
+    guard_sysfs_write("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor", governor)?;
+
     for i in 0..cpu_count {
         let path = format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_governor", i);
-        fs::write(&path, governor)
-            .map_err(|e| anyhow!("Failed to set governor for CPU {}: {}", i, e))?;
+        guard_sysfs_write(&path, governor)?;
     }
     
     log::info!(target: "hw.cpu", "set_governor profile=\"{}\"", governor);
@@ -58,16 +330,12 @@ pub fn set_cpu_frequency_limits(min_freq: u64, max_freq: u64) -> Result<()> {
         // Determine order based on current vs new values
         if max_freq < current_max || min_freq > current_min {
             // Set max first
-            fs::write(&max_path, max_freq.to_string())
-                .map_err(|e| anyhow!("Failed to set max frequency for CPU {}: {}", i, e))?;
-            fs::write(&min_path, min_freq.to_string())
-                .map_err(|e| anyhow!("Failed to set min frequency for CPU {}: {}", i, e))?;
+            guard_sysfs_write(&max_path, &max_freq.to_string())?;
+            guard_sysfs_write(&min_path, &min_freq.to_string())?;
         } else {
             // Set min first
-            fs::write(&min_path, min_freq.to_string())
-                .map_err(|e| anyhow!("Failed to set min frequency for CPU {}: {}", i, e))?;
-            fs::write(&max_path, max_freq.to_string())
-                .map_err(|e| anyhow!("Failed to set max frequency for CPU {}: {}", i, e))?;
+            guard_sysfs_write(&min_path, &min_freq.to_string())?;
+            guard_sysfs_write(&max_path, &max_freq.to_string())?;
         }
     }
     
@@ -95,15 +363,15 @@ pub fn set_cpu_boost(enabled: bool) -> Result<()> {
     // AMD cpufreq boost
     let amd_path = "/sys/devices/system/cpu/cpufreq/boost";
     if Path::new(amd_path).exists() {
-        fs::write(amd_path, if enabled { "1" } else { "0" })?;
+        guard_sysfs_write(amd_path, if enabled { "1" } else { "0" })?;
         log::info!(target: "hw.cpu", "set_amd_boost enabled={}", enabled);
         return Ok(());
     }
     
     // Intel turbo
     let intel_path = "/sys/devices/system/cpu/intel_pstate/no_turbo";
-    if Path::new(intel_path).exists() {
-        fs::write(intel_path, if enabled { "0" } else { "1" })?;
+        if Path::new(intel_path).exists() {
+            guard_sysfs_write(intel_path, if enabled { "0" } else { "1" })?;
         log::info!(target: "hw.cpu", "set_intel_turbo enabled={}", enabled);
         return Ok(());
     }
@@ -111,7 +379,7 @@ pub fn set_cpu_boost(enabled: bool) -> Result<()> {
     // AMD P-State boost (if using amd-pstate driver)
     let amd_pstate_boost = "/sys/devices/system/cpu/amd_pstate/cpb_boost";
     if Path::new(amd_pstate_boost).exists() {
-        fs::write(amd_pstate_boost, if enabled { "1" } else { "0" })?;
+        guard_sysfs_write(amd_pstate_boost, if enabled { "1" } else { "0" })?;
         log::info!(target: "hw.cpu", "set_amd_pstate_boost enabled={}", enabled);
         return Ok(());
     }
@@ -125,7 +393,7 @@ pub fn set_smt(enabled: bool) -> Result<()> {
         return Err(anyhow!("SMT control not available"));
     }
     
-    fs::write(path, if enabled { "on" } else { "off" })?;
+    guard_sysfs_write(path, if enabled { "on" } else { "off" })?;
     log::info!(target: "hw.cpu", "set_smt enabled={}", enabled);
     Ok(())
 }
@@ -140,7 +408,7 @@ pub fn set_amd_pstate_status(status: &str) -> Result<()> {
         return Err(anyhow!("Invalid AMD pstate status: {}", status));
     }
     
-    fs::write(path, status)?;
+    guard_sysfs_write(path, status)?;
     log::info!(target: "hw.cpu", "set_amd_pstate_status status=\"{}\"", status);
     crate::refresh_hardware_cache();
     Ok(())
@@ -156,7 +424,7 @@ pub fn set_intel_pstate_status(status: &str) -> Result<()> {
         return Err(anyhow!("Invalid Intel pstate status: {}", status));
     }
 
-    fs::write(path, status)?;
+    guard_sysfs_write(path, status)?;
     log::info!(target: "hw.cpu", "set_intel_pstate_status status=\"{}\"", status);
     crate::refresh_hardware_cache();
     Ok(())
@@ -218,7 +486,15 @@ pub fn apply_profile(profile: &Profile) -> Result<()> {
 
     // Apply GPU settings
     let nvidia_gpu_idx = {
-        let cache = crate::HARDWARE_CACHE.lock().unwrap();
+        let cache = match crate::HARDWARE_CACHE.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                log::error!(target: "hw.cache", "HARDWARE_CACHE poisoned — clearing poison and recovering");
+                let g = e.into_inner();
+                crate::HARDWARE_CACHE.clear_poison();
+                g
+            }
+        };
         cache.gpu_info.iter()
             .find(|g| g.name.to_lowercase().contains("nvidia"))
             .and_then(|g| g.nvml_index)
@@ -360,22 +636,13 @@ fn apply_screen_settings(settings: &ScreenSettings) -> Result<()> {
             // Write to actual_brightness first (this is writable)
             let actual_path = format!("{}/actual_brightness", base_path);
             if Path::new(&actual_path).exists() {
-                if let Err(e) = fs::write(&actual_path, actual_brightness.to_string()) {
-                    log::warn!(target: "hw.screen", "Could not write to actual_brightness: {}", e);
-                }
+                let _ = guard_sysfs_write(&actual_path, &actual_brightness.to_string());
             }
             
             // Then write to brightness
-            match fs::write(&brightness_path, actual_brightness.to_string()) {
-                Ok(_) => {
-                    log::info!(target: "hw.screen", "set_brightness level={}% path=\"{}\"", settings.brightness, base_path);
-                    return Ok(());
-                }
-                Err(e) => {
-                    log::warn!(target: "hw.screen", "Failed to set brightness at {}: {}", base_path, e);
-                    continue;
-                }
-            }
+            guard_sysfs_write(&brightness_path, &actual_brightness.to_string())?;
+            log::info!(target: "hw.screen", "set_brightness level={}% path=\"{}\"", settings.brightness, base_path);
+            return Ok(());
         }
     }
     
@@ -625,12 +892,23 @@ pub fn set_energy_performance_preference(epp: &str) -> Result<()> {
     for i in 0..cpu_count {
         let path = format!("/sys/devices/system/cpu/cpu{}/cpufreq/energy_performance_preference", i);
         if Path::new(&path).exists() {
-            fs::write(&path, epp)
-                .map_err(|e| anyhow!("Failed to set EPP for CPU {}: {}", i, e))?;
+            guard_sysfs_write(&path, epp)?;
         }
     }
     
     log::info!(target: "hw.cpu", "set_epp preference=\"{}\"", epp);
+    Ok(())
+}
+
+pub fn set_all_cpu_epp(epp: &str) -> Result<()> {
+    set_energy_performance_preference(epp)?;
+
+    let policy_path = "/sys/devices/system/cpu/cpufreq/energy_performance_preference";
+    if Path::new(policy_path).exists() {
+        guard_sysfs_write(policy_path, epp)?;
+    }
+
+    log::info!(target: "hw.cpu", "set_all_cpu_epp preference={}", epp);
     Ok(())
 }
 
@@ -718,7 +996,7 @@ impl RgbKeyboardControl {
         }
         
         let color_str = format!("{} {} {}", red, green, blue);
-        fs::write(&color_path, color_str)?;
+        guard_sysfs_write(&color_path, &color_str)?;
         
         log::info!(target: "hw.kbd", "set_zone_color zone={} r={} g={} b={}", zone_idx, red, green, blue);
         Ok(())
@@ -742,7 +1020,7 @@ impl RgbKeyboardControl {
             };
 
             let actual_brightness = ((brightness as u32) * max_brightness) / 100;
-            let _ = fs::write(&brightness_path, actual_brightness.to_string());
+            guard_sysfs_write(&brightness_path, &actual_brightness.to_string())?;
         }
         
         log::info!(target: "hw.kbd", "set_brightness level={}%", brightness);
