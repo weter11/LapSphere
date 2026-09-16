@@ -94,9 +94,11 @@ const APPROVED_SYSFS_PATHS: &[&str] = &[
     "/sys/class/leds/*/speed",
 ];
 
-/// Split on '/', keeping empty segments for uniform comparison.
+/// Split on '/', dropping the empty leading segment that an absolute path
+/// produces ("/sys/..." -> ["", "sys", ...]) so it cannot poison the wildcard
+/// comparison below.
 fn split_path(p: &str) -> Vec<&str> {
-    p.split('/').collect()
+    p.split('/').filter(|s| !s.is_empty()).collect()
 }
 
 /// Does `path` match an allowlist template whose '*' wildcard spans one segment?
@@ -431,19 +433,49 @@ pub fn set_intel_pstate_status(status: &str) -> Result<()> {
 }
 
 pub fn apply_profile(profile: &Profile) -> Result<()> {
-    // Check if this profile is already applied to avoid redundant hardware calls
+    // Check if this profile is already applied to avoid redundant hardware calls.
+    //
+    // IMPORTANT: the "already applied" marker is only written *after* every
+    // hardware step below succeeds. Previously it was recorded up-front, so a
+    // failure on any late step (keyboard/screen/fan...) left the profile
+    // marked as applied and every subsequent identical apply was silently
+    // skipped, leaving the machine in a partial hardware state. See task
+    // fix-hwc-stale-applied-profile.
     {
-        let mut last_profile = LAST_APPLIED_PROFILE.lock().unwrap();
+        let last_profile = LAST_APPLIED_PROFILE.lock().unwrap();
         if let Some(ref last) = *last_profile {
             if last == profile {
                 log::info!(target: "hw.detect", "Profile '{}' is already applied, skipping", profile.name);
                 return Ok(());
             }
         }
-        *last_profile = Some(profile.clone());
     }
 
     log::info!(target: "hw.detect", "Applying profile: {}", profile.name);
+    let result = apply_profile_inner(profile);
+    match result {
+        Ok(()) => {
+            // Record the profile only now that every hardware step succeeded.
+            let mut last_profile = LAST_APPLIED_PROFILE.lock().unwrap();
+            *last_profile = Some(profile.clone());
+            log::info!(target: "hw.detect", "Profile '{}' applied successfully", profile.name);
+            Ok(())
+        }
+        Err(e) => {
+            // A partial apply must NOT be remembered as "applied": otherwise the
+            // next identical apply would hit the early-return above and leave the
+            // machine in the partial state forever.
+            let mut last_profile = LAST_APPLIED_PROFILE.lock().unwrap();
+            *last_profile = None;
+            log::error!(target: "hw.detect", "Profile '{}' apply failed: {} — cleared last-applied marker", profile.name, e);
+            Err(e)
+        }
+    }
+}
+
+/// All hardware steps of a profile apply, in order. The caller owns the
+/// last-applied marker so a failure never leaves a stale "already applied" state.
+fn apply_profile_inner(profile: &Profile) -> Result<()> {
     
     // Apply CPU settings
     if let Some(ref governor) = profile.cpu_settings.governor {
@@ -544,8 +576,7 @@ pub fn apply_profile(profile: &Profile) -> Result<()> {
             let _ = set_gpu_fan_auto(fan_setting.device_index, fan_setting.fan_id);
         }
     }
-    
-    log::info!(target: "hw.detect", "Profile '{}' applied successfully", profile.name);
+
     Ok(())
 }
 
@@ -1176,5 +1207,97 @@ impl RgbKeyboardControl {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: absolute sysfs paths must match the allowlist templates.
+    ///
+    /// `split_path` previously kept the empty leading segment an absolute path
+    /// produces ("/sys/..." -> ["", "sys", ...]). `matches_template` rejects an
+    /// empty non-wildcard segment, so every real path was refused with
+    /// "blocked non-allowlisted sysfs write" and profile application never
+    /// reached the hardware at all. Dropping empty segments restores matching.
+    #[test]
+    fn absolute_paths_match_sysfs_allowlist() {
+        // The exact path the live daemon rejected 2026-09-16, plus a sibling
+        // wildcard position and a non-wildcard entry for coverage.
+        assert!(is_allowed_sysfs_path(
+            "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"
+        ));
+        assert!(is_allowed_sysfs_path(
+            "/sys/devices/system/cpu/cpu7/cpufreq/scaling_max_freq"
+        ));
+        assert!(is_allowed_sysfs_path("/sys/devices/system/cpu/cpufreq/boost"));
+        assert!(is_allowed_sysfs_path("/sys/class/leds/kbd_backlight/mode"));
+
+        // Still rejects unlisted attributes: the guard is not weakened.
+        assert!(!is_allowed_sysfs_path(
+            "/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq"
+        ));
+        assert!(!is_allowed_sysfs_path("/sys/class/hwmon/hwmon0/temp1_input"));
+    }
+
+
+    /// A profile whose earliest hardware step fails: `set_cpu_governor` runs
+    /// first in `apply_profile_inner` and "invalid-governor-token" is not on
+    /// GOVERNOR_ALLOWLIST, so `guard_sysfs_write` rejects it on any host.
+    fn failing_profile() -> Profile {
+        Profile {
+            name: "regression-early-fail".to_string(),
+            is_default: false,
+            cpu_settings: CpuSettings {
+                governor: Some("invalid-governor-token".to_string()),
+                ..CpuSettings::default()
+            },
+            ..Profile::default()
+        }
+    }
+
+    #[test]
+    fn failing_apply_propagates_err_and_is_repeatable() {
+        // Pre-fix: LAST_APPLIED_PROFILE was written before any hardware step
+        // ran, so the FIRST apply failed but the SECOND identical apply hit the
+        // "already applied" early return and returned Ok without touching
+        // hardware. Post-fix both must run the hardware steps and fail.
+        let p = failing_profile();
+
+        let first = apply_profile(&p);
+        assert!(first.is_err(), "first apply with a bad governor must fail");
+
+        // Re-apply must NOT be suppressed: it re-executes the hardware steps.
+        let second = apply_profile(&p);
+        assert!(second.is_err(), "re-apply of the same profile after a failure must not be skipped");
+
+        // Same step fails both times, proving re-execution rather than a
+        // short-circuit via a stale marker.
+        assert_eq!(
+            format!("{}", first.unwrap_err()),
+            format!("{}", second.unwrap_err()),
+            "re-apply must fail at the same step, not be suppressed"
+        );
+    }
+
+    #[test]
+    fn failing_apply_clears_last_applied_marker() {
+        // The invariant the bug broke: a failed apply must leave the marker
+        // empty so the next identical apply is never suppressed.
+        let p = failing_profile();
+        assert!(apply_profile(&p).is_err());
+
+        {
+            let marker = LAST_APPLIED_PROFILE.lock().unwrap();
+            assert!(marker.is_none(), "LAST_APPLIED_PROFILE must be None after a failed apply");
+        }
+    }
+
+    #[test]
+    fn profile_equality_keyes_the_skip_branch() {
+        // The skip branch is keyed on Profile PartialEq; guard against a
+        // future derive change silently breaking the contract.
+        assert_eq!(&failing_profile(), &failing_profile());
     }
 }
