@@ -281,6 +281,12 @@ fn guard_sysfs_write(path: &str, contents: &str) -> Result<()> {
         }
     }
 
+    // All checks passed: perform the write. The guard was originally
+    // validate-only and the call sites validated without ever writing, which
+    // made every sysfs-control method a no-op (profile apply returned success
+    // and no hardware state changed). See the docblock above: the intent was
+    // always "before any bytes hit disk".
+    fs::write(path, contents)?;
     Ok(())
 }
 
