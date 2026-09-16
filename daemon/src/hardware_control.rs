@@ -132,6 +132,11 @@ const APPROVED_SYSFS_PATHS: &[&str] = &[
     "/sys/class/leds/*/brightness",
     "/sys/class/leds/*/mode",
     "/sys/class/leds/*/speed",
+    // Keyboard discovery prefers the Tuxedo platform path to its class alias.
+    "/sys/devices/platform/tuxedo_keyboard/leds/*/multi_intensity",
+    "/sys/devices/platform/tuxedo_keyboard/leds/*/brightness",
+    "/sys/devices/platform/tuxedo_keyboard/leds/*/mode",
+    "/sys/devices/platform/tuxedo_keyboard/leds/*/speed",
 ];
 
 /// Split on '/', dropping the empty leading segment that an absolute path
@@ -255,8 +260,10 @@ fn guard_sysfs_write(path: &str, contents: &str) -> Result<()> {
 
     // Backlight brightness bounded by reported max_brightness.
     if is_brightness_attr(path) {
-        let trimmed = path.strip_suffix("/actual_brightness").unwrap();
-        let trimmed = trimmed.strip_suffix("/brightness").unwrap();
+        let trimmed = path
+            .strip_suffix("/actual_brightness")
+            .or_else(|| path.strip_suffix("/brightness"))
+            .ok_or_else(|| anyhow!("invalid brightness attribute path: {}", path))?;
         match read_max_brightness(trimmed) {
             Some(max_b) => {
                 within_brightness(contents, path, max_b)?;
@@ -1292,6 +1299,40 @@ mod tests {
         assert!(!is_allowed_sysfs_path("/sys/class/hwmon/hwmon0/temp1_input"));
     }
 
+
+    #[test]
+    fn brightness_guard_rejects_invalid_value_without_panicking() {
+        // Nonexistent LED/backlight fixtures ensure this test never writes hardware.
+        // Both attribute variants used to panic while removing their suffixes.
+        for path in [
+            "/sys/class/leds/lapsphere-nonexistent-test-led/brightness",
+            "/sys/class/backlight/lapsphere-nonexistent-test-backlight/actual_brightness",
+        ] {
+            let result = std::panic::catch_unwind(|| guard_sysfs_write(path, "invalid"));
+            assert!(result.is_ok(), "brightness validation panicked for {path}");
+            assert!(result.unwrap().is_err(), "invalid brightness must not succeed");
+        }
+    }
+
+    #[test]
+    fn platform_keyboard_attributes_match_sysfs_allowlist() {
+        // Discovery prefers this platform path over the /sys/class alias.
+        // Rejecting it aborts ApplyProfile before screen and fan settings.
+        for zone in ["rgb", "left", "center", "right"] {
+            for attr in ["brightness", "multi_intensity", "mode", "speed"] {
+                let path = format!(
+                    "/sys/devices/platform/tuxedo_keyboard/leds/{zone}:kbd_backlight/{attr}"
+                );
+                assert!(is_allowed_sysfs_path(&path), "rejected keyboard attribute: {path}");
+            }
+        }
+        assert!(!is_allowed_sysfs_path(
+            "/sys/devices/platform/tuxedo_keyboard/leds/rgb:kbd_backlight/trigger"
+        ));
+        assert!(!is_allowed_sysfs_path(
+            "/sys/devices/platform/unrelated/leds/rgb:kbd_backlight/brightness"
+        ));
+    }
 
     /// A profile whose earliest hardware step fails: `set_cpu_governor` runs
     /// first in `apply_profile_inner` and "invalid-governor-token" is not on
