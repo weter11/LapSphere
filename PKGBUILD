@@ -8,12 +8,27 @@ url="https://github.com/weter11/lapsphere"
 license=('GPL2')
 depends=('dbus' 'polkit' 'libxkbcommon-x11' 'dmidecode' 'pciutils' 'ethtool' 'iw' 'gtk3' 'libadwaita')
 optdepends=('optimus-manager: GPU switching support on Arch Linux')
-makedepends=('cargo' 'pkgconf')
+makedepends=('cargo' 'cmake' 'gcc' 'pkgconf')
 source=("lapsphere-$pkgver.tar.gz") # This will be handled by the CI or manual packaging
 sha256sums=('SKIP')
 
 build() {
   cd "$pkgname-$pkgver"
+
+  # libmimalloc-sys builds its vendored C library (mimalloc v3, single TU
+  # `static.c`) through the `cc` crate, which merges the ambient CFLAGS into
+  # that compile. On the Arch job the resulting archive links but exports no
+  # mi_* symbols, failing at final link with exactly:
+  #   undefined symbol: mi_malloc_aligned / mi_realloc_aligned /
+  #                    mi_zalloc_aligned / mi_free
+  # The Ubuntu job builds the same source with no ambient CFLAGS and links
+  # cleanly, so restore that condition here rather than inheriting the distro
+  # flags. NOTE: the local toolchain (gcc 13) cannot reproduce the failure, so
+  # this is targeted mitigation of the proven mechanism, not a locally
+  # reproduced fix — the Arch CI run is the real verification.
+  export CFLAGS="-O2 -pipe"
+  export CXXFLAGS="-O2 -pipe"
+
   cargo build --release --all
 }
 
