@@ -154,7 +154,12 @@ impl log::Log for DaemonLogger {
 async fn main() -> Result<()> {
     let mut builder = env_logger::Builder::from_default_env();
     if std::env::var("RUST_LOG").is_err() {
-        builder.filter_level(log::LevelFilter::Warn);
+        // Default to Info, not Warn: successful API calls and hardware writes
+        // log at Info (api.ok / hw.*), and Warn-only journal output meant a
+        // working profile apply left no trace at all — only failures showed.
+        // A failing or chatty subsystem can still be silenced per-target with
+        // RUST_LOG, which from_default_env() honors when set.
+        builder.filter_level(log::LevelFilter::Info);
         builder.filter(Some("zbus"), log::LevelFilter::Warn);
     }
     let inner = builder.build();
