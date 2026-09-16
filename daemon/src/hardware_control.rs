@@ -1111,7 +1111,7 @@ impl RgbKeyboardControl {
                         let _ = io.set_clevo_keyboard_mode(0x1002a000); // BREATHE
                     }
                 }
-                self.write_effect_mode(1, "breathing")?;
+                self.write_effect_mode(1)?;
                 self.write_effect_speed(*speed)?;
                 for i in 0..self.paths.len() {
                     let _ = self.set_zone_color(i, *r, *g, *b);
@@ -1125,7 +1125,7 @@ impl RgbKeyboardControl {
                         let _ = io.set_clevo_keyboard_mode(0xB0000000); // WAVE
                     }
                 }
-                self.write_effect_mode(7, "wave")?;
+                self.write_effect_mode(7)?;
                 self.write_effect_speed(*speed)?;
                 self.set_brightness(*brightness)?;
                 log::info!(target: "hw.kbd", "set_mode mode=\"wave\" speed={}", speed);
@@ -1136,7 +1136,7 @@ impl RgbKeyboardControl {
                         let _ = io.set_clevo_keyboard_mode(0x33010000); // CYCLE
                     }
                 }
-                self.write_effect_mode(2, "cycle")?;
+                self.write_effect_mode(2)?;
                 self.write_effect_speed(*speed)?;
                 self.set_brightness(*brightness)?;
                 log::info!(target: "hw.kbd", "set_mode mode=\"cycle\" speed={}", speed);
@@ -1147,7 +1147,7 @@ impl RgbKeyboardControl {
                         let _ = io.set_clevo_keyboard_mode(0x80000000); // DANCE
                     }
                 }
-                self.write_effect_mode(3, "dance")?;
+                self.write_effect_mode(3)?;
                 self.write_effect_speed(*speed)?;
                 self.set_brightness(*brightness)?;
                 log::info!(target: "hw.kbd", "set_mode mode=\"dance\" speed={}", speed);
@@ -1158,7 +1158,7 @@ impl RgbKeyboardControl {
                         let _ = io.set_clevo_keyboard_mode(0xA0000000); // FLASH
                     }
                 }
-                self.write_effect_mode(4, "flash")?;
+                self.write_effect_mode(4)?;
                 self.write_effect_speed(*speed)?;
                 for i in 0..self.paths.len() {
                     let _ = self.set_zone_color(i, *r, *g, *b);
@@ -1172,7 +1172,7 @@ impl RgbKeyboardControl {
                         let _ = io.set_clevo_keyboard_mode(0x70000000); // RANDOM_COLOR
                     }
                 }
-                self.write_effect_mode(5, "random")?;
+                self.write_effect_mode(5)?;
                 self.write_effect_speed(*speed)?;
                 self.set_brightness(*brightness)?;
                 log::info!(target: "hw.kbd", "set_mode mode=\"random\" speed={}", speed);
@@ -1183,7 +1183,7 @@ impl RgbKeyboardControl {
                         let _ = io.set_clevo_keyboard_mode(0x90000000); // TEMPO
                     }
                 }
-                self.write_effect_mode(6, "tempo")?;
+                self.write_effect_mode(6)?;
                 self.write_effect_speed(*speed)?;
                 self.set_brightness(*brightness)?;
                 log::info!(target: "hw.kbd", "set_mode mode=\"tempo\" speed={}", speed);
@@ -1192,24 +1192,29 @@ impl RgbKeyboardControl {
         Ok(())
     }
 
-    fn write_effect_mode(&self, mode_value: u8, fallback: &str) -> Result<()> {
+    /// Writes the effect mode integer to every LED `mode` attribute.
+    ///
+    /// Routed through `guard_sysfs_write`: the path must be on
+    /// APPROVED_SYSFS_PATHS and the payload must parse as a byte integer.
+    /// The old call sites passed a string fallback token ("breathing") which
+    /// the guard's LED check can never accept, so the fallback is gone.
+    fn write_effect_mode(&self, mode_value: u8) -> Result<()> {
         for path in &self.paths {
             let mode_path = format!("{}/mode", path);
             if Path::new(&mode_path).exists() {
-                let value = mode_value.to_string();
-                if fs::write(&mode_path, &value).is_err() {
-                    let _ = fs::write(&mode_path, fallback);
-                }
+                guard_sysfs_write(&mode_path, &mode_value.to_string())?;
             }
         }
         Ok(())
     }
 
+    /// Writes the effect speed integer to every LED `speed` attribute,
+    /// validated by `guard_sysfs_write` the same way as `mode`.
     fn write_effect_speed(&self, speed: u8) -> Result<()> {
         for path in &self.paths {
             let speed_path = format!("{}/speed", path);
             if Path::new(&speed_path).exists() {
-                let _ = fs::write(&speed_path, speed.to_string());
+                guard_sysfs_write(&speed_path, &speed.to_string())?;
             }
         }
         Ok(())
