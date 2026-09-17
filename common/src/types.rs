@@ -193,8 +193,20 @@ pub struct GpuInfo {
     pub name: String,
     /// Integrated vs discrete classification.
     pub gpu_type: GpuType,
-    /// Driver-reported status string.
-    pub status: String,
+    /// Linux PCI runtime power-management state, verbatim from
+    /// `/sys/bus/pci/devices/<bdf>/power/runtime_status` ("active",
+    /// "suspended", "unsupported", "error"). A non-invasive sysfs read, never
+    /// cached, and deliberately a SEPARATE value from `performance_state`:
+    /// the two are different namespaces and must not share one string.
+    /// `None` for integrated GPUs, which never runtime-suspend.
+    #[serde(default)]
+    pub runtime_status: Option<String>,
+    /// NVML performance state ("P0".."P15") from the most recent live query.
+    /// `None` means "not queried" — either the GPU is suspended or it was in
+    /// the P3+ idle-down range where invasive queries are not allowed. Never
+    /// back-filled from a stale store, so `None` must render as unknown.
+    #[serde(default)]
+    pub performance_state: Option<String>,
     /// Current core clock in MHz.
     pub frequency: Option<u64>,
     /// Current memory clock in MHz.

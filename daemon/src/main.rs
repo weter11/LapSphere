@@ -42,11 +42,6 @@ pub static HARDWARE_CACHE: once_cell::sync::Lazy<Arc<Mutex<HardwareCache>>> =
         system_info: None,
     })));
 
-// Set by GetGpuInfoFull D-Bus call to force one full NVML query on the next
-// hardware_monitor tick (on-demand override for the GUI stats panel).
-// The monitor job consumes and clears it, so the override is one-shot.
-pub static FULL_NVML_REFRESH_REQUESTED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
 
 // Global fan daemon state
 pub static FAN_DAEMON_STATE: once_cell::sync::Lazy<Arc<Mutex<Option<FanSettings>>>> = 
@@ -606,9 +601,16 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
     let nvidia_gpu = gpus.iter().find(|g| g.name.to_lowercase().contains("nvidia"));
 
     if let Some(gpu) = nvidia_gpu {
-        let status_lower = gpu.status.to_lowercase();
-        let is_suspended = status_lower.contains("suspended");
-        let is_pstate = status_lower.starts_with('p');
+        // The two status values are separate now: the runtime-PM word says
+        // whether the adapter is asleep, the NVML performance state says whether
+        // it is being queried (P0..P15) at all. When the quiet tier is active
+        // there is no performance state and no telemetry to steer offsets with,
+        // so skip rather than acting on absent values.
+        let is_suspended = gpu
+            .runtime_status
+            .as_deref()
+            .map(|status| status.eq_ignore_ascii_case("suspended"))
+            .unwrap_or(false);
 
         // If suspended, don't do anything
         if is_suspended {
@@ -616,7 +618,7 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
         }
 
         // Check if GPU is in an active state for overclocking (typically P0)
-        if !is_pstate {
+        if gpu.performance_state.is_none() || gpu.frequency.is_none() {
             return Ok(());
         }
 
@@ -693,7 +695,9 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
         // Total Offset
         let total_offset = freq_offset + drain_offset + power_offset;
 
-        if status_lower != "p0" {
+        // Dynamic offsets only steer the GPU at P0; a quiet-tier or
+        // non-P0 reading leaves the applied offset cleared as before.
+        if gpu.performance_state.as_deref() != Some("P0") {
             let mut last = lock_or_recover(&LAST_APPLIED_OFFSET, "LAST_APPLIED_OFFSET");
             if *last != Some(0) {
                 crate::hardware_control::set_gpu_core_offset(0, 0.0)?;

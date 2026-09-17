@@ -77,9 +77,9 @@ threads before they fire. `[assumed]`
 - Jobs retain their callbacks until removed or process exit. The fan callback
   retains its `TuxedoIo` `Arc`, and `main` has no removal/shutdown path.
   `[verified]` An FD/resource leak is `[assumed]`, not proven here.
-- `GetGpuInfoFull` creates one blocking task per D-Bus call with no visible
-  in-flight guard. `[verified]` Resource amplification under bursts is
-  `[assumed]`.
+- `GetGpuInfoFull` no longer exists: the on-demand full-query path was removed
+  and all GPU telemetry comes from the `hardware_monitor` tick, so there is no
+  per-call blocking task left to guard. `[verified]`
 - Battery objects are local and dropped at call return. This is allocation
   churn, not an identified leak. `[verified]`
 

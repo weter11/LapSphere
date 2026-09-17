@@ -323,10 +323,12 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                             });
                             ui.end_row();
                             
-                            ui.label("Status:");
-                            ui.label(&gpu.status);
-                            ui.end_row();
-                            draw_gpu_diagnostics(ui, gpu);
+                            if let Some(status) = gpu_status_text(gpu) {
+                                ui.label("Status:");
+                                ui.label(status).on_hover_text(gpu_status_help(gpu));
+                                ui.end_row();
+                            }
+                            draw_gpu_vram(ui, gpu);
 
                             if let Some(freq) = gpu.frequency {
                                 ui.label("Core Frequency:");
@@ -444,66 +446,158 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
         });
 }
 
-fn draw_gpu_diagnostics(ui: &mut Ui, gpu: &lapsphere_common::types::GpuInfo) {
-ui.label("VRAM available / total:");
-if let Some(memory) = &gpu.vram_memory {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-    ui.label(format!("{} / {} MiB (used: {} MiB; sampled {}s ago)",
-        memory.free_mib, memory.total_mib, memory.used_mib,
-        now.saturating_sub(memory.sampled_at_unix_secs)))
-        .on_hover_text("Last driver sample from an already-authorized GPU poll. Not refreshed while sleeping; available memory is not inferred from process allocations.");
-} else {
-    ui.label(format!("Unknown / {}", gpu.vram_total.map(|v| format!("{v} MiB")).unwrap_or_else(|| "Unknown".into())));
+/// NVML performance state and the Linux PCI runtime-PM word, rendered as one
+/// line but kept as two distinct values underneath (e.g. "P0 · active").
+/// `None` means neither is known: integrated graphics publish neither, and a
+/// dGPU that is idling down or suspended is deliberately not queried.
+fn gpu_status_text(gpu: &lapsphere_common::types::GpuInfo) -> Option<String> {
+    match (&gpu.performance_state, &gpu.runtime_status) {
+        (Some(performance), Some(runtime)) => Some(format!("{} · {}", performance, runtime)),
+        (Some(performance), None) => Some(performance.clone()),
+        (None, Some(runtime)) => Some(runtime.clone()),
+        (None, None) => None,
+    }
 }
-ui.end_row();
-ui.label("GPU device holders:");
-ui.vertical(|ui| {
-    ui.label("Open handles — possible sleep blockers, not proof of GPU activity.");
-    for process in &gpu.process_snapshot.processes {
-        ui.label(format!("{} (PID {})", process.name, process.pid))
-            .on_hover_text(process.device_nodes.join(", "));
+
+fn gpu_status_help(gpu: &lapsphere_common::types::GpuInfo) -> &'static str {
+    match (&gpu.performance_state, &gpu.runtime_status) {
+        (Some(_), Some(_)) => {
+            "NVML performance state (P0-P15) · Linux PCI runtime power state (/sys/.../power/runtime_status)."
+        }
+        (None, Some(_)) => {
+            "Performance state not queried: the dGPU is idling down (P3 or deeper) or suspended, and no stale value is shown in its place."
+        }
+        (Some(_), None) => "NVML performance state (P0-P15).",
+        (None, None) => "",
     }
-    if gpu.process_snapshot.processes.is_empty() {
-        ui.label(if gpu.process_snapshot.complete { "No open device holders found." } else { "Process information unavailable or incomplete." });
+}
+
+/// VRAM availability is one of the two figures allowed to stay cached: it is
+/// refreshed only inside an already-authorized poll and is displayed with its
+/// own sample age. Discrete GPUs only — integrated graphics share system memory
+/// and never report VRAM.
+fn draws_vram_row(gpu: &lapsphere_common::types::GpuInfo) -> bool {
+    // Integrated graphics share system memory: no VRAM figures, no status word,
+    // no holder list (they never runtime-suspend, so all three are noise).
+    gpu.gpu_type == lapsphere_common::types::GpuType::Discrete
+}
+
+fn draw_gpu_vram(ui: &mut Ui, gpu: &lapsphere_common::types::GpuInfo) {
+    if !draws_vram_row(gpu) {
+        return;
     }
-    if !gpu.process_snapshot.complete {
-        ui.label("Partial visibility: inaccessible processes or device mapping unavailable.");
+    ui.label("VRAM available / total:");
+    match &gpu.vram_memory {
+        Some(memory) => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            ui.label(format!(
+                "{} / {} MiB (used: {} MiB; sampled {}s ago)",
+                memory.free_mib,
+                memory.total_mib,
+                memory.used_mib,
+                now.saturating_sub(memory.sampled_at_unix_secs)
+            ))
+            .on_hover_text("Last driver sample from an already-authorized GPU poll. Refreshed only while the GPU is being queried; available memory is not inferred from process allocations.");
+        }
+        None => {
+            ui.label(format!(
+                "Unknown / {}",
+                gpu.vram_total
+                    .map(|v| format!("{v} MiB"))
+                    .unwrap_or_else(|| "Unknown".into())
+            ));
+        }
     }
-    if gpu.process_snapshot.sampled_at_unix_secs > 0 {
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-        ui.small(format!("Passive /proc scan; sampled {}s ago", now.saturating_sub(gpu.process_snapshot.sampled_at_unix_secs)));
-    }
-});
-ui.end_row();
+    ui.end_row();
 }
 
 #[cfg(test)]
 mod gpu_diagnostic_tests {
     use super::*;
     use lapsphere_common::types::*;
+
     #[test]
     fn legacy_wire_payload_and_diagnostic_states_render_without_hardware() {
-        let mut gpu: GpuInfo = serde_json::from_str(include_str!("../../tests/fixtures/gpu_legacy.json")).unwrap();
+        let gpu: GpuInfo =
+            serde_json::from_str(include_str!("../../tests/fixtures/gpu_legacy.json")).unwrap();
+        // Legacy daemon payload: the old combined `status` string is ignored and
+        // the two split fields simply default to "unknown".
+        assert!(gpu.performance_state.is_none());
+        assert!(gpu.runtime_status.is_none());
         assert!(gpu.vram_memory.is_none());
         assert!(!gpu.process_snapshot.complete);
-        for populated in [false, true] {
-            if populated {
-                gpu.vram_memory = Some(GpuMemorySnapshot { free_mib: 700, used_mib: 200, total_mib: 1024, sampled_at_unix_secs: 1 });
-                gpu.process_snapshot = GpuProcessSnapshot {
-                    processes: vec![GpuProcess { pid: 123, name: "browser".into(), device_nodes: vec!["/dev/nvidia0".into()] }],
-                    complete: true, sampled_at_unix_secs: 1,
-                };
-            }
+        assert!(gpu_status_text(&gpu).is_none(), "no status line without either value");
+
+        for (perf, runtime, expected) in [
+            (Some("P0".to_string()), Some("active".to_string()), "P0 · active"),
+            (Some("P8".to_string()), None, "P8"),
+            (None, Some("active".to_string()), "active"),
+            (None, Some("suspended".to_string()), "suspended"),
+        ] {
+            let mut g = gpu.clone();
+            g.performance_state = perf;
+            g.runtime_status = runtime;
+            assert_eq!(gpu_status_text(&g).as_deref(), Some(expected));
+        }
+
+        // The split must survive a wire round-trip as two values, not one string.
+        let mut populated = gpu.clone();
+        populated.performance_state = Some("P0".to_string());
+        populated.runtime_status = Some("active".to_string());
+        populated.vram_memory = Some(GpuMemorySnapshot {
+            free_mib: 700,
+            used_mib: 200,
+            total_mib: 1024,
+            sampled_at_unix_secs: 1,
+        });
+        populated.process_snapshot = GpuProcessSnapshot {
+            processes: vec![GpuProcess {
+                pid: 123,
+                name: "browser".into(),
+                device_nodes: vec!["/dev/nvidia0".into()],
+            }],
+            complete: true,
+            sampled_at_unix_secs: 1,
+        };
+        let encoded = serde_json::to_string(&populated).unwrap();
+        assert_eq!(serde_json::from_str::<GpuInfo>(&encoded).unwrap(), populated);
+
+        assert!(draws_vram_row(&populated));
+        for candidate in [gpu.clone(), populated.clone()] {
             let ctx = egui::Context::default();
             let output = ctx.run(egui::RawInput::default(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    egui::Grid::new("diagnostic_test").show(ui, |ui| draw_gpu_diagnostics(ui, &gpu));
+                    egui::Grid::new("diagnostic_test").show(ui, |ui| draw_gpu_vram(ui, &candidate));
                 });
             });
             assert!(!output.shapes.is_empty());
-            let encoded = serde_json::to_string(&gpu).unwrap();
-            assert_eq!(serde_json::from_str::<GpuInfo>(&encoded).unwrap(), gpu);
         }
+    }
+
+    #[test]
+    fn integrated_gpu_renders_no_vram_row() {
+        let mut gpu: GpuInfo =
+            serde_json::from_str(include_str!("../../tests/fixtures/gpu_legacy.json")).unwrap();
+        gpu.gpu_type = GpuType::Integrated;
+        gpu.vram_memory = Some(GpuMemorySnapshot {
+            free_mib: 1,
+            used_mib: 1,
+            total_mib: 2,
+            sampled_at_unix_secs: 1,
+        });
+        assert!(!draws_vram_row(&gpu), "iGPU must not render a VRAM row");
+        assert!(gpu_status_text(&gpu).is_none(), "iGPU must not render a status line");
+
+        // Still renders without panicking when the row is suppressed.
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                egui::Grid::new("integrated_test").show(ui, |ui| draw_gpu_vram(ui, &gpu));
+            });
+        });
     }
 }
 

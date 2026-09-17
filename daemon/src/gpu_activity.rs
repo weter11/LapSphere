@@ -2,6 +2,23 @@
 use lapsphere_common::types::*;
 use std::path::Path;
 
+/// Holders that do not block dGPU runtime suspend and must therefore not read
+/// as sleep blockers: the X server, the persistence daemon, and the monitoring
+/// daemon's own device handle (added by PID below). The kernel truncates `comm`
+/// to 15 bytes, so every comparison is prefix-tolerant.
+const NON_BLOCKING_HOLDERS: &[&str] = &["Xorg", "nvidia-persistenced"];
+
+pub(crate) fn is_structural_holder(name: &str, pid: u32) -> bool {
+    if pid == std::process::id() {
+        return true;
+    }
+    !name.is_empty()
+        && NON_BLOCKING_HOLDERS.iter().any(|holder| {
+            let truncated = &holder[..holder.len().min(15)];
+            name == truncated || name == *holder || holder.starts_with(name)
+        })
+}
+
 fn scan(proc_root: &Path, nodes: &[String]) -> GpuProcessSnapshot {
     use std::{collections::BTreeSet, fs, io::ErrorKind};
     let mut result = GpuProcessSnapshot {
@@ -51,6 +68,9 @@ fn scan(proc_root: &Path, nodes: &[String]) -> GpuProcessSnapshot {
                 .unwrap_or_else(|_| "<exited or inaccessible>".into())
                 .trim()
                 .to_owned();
+            if is_structural_holder(&name, pid) {
+                continue;
+            }
             result.processes.push(GpuProcess {
                 pid,
                 name,
@@ -117,6 +137,13 @@ pub fn record_memory(pci: &str, free: u64, used: u64, total: u64) {
 
 pub fn attach(gpus: &mut [GpuInfo]) {
     for gpu in gpus {
+        // Integrated graphics are deliberately skipped: they never
+        // runtime-suspend, so a holder list there is permanent desktop noise
+        // (Xorg, compositor, session manager, every browser) rather than
+        // actionable information.
+        if gpu.gpu_type != GpuType::Discrete {
+            continue;
+        }
         let Some(pci) = gpu.pci_bus_id.as_deref() else {
             continue;
         };
@@ -190,6 +217,21 @@ mod tests {
                 serde_json::to_string(&scan(Path::new("/proc"), &nodes)).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn structural_holders_are_not_reported_as_holders() {
+        let root = std::env::temp_dir().join(format!("lp-gpu-filter-{}", std::process::id()));
+        for (pid, comm) in [(11u32, "Xorg\n"), (12, "nvidia-persiste\n"), (13, "game\n")] {
+            let fd = root.join(format!("{pid}/fd"));
+            fs::create_dir_all(&fd).unwrap();
+            fs::write(root.join(format!("{pid}/comm")), comm).unwrap();
+            symlink("/dev/nvidia0", fd.join("1")).unwrap();
+        }
+        let got = scan(&root, &["/dev/nvidia0".into()]);
+        fs::remove_dir_all(&root).unwrap();
+        assert_eq!(got.processes.len(), 1, "only the real holder must survive");
+        assert_eq!(got.processes[0].name, "game");
     }
 
     #[test]
