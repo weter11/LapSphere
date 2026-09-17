@@ -57,7 +57,11 @@ static NVIDIA_METADATA_CACHE: Lazy<Mutex<HashMap<u32, NvidiaMetadata>>> =
 //                             would wake the GPU)
 //   - active, P0..P2       -> full live NVML + NVAPI query EVERY tick; a loaded
 //                             GPU cannot runtime-suspend, so this is free
-//   - active, P3 or deeper -> quiet tier: sysfs runtime_status only; every
+//   - active, with work    -> same live treatment as P0..P2 at ANY p-state:
+//                             light 3D work sits on P3 and oscillates to P5,
+//                             and those ticks must not go blank
+//   - active, no work
+//     (any p-state)        -> quiet tier: sysfs runtime_status only; every
 //                             telemetry field is left blank rather than filled
 //                             from a previous sample, so the GPU can complete
 //                             its own idle-down (P3 -> P5 -> P8 -> suspended)
@@ -80,6 +84,12 @@ static NVIDIA_METADATA_CACHE: Lazy<Mutex<HashMap<u32, NvidiaMetadata>>> =
 /// Minimum quiet-tier dwell before one bounded re-probe is allowed (seconds).
 const QUIET_REPROBE_SECS: u64 = 45;
 
+/// GPU utilization that counts as "this adapter is doing work" (percent).
+/// Measured on the XMG: an idle desktop reports 0.0, while real 3D work sits
+/// well above this (5 % at P0, 26-46 % at P3/P5). The margin keeps a one-off
+/// Xorg blit from holding the live tier open.
+const GPU_WORK_UTILIZATION_PERCENT: f32 = 1.0;
+
 /// Per-GPU control state. This is NOT a telemetry store: `last_pstate` and
 /// `last_runtime_status` decide the tier only and are never published as
 /// measurements (the quiet-tier payload carries `performance_state: None`).
@@ -89,6 +99,9 @@ struct GpuPollState {
     last_runtime_status: Option<String>,
     /// Last performance state seen by a live NVML pass.
     last_pstate: Option<u8>,
+    /// GPU utilization observed by that same pass. P3 is the boundary state:
+    /// P3 with work must stay live, P3 without work must be left alone.
+    last_load: Option<f32>,
     /// When the last invasive NVML/NVAPI query for this GPU was issued.
     last_probe: Option<Instant>,
 }
@@ -130,6 +143,19 @@ fn gpu_poll_tier(state: Option<&GpuPollState>, runtime_status: &str) -> GpuPollT
     if matches!(state.last_pstate, Some(pstate) if pstate <= 2) {
         return GpuPollTier::Live;
     }
+    // Anything with work is polled live, whatever its P-state: light 3D work
+    // lands on P3 and oscillates to P5 (measured 26-46 % utilization), and the
+    // user-facing rule is "real values whenever the GPU is actually working".
+    // A pass that could not read the utilization counts as "no work": the
+    // re-probe below still refreshes it, and an unmeasured GPU must never be
+    // pinned awake.
+    if state
+        .last_load
+        .map(|load| load > GPU_WORK_UTILIZATION_PERCENT)
+        .unwrap_or(false)
+    {
+        return GpuPollTier::Live;
+    }
     // Never probed yet: one pass is needed to learn the p-state.
     if state.last_probe.is_none() {
         return GpuPollTier::Live;
@@ -150,13 +176,17 @@ fn record_gpu_observation(index: u32, runtime_status: &str) {
     state.last_runtime_status = Some(runtime_status.to_string());
 }
 
-/// Record a completed invasive pass: its p-state drives the next tick's tier.
-fn record_gpu_probe(index: u32, runtime_status: &str, pstate: Option<u8>) {
+/// Record a completed invasive pass: its p-state and utilization drive the
+/// next tick's tier.
+fn record_gpu_probe(index: u32, runtime_status: &str, pstate: Option<u8>, load: Option<f32>) {
     let mut states = crate::hardware_control::lock_or_recover(&GPU_POLL_STATE, "GPU_POLL_STATE");
     let state = states.entry(index).or_default();
     state.last_runtime_status = Some(runtime_status.to_string());
     if let Some(pstate) = pstate {
         state.last_pstate = Some(pstate);
+    }
+    if let Some(load) = load {
+        state.last_load = Some(load);
     }
     state.last_probe = Some(Instant::now());
 }
@@ -2732,18 +2762,12 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             PerformanceState::Unknown => 99,
         });
 
-        // Bookkeeping for the NEXT tick's tier: a pass that observed P0..P2
-        // keeps this GPU live; P3 and deeper hands it to the quiet tier so the
-        // kernel can finish its idle-down. `last_pstate` never leaves the
-        // daemon as telemetry.
-        record_gpu_probe(i, &status_from_sysfs, pstate_val);
 
-        // The tier already authorized this pass (P0..P2, a fresh wake, or the
-        // bounded re-probe), so NVML is queried fully. NVAPI follows the same
-        // line as the spec: P0..P2 only — an observed P3 or deeper ends the live
-        // run, and the next tick serves the sysfs-only payload instead of
-        // issuing another invasive call.
-        let should_poll_nvapi = matches!(pstate_val, Some(pstate) if pstate <= 2);
+        // This pass only runs when the tier authorized it (P0..P2, work at any
+        // P-state, a fresh wake, or the bounded re-probe), so NVML is queried
+        // fully and NVAPI comes with it: when the adapter is being polled, every
+        // statistic is reported live rather than some of them silently missing.
+        let should_poll_nvapi = true;
 
         let (frequency, memory_frequency, temperature, load, mut power) = (
             device.clock_info(nvml_wrapper::enum_wrappers::device::Clock::Graphics)
@@ -2794,6 +2818,12 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         };
 
         let voltage = nvapi_voltage;
+
+        // Bookkeeping for the NEXT tick's tier — the pass's own p-state and
+        // utilization decide it: P0..P2 always live, P3 live while it has work,
+        // otherwise quiet so the kernel can finish its idle-down. Neither value
+        // leaves the daemon as telemetry.
+        record_gpu_probe(i, &status_from_sysfs, pstate_val, load);
 
         let (min_core_clock, max_core_clock) = (None, None); // NVML wrapper 0.11 doesn't have a getter
 
@@ -4098,9 +4128,19 @@ mod gpu_tier_tests {
     use super::*;
 
     fn state(status: &str, pstate: Option<u8>, probed_secs_ago: Option<u64>) -> GpuPollState {
+        state_with_load(status, pstate, None, probed_secs_ago)
+    }
+
+    fn state_with_load(
+        status: &str,
+        pstate: Option<u8>,
+        load: Option<f32>,
+        probed_secs_ago: Option<u64>,
+    ) -> GpuPollState {
         GpuPollState {
             last_runtime_status: Some(status.to_string()),
             last_pstate: pstate,
+            last_load: load,
             last_probe: probed_secs_ago.map(|secs| Instant::now() - std::time::Duration::from_secs(secs)),
         }
     }
@@ -4128,12 +4168,40 @@ mod gpu_tier_tests {
     }
 
     #[test]
-    fn p3_and_deeper_go_quiet_until_the_reprobe_cadence() {
+    fn work_is_live_at_any_pstate_above_p0() {
+        // Light 3D work lands on P3 and oscillates to P5: both must report live
+        // values at the configured polling rate, not blanks.
         for pstate in [3u8, 5, 8] {
             assert_eq!(
-                gpu_poll_tier(Some(&state("active", Some(pstate), Some(1))), "active"),
+                gpu_poll_tier(Some(&state_with_load("active", Some(pstate), Some(27.0), Some(1))), "active"),
+                GpuPollTier::Live,
+                "P{} with utilization must be polled live",
+                pstate
+            );
+        }
+    }
+
+    #[test]
+    fn low_utilization_noise_does_not_open_the_live_tier() {
+        assert_eq!(
+            gpu_poll_tier(Some(&state_with_load("active", Some(8), Some(0.5), Some(1))), "active"),
+            GpuPollTier::Quiet,
+            "a sub-threshold blip must not hold the adapter awake"
+        );
+        assert_eq!(
+            gpu_poll_tier(Some(&state_with_load("active", Some(3), None, Some(1))), "active"),
+            GpuPollTier::Quiet,
+            "an unmeasurable P3 must not be pinned awake"
+        );
+    }
+
+    #[test]
+    fn idle_p3_and_deeper_go_quiet_until_the_reprobe_cadence() {
+        for pstate in [3u8, 5, 8] {
+            assert_eq!(
+                gpu_poll_tier(Some(&state_with_load("active", Some(pstate), Some(0.0), Some(1))), "active"),
                 GpuPollTier::Quiet,
-                "P{} must not be probed while it idles down",
+                "P{} with no work must not be probed while it idles down",
                 pstate
             );
         }
@@ -4363,9 +4431,10 @@ mod hil_gpu_tier_tests {
         println!("[+] ACCEPTANCE: quiet tier publishes blanks and the GPU still suspends");
     }
 
-    /// Acceptance 1: while the GPU is working (P0), every call must return live
-    /// values including hotspot/memory temperature. Requires an external GPU
-    /// load — run it while a game or a load generator is active.
+    /// Live tier at P0..P3: every call must return live values including
+    /// hotspot/memory temperature. Requires an external GPU load — run it while
+    /// a game or a load generator is active. A light load (one small glxgears)
+    /// lands on P3, which is the case this test exists for as much as P0.
     #[test]
     #[ignore = "HIL: needs an external P0 load on the dGPU"]
     fn hil_p0_returns_live_values_including_hotspot_on_every_call() {
@@ -4381,28 +4450,39 @@ mod hil_gpu_tier_tests {
                 round, g.performance_state, g.runtime_status, g.frequency, g.load, g.power,
                 g.hotspot_temperature, g.memory_temperature, g.voltage
             );
-            if g.performance_state.as_deref() == Some("P0") {
+            if let Some(pstate) = g.performance_state.as_deref() {
+                // Any reported p-state comes from a live pass, and a live pass
+                // publishes every statistic — no silently missing hotspot.
                 p0_seen = true;
+                println!("    ^ live tier at {}", pstate);
                 assert!(
                     g.frequency.is_some() && g.load.is_some() && g.power.is_some(),
-                    "P0 must publish live clocks/load/power"
+                    "live pass at {} must publish clocks/load/power",
+                    pstate
                 );
                 assert!(
                     g.hotspot_temperature.is_some() && g.memory_temperature.is_some(),
-                    "P0 must publish hotspot and memory temperature"
+                    "live pass at {} must publish hotspot and memory temperature",
+                    pstate
                 );
-                assert!(g.voltage.is_some(), "P0 must publish voltage");
+                assert!(g.voltage.is_some(), "live pass at {} must publish voltage", pstate);
             } else {
-                // P1..P3+ (or a quiet tick that may not query at all): the only
-                // hard requirement here is that no value is invented.
+                // Quiet tick: no value may be invented for it.
                 assert!(
-                    g.performance_state.is_none() || g.frequency.is_some(),
-                    "a p-state without telemetry would mean a cached value leaked"
+                    g.frequency.is_none()
+                        && g.load.is_none()
+                        && g.power.is_none()
+                        && g.hotspot_temperature.is_none(),
+                    "a quiet tick must not report telemetry"
                 );
+                assert!(g.runtime_status.is_some(), "a quiet tick must still publish the PM word");
             }
             std::thread::sleep(std::time::Duration::from_millis(1000));
         }
-        assert!(p0_seen, "no P0 observed: run this test with a real GPU load active");
+        assert!(
+            p0_seen,
+            "no live-tier observation: run this test with a real GPU load active"
+        );
     }
 
     /// Suspended path: the payload is sysfs-only and the call itself must not
