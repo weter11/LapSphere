@@ -18,10 +18,14 @@ Any NVML call resets the kernel's 20 s autosuspend timer, so the single poll blo
 | Observation | Tier | What is queried |
 | --- | --- | --- |
 | sysfs says `suspended` | Suspended | nothing (a probe would wake the GPU) |
-| first sight, a suspend→active wake, or last known P0..P2 | Live | full NVML + NVAPI pass, every tick |
-| last known P3 and deeper | Quiet | sysfs only; all dynamic fields published blank |
+| first sight, or a suspend→active wake | Live | full NVML + NVAPI pass, every tick |
+| last known P0..P2 | Live | full NVML + NVAPI pass, every tick |
+| last pass saw utilization above `GPU_WORK_UTILIZATION_PERCENT` (1 %), at any p-state | Live | full NVML + NVAPI pass, every tick |
+| no work observed (0 %, or utilization unreadable) | Quiet | sysfs only; all dynamic fields published blank |
 
-The quiet tier allows one bounded re-probe after `QUIET_REPROBE_SECS` (45 s) so a GPU that ramps from a light P8 back to P0 is noticed without a wake. The cadence is deliberately longer than the kernel's autosuspend delay plus the driver's release latency (measured: this dGPU re-suspends 27 s after the last NVML touch), so an unused GPU is already suspended when the cadence fires and the tier check skips the probe instead of waking it.
+The live tier is keyed on work rather than on the p-state number, because light 3D work does not stay at P0: measured on the XMG, a light uncapped GL load holds **P3 at 26-30 % utilization and oscillates to P5 at up to 46 %**, and those ticks must report real values at the configured polling rate rather than blanks. The 1 % margin keeps a one-off compositor blit from holding the live tier open, and an adapter whose utilization cannot be read is never pinned awake by it. NVAPI extended stats follow the pass itself — when the adapter is polled, hotspot, VRAM temperature and voltage are live rather than silently absent.
+
+The quiet tier allows one bounded re-probe after `QUIET_REPROBE_SECS` (45 s) so a GPU that ramps back into work without a suspend in between is still noticed. The cadence is deliberately longer than the kernel's autosuspend delay plus the driver's release latency (measured: this dGPU re-suspends 27 s after the last NVML touch, and a probe holds `power/runtime_usage` at >= 1 for ~26 s), so an unused GPU is already suspended when the cadence fires and the tier check skips the probe instead of waking it. A 5-10 s cadence in the quiet tier is not an option: each touch restarts the 26 s window and no suspend would ever happen.
 
 ## Cached values
 
@@ -52,6 +56,6 @@ On driver 610.57.04 the FB-info query itself returns `NV_ERR_INVALID_ADDRESS` fo
 ## Verification
 
 - Tier decisions, the quiet/suspended payload shape (no stale telemetry) and the holder filter have pure unit tests.
-- HIL tests (run explicitly, ignored by default) exercise the real driver: a live pass followed by quiet ticks that publish blanks while the GPU still reaches `runtime_status` "suspended"; a P0 load run asserting every call returns live clocks/load/power/hotspot/voltage; a suspended run asserting the call does not wake the GPU; and a raw probe of the direct-ioctl VRAM path.
+- HIL tests (run explicitly, ignored by default) exercise the real driver: a light-load run asserting every reported p-state comes with live clocks/load/power/hotspot/memory temperature/voltage (P3 with 26-30 % load included); a live pass followed by quiet ticks that publish blanks while the GPU still reaches `runtime_status` "suspended"; a suspended run asserting the call does not wake the GPU; and a raw probe of the direct-ioctl VRAM path.
 - Headless egui test renders legacy and populated payloads, asserts the two status values stay separate on the wire, and that an integrated GPU renders neither a status nor a VRAM row.
 - The full deployed daemon-to-GUI check requires installing the CI package.
