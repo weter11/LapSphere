@@ -139,33 +139,79 @@ const APPROVED_SYSFS_PATHS: &[&str] = &[
     "/sys/devices/platform/tuxedo_keyboard/leds/*/speed",
 ];
 
-/// Split on '/', dropping the empty leading segment that an absolute path
-/// produces ("/sys/..." -> ["", "sys", ...]) so it cannot poison the wildcard
-/// comparison below.
-fn split_path(p: &str) -> Vec<&str> {
-    p.split('/').filter(|s| !s.is_empty()).collect()
+/// Lexical components of an absolute path, or `None` when the path must not be
+/// matched at all.
+///
+/// This is deliberately pure: sysfs is full of symlinks and kernel-generated
+/// nodes, so `canonicalize()` is not an option — it would resolve the very
+/// aliases the allowlist names (`/sys/class/leds/*` points into
+/// `/sys/devices/...`) and would reject paths whose final component the kernel
+/// creates on demand.
+///
+/// Normalisation rules:
+///   * a relative path is refused: `fs::write` would resolve it against the
+///     daemon's working directory instead of `/sys`;
+///   * repeated separators collapse and `.` components are dropped — those are
+///     equivalent spellings of the same file, so they reduce to the canonical
+///     form rather than being rejected;
+///   * a `..` component is refused outright instead of being resolved, so no
+///     accepted path can traverse out of the subtree its template describes.
+fn normalized_components(path: &str) -> Option<Vec<&str>> {
+    if !path.starts_with('/') {
+        return None;
+    }
+    let mut components = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => continue,
+            ".." => return None,
+            other => components.push(other),
+        }
+    }
+    Some(components)
 }
 
-/// Does `path` match an allowlist template whose '*' wildcard spans one segment?
-fn matches_template(path: &str, tmpl: &str) -> bool {
-    let mut a = split_path(path);
-    let mut b = split_path(tmpl);
-    if a.len() != b.len() {
+/// Canonical spelling of a path that passed [`normalized_components`]. The
+/// guard writes this form, so the bytes can only land on the path that was
+/// actually checked.
+fn normalized_path(path: &str) -> Option<String> {
+    let components = normalized_components(path)?;
+    Some(format!("/{}", components.join("/")))
+}
+
+/// Does a canonical component list match one allowlist template, and stay
+/// inside the subtree that template fixes?
+///
+/// Two independent conditions, both on the normalised form:
+///   1. containment — every component before the first wildcard is identical,
+///      so the write must land inside the template's literal subtree;
+///   2. shape — equal component counts, each template component either a
+///      single-segment `*` or an exact literal.
+/// Because `..` never reaches this point, "matches the template" and "is inside
+/// the template's subtree" are the same statement — the containment check below
+/// states it explicitly so it cannot be lost in a future edit.
+fn matches_template_components(path: &[&str], tmpl: &[&str]) -> bool {
+    if path.len() != tmpl.len() {
         return false;
     }
-    for (x, y) in a.iter().zip(b.iter()) {
-        if *y == "*" {
-            continue; // wildcard matches any single non-empty segment
-        }
-        if x.is_empty() || *x != *y {
-            return false;
-        }
+    let first_wildcard = tmpl.iter().position(|component| *component == "*").unwrap_or(tmpl.len());
+    if path[..first_wildcard] != tmpl[..first_wildcard] {
+        return false;
     }
-    true
+    path.iter()
+        .zip(tmpl.iter())
+        .all(|(actual, expected)| *expected == "*" || actual == expected)
 }
 
 fn is_allowed_sysfs_path(path: &str) -> bool {
-    APPROVED_SYSFS_PATHS.iter().any(|t| matches_template(path, t))
+    let Some(components) = normalized_components(path) else {
+        return false;
+    };
+    APPROVED_SYSFS_PATHS.iter().any(|tmpl| {
+        normalized_components(tmpl)
+            .map(|tmpl_components| matches_template_components(&components, &tmpl_components))
+            .unwrap_or(false)
+    })
 }
 
 /// Parse a u64 payload, used by both frequency and brightness range checks.
@@ -226,12 +272,22 @@ fn read_max_brightness(base: &str) -> Option<u32> {
 
 /// Central gate: refuse anything not on the allowlist, then enforce value rules.
 fn guard_sysfs_write(path: &str, contents: &str) -> Result<()> {
-    if !is_allowed_sysfs_path(path) {
+    // Match on the canonical form and write that same form, so what is checked
+    // is exactly what is written. A relative path or one containing `..` is
+    // refused here, before any value rule or write is reached.
+    let Some(target) = normalized_path(path) else {
         return Err(anyhow!(
-            "blocked non-allowlisted sysfs write to {}",
+            "blocked sysfs write to non-absolute or traversing path {}",
             path
         ));
+    };
+    if !is_allowed_sysfs_path(&target) {
+        return Err(anyhow!(
+            "blocked non-allowlisted sysfs write to {}",
+            target
+        ));
     }
+    let path = target.as_str();
 
     // Governor string must be an explicitly sanctioned value.
     if path.ends_with("scaling_governor") {
@@ -964,33 +1020,63 @@ pub fn set_prime_profile(profile: &str) -> Result<()> {
     Ok(())
 }
 
+/// EPP attribute paths that exist right now, one per CPU.
+///
+/// The cpufreq attribute belongs to a *policy*, and the kernel exposes the
+/// per-CPU `cpufreq` directories as symlinks into `cpufreq/policyN` (verified on
+/// the XMG: `/sys/devices/system/cpu/cpu0/cpufreq` resolves to
+/// `/sys/devices/system/cpu/cpufreq/policy0`). Addressing every CPU through those
+/// aliases therefore covers every policy using the form the allowlist already
+/// contains.
+///
+/// The parent directory `/sys/devices/system/cpu/cpufreq/` is NOT an attribute —
+/// it holds `policyN/` (and `boost`) — so there is no policy-level file to write
+/// there, on this kernel or on the layouts the read path uses
+/// (`hardware_detection::read_energy_performance_preference` reads the same
+/// per-CPU path).
+fn existing_epp_paths() -> Vec<String> {
+    let Ok(cpu_count) = get_cpu_count() else {
+        return Vec::new();
+    };
+    (0..cpu_count)
+        .map(|cpu| {
+            format!(
+                "/sys/devices/system/cpu/cpu{}/cpufreq/energy_performance_preference",
+                cpu
+            )
+        })
+        .filter(|path| Path::new(path).exists())
+        .collect()
+}
+
 pub fn set_energy_performance_preference(epp: &str) -> Result<()> {
-    let cpu_count = get_cpu_count()?;
-    
     let valid_values = ["performance", "balance_performance", "balance_power", "power", 
                        "default", "balance-performance", "balance-power"];
     if !valid_values.contains(&epp) {
         return Err(anyhow!("Invalid EPP value: {}", epp));
     }
-    
-    for i in 0..cpu_count {
-        let path = format!("/sys/devices/system/cpu/cpu{}/cpufreq/energy_performance_preference", i);
-        if Path::new(&path).exists() {
-            guard_sysfs_write(&path, epp)?;
-        }
+
+    for path in existing_epp_paths() {
+        guard_sysfs_write(&path, epp)?;
     }
-    
+
     log::info!(target: "hw.cpu", "set_epp preference=\"{}\"", epp);
     Ok(())
 }
 
+/// Apply an EPP preference to every CPU/policy.
+///
+/// This is the explicit "all CPUs" entry point. It writes exactly the target set
+/// returned by [`existing_epp_paths`] — the same list
+/// `set_energy_performance_preference` uses — and nothing else, so the function
+/// and [`guard_sysfs_write`] cannot disagree about what is writable (the test
+/// `epp_write_targets_stay_inside_the_allowlist` pins that with synthetic CPU
+/// numbers). It previously also attempted
+/// `/sys/devices/system/cpu/cpufreq/energy_performance_preference`, which is not
+/// an attribute in the kernel's cpufreq layout and is not on the allowlist: that
+/// branch could only ever be skipped (path absent) or rejected by the guard.
 pub fn set_all_cpu_epp(epp: &str) -> Result<()> {
     set_energy_performance_preference(epp)?;
-
-    let policy_path = "/sys/devices/system/cpu/cpufreq/energy_performance_preference";
-    if Path::new(policy_path).exists() {
-        guard_sysfs_write(policy_path, epp)?;
-    }
 
     log::info!(target: "hw.cpu", "set_all_cpu_epp preference={}", epp);
     Ok(())
@@ -1274,11 +1360,12 @@ mod tests {
 
     /// Regression: absolute sysfs paths must match the allowlist templates.
     ///
-    /// `split_path` previously kept the empty leading segment an absolute path
-    /// produces ("/sys/..." -> ["", "sys", ...]). `matches_template` rejects an
-    /// empty non-wildcard segment, so every real path was refused with
-    /// "blocked non-allowlisted sysfs write" and profile application never
-    /// reached the hardware at all. Dropping empty segments restores matching.
+    /// The empty leading segment an absolute path produces ("/sys/..." ->
+    /// ["", "sys", ...]) previously poisoned matching, so every real path was
+    /// refused with "blocked non-allowlisted sysfs write" and profile application
+    /// never reached the hardware at all. Components are now normalised before
+    /// matching, which covers that case with the traversal rules in
+    /// `traversal_components_cannot_satisfy_an_allowlist_template`.
     #[test]
     fn absolute_paths_match_sysfs_allowlist() {
         // The exact path the live daemon rejected 2026-09-16, plus a sibling
@@ -1299,6 +1386,188 @@ mod tests {
         assert!(!is_allowed_sysfs_path("/sys/class/hwmon/hwmon0/temp1_input"));
     }
 
+
+    /// `..`, `.`, repeated separators and relative spellings must not be able to
+    /// reach a file the templates do not describe.
+    ///
+    /// The wildcard used to accept ANY non-empty segment, including `..`, so
+    /// `/sys/class/leds/../brightness` matched the `/sys/class/leds/*/brightness`
+    /// template and resolved to `/sys/class/brightness` — outside the subtree the
+    /// template fixes. Components are now normalised lexically (no filesystem
+    /// access, because sysfs is symlink-based) and `..` is refused outright.
+    #[test]
+    fn traversal_components_cannot_satisfy_an_allowlist_template() {
+        // Every `..` path is refused by the path layer itself, never resolved.
+        for path in [
+            // '..' in the wildcard slot of a real template
+            "/sys/class/leds/../brightness",
+            "/sys/class/backlight/../../brightness",
+            // '..' walking out of the CPU subtree
+            "/sys/devices/system/cpu/../cpu/cpu0/cpufreq/scaling_governor",
+            "/sys/devices/system/cpu/cpu0/cpufreq/../../../etc/passwd",
+            "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor/../../../..",
+            // '..' above the root
+            "/../sys/class/leds/kbd_backlight/brightness",
+            "/..",
+        ] {
+            assert!(
+                !is_allowed_sysfs_path(path),
+                "traversing path was accepted: {path}"
+            );
+            assert_eq!(normalized_path(path), None, "traversal was resolved: {path}");
+            let err = guard_sysfs_write(path, "1").expect_err("guard accepted a traversing path");
+            assert!(
+                err.to_string().contains("traversing path"),
+                "guard did not report traversal for {path}: {err}"
+            );
+        }
+
+        // A lone `.` in the wildcard slot is dropped rather than resolved, so the
+        // result is a *different* path that no template describes — rejected on
+        // shape, which is why the message is the allowlist one.
+        let dotted = "/sys/class/leds/./brightness";
+        assert!(!is_allowed_sysfs_path(dotted));
+        assert_eq!(normalized_path(dotted).as_deref(), Some("/sys/class/leds/brightness"));
+        let err = guard_sysfs_write(dotted, "1").unwrap_err();
+        assert!(err.to_string().contains("non-allowlisted"), "{err}");
+    }
+
+    /// A relative path is not a sysfs path: `fs::write` would resolve it against
+    /// the daemon's working directory, so it must be refused even when its
+    /// component list looks allowlisted.
+    #[test]
+    fn relative_and_empty_paths_are_rejected() {
+        for path in [
+            "sys/class/leds/kbd_backlight/brightness",
+            "sys/devices/system/cpu/cpu0/cpufreq/scaling_governor",
+            "",
+            "/",
+            "./sys/class/leds/kbd_backlight/brightness",
+        ] {
+            assert!(!is_allowed_sysfs_path(path), "relative path accepted: {path:?}");
+            assert!(
+                guard_sysfs_write(path, "1").is_err(),
+                "guard accepted a non-absolute path: {path:?}"
+            );
+        }
+    }
+
+    /// Equivalent spellings of one path reduce to the same canonical target, and
+    /// that canonical form is what the guard checks and writes.
+    #[test]
+    fn equivalent_spellings_normalize_to_the_same_target() {
+        let canonical = "/sys/class/leds/kbd_backlight/brightness";
+        for spelling in [
+            "/sys/class/leds//kbd_backlight/brightness",
+            "/sys/class/leds/./kbd_backlight/brightness",
+            "/sys//class///leds/kbd_backlight/brightness",
+            "/sys/class/leds/kbd_backlight/brightness/",
+        ] {
+            assert!(is_allowed_sysfs_path(spelling), "rejected equivalent spelling: {spelling}");
+            assert_eq!(
+                normalized_path(spelling).as_deref(),
+                Some(canonical),
+                "spelling did not reduce to the canonical target: {spelling}"
+            );
+        }
+        // Nothing canonicalises into a path the allowlist does not describe.
+        assert_eq!(normalized_path("/sys/class/leds/../brightness"), None);
+    }
+
+    /// The guard is the production boundary: it must reject before any write,
+    /// reach the write for an allowed path, and run the value rules on the
+    /// canonical path.
+    #[test]
+    fn guard_boundary_rejects_traversal_but_still_writes_allowed_paths() {
+        // (a) rejected by the path layer, and the message names traversal rather
+        //     than the allowlist: no filesystem access was attempted.
+        let err = guard_sysfs_write("/sys/class/leds/../brightness", "1").unwrap_err();
+        assert!(err.to_string().contains("traversing path"), "{err}");
+
+        // (b) an allowlisted shape whose file does not exist reaches fs::write and
+        //     fails on the filesystem, not on the guard.
+        let err = guard_sysfs_write(
+            "/sys/class/leds/lapsphere-nonexistent-test-led/brightness",
+            "0",
+        )
+        .unwrap_err();
+        assert!(
+            !err.to_string().contains("blocked"),
+            "allowed path was blocked instead of attempted: {err}"
+        );
+
+        // (c) value rules still run, on the canonical path.
+        let err = guard_sysfs_write(
+            "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor",
+            "definitely-not-a-governor",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("governor"), "{err}");
+    }
+
+    /// Every target the EPP entry points can write stays inside the allowlist,
+    /// and the policy-level parent path stays out.
+    ///
+    /// `set_all_cpu_epp` used to write
+    /// `/sys/devices/system/cpu/cpufreq/energy_performance_preference`, which is
+    /// not an attribute in the kernel's layout (that directory holds `policyN/`
+    /// and `boost`) and is not on the allowlist — so the guard could only reject
+    /// it. The policy attribute is addressed through the per-CPU aliases, which
+    /// are symlinks into `cpufreq/policyN`.
+    #[test]
+    fn epp_write_targets_stay_inside_the_allowlist() {
+        // Synthetic CPU numbers: the contract, not this machine's CPU count.
+        for cpu in [0u32, 1, 7, 15, 63] {
+            let path = format!(
+                "/sys/devices/system/cpu/cpu{}/cpufreq/energy_performance_preference",
+                cpu
+            );
+            assert!(is_allowed_sysfs_path(&path), "EPP target not allowlisted: {path}");
+            let written = guard_sysfs_write(&path, "balance-performance");
+            assert!(
+                !written.unwrap_err().to_string().contains("blocked"),
+                "EPP target was blocked by the guard: {path}"
+            );
+        }
+
+        // The policy-level path is refused, and so is the policy directory form:
+        // the allowlist was not broadened to make the function work.
+        for path in [
+            "/sys/devices/system/cpu/cpufreq/energy_performance_preference",
+            "/sys/devices/system/cpu/cpufreq/policy0/energy_performance_preference",
+        ] {
+            assert!(!is_allowed_sysfs_path(path), "unexpectedly allowlisted: {path}");
+            assert!(guard_sysfs_write(path, "balance-performance").is_err());
+        }
+    }
+
+    /// The function itself must not address a path the allowlist refuses, and
+    /// that is not observable through `Path::exists()` on a host where the
+    /// attribute is absent. Pin it at the source level instead: the old body
+    /// addressed `/sys/devices/system/cpu/cpufreq/energy_performance_preference`
+    /// (the policy parent directory, which holds `policyN/` and `boost`), so this
+    /// test fails if that branch ever comes back.
+    #[test]
+    fn epp_entry_points_never_address_the_policy_parent_directory() {
+        let offending = "/sys/devices/system/cpu/cpufreq/energy_performance_preference";
+        assert!(
+            !is_allowed_sysfs_path(offending),
+            "the policy parent directory must not become writable"
+        );
+
+        let source = include_str!("hardware_control.rs");
+        let body = source
+            .split("pub fn set_all_cpu_epp")
+            .nth(1)
+            .expect("set_all_cpu_epp is missing from the source");
+        // Bound the body at the function's own closing brace (the first line that
+        // is exactly "}"), so the scan cannot run on into unrelated code.
+        let body = body.split("\n}").next().unwrap_or(body);
+        assert!(
+            !body.contains(offending),
+            "set_all_cpu_epp addresses the policy parent directory again:\n{body}"
+        );
+    }
 
     #[test]
     fn brightness_guard_rejects_invalid_value_without_panicking() {
