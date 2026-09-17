@@ -2181,6 +2181,71 @@ fn get_nvidia_extended_stats(gpu_index: u32) -> (Option<f32>, Option<f32>, Optio
     }
 }
 
+/// Validate the power sample on an explicitly requested cold wake only.
+/// A successful NVML call can return stale pre-ready data (753 W on a
+/// 150 W laptop). Never clamp it into a plausible-looking measurement.
+fn settle_cold_power(
+    initial: u32,
+    maximum: u32,
+    mut read: impl FnMut() -> Result<u32>,
+    mut wait: impl FnMut(),
+) -> Result<u32> {
+    if initial <= maximum {
+        return Ok(initial);
+    }
+    let mut last = format!("{} mW exceeds {} mW", initial, maximum);
+    // At most ten additional reads and one second of intentional waiting.
+    // NVML itself is synchronous; this does not impose a driver-call timeout.
+    for _ in 0..10 {
+        wait();
+        match read() {
+            Ok(value) if value <= maximum => return Ok(value),
+            Ok(value) => last = format!("{} mW exceeds {} mW", value, maximum),
+            Err(error) => last = error.to_string(),
+        }
+    }
+    Err(anyhow!("Cold GPU power telemetry not ready after 10 retries: {}", last))
+}
+
+#[cfg(test)]
+mod cold_power_tests {
+    use super::settle_cold_power;
+
+    #[test]
+    fn valid_initial_sample_needs_no_retry() {
+        assert_eq!(settle_cold_power(0, 150_000,
+            || panic!("unexpected read"), || panic!("unexpected wait")).unwrap(), 0);
+    }
+
+    #[test]
+    fn retries_invalid_sample_without_clamping() {
+        let mut reads = 0;
+        let mut waits = 0;
+        let value = settle_cold_power(753_173, 150_000, || {
+            reads += 1;
+            Ok(if reads < 3 { 753_173 } else { 31_088 })
+        }, || waits += 1).unwrap();
+        assert_eq!((value, reads, waits), (31_088, 3, 3));
+    }
+
+    #[test]
+    fn persistent_invalid_sample_returns_error_with_bounded_retries() {
+        let mut reads = 0;
+        let mut waits = 0;
+        let error = settle_cold_power(753_173, 150_000,
+            || { reads += 1; Ok(753_173) }, || waits += 1).unwrap_err();
+        assert_eq!((reads, waits), (10, 10));
+        assert!(error.to_string().contains("not ready after 10 retries"));
+    }
+
+    #[test]
+    fn driver_errors_do_not_turn_into_a_power_value() {
+        let error = settle_cold_power(753_173, 150_000,
+            || Err(anyhow::anyhow!("GPU lost")), || {}).unwrap_err();
+        assert!(error.to_string().contains("GPU lost"));
+    }
+}
+
 fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
     let (manual_clocks_enabled, _advanced_control_enabled) = {
         let state = crate::hardware_control::lock_or_recover(&crate::GPU_DAEMON_STATE, "GPU_DAEMON_STATE");
@@ -2625,7 +2690,10 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         // 3. If P4+ (including P8): poll NVML only (no NVAPI/direct ioctls).
         // This ensures visibility (P0-P3) while allowing the GPU to enter
         // low-power states (P8) and eventually suspend.
-        let (should_poll_nvml, should_poll_nvapi) = if is_suspended {
+        // is_suspended is the snapshot taken BEFORE the authorized NVML
+        // wake. An explicit full refresh must bypass this telemetry gate too,
+        // not only the suspended-stub returns above.
+        let (should_poll_nvml, should_poll_nvapi) = if is_suspended && !force_full_poll {
             (false, false)
         } else if pstate_val <= 3 {
             (true, true)
@@ -2634,7 +2702,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             (true, false)
         };
 
-        let (frequency, memory_frequency, temperature, load, power) = if !should_poll_nvml {
+        let (frequency, memory_frequency, temperature, load, mut power) = if !should_poll_nvml {
             (None, None, None, None, None)
         } else {
             (
@@ -2652,8 +2720,34 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             )
         };
 
+        // Only explicit cold refreshes may wait. Ordinary monitoring keeps
+        // its existing RTD3 gates and never acquires a retry loop.
+        if force_full_poll && is_suspended {
+            if let Some(watts) = power {
+                power = match device.power_management_limit_constraints() {
+                    Ok(bounds) if bounds.max_limit > 0 => match settle_cold_power(
+                        (watts * 1000.0).round() as u32,
+                        bounds.max_limit,
+                        || device.power_usage().map_err(Into::into),
+                        || std::thread::sleep(std::time::Duration::from_millis(100)),
+                    ) {
+                        Ok(value) => Some(value as f32 / 1000.0),
+                        Err(error) => {
+                            // Keep the remaining telemetry and reach the flag
+                            // consumption below; an early error would leave the
+                            // one-shot armed and wake again on a monitor tick.
+                            log::warn!(target: "hw.detect", "GPU {}: {}", i, error);
+                            None
+                        }
+                    },
+                    // No trustworthy bound: do not certify cold power data.
+                    _ => None,
+                };
+            }
+        }
+
         // Get extended stats via NVAPI
-        let (hotspot_temp, memory_temp, nvapi_voltage) = if !is_suspended && should_poll_nvapi {
+        let (hotspot_temp, memory_temp, nvapi_voltage) = if should_poll_nvapi {
             get_nvidia_extended_stats(i)
         } else {
             (None, None, None)
@@ -4011,6 +4105,32 @@ mod rtd3_hybrid_tests {
         .unwrap_or_else(|_| "unknown".into())
         .trim()
         .to_string()
+    }
+
+    #[test]
+    #[ignore = "requires an idle RTD3 NVIDIA GPU; deliberately wakes it"]
+    fn hil_cold_override_returns_core_telemetry() {
+        let _hil_guard = HIL_GLOBAL_STATE_LOCK.lock().unwrap();
+        let deadline = Instant::now() + std::time::Duration::from_secs(75);
+        while runtime_status() != "suspended" && Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert_eq!(runtime_status(), "suspended", "cold-start precondition");
+        IDLE_METRICS_CACHE.lock().unwrap().clear();
+        crate::FULL_NVML_REFRESH_REQUESTED.store(true, std::sync::atomic::Ordering::Relaxed);
+        let start = Instant::now();
+        let gpus = get_nvidia_gpu_info().expect("cold override failed");
+        let gpu = gpus.iter().find(|g| g.gpu_type == GpuType::Discrete).unwrap();
+        println!("cold override elapsed={:?} status={} core={:?} memory={:?} temp={:?} load={:?} power={:?}",
+            start.elapsed(), gpu.status, gpu.frequency, gpu.memory_frequency,
+            gpu.temperature, gpu.load, gpu.power);
+        assert!(gpu.frequency.is_some() && gpu.memory_frequency.is_some()
+            && gpu.temperature.is_some() && gpu.load.is_some() && gpu.power.is_some(),
+            "cold override must query core telemetry, not suppress it using pre-wake status");
+        let maximum = gpu.power_limit_range.expect("fixture requires power constraints").1 as f32;
+        assert!(gpu.power.unwrap() <= maximum,
+            "idle cold fixture returned implausible power: {:?} W, maximum {} W", gpu.power, maximum);
+        assert!(!crate::FULL_NVML_REFRESH_REQUESTED.load(std::sync::atomic::Ordering::Relaxed));
     }
 
     #[test]
