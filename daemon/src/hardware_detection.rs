@@ -20,7 +20,20 @@ static PREVIOUS_NET_STATS: Lazy<Mutex<HashMap<String, NetStats>>> =
 static PREVIOUS_STORAGE_STATS: Lazy<Mutex<HashMap<String, StorageStats>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-static NVIDIA_NAMES_CACHE: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
+/// Last name reported per PCI BDF. Keyed by identity, not by list position: a
+/// name is a property of the adapter, and the sysfs-only paths must not borrow
+/// another adapter's name when NVML enumeration order changes.
+static NVIDIA_NAMES_CACHE: Lazy<Mutex<HashMap<String, String>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+
+fn remember_gpu_name(bdf: &str, name: &str) {
+    let mut cache = crate::hardware_control::lock_or_recover(&NVIDIA_NAMES_CACHE, "NVIDIA_NAMES_CACHE");
+    cache.insert(bdf.to_lowercase(), name.to_string());
+}
+
+fn gpu_name_for_bdf(bdf: &str) -> Option<String> {
+    let cache = crate::hardware_control::lock_or_recover(&NVIDIA_NAMES_CACHE, "NVIDIA_NAMES_CACHE");
+    cache.get(&bdf.to_lowercase()).cloned()
+}
 
 #[derive(Clone)]
 struct NvidiaMetadata {
@@ -43,51 +56,330 @@ static NVIDIA_METADATA_CACHE: Lazy<Mutex<HashMap<u32, NvidiaMetadata>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 // ---------------------------------------------------------------------------
-// Hybrid metric-fetching (RTD3-aware idle tier)
+// dGPU polling tiers (RTD3-aware)
 //
 // Any NVML call on an RTD3-capable dGPU resets the kernel's
 // autosuspend_delay_ms (20 s) timer, even at 0% utilization. Polling NVML at
-// 1 Hz therefore pins an active-but-idle GPU awake forever. Strategy:
-//   - suspended          -> sysfs-only stub, zero NVML calls (existing behavior)
-//   - active, util > 0   -> full NVML query; results snapshotted into IDLE_CACHE
-//   - active, util == 0  -> serve last-known values from IDLE_CACHE, ZERO NVML
-//                           calls, so the autosuspend timer can expire and
-//                           the GPU drops to runtime_status "suspended"
-// The cache goes stale after IDLE_CACHE_TTL_SECS; stale entries are served as
-// None so the GUI shows real staleness instead of frozen values.
-// GetGpuInfoFull() sets FULL_NVML_REFRESH_REQUESTED for a one-shot bypass
-// (explicit user demand beats power saving).
+// 1 Hz therefore pins an active-but-idle GPU awake forever — that is why the
+// old idle-metrics cache existed. The cache is gone: NO telemetry may be
+// served from a stale store, because a cached "OK" reading is indistinguishable
+// from a live one and mislabels the GPU. Instead, one poll block decides per
+// tick whether invasive queries are allowed at all:
+//
+//   - suspended            -> sysfs-only payload, ZERO NVML/NVAPI calls (a call
+//                             would wake the GPU)
+//   - active, P0..P2       -> full live NVML + NVAPI query EVERY tick; a loaded
+//                             GPU cannot runtime-suspend, so this is free
+//   - active, with work    -> same live treatment as P0..P2 at ANY p-state:
+//                             light 3D work sits on P3 and oscillates to P5,
+//                             and those ticks must not go blank
+//   - active, no work
+//     (any p-state)        -> quiet tier: sysfs runtime_status only; every
+//                             telemetry field is left blank rather than filled
+//                             from a previous sample, so the GPU can complete
+//                             its own idle-down (P3 -> P5 -> P8 -> suspended)
+//
+// The only cached values are the two cheap/static VRAM figures (total and
+// available, see gpu_activity::record_memory) plus static device metadata
+// (name, VRAM type/vendor/bus, clock ranges, supported p-states). Nothing
+// dynamic — status, clocks, load, power, voltage, hotspot, memory temperature —
+// is ever read back from a store.
+//
+// Entering the quiet tier is not a one-way door: a re-probe is allowed once
+// QUIET_REPROBE_SECS have passed, so a GPU that ramps from a light P8 back to
+// P0 is noticed without a wake. The cadence must stay longer than the
+// kernel's autosuspend delay plus the driver's release latency: measured on
+// this machine, the dGPU re-suspends 27 s after the last NVML touch, so by the
+// time the cadence fires an unused GPU is already suspended — the tier check
+// then reads "suspended" and skips the probe instead of waking it.
 // ---------------------------------------------------------------------------
 
-const IDLE_CACHE_TTL_SECS: u64 = 30;
+/// Minimum quiet-tier dwell before one bounded re-probe is allowed (seconds).
+const QUIET_REPROBE_SECS: u64 = 45;
 
-#[derive(Clone)]
-struct GpuIdleSnapshot {
-    frequency: Option<u64>,
-    memory_frequency: Option<u64>,
-    temperature: Option<f32>,
-    load: Option<f32>,
-    power: Option<f32>,
-    voltage: Option<f32>, // NVAPI voltage captured alongside the full query
+/// GPU utilization that counts as "this adapter is doing work" (percent).
+/// Measured on the XMG: an idle desktop reports 0.0, while real 3D work sits
+/// well above this (5 % at P0, 26-46 % at P3/P5). The margin keeps a one-off
+/// Xorg blit from holding the live tier open.
+const GPU_WORK_UTILIZATION_PERCENT: f32 = 1.0;
+
+/// Per-GPU control state. This is NOT a telemetry store: `last_pstate` and
+/// `last_runtime_status` decide the tier only and are never published as
+/// measurements (the quiet-tier payload carries `performance_state: None`).
+#[derive(Clone, Debug, Default)]
+struct GpuPollState {
+    /// Last runtime-PM word observed from sysfs.
+    last_runtime_status: Option<String>,
+    /// Last performance state seen by a live NVML pass.
+    last_pstate: Option<u8>,
+    /// GPU utilization observed by that same pass. P3 is the boundary state:
+    /// P3 with work must stay live, P3 without work must be left alone.
+    last_load: Option<f32>,
+    /// When the last invasive NVML/NVAPI query for this GPU was issued.
+    last_probe: Option<Instant>,
 }
 
-struct IdleCacheEntry {
-    snapshot: Option<GpuIdleSnapshot>,
-    captured_at: Instant,
-}
-
-/// Per-GPU last-known metrics from the most recent full (util > 0) NVML pass.
-static IDLE_METRICS_CACHE: Lazy<Mutex<HashMap<u32, IdleCacheEntry>>> =
+static GPU_POLL_STATE: Lazy<Mutex<HashMap<String, GpuPollState>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-/// Freshness probe without touching the GPU (safe to call from any path).
-#[allow(dead_code)]
-fn idle_cache_fresh_for(index: u32) -> bool {
-    let cache = IDLE_METRICS_CACHE.lock().unwrap();
-    cache
-        .get(&index)
-        .map(|e| e.captured_at.elapsed().as_secs() < IDLE_CACHE_TTL_SECS)
+/// NVML device index -> PCI BDF, learned from the driver during live passes.
+///
+/// NVML's index order is an implementation detail of the library, while the BDF
+/// is the identity the kernel, the sysfs tree and NVML's own `pci_info()` all
+/// agree on. Everything that pairs sysfs state with an NVML device resolves the
+/// BDF through this map first, so a change in enumeration order cannot attach
+/// one adapter's runtime/power state to another adapter's telemetry.
+static NVIDIA_BDF_BY_INDEX: Lazy<Mutex<HashMap<u32, String>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// One adapter as sysfs sees it: directory name plus runtime-PM word.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SysfsNvidiaDevice {
+    /// Directory name under /sys/bus/pci/drivers/nvidia, e.g. "0000:01:00.0".
+    bdf: String,
+    /// `power/runtime_status`, lower case.
+    runtime_status: String,
+}
+
+/// One NVML device plus the identity NVML reports for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NvmlDeviceSlot {
+    index: u32,
+    /// `None` when NVML cannot report the PCI identity for this device.
+    bdf: Option<String>,
+}
+
+/// Canonicalise an NVML PCI identity into the sysfs directory-name form used by
+/// /sys/bus/pci/devices and /sys/bus/pci/drivers/nvidia ("0000:01:00.0").
+fn canonical_bdf(bus_id: &str, domain: u32) -> Option<String> {
+    let (_, rest) = bus_id.split_once(':')?;
+    if rest.is_empty() {
+        return None;
+    }
+    Some(format!("{:04x}:{}", domain, rest).to_lowercase())
+}
+
+/// Identity NVML reports for one device.
+fn nvml_pci_bdf(device: &nvml_wrapper::Device) -> Option<String> {
+    let pci = device.pci_info().ok()?;
+    canonical_bdf(&pci.bus_id, pci.domain)
+}
+
+fn remember_nvml_bdf(index: u32, bdf: &str) {
+    let mut map = crate::hardware_control::lock_or_recover(&NVIDIA_BDF_BY_INDEX, "NVIDIA_BDF_BY_INDEX");
+    match map.get(&index) {
+        Some(known) if known.eq_ignore_ascii_case(bdf) => {}
+        Some(known) => {
+            log::warn!(target: "hw.detect",
+                "NVML index {} now reports BDF {} (was {}) - remapping", index, bdf, known);
+            map.insert(index, bdf.to_lowercase());
+        }
+        None => {
+            map.insert(index, bdf.to_lowercase());
+        }
+    }
+}
+
+/// BDF the most recent live pass saw for an NVML index.
+fn bdf_for_nvml_index(index: u32) -> Option<String> {
+    let map = crate::hardware_control::lock_or_recover(&NVIDIA_BDF_BY_INDEX, "NVIDIA_BDF_BY_INDEX");
+    map.get(&index).cloned()
+}
+
+/// NVML index for a BDF, when a live pass already learned the association.
+fn nvml_index_for_bdf(bdf: &str) -> Option<u32> {
+    let map = crate::hardware_control::lock_or_recover(&NVIDIA_BDF_BY_INDEX, "NVIDIA_BDF_BY_INDEX");
+    map.iter()
+        .find(|(_, known)| known.eq_ignore_ascii_case(bdf))
+        .map(|(index, _)| *index)
+}
+
+/// Poll-state key for one adapter. The BDF is used whenever it is known, so the
+/// state follows the adapter across enumerations; only an adapter NVML cannot
+/// identify falls back to an index-scoped key (which cannot collide with a BDF).
+fn poll_state_key(bdf: Option<&str>, index: u32) -> String {
+    match bdf {
+        Some(bdf) if !bdf.is_empty() => bdf.to_lowercase(),
+        _ => format!("index:{}", index),
+    }
+}
+
+/// What a tick is allowed to do for one GPU.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GpuPollTier {
+    /// Issue NVML + NVAPI queries this tick.
+    Live,
+    /// sysfs reads only; every telemetry field is published blank.
+    Quiet,
+    /// Runtime-suspended: sysfs reads only, and never a probe (it would wake it).
+    Suspended,
+}
+
+/// Pure tier decision. `runtime_status` comes from sysfs and costs nothing.
+fn gpu_poll_tier(state: Option<&GpuPollState>, runtime_status: &str) -> GpuPollTier {
+    if runtime_status.eq_ignore_ascii_case("suspended") {
+        return GpuPollTier::Suspended;
+    }
+    let Some(state) = state else {
+        // Never observed: one pass is needed to learn the current p-state.
+        return GpuPollTier::Live;
+    };
+    // A wake after a suspended observation is the cheapest possible evidence
+    // that something started using the GPU: probe it while it is awake anyway.
+    let woke = state
+        .last_runtime_status
+        .as_deref()
+        .map(|previous| previous.eq_ignore_ascii_case("suspended"))
+        .unwrap_or(false);
+    if woke {
+        return GpuPollTier::Live;
+    }
+    // P0..P2: the GPU is doing work — live values every tick, no cache.
+    if matches!(state.last_pstate, Some(pstate) if pstate <= 2) {
+        return GpuPollTier::Live;
+    }
+    // Anything with work is polled live, whatever its P-state: light 3D work
+    // lands on P3 and oscillates to P5 (measured 26-46 % utilization), and the
+    // user-facing rule is "real values whenever the GPU is actually working".
+    // A pass that could not read the utilization counts as "no work": the
+    // re-probe below still refreshes it, and an unmeasured GPU must never be
+    // pinned awake.
+    if state
+        .last_load
+        .map(|load| load > GPU_WORK_UTILIZATION_PERCENT)
         .unwrap_or(false)
+    {
+        return GpuPollTier::Live;
+    }
+    // Never probed yet: one pass is needed to learn the p-state.
+    if state.last_probe.is_none() {
+        return GpuPollTier::Live;
+    }
+    // P3 and deeper — or a pass that could not report a p-state at all — stay
+    // out of the way until the bounded re-probe cadence elapses.
+    match state.last_probe {
+        Some(at) if at.elapsed().as_secs() < QUIET_REPROBE_SECS => GpuPollTier::Quiet,
+        _ => GpuPollTier::Live,
+    }
+}
+
+/// Record a sysfs-only observation (no probe issued, so the cadence clock is
+/// deliberately not touched).
+fn record_gpu_observation(key: &str, runtime_status: &str) {
+    let mut states = crate::hardware_control::lock_or_recover(&GPU_POLL_STATE, "GPU_POLL_STATE");
+    let state = states.entry(key.to_string()).or_default();
+    state.last_runtime_status = Some(runtime_status.to_string());
+}
+
+/// Record a completed invasive pass: its p-state and utilization drive the
+/// next tick's tier.
+fn record_gpu_probe(key: &str, runtime_status: &str, pstate: Option<u8>, load: Option<f32>) {
+    let mut states = crate::hardware_control::lock_or_recover(&GPU_POLL_STATE, "GPU_POLL_STATE");
+    let state = states.entry(key.to_string()).or_default();
+    state.last_runtime_status = Some(runtime_status.to_string());
+    if let Some(pstate) = pstate {
+        state.last_pstate = Some(pstate);
+    }
+    if let Some(load) = load {
+        state.last_load = Some(load);
+    }
+    state.last_probe = Some(Instant::now());
+}
+
+/// Was the previous observation of this GPU "suspended"? Used to validate the
+/// first power sample after a wake (a successful NVML read right after D3 wake
+/// can report stale nonsense, measured at 753 W on a 150 W-max GPU).
+fn gpu_woke_from_suspend(key: &str) -> bool {
+    let states = crate::hardware_control::lock_or_recover(&GPU_POLL_STATE, "GPU_POLL_STATE");
+    states
+        .get(key)
+        .and_then(|s| s.last_runtime_status.as_deref())
+        .map(|s| s.eq_ignore_ascii_case("suspended"))
+        .unwrap_or(false)
+}
+
+/// Runtime-PM status word for one NVIDIA PCI id (non-invasive sysfs read).
+fn read_runtime_status(pci_id: &str) -> String {
+    fs::read_to_string(format!(
+        "/sys/bus/pci/drivers/nvidia/{}/power/runtime_status",
+        pci_id
+    ))
+    .unwrap_or_default()
+    .trim()
+    .to_lowercase()
+}
+
+/// Every NVIDIA adapter sysfs lists, with its own runtime-PM word.
+///
+/// Sorted for deterministic output; the order carries no identity meaning — the
+/// `bdf` field is the identity, and every lookup below matches on it.
+fn sysfs_nvidia_devices() -> Vec<SysfsNvidiaDevice> {
+    let mut ids: Vec<String> = Vec::new();
+    if let Ok(entries) = fs::read_dir("/sys/bus/pci/drivers/nvidia") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.contains(':') {
+                ids.push(name);
+            }
+        }
+    }
+    ids.sort();
+    ids.into_iter()
+        .map(|bdf| SysfsNvidiaDevice {
+            runtime_status: read_runtime_status(&bdf),
+            bdf,
+        })
+        .collect()
+}
+
+/// Resolve each NVML device's runtime-PM status by ITS OWN PCI identity.
+///
+/// Association is by BDF and never by list position, so a permuted sysfs
+/// enumeration cannot hand one adapter's runtime state to another. A device
+/// whose BDF sysfs does not list yields `None` (unknown) instead of borrowing a
+/// neighbour's status; the one exception is a single-device system, where the
+/// two views cannot describe different adapters — that preserves the
+/// pre-existing single-GPU behaviour when NVML reports no BDF at all.
+fn runtime_status_by_device(
+    devices: &[NvmlDeviceSlot],
+    sysfs: &[SysfsNvidiaDevice],
+) -> Vec<Option<String>> {
+    devices
+        .iter()
+        .map(|slot| {
+            if let Some(bdf) = slot.bdf.as_deref() {
+                if let Some(found) = sysfs.iter().find(|dev| dev.bdf.eq_ignore_ascii_case(bdf)) {
+                    return Some(found.runtime_status.clone());
+                }
+                log::debug!(target: "hw.detect",
+                    "NVML device {} reports BDF {} which sysfs does not list; runtime state stays unknown",
+                    slot.index, bdf);
+                return None;
+            }
+            if devices.len() == 1 && sysfs.len() == 1 {
+                return Some(sysfs[0].runtime_status.clone());
+            }
+            log::debug!(target: "hw.detect",
+                "NVML device {} reports no PCI identity and the system has {} adapters; runtime state stays unknown",
+                slot.index, sysfs.len());
+            None
+        })
+        .collect()
+}
+
+/// Poll-state keys whose current tier allows an invasive query, evaluated
+/// WITHOUT touching the GPU. Shared by the metric poll and the GPU-fan poll so
+/// both obey the same policy instead of each deciding for itself.
+fn live_tier_keys() -> Vec<String> {
+    let states = crate::hardware_control::lock_or_recover(&GPU_POLL_STATE, "GPU_POLL_STATE");
+    sysfs_nvidia_devices()
+        .iter()
+        .filter(|dev| {
+            gpu_poll_tier(states.get(&poll_state_key(Some(&dev.bdf), 0)), &dev.runtime_status)
+                == GpuPollTier::Live
+        })
+        .map(|dev| poll_state_key(Some(&dev.bdf), 0))
+        .collect()
 }
 
 static PREVIOUS_RAPL_STATS: Mutex<Option<(f64, Instant)>> = Mutex::new(None);
@@ -165,7 +457,7 @@ fn calculate_cpu_load() -> Result<HashMap<u32, f32>> {
     let current_stats = read_cpu_stats()?;
     
     // Get previous stats from thread-safe storage
-    let mut prev_stats_lock = PREVIOUS_CPU_STATS.lock().unwrap();
+    let mut prev_stats_lock = crate::hardware_control::lock_or_recover(&PREVIOUS_CPU_STATS, "PREVIOUS_CPU_STATS");
     
     let loads = if let Some(ref prev_stats) = *prev_stats_lock {
         // Calculate load based on delta from previous call
@@ -410,7 +702,7 @@ fn try_rapl() -> Result<f32> {
                 if let Ok(energy_str) = fs::read_to_string(path.join("energy_uj")) {
                     if let Ok(energy) = energy_str.trim().parse::<f64>() {
                         let now = Instant::now();
-                        let mut prev_lock = PREVIOUS_RAPL_STATS.lock().unwrap();
+                        let mut prev_lock = crate::hardware_control::lock_or_recover(&PREVIOUS_RAPL_STATS, "PREVIOUS_RAPL_STATS");
 
                         let power = if let Some((prev_energy, prev_time)) = *prev_lock {
                             let elapsed = now.duration_since(prev_time).as_secs_f64();
@@ -717,7 +1009,7 @@ pub fn get_tdp_profiles() -> Result<Vec<String>> {
             match io.get_available_profiles() {
                 Ok(profiles) => {
                     static LOGGED_ONCE: Mutex<bool> = Mutex::new(false);
-                    let mut logged = LOGGED_ONCE.lock().unwrap();
+                    let mut logged = crate::hardware_control::lock_or_recover(&LOGGED_ONCE, "LOGGED_ONCE");
                     if !*logged {
                         log::debug!(target: "hw.detect", "Available TDP profiles: {:?}", profiles);
                         *logged = true;
@@ -797,7 +1089,7 @@ pub fn get_all_fan_info() -> Result<Vec<FanInfo>> {
     // 1. Get system fans (Tuxedo/Uniwill/Clevo)
     if TuxedoIo::is_available() {
         if let Some(io) = TuxedoIo::shared() {
-            let fan_settings = crate::FAN_DAEMON_STATE.lock().unwrap();
+            let fan_settings = crate::hardware_control::lock_or_recover(&crate::FAN_DAEMON_STATE, "FAN_DAEMON_STATE");
             let manual_mode = fan_settings.as_ref().map_or(false, |s| s.control_enabled);
 
             for fan_id in 0..io.get_fan_count() {
@@ -817,7 +1109,7 @@ pub fn get_all_fan_info() -> Result<Vec<FanInfo>> {
     }
 
     // 2. Get NVIDIA GPU fans
-    let gpu_settings = crate::GPU_DAEMON_STATE.lock().unwrap();
+    let gpu_settings = crate::hardware_control::lock_or_recover(&crate::GPU_DAEMON_STATE, "GPU_DAEMON_STATE");
 
     // Check suspension status first to avoid waking up GPU
     let mut nvidia_active = false;
@@ -835,29 +1127,45 @@ pub fn get_all_fan_info() -> Result<Vec<FanInfo>> {
         }
     }
 
-    // RTD3 idle-tier: skip NVML entirely when the GPU is active-but-idle
-    // (fresh idle snapshot present). NVML calls here would reset the kernel's
-    // 20 s autosuspend timer and pin the dGPU awake. The GUI falls back to the
-    // last-known values from get_gpu_info()'s idle cache.
-    if nvidia_active && !idle_cache_fresh_for(0) {
+    // Same RTD3 policy as the metric poll: NVML fan reads happen only for a
+    // GPU in the live tier (see the tier block at the top of this file). This
+    // second, independently scheduled NVML toucher must not reset the
+    // autosuspend timer for a GPU that is idling down. Fan speeds are never
+    // cached: a GPU that may not be queried simply has no fan rows until it is
+    // queried again.
+    let live_keys = live_tier_keys();
+    if nvidia_active && !live_keys.is_empty() {
         if let Ok(nvml) = get_nvml() {
             if let Ok(device_count) = nvml.device_count() {
                 for i in 0..device_count {
-                    // Check specific GPU status again
-                    let mut is_suspended = true;
-                    if let Ok(pci_info) = nvml.device_by_index(i).and_then(|d| d.pci_info()) {
-                        let bus_id = pci_info.bus_id.to_lowercase();
-                        let status_path = format!("/sys/bus/pci/devices/{}/power/runtime_status", bus_id);
-                        if let Ok(status) = fs::read_to_string(status_path) {
-                            if status.trim() != "suspended" {
-                                is_suspended = false;
-                            }
-                        }
+                    let Ok(device) = nvml.device_by_index(i) else { continue };
+
+                    // Identify the adapter through the same canonicalisation the
+                    // metric poll uses. NVML reports the domain as eight hex
+                    // digits ("00000000:01:00.0") while sysfs directories use
+                    // four ("0000:01:00.0"), so hand-building the path from
+                    // pci_info().bus_id silently missed every file: the status
+                    // read failed, the GPU counted as suspended and its fan rows
+                    // were never emitted (observed on the XMG: zero NVIDIA fan
+                    // entries in the payload).
+                    let bdf = nvml_pci_bdf(&device);
+                    if let Some(ref bdf) = bdf {
+                        remember_nvml_bdf(i, bdf);
+                    }
+                    let poll_key = poll_state_key(bdf.as_deref(), i);
+                    if read_runtime_status(
+                        bdf.as_deref()
+                            .unwrap_or("__unknown__"),
+                    )
+                    .eq_ignore_ascii_case("suspended")
+                    {
+                        continue;
+                    }
+                    if !live_keys.contains(&poll_key) {
+                        continue;
                     }
 
-                    if is_suspended { continue; }
-
-                    if let Ok(device) = nvml.device_by_index(i) {
+                    {
                         if let Ok(num_fans) = device.num_fans() {
                             for f in 0..num_fans {
                                 let speed = device.fan_speed(f).unwrap_or(0);
@@ -1271,7 +1579,7 @@ pub fn get_system_info() -> Result<SystemInfo> {
     static CACHED_SYSTEM_INFO: Mutex<Option<SystemInfo>> = Mutex::new(None);
 
     {
-        let cache = CACHED_SYSTEM_INFO.lock().unwrap();
+        let cache = crate::hardware_control::lock_or_recover(&CACHED_SYSTEM_INFO, "CACHED_SYSTEM_INFO");
         if let Some(info) = &*cache {
             return Ok(info.clone());
         }
@@ -1325,7 +1633,7 @@ pub fn get_system_info() -> Result<SystemInfo> {
     };
 
     {
-        let mut cache = CACHED_SYSTEM_INFO.lock().unwrap();
+        let mut cache = crate::hardware_control::lock_or_recover(&CACHED_SYSTEM_INFO, "CACHED_SYSTEM_INFO");
         *cache = Some(info.clone());
     }
 
@@ -1376,11 +1684,10 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
             
             let gpu_type = GpuType::Integrated;
             
-            let status_path = format!("{}/power/runtime_status", device_path);
-            let status = fs::read_to_string(&status_path)
-                .unwrap_or_else(|_| "active".to_string())
-                .trim()
-                .to_string();
+            // No runtime_status for integrated graphics: the adapter never
+            // runtime-suspends, so the word would be a constant "active" and
+            // carries no information. Its holders list and VRAM figures are
+            // suppressed for the same reason (see gpu_activity::attach).
             
             // Read frequency
             let frequency = read_gpu_frequency(&device_path);
@@ -1401,9 +1708,13 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
             let voltage = read_gpu_voltage(&device_path);
             
             gpus.push(GpuInfo {
+                pci_bus_id: fs::canonicalize(&device_path).ok().and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned())),
+                process_snapshot: GpuProcessSnapshot::default(),
+                vram_memory: None,
                 name,
                 gpu_type,
-                status,
+                runtime_status: None,
+                performance_state: None,
                 frequency,
                 memory_frequency,
                 temperature,
@@ -1443,6 +1754,7 @@ pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
         }
     }
     
+    crate::gpu_activity::attach(&mut gpus);
     if gpus.is_empty() {
         return Err(anyhow!("No GPUs detected"));
     }
@@ -1517,7 +1829,7 @@ fn get_base_gpu_clock_ranges(device: &nvml_wrapper::Device) -> Result<(u32, u32)
 pub fn get_gpu_clock_ranges(device_index: u32) -> Result<(u32, u32)> {
     // Try cache first to avoid waking up GPU
     let cached_range = {
-        let cache = NVIDIA_METADATA_CACHE.lock().unwrap();
+        let cache = crate::hardware_control::lock_or_recover(&NVIDIA_METADATA_CACHE, "NVIDIA_METADATA_CACHE");
         cache.get(&device_index).and_then(|m| m.core_clock_range)
     };
 
@@ -1535,7 +1847,7 @@ pub fn get_gpu_clock_ranges(device_index: u32) -> Result<(u32, u32)> {
 
     // Add current core offset if any to show real-time effective ranges in the UI
     let offset = {
-        let map = crate::MANUAL_GPU_OFFSETS.lock().unwrap();
+        let map = crate::hardware_control::lock_or_recover(&crate::MANUAL_GPU_OFFSETS, "MANUAL_GPU_OFFSETS");
         map.get(&device_index).map(|(c, _)| *c).unwrap_or(0.0)
     };
 
@@ -1549,7 +1861,7 @@ pub fn get_gpu_clock_ranges(device_index: u32) -> Result<(u32, u32)> {
 pub fn get_gpu_core_offset_limits(device_index: u32) -> Result<(i32, i32)> {
     // Try cache first
     let cached_limits = {
-        let cache = NVIDIA_METADATA_CACHE.lock().unwrap();
+        let cache = crate::hardware_control::lock_or_recover(&NVIDIA_METADATA_CACHE, "NVIDIA_METADATA_CACHE");
         cache.get(&device_index).and_then(|m| m.core_offset_limits)
     };
 
@@ -1570,7 +1882,7 @@ pub fn get_gpu_core_offset_limits(device_index: u32) -> Result<(i32, i32)> {
 pub fn get_gpu_memory_offset_limits(device_index: u32) -> Result<(i32, i32)> {
     // Try cache first
     let cached_limits = {
-        let cache = NVIDIA_METADATA_CACHE.lock().unwrap();
+        let cache = crate::hardware_control::lock_or_recover(&NVIDIA_METADATA_CACHE, "NVIDIA_METADATA_CACHE");
         cache.get(&device_index).and_then(|m| m.memory_offset_limits)
     };
 
@@ -1588,32 +1900,70 @@ pub fn get_gpu_memory_offset_limits(device_index: u32) -> Result<(i32, i32)> {
     Ok((offset_info.min_clock_offset_mhz, offset_info.max_clock_offset_mhz))
 }
 
-fn is_gpu_suspended_by_index(index: u32) -> bool {
-    let mut nvidia_pci_ids = Vec::new();
-    if let Ok(entries) = fs::read_dir("/sys/bus/pci/drivers/nvidia") {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.contains(':') {
-                nvidia_pci_ids.push(name);
-            }
-        }
+/// Pure decision behind [`is_gpu_suspended_by_index`], so the identity handling
+/// is testable without hardware.
+///
+/// `Some(status)` means "this index is known to be suspended or not"; `None`
+/// means the mapping is not established (no live pass yet) and the index cannot
+/// be attributed safely. A single-adapter system has only one possible
+/// interpretation, so there the sysfs entry is used directly; with several
+/// adapters an unestablished mapping is never guessed from list position.
+fn suspended_decision(
+    sysfs: &[SysfsNvidiaDevice],
+    known_bdf: Option<&str>,
+    candidates: usize,
+) -> Option<bool> {
+    if let Some(bdf) = known_bdf {
+        return sysfs
+            .iter()
+            .find(|dev| dev.bdf.eq_ignore_ascii_case(bdf))
+            .map(|dev| dev.runtime_status.eq_ignore_ascii_case("suspended"));
     }
-    nvidia_pci_ids.sort();
+    if candidates == 1 && sysfs.len() == 1 {
+        return Some(sysfs[0].runtime_status.eq_ignore_ascii_case("suspended"));
+    }
+    None
+}
 
-    if let Some(id) = nvidia_pci_ids.get(index as usize) {
-        let status_path = format!("/sys/bus/pci/drivers/nvidia/{}/power/runtime_status", id);
-        if let Ok(status) = fs::read_to_string(status_path) {
-            return status.trim().eq_ignore_ascii_case("suspended");
+/// Is the GPU behind this NVML index runtime-suspended?
+///
+/// The BDF learned from NVML decides it. When NVML has not reported an identity
+/// yet, an index on a multi-adapter system is treated as suspended: refusing to
+/// query is the conservative choice for RTD3 (a wrong "awake" answer would wake
+/// the adapter), and the caller's error path already says the metadata is not
+/// cached.
+fn is_gpu_suspended_by_index(index: u32) -> bool {
+    let sysfs = sysfs_nvidia_devices();
+    let known_bdf = bdf_for_nvml_index(index);
+    match suspended_decision(&sysfs, known_bdf.as_deref(), sysfs.len()) {
+        Some(suspended) => suspended,
+        None => {
+            log::debug!(target: "hw.detect",
+                "no NVML->BDF mapping for index {} on a {}-adapter system; treating as suspended",
+                index, sysfs.len());
+            true
         }
     }
-    false
 }
 
 // NVIDIA Direct Driver Constants and Structs
+//
+// Escape numbers and the registration direction are verified against the
+// installed driver (610.57.04) by issuing each ioctl and reading the result:
+//   * 0x23 -> EINVAL: not a valid escape at all. The RM allocation escape is
+//     0x2B, which allocates a client and then device/subdevice objects
+//     (returned handles land in the 0xC1D0_0000 client and 0xCAF0_0000 device
+//     ranges with status NV_OK).
+//   * 0x2A is the RM control escape; issuing a control with 0x2B routes it into
+//     the allocator instead (it answers with an allocation status).
+//   * Registration is NV_ESC_REGISTER_FD (201, i.e. NV_IOCTL_BASE + 1, see
+//     common/inc/nv-ioctl-numbers.h), it must be issued ON THE DEVICE fd and
+//     pass the CONTROL fd as its argument. Every other combination
+//     (0x27, array sizes 8, ctl fd on nvidiactl, ...) returns EINVAL.
 const NV_IOCTL_MAGIC: u8 = b'F';
-const NV_ESC_RM_ALLOC: u8 = 0x23;
-const NV_ESC_RM_CONTROL: u8 = 0x2B;
-const NV_ESC_REGISTER_FD: u8 = 0x27;
+const NV_ESC_RM_ALLOC: u8 = 0x2B;
+const NV_ESC_RM_CONTROL: u8 = 0x2A;
+const NV_ESC_REGISTER_FD: u8 = 201;
 
 const NV01_DEVICE_0: u32 = 0x00000080;
 const NV20_SUBDEVICE_0: u32 = 0x00002080;
@@ -1726,15 +2076,7 @@ impl NvidiaDriverHandle {
             .with_context(|| "Failed to open /dev/nvidiactl - ensure NVIDIA driver is loaded and you have permissions (try: sudo usermod -aG video <username>)")?;
         log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Opened /dev/nvidiactl");
 
-        let mut client_params: NVOS21_PARAMETERS = unsafe { std::mem::zeroed() };
-        unsafe {
-            rm_alloc_nvos21(nvidiactl_fd.as_raw_fd(), &mut client_params)
-                .with_context(|| "Failed to allocate NVIDIA RM client handle via IOCTL NV_ESC_RM_ALLOC")?;
-        }
-        let client_handle = client_params.hObjectNew;
-        log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Got client_handle=0x{:x}", client_handle);
-
-        // Open device-specific file with enhanced error reporting  
+        // Open device-specific file with enhanced error reporting
         let device_path = format!("/dev/nvidia{}", minor_number);
         let device_fd = fs::File::options()
             .read(true)
@@ -1743,12 +2085,24 @@ impl NvidiaDriverHandle {
             .with_context(|| format!("Failed to open {} - GPU device may not exist or is not accessible", device_path))?;
         log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Opened /dev/nvidia{}", minor_number);
 
-        let mut dev_fd_raw = device_fd.as_raw_fd();
+        // Registration goes the other way round from what it may look like: the
+        // ioctl is issued on the DEVICE fd and carries the CONTROL fd. Measured
+        // on driver 610.57.04: issuing it on nvidiactl (any fd, any size) fails
+        // with EINVAL, and so does issuing 0x27 on the device fd.
+        let mut control_fd_raw = nvidiactl_fd.as_raw_fd();
         unsafe {
-            register_fd(device_fd.as_raw_fd(), &mut dev_fd_raw)
-                .with_context(|| format!("Failed to register device FD for /dev/nvidia{} via IOCTL NV_ESC_REGISTER_FD", minor_number))?;
+            register_fd(device_fd.as_raw_fd(), &mut control_fd_raw)
+                .with_context(|| format!("Failed to register the control FD for /dev/nvidia{} via IOCTL NV_ESC_REGISTER_FD", minor_number))?;
         }
-        log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Registered device FD");
+        log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Registered /dev/nvidiactl fd on the device fd");
+
+        let mut client_params: NVOS21_PARAMETERS = unsafe { std::mem::zeroed() };
+        unsafe {
+            rm_alloc_nvos21(nvidiactl_fd.as_raw_fd(), &mut client_params)
+                .with_context(|| "Failed to allocate NVIDIA RM client handle via IOCTL NV_ESC_RM_ALLOC")?;
+        }
+        let client_handle = client_params.hObjectNew;
+        log::debug!(target: "hw.detect", "NvidiaDriverHandle::open: Got client_handle=0x{:x}", client_handle);
 
         let mut alloc_params: NV0080_ALLOC_PARAMETERS = unsafe { std::mem::zeroed() };
         alloc_params.deviceId = minor_number;
@@ -1840,17 +2194,21 @@ impl NvidiaDriverHandle {
         
         if request.status != 0 {
             // Decode common NVIDIA RM error codes
+            // Decoded from the driver's own table: common/inc/nvstatuscodes.h
+            // in the installed kernel source. The values previously hardcoded
+            // here (0x01/0x02/0x05...) belong to no released driver, so every
+            // real failure was reported as "UNKNOWN_ERROR".
             let error_desc = match request.status {
+                0x0000001a => "NV_ERR_INSUFFICIENT_RESOURCES",
+                0x0000001b => "NV_ERR_INSUFFICIENT_PERMISSIONS",
+                0x0000001c => "NV_ERR_INSUFFICIENT_POWER",
+                0x0000001e => "NV_ERR_INVALID_ADDRESS",
+                0x0000001f => "NV_ERR_INVALID_ARGUMENT",
+                0x00000033 => "NV_ERR_INVALID_OBJECT_HANDLE",
+                0x00000040 => "NV_ERR_INVALID_STATE",
+                0x00000056 => "NV_ERR_NOT_SUPPORTED",
+                0x00000057 => "NV_ERR_OBJECT_NOT_FOUND",
                 0x0000ffff => "NV_ERR_GENERIC",
-                0x00000001 => "NV_ERR_INVALID_ARGUMENT", 
-                0x00000002 => "NV_ERR_INVALID_OBJECT_HANDLE",
-                0x00000003 => "NV_ERR_INVALID_OBJECT_PARENT",
-                0x00000005 => "NV_ERR_INSUFFICIENT_RESOURCES",
-                0x00000006 => "NV_ERR_INVALID_FLAGS",
-                0x00000008 => "NV_ERR_INVALID_STATE",
-                0x0000000a => "NV_ERR_NOT_SUPPORTED",
-                0x0000000d => "NV_ERR_OBJECT_NOT_FOUND",
-                0x00000056 => "NV_ERR_GPU_NOT_FULL_POWER",
                 _ => "UNKNOWN_ERROR",
             };
             log::error!(target: "hw.detect", "get_fb_info: RM control returned error status 0x{:08x} ({}) for index 0x{:02x}", 
@@ -1928,6 +2286,45 @@ fn calculate_vram_bandwidth(vram_type: Option<&String>, vram_bus_width: Option<u
     }
 }
 
+/// Rate-limited report for an unusable FB-info query. The failure is a driver
+/// interface limit, not a hardware fault, so it is reported once per run
+/// instead of once per poll (it used to be a warn! on every tick).
+fn report_fb_info_unavailable(minor_number: u32, index: u32, error: &anyhow::Error) {
+    static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    log::debug!(target: "hw.detect", "FB info index 0x{:02x} unavailable for minor {}: {}", index, minor_number, error);
+    if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        log::warn!(target: "hw.detect",
+            "VRAM type/vendor could not be read through the driver's RM control interface (FB info 0x{:02x}, minor {}): {} — bus width falls back to NVML, type/vendor stay unknown",
+            index, minor_number, error);
+    }
+}
+
+/// VRAM type/vendor/bus width with an NVML fallback for the bus width.
+///
+/// The FB-info query is the only source for type and vendor, but its list
+/// pointer cannot be resolved through NV_ESC_RM_CONTROL on every driver version
+/// (measured on 610.57.04: NV_ERR_INVALID_ADDRESS). The bus width has a proper
+/// NVML accessor, so publish that rather than nothing.
+fn resolve_vram_identity(
+    device: &nvml_wrapper::Device,
+    minor_number: u32,
+) -> (Option<String>, Option<String>, Option<u32>) {
+    let (vram_type, vram_vendor, bus_width, _bandwidth) = get_vram_info(minor_number);
+    let bus_width = match bus_width {
+        Some(bits) if bits > 0 => Some(bits),
+        _ => {
+            let from_nvml = device.memory_bus_width().ok().filter(|bits| *bits > 0);
+            if from_nvml.is_some() {
+                log::debug!(target: "hw.detect",
+                    "VRAM bus width for minor {} taken from NVML ({:?} bits) because the RM control query was unavailable",
+                    minor_number, from_nvml);
+            }
+            from_nvml
+        }
+    };
+    (vram_type, vram_vendor, bus_width)
+}
+
 // Function to get NVIDIA extended stats (hotspot, memory temp, voltage)
 fn get_vram_info(minor_number: u32) -> (Option<String>, Option<String>, Option<u32>, Option<f32>) {
     // Returns (type, vendor, bus_width, bandwidth)
@@ -1935,25 +2332,25 @@ fn get_vram_info(minor_number: u32) -> (Option<String>, Option<String>, Option<u
     match NvidiaDriverHandle::open(minor_number) {
         Ok(handle) => {
             let ram_type_val = handle.get_fb_info(NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE)
-                .inspect_err(|e| log::warn!(target: "hw.detect", 
-                    "Failed to get RAM type for minor {} (index=0x{:02x}): {} - This may indicate driver/GPU incompatibility or suspended GPU state", 
-                    minor_number, NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE, e))
+                .map_err(|e| report_fb_info_unavailable(minor_number, NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE, &e))
                 .ok();
-            
+
             let bus_width = handle.get_fb_info(NV2080_CTRL_FB_INFO_INDEX_BUS_WIDTH)
-                .inspect_err(|e| log::warn!(target: "hw.detect", 
-                    "Failed to get bus width for minor {} (index=0x{:02x}): {} - This may indicate driver/GPU incompatibility or suspended GPU state", 
-                    minor_number, NV2080_CTRL_FB_INFO_INDEX_BUS_WIDTH, e))
+                .map_err(|e| report_fb_info_unavailable(minor_number, NV2080_CTRL_FB_INFO_INDEX_BUS_WIDTH, &e))
                 .ok();
-            
+
             let vendor_id = handle.get_fb_info(NV2080_CTRL_FB_INFO_INDEX_MEMORYINFO_VENDOR_ID)
-                .inspect_err(|e| log::warn!(target: "hw.detect", 
-                    "Failed to get vendor ID for minor {} (index=0x{:02x}): {} - This may indicate driver/GPU incompatibility or suspended GPU state", 
-                    minor_number, NV2080_CTRL_FB_INFO_INDEX_MEMORYINFO_VENDOR_ID, e))
+                .map_err(|e| report_fb_info_unavailable(minor_number, NV2080_CTRL_FB_INFO_INDEX_MEMORYINFO_VENDOR_ID, &e))
                 .ok();
 
             log::debug!(target: "hw.detect", "VRAM raw info for minor {}: type={:?}, bus={:?}, vendor={:?}",
                 minor_number, ram_type_val, bus_width, vendor_id);
+            log::info!(target: "hw.detect",
+                "hw.detect GPU minor {}: FB-info raw codes ram_type=0x{:x} bus_width={:?} vendor=0x{:x}",
+                minor_number,
+                ram_type_val.unwrap_or(0),
+                bus_width,
+                vendor_id.unwrap_or(0));
             
             // Log summary of detection results
             if ram_type_val.is_some() || bus_width.is_some() || vendor_id.is_some() {
@@ -2006,6 +2403,18 @@ fn get_vram_info(minor_number: u32) -> (Option<String>, Option<String>, Option<u
             // Actually bandwidth is complex to calculate without current clock.
             // NVML already provides memory bandwidth in some versions but not all.
             // nvidia/nvidia.rs doesn't seem to calculate it, just returns None.
+
+            // The elements of the FB-info list are not documented in the driver's
+            // open headers, so a returned word is only used when it is a value the
+            // hardware can really report. A mis-decoded number must never become a
+            // confident label ("93-bit") in the UI: unknown is better than wrong,
+            // and resolve_vram_identity() has an NVML fallback for the bus width.
+            let bus_width = bus_width.filter(|bits| (32..=1024).contains(bits) && bits % 32 == 0);
+            if bus_width.is_none() {
+                log::debug!(target: "hw.detect",
+                    "Discarding implausible FB-info bus width for minor {} (raw {:?})",
+                    minor_number, bus_width);
+            }
 
             (ram_type, vendor, bus_width, None)
         }
@@ -2177,354 +2586,320 @@ fn get_nvidia_extended_stats(gpu_index: u32) -> (Option<f32>, Option<f32>, Optio
     }
 }
 
+/// Validate the power sample on an explicitly requested cold wake only.
+/// A successful NVML call can return stale pre-ready data (753 W on a
+/// 150 W laptop). Never clamp it into a plausible-looking measurement.
+fn settle_cold_power(
+    initial: u32,
+    maximum: u32,
+    mut read: impl FnMut() -> Result<u32>,
+    mut wait: impl FnMut(),
+) -> Result<u32> {
+    if initial <= maximum {
+        return Ok(initial);
+    }
+    let mut last = format!("{} mW exceeds {} mW", initial, maximum);
+    // At most ten additional reads and one second of intentional waiting.
+    // NVML itself is synchronous; this does not impose a driver-call timeout.
+    for _ in 0..10 {
+        wait();
+        match read() {
+            Ok(value) if value <= maximum => return Ok(value),
+            Ok(value) => last = format!("{} mW exceeds {} mW", value, maximum),
+            Err(error) => last = error.to_string(),
+        }
+    }
+    Err(anyhow!("Cold GPU power telemetry not ready after 10 retries: {}", last))
+}
+
+#[cfg(test)]
+mod cold_power_tests {
+    use super::settle_cold_power;
+
+    #[test]
+    fn valid_initial_sample_needs_no_retry() {
+        assert_eq!(settle_cold_power(0, 150_000,
+            || panic!("unexpected read"), || panic!("unexpected wait")).unwrap(), 0);
+    }
+
+    #[test]
+    fn retries_invalid_sample_without_clamping() {
+        let mut reads = 0;
+        let mut waits = 0;
+        let value = settle_cold_power(753_173, 150_000, || {
+            reads += 1;
+            Ok(if reads < 3 { 753_173 } else { 31_088 })
+        }, || waits += 1).unwrap();
+        assert_eq!((value, reads, waits), (31_088, 3, 3));
+    }
+
+    #[test]
+    fn persistent_invalid_sample_returns_error_with_bounded_retries() {
+        let mut reads = 0;
+        let mut waits = 0;
+        let error = settle_cold_power(753_173, 150_000,
+            || { reads += 1; Ok(753_173) }, || waits += 1).unwrap_err();
+        assert_eq!((reads, waits), (10, 10));
+        assert!(error.to_string().contains("not ready after 10 retries"));
+    }
+
+    #[test]
+    fn driver_errors_do_not_turn_into_a_power_value() {
+        let error = settle_cold_power(753_173, 150_000,
+            || Err(anyhow::anyhow!("GPU lost")), || {}).unwrap_err();
+        assert!(error.to_string().contains("GPU lost"));
+    }
+}
+
+/// Currently applied GPU offsets, from daemon state rather than from a sample.
+/// These are authoritative "what is set right now" values, so they stay
+/// available even when the GPU itself may not be queried.
+fn current_gpu_offsets(index: u32) -> (Option<i32>, Option<i32>, Option<i32>, Option<i32>) {
+    {
+        let stats = crate::hardware_control::lock_or_recover(
+            &crate::CURRENT_GPU_OVERCLOCK_STATS,
+            "CURRENT_GPU_OVERCLOCK_STATS",
+        );
+        if let Some(ref stats) = *stats {
+            return (
+                Some(stats.freq_offset),
+                Some(stats.drain_offset),
+                Some(stats.power_offset),
+                Some(stats.total_offset),
+            );
+        }
+    }
+    let manual = crate::hardware_control::lock_or_recover(
+        &crate::MANUAL_GPU_OFFSETS,
+        "MANUAL_GPU_OFFSETS",
+    );
+    match manual.get(&index) {
+        Some(offsets) => (None, None, None, Some(offsets.0.round() as i32)),
+        None => (None, None, None, None),
+    }
+}
+
+/// Payload for an adapter whose tier forbids invasive queries (P3+ idle-down, or
+/// runtime-suspended).
+///
+/// Every dynamic field is deliberately blank. Clocks, load, power, voltage and
+/// both temperatures are NOT carried over from the previous sample: a stale
+/// number rendered as live is the exact defect this replaces, and `None`
+/// renders in the GUI as "not queried". `performance_state` is likewise not
+/// back-filled — the tier state that remembers the last p-state is control
+/// input for the poller and never leaves the daemon as telemetry.
+///
+/// What is attached: the sysfs `runtime_status` word, static device metadata
+/// (name, VRAM type/vendor/bus/total, clock ranges, supported p-states — the
+/// same kind of static capability data as VRAM total) and the applied offsets.
+fn degraded_gpu_info(device: &SysfsNvidiaDevice) -> GpuInfo {
+    let name = gpu_name_for_bdf(&device.bdf).unwrap_or_else(|| "NVIDIA GPU".to_string());
+    // Static capability metadata is cached under the NVML index; the index is
+    // resolved from the BDF learned during a live pass, never guessed from list
+    // position. Without a learned association the metadata is absent (the fields
+    // stay blank) rather than borrowed from another adapter.
+    let nvml_index = nvml_index_for_bdf(&device.bdf);
+    let metadata = nvml_index.and_then(|index| {
+        let cache = crate::hardware_control::lock_or_recover(&NVIDIA_METADATA_CACHE, "NVIDIA_METADATA_CACHE");
+        cache.get(&index).cloned()
+    });
+
+    let (vram_type, vram_vendor, vram_bus_width, vram_bandwidth, vram_total) =
+        match &metadata {
+            Some(meta) => {
+                let bandwidth = calculate_vram_bandwidth(
+                    meta.vram_type.as_ref(),
+                    meta.vram_bus_width,
+                    meta.memory_clock_range,
+                );
+                (
+                    meta.vram_type.clone(),
+                    meta.vram_vendor.clone(),
+                    meta.vram_bus_width,
+                    bandwidth,
+                    meta.vram_total,
+                )
+            }
+            None => (None, None, None, None, None),
+        };
+
+    log::debug!(
+        target: "hw.detect",
+        "GPU {}: runtime_status=\"{}\" — no NVML/NVAPI query this tick; dynamic fields published blank",
+        device.bdf, device.runtime_status
+    );
+
+    // Offsets come from daemon state addressed by the NVML index the GUI uses, so
+    // they are resolved through the same learned BDF mapping.
+    let (freq_offset, drain_offset, power_offset, total_offset) =
+        match nvml_index {
+            Some(index) => current_gpu_offsets(index),
+            None => (None, None, None, None),
+        };
+
+    GpuInfo {
+        pci_bus_id: Some(device.bdf.clone()),
+        process_snapshot: GpuProcessSnapshot::default(),
+        vram_memory: None,
+        name,
+        gpu_type: GpuType::Discrete,
+        runtime_status: Some(device.runtime_status.clone()),
+        performance_state: None,
+        frequency: None,
+        memory_frequency: None,
+        temperature: None,
+        hotspot_temperature: None,
+        memory_temperature: None,
+        load: None,
+        power: None,
+        voltage: None,
+        freq_offset,
+        drain_offset,
+        power_offset,
+        total_offset,
+        min_core_clock: None,
+        max_core_clock: None,
+        min_memory_clock: None,
+        max_memory_clock: None,
+        core_clock_range: metadata.as_ref().and_then(|m| m.core_clock_range),
+        memory_clock_range: metadata.as_ref().and_then(|m| m.memory_clock_range),
+        core_offset_limits: metadata.as_ref().and_then(|m| m.core_offset_limits),
+        memory_offset_limits: metadata.as_ref().and_then(|m| m.memory_offset_limits),
+        is_desktop: false,
+        architecture: metadata.as_ref().and_then(|m| m.architecture.clone()),
+        nvml_index,
+        driver_version: None,
+        supported_p_states: metadata
+            .as_ref()
+            .map(|m| m.supported_p_states.clone())
+            .unwrap_or_default(),
+        supports_power_limit: metadata.as_ref().and_then(|m| m.power_limit_range).is_some(),
+        power_limit_range: metadata.as_ref().and_then(|m| m.power_limit_range),
+        supports_gpu_offset: metadata.as_ref().map(|m| m.supports_gpu_offset).unwrap_or(false),
+        supports_mem_offset: metadata.as_ref().map(|m| m.supports_mem_offset).unwrap_or(false),
+        fan_speed_range: None,
+        vram_type,
+        vram_vendor,
+        vram_bus_width,
+        vram_bandwidth,
+        vram_total,
+    }
+}
+
 fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
     let (manual_clocks_enabled, _advanced_control_enabled) = {
-        let state = crate::GPU_DAEMON_STATE.lock().unwrap();
+        let state = crate::hardware_control::lock_or_recover(&crate::GPU_DAEMON_STATE, "GPU_DAEMON_STATE");
         state.as_ref().map_or((false, false), |s| (s.manual_clocks, s.advanced_control))
     };
 
-    // 1. Check sysfs for NVIDIA devices and their status to avoid waking up suspended GPUs
-    let mut nvidia_pci_ids = Vec::new();
-    if let Ok(entries) = fs::read_dir("/sys/bus/pci/drivers/nvidia") {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.contains(':') {
-                nvidia_pci_ids.push(name);
-            }
-        }
-    }
-    nvidia_pci_ids.sort();
+    // 1. sysfs only: one entry per adapter, carrying its own BDF and runtime-PM
+    // word. Reading these never wakes the GPU, so this is safe on every tick and
+    // is the sole input to the tier decision and to the published
+    // runtime_status field. Adapters are identified by BDF here, not by an
+    // assumed NVML index: the two orders need not agree.
+    let sysfs_devices = sysfs_nvidia_devices();
 
-    if nvidia_pci_ids.is_empty() {
+    if sysfs_devices.is_empty() {
         return Ok(vec![]);
     }
 
-    let mut all_suspended = true;
-    let mut statuses = Vec::new();
-    for id in &nvidia_pci_ids {
-        let status_path = format!("/sys/bus/pci/drivers/nvidia/{}/power/runtime_status", id);
-        let status = fs::read_to_string(status_path).unwrap_or_default().trim().to_lowercase();
-        if status != "suspended" {
-            all_suspended = false;
-        }
-        statuses.push(status);
-    }
+    // -----------------------------------------------------------------------
+    // Tier decision — the single gate for invasive queries on this tick.
+    //
+    // The only input is the sysfs runtime_status word above, so a suspended
+    // adapter is never touched. Rules (see gpu_poll_tier):
+    //   P0..P2  -> live NVML + NVAPI query every tick, no cached values
+    //   work at any p-state -> live too (light 3D work sits on P3/P5)
+    //   no work -> quiet: sysfs only, all telemetry blank, GPU idles down
+    //   suspended -> sysfs only, and never a probe (it would wake the GPU)
+    //
+    // The state is keyed by BDF, so it follows the adapter rather than a list
+    // position.
+    // -----------------------------------------------------------------------
+    let tiers: Vec<GpuPollTier> = {
+        let states = crate::hardware_control::lock_or_recover(&GPU_POLL_STATE, "GPU_POLL_STATE");
+        sysfs_devices
+            .iter()
+            .map(|dev| {
+                gpu_poll_tier(
+                    states.get(&poll_state_key(Some(&dev.bdf), 0)),
+                    &dev.runtime_status,
+                )
+            })
+            .collect()
+    };
 
-    // On-demand override (GetGpuInfoFull / GUI stats panel): loaded BEFORE any
-    // shortcut so an armed flag punches through BOTH fast paths — including
-    // all-suspended, where the documented contract is to deliberately wake the
-    // GPU and serve live NVML values. Clearing happens only in the full-poll
-    // path (one-shot), never in the stubs.
-    let force_full_poll =
-        crate::FULL_NVML_REFRESH_REQUESTED.load(std::sync::atomic::Ordering::Relaxed);
-
-    // If all detected NVIDIA GPUs are suspended, bypass NVML completely to keep them asleep
-    if all_suspended && !force_full_poll {
+    // Nothing may be queried this tick: build the sysfs-only payloads WITHOUT
+    // initialising NVML at all, since loading the library and taking a device
+    // handle is itself a touch that resets the autosuspend timer.
+    if !tiers.contains(&GpuPollTier::Live) {
         let mut gpus = Vec::new();
-        let names = NVIDIA_NAMES_CACHE.lock().unwrap();
-        for (i, status) in statuses.into_iter().enumerate() {
-            let name = names.get(i).cloned().unwrap_or_else(|| "NVIDIA GPU".to_string());
-            
-            // Retrieve cached metadata (including VRAM info) if available
-            let cached_metadata = {
-                let cache = NVIDIA_METADATA_CACHE.lock().unwrap();
-                cache.get(&(i as u32)).cloned()
-            };
-            
-            let (vram_type, vram_vendor, vram_bus_width, vram_bandwidth, vram_total) =
-                if let Some(ref meta) = cached_metadata {
-                    let bandwidth = calculate_vram_bandwidth(meta.vram_type.as_ref(), meta.vram_bus_width, meta.memory_clock_range);
-                    log::debug!(target: "hw.detect", 
-                        "GPU {} (all suspended): Using cached VRAM - Type: {:?}, Vendor: {:?}, Bus: {:?} bits, BW: {:?} GB/s, Total: {:?} MiB",
-                        i, meta.vram_type, meta.vram_vendor, meta.vram_bus_width, bandwidth, meta.vram_total);
-                    (meta.vram_type.clone(), meta.vram_vendor.clone(), meta.vram_bus_width, bandwidth, meta.vram_total)
-                } else {
-                    log::debug!(target: "hw.detect", "GPU {} (all suspended): No cached VRAM info available", i);
-                    (None, None, None, None, None)
-                };
-            
-            gpus.push(GpuInfo {
-                name,
-                gpu_type: GpuType::Discrete,
-                status,
-                frequency: None,
-                memory_frequency: None,
-                temperature: None,
-                hotspot_temperature: None,
-                memory_temperature: None,
-                load: None,
-                power: None,
-                voltage: None,
-                freq_offset: None,
-                drain_offset: None,
-                power_offset: None,
-                total_offset: None,
-                min_core_clock: None,
-                max_core_clock: None,
-                min_memory_clock: None,
-                max_memory_clock: None,
-                core_clock_range: cached_metadata.as_ref().and_then(|m| m.core_clock_range),
-                memory_clock_range: cached_metadata.as_ref().and_then(|m| m.memory_clock_range),
-                core_offset_limits: cached_metadata.as_ref().and_then(|m| m.core_offset_limits),
-                memory_offset_limits: cached_metadata.as_ref().and_then(|m| m.memory_offset_limits),
-                is_desktop: false,
-                architecture: cached_metadata.as_ref().and_then(|m| m.architecture.clone()),
-                nvml_index: Some(i as u32),
-                driver_version: None,
-                supported_p_states: cached_metadata.as_ref().map(|m| m.supported_p_states.clone()).unwrap_or_default(),
-                supports_power_limit: cached_metadata.as_ref().and_then(|m| m.power_limit_range).is_some(),
-                power_limit_range: cached_metadata.as_ref().and_then(|m| m.power_limit_range),
-                supports_gpu_offset: cached_metadata.as_ref().map(|m| m.supports_gpu_offset).unwrap_or(false),
-                supports_mem_offset: cached_metadata.as_ref().map(|m| m.supports_mem_offset).unwrap_or(false),
-                fan_speed_range: None,
-                vram_type,
-                vram_vendor,
-                vram_bus_width,
-                vram_bandwidth,
-                vram_total,
-            });
+        for dev in &sysfs_devices {
+            record_gpu_observation(&poll_state_key(Some(&dev.bdf), 0), &dev.runtime_status);
+            gpus.push(degraded_gpu_info(dev));
         }
         return Ok(gpus);
     }
 
-    // -----------------------------------------------------------------------
-    // RTD3 hybrid strategy — idle tier decision (BEFORE any NVMS/NVML touch).
-    //
-    // Field-verified: ANY periodic NVML call (even device.name() /
-    // performance_state()) resets the kernel's 20 s autosuspend_delay_ms
-    // timer, keeping an active-but-idle dGPU awake forever. The previous
-    // "P4+ still polls NVML and eventually suspends" model never suspended.
-    //
-    // If every ACTIVE GPU has a fresh idle snapshot (last full poll observed
-    // utilization == 0), serve last-known values and skip NVML entirely this
-    // tick so the autosuspend timer can expire and the GPU drops into
-    // runtime_status "suspended". Snapshots older than IDLE_CACHE_TTL_SECS
-    // expire; the next tick then does one full poll (honest staleness).
-    // GetGpuInfoFull() sets FULL_NVML_REFRESH_REQUESTED for a one-shot bypass.
-    // -----------------------------------------------------------------------
-    if !force_full_poll {
-        let all_active_idle = statuses.iter().enumerate().all(|(idx, status)| {
-            if status == "suspended" {
-                return true;
-            }
-            idle_cache_fresh_for(idx as u32)
-        });
-
-        if all_active_idle {
-            log::debug!(target: "hw.detect",
-                "NVIDIA GPU(s) active-but-idle with fresh snapshot: bypassing NVML (RTD3 idle tier)");
-            let mut gpus = Vec::new();
-            {
-                let names = NVIDIA_NAMES_CACHE.lock().unwrap();
-                let cache_guard = IDLE_METRICS_CACHE.lock().unwrap();
-                for (i, status) in statuses.iter().enumerate() {
-                    let name = names
-                        .get(i)
-                        .cloned()
-                        .unwrap_or_else(|| "NVIDIA GPU".to_string());
-
-                    let cached_metadata = {
-                        let meta_cache = NVIDIA_METADATA_CACHE.lock().unwrap();
-                        meta_cache.get(&(i as u32)).cloned()
-                    };
-
-                    let (vram_type, vram_vendor, vram_bus_width, vram_bandwidth, vram_total) =
-                        if let Some(ref meta) = cached_metadata {
-                            let bandwidth = calculate_vram_bandwidth(
-                                meta.vram_type.as_ref(),
-                                meta.vram_bus_width,
-                                meta.memory_clock_range,
-                            );
-                            (
-                                meta.vram_type.clone(),
-                                meta.vram_vendor.clone(),
-                                meta.vram_bus_width,
-                                bandwidth,
-                                meta.vram_total,
-                            )
-                        } else {
-                            (None, None, None, None, None)
-                        };
-
-                    // Expired entries were already dropped by the freshness
-                    // scan above; every active GPU is guaranteed fresh here.
-                    let snap = cache_guard
-                        .get(&(i as u32))
-                        .and_then(|e| e.snapshot.clone())
-                        .unwrap_or(GpuIdleSnapshot {
-                            frequency: None,
-                            memory_frequency: None,
-                            temperature: None,
-                            load: None,
-                            power: None,
-                            voltage: None,
-                        });
-
-                    let mut gpu_info = GpuInfo {
-                        name,
-                        gpu_type: GpuType::Discrete,
-                        status: status.clone(),
-                        frequency: snap.frequency,
-                        memory_frequency: snap.memory_frequency,
-                        temperature: snap.temperature,
-                        hotspot_temperature: None, // NVAPI-only; not cached
-                        memory_temperature: None,  // NVAPI-only; not cached
-                        load: snap.load,
-                        power: snap.power,
-                        voltage: snap.voltage,
-                        freq_offset: None,
-                        drain_offset: None,
-                        power_offset: None,
-                        total_offset: None,
-                        min_core_clock: None,
-                        max_core_clock: None,
-                        min_memory_clock: None,
-                        max_memory_clock: None,
-                        core_clock_range: cached_metadata.as_ref().and_then(|m| m.core_clock_range),
-                        memory_clock_range: cached_metadata.as_ref().and_then(|m| m.memory_clock_range),
-                        core_offset_limits: cached_metadata.as_ref().and_then(|m| m.core_offset_limits),
-                        memory_offset_limits: cached_metadata.as_ref().and_then(|m| m.memory_offset_limits),
-                        is_desktop: false,
-                        architecture: cached_metadata.as_ref().and_then(|m| m.architecture.clone()),
-                        nvml_index: Some(i as u32),
-                        driver_version: None,
-                        supported_p_states: cached_metadata
-                            .as_ref()
-                            .map(|m| m.supported_p_states.clone())
-                            .unwrap_or_default(),
-                        supports_power_limit: cached_metadata
-                            .as_ref()
-                            .and_then(|m| m.power_limit_range)
-                            .is_some(),
-                        power_limit_range: cached_metadata.as_ref().and_then(|m| m.power_limit_range),
-                        supports_gpu_offset: cached_metadata
-                            .as_ref()
-                            .map(|m| m.supports_gpu_offset)
-                            .unwrap_or(false),
-                        supports_mem_offset: cached_metadata
-                            .as_ref()
-                            .map(|m| m.supports_mem_offset)
-                            .unwrap_or(false),
-                        fan_speed_range: None,
-                        vram_type,
-                        vram_vendor,
-                        vram_bus_width,
-                        vram_bandwidth,
-                        vram_total,
-                    };
-
-                    // Report applied offsets (lock-only reads, no NVML) so the
-                    // GUI keeps showing the active clock offset while idle.
-                    if gpu_info.name.to_lowercase().contains("nvidia")
-                        && manual_clocks_enabled
-                    {
-                        let stats_lock = crate::CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
-                        if let Some(ref stats) = *stats_lock {
-                            gpu_info.freq_offset = Some(stats.freq_offset);
-                            gpu_info.drain_offset = Some(stats.drain_offset);
-                            gpu_info.power_offset = Some(stats.power_offset);
-                            gpu_info.total_offset = Some(stats.total_offset);
-                        } else {
-                            let manual_map = crate::MANUAL_GPU_OFFSETS.lock().unwrap();
-                            if let Some(offsets) = manual_map.get(&(i as u32)) {
-                                let core: f32 = offsets.0;
-                                gpu_info.total_offset = Some(core.round() as i32);
-                            }
-                        }
-                    }
-
-                    gpus.push(gpu_info);
-                }
-            }
-            return Ok(gpus);
-        }
-    }
-
-    // At least one GPU is active with work to do (no snapshot yet, snapshot
-    // expired, or explicit GetGpuInfoFull override) — do a full NVML pass.
+    // At least one adapter is in the live tier. It gets a full NVML + NVAPI
+    // pass; every adapter that is not gets a sysfs-only payload below.
     let nvml = get_nvml()?;
     let mut gpus = Vec::new();
+
+    // 2. Identity mapping: pair every NVML device with the BDF NVML reports for
+    // it, and remember the association for the sysfs-only paths. This is what
+    // replaces "sorted PCI devices[i] == NVML device index[i]".
+    let mut slots: Vec<NvmlDeviceSlot> = Vec::new();
+    for i in 0..nvml.device_count().unwrap_or(0) {
+        let bdf = match nvml.device_by_index(i) {
+            Ok(device) => nvml_pci_bdf(&device),
+            Err(_) => None,
+        };
+        if let Some(ref bdf) = bdf {
+            remember_nvml_bdf(i, bdf);
+        }
+        slots.push(NvmlDeviceSlot { index: i, bdf });
+    }
+    let statuses = runtime_status_by_device(&slots, &sysfs_devices);
 
     let driver_version = nvml.sys_driver_version().ok();
 
     let device_count = nvml.device_count().unwrap_or(0);
     for i in 0..device_count {
-        // Use pre-read status to avoid waking up the GPU
-        let status_from_sysfs = statuses.get(i as usize).cloned();
-        let is_suspended = status_from_sysfs
-            .as_deref()
-            .map(|s| s.eq_ignore_ascii_case("suspended"))
-            .unwrap_or(false);
+        // Identity for this NVML device, and its own runtime-PM word: resolved
+        // by BDF above, so a permuted sysfs enumeration cannot hand this GPU
+        // another adapter's state.
+        let device_bdf = slots
+            .get(i as usize)
+            .and_then(|slot| slot.bdf.clone());
+        let poll_key = poll_state_key(device_bdf.as_deref(), i);
+        let status_from_sysfs = statuses
+            .get(i as usize)
+            .cloned()
+            .flatten()
+            .unwrap_or_default();
 
-        // Override punch-through: under FULL_NVML_REFRESH_REQUESTED we must
-        // actually query NVML (waking a suspended GPU) instead of serving the
-        // stub — otherwise the flag burns without producing live values.
-        if is_suspended && !force_full_poll {
-            let name = {
-                let cache = NVIDIA_NAMES_CACHE.lock().unwrap();
-                cache.get(i as usize).cloned().unwrap_or_else(|| "NVIDIA GPU".to_string())
-            };
-            
-            // Retrieve cached metadata (including VRAM info) if available
-            let cached_metadata = {
-                let cache = NVIDIA_METADATA_CACHE.lock().unwrap();
-                cache.get(&i).cloned()
-            };
-            
-            let (vram_type, vram_vendor, vram_bus_width, vram_bandwidth, vram_total) =
-                if let Some(ref meta) = cached_metadata {
-                    let bandwidth = calculate_vram_bandwidth(meta.vram_type.as_ref(), meta.vram_bus_width, meta.memory_clock_range);
-                    log::debug!(target: "hw.detect", 
-                        "GPU {} (suspended): Using cached VRAM - Type: {:?}, Vendor: {:?}, Bus: {:?} bits, BW: {:?} GB/s, Total: {:?} MiB",
-                        i, meta.vram_type, meta.vram_vendor, meta.vram_bus_width, bandwidth, meta.vram_total);
-                    (meta.vram_type.clone(), meta.vram_vendor.clone(), meta.vram_bus_width, bandwidth, meta.vram_total)
-                } else {
-                    log::debug!(target: "hw.detect", "GPU {} (suspended): No cached VRAM info available", i);
-                    (None, None, None, None, None)
-                };
-            
-            gpus.push(GpuInfo {
-                name,
-                gpu_type: GpuType::Discrete,
-                status: "suspended".to_string(),
-                frequency: None,
-                memory_frequency: None,
-                temperature: None,
-                hotspot_temperature: None,
-                memory_temperature: None,
-                load: None,
-                power: None,
-                voltage: None,
-                freq_offset: None,
-                drain_offset: None,
-                power_offset: None,
-                total_offset: None,
-                min_core_clock: None,
-                max_core_clock: None,
-                min_memory_clock: None,
-                max_memory_clock: None,
-                core_clock_range: cached_metadata.as_ref().and_then(|m| m.core_clock_range),
-                memory_clock_range: cached_metadata.as_ref().and_then(|m| m.memory_clock_range),
-                core_offset_limits: cached_metadata.as_ref().and_then(|m| m.core_offset_limits),
-                memory_offset_limits: cached_metadata.as_ref().and_then(|m| m.memory_offset_limits),
-                is_desktop: false,
-                architecture: cached_metadata.as_ref().and_then(|m| m.architecture.clone()),
-                nvml_index: Some(i),
-                driver_version: driver_version.clone(),
-                supported_p_states: cached_metadata.as_ref().map(|m| m.supported_p_states.clone()).unwrap_or_default(),
-                supports_power_limit: cached_metadata.as_ref().and_then(|m| m.power_limit_range).is_some(),
-                power_limit_range: cached_metadata.as_ref().and_then(|m| m.power_limit_range),
-                supports_gpu_offset: cached_metadata.as_ref().map(|m| m.supports_gpu_offset).unwrap_or(false),
-                supports_mem_offset: cached_metadata.as_ref().map(|m| m.supports_mem_offset).unwrap_or(false),
-                fan_speed_range: None,
-                vram_type,
-                vram_vendor,
-                vram_bus_width,
-                vram_bandwidth,
-                vram_total,
-            });
+        // Tier for this adapter: sysfs word + the state keyed by its own BDF.
+        // Anything other than Live gets the sysfs-only payload: no query, no
+        // cached numbers, no plausible-looking stale value.
+        let tier = {
+            let states = crate::hardware_control::lock_or_recover(&GPU_POLL_STATE, "GPU_POLL_STATE");
+            gpu_poll_tier(states.get(&poll_key), &status_from_sysfs)
+        };
+        if tier != GpuPollTier::Live {
+            record_gpu_observation(&poll_key, &status_from_sysfs);
+            if let Some(dev) = sysfs_devices
+                .iter()
+                .find(|dev| device_bdf.as_deref().map(|bdf| dev.bdf.eq_ignore_ascii_case(bdf)).unwrap_or(false))
+            {
+                gpus.push(degraded_gpu_info(dev));
+            }
             continue;
         }
+
+        // First authorized pass after a suspend: validate the power sample,
+        // which can be stale nonsense right after a D3 wake.
+        let cold_wake = gpu_woke_from_suspend(&poll_key);
 
         // Active GPU - proceed with NVML
         let device = match nvml.device_by_index(i) {
@@ -2534,26 +2909,29 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
 
         let name = device.name().unwrap_or_else(|_| "NVIDIA GPU".to_string());
 
-        // Update name cache
-        {
-            let mut cache = NVIDIA_NAMES_CACHE.lock().unwrap();
-            if cache.len() <= i as usize {
-                cache.push(name.clone());
-            } else {
-                cache[i as usize] = name.clone();
+        // Name and identity are properties of the adapter: cached under its BDF
+        // so the sysfs-only paths can find them again without assuming an order.
+        // `device_bdf` was already resolved from NVML's own PCI identity above.
+        let pci_identity = device_bdf.clone();
+        if let Some(ref bdf) = pci_identity {
+            remember_gpu_name(bdf, &name);
+            if let Ok(memory) = device.memory_info() {
+                crate::gpu_activity::record_memory(bdf, memory.free, memory.used, memory.total);
             }
         }
-
         let gpu_type = GpuType::Discrete;
 
         // Get performance state
         use nvml_wrapper::enum_wrappers::device::PerformanceState;
         let pstate = device.performance_state().ok();
 
-        let status = match pstate {
+        // Two distinct values, never merged: `performance_state` is the NVML
+        // performance state from THIS pass, `runtime_status` is the sysfs
+        // runtime-PM word carried alongside it.
+        let performance_state = match pstate {
             Some(state) => {
                 // Map nvml_wrapper::PerformanceState to "PX" format for GUI
-                match state {
+                Some(match state {
                     PerformanceState::Zero => "P0".to_string(),
                     PerformanceState::One => "P1".to_string(),
                     PerformanceState::Two => "P2".to_string(),
@@ -2571,9 +2949,9 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                     PerformanceState::Fourteen => "P14".to_string(),
                     PerformanceState::Fifteen => "P15".to_string(),
                     PerformanceState::Unknown => "unknown".to_string(),
-                }
+                })
             }
-            None => status_from_sysfs.unwrap_or_else(|| "active".to_string()),
+            None => None,
         };
 
         let pstate_val = pstate.map(|s| match s {
@@ -2594,44 +2972,58 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             PerformanceState::Fourteen => 14,
             PerformanceState::Fifteen => 15,
             PerformanceState::Unknown => 99,
-        }).unwrap_or(0);
+        });
 
-        // Determine if we should poll monitoring stats
-        // Logic for all modes:
-        // 1. If suspended: poll nothing.
-        // 2. If P0-P3: poll NVML and NVAPI (all stats).
-        // 3. If P4+ (including P8): poll NVML only (no NVAPI/direct ioctls).
-        // This ensures visibility (P0-P3) while allowing the GPU to enter
-        // low-power states (P8) and eventually suspend.
-        let (should_poll_nvml, should_poll_nvapi) = if is_suspended {
-            (false, false)
-        } else if pstate_val <= 3 {
-            (true, true)
-        } else {
-            // P4+, including P8
-            (true, false)
-        };
 
-        let (frequency, memory_frequency, temperature, load, power) = if !should_poll_nvml {
-            (None, None, None, None, None)
-        } else {
-            (
-                device.clock_info(nvml_wrapper::enum_wrappers::device::Clock::Graphics)
-                    .ok()
-                    .map(|c| c as u64),
-                device.clock_info(nvml_wrapper::enum_wrappers::device::Clock::Memory)
-                    .ok()
-                    .map(|c| c as u64),
-                device.temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu)
-                    .ok()
-                    .map(|t| t as f32),
-                device.utilization_rates().ok().map(|u| u.gpu as f32),
-                device.power_usage().ok().map(|p| p as f32 / 1000.0),
-            )
-        };
+        // This pass only runs when the tier authorized it (P0..P2, work at any
+        // P-state, a fresh wake, or the bounded re-probe), so NVML is queried
+        // fully and NVAPI comes with it: when the adapter is being polled, every
+        // statistic is reported live rather than some of them silently missing.
+        let should_poll_nvapi = true;
+
+        let (frequency, memory_frequency, temperature, load, mut power) = (
+            device.clock_info(nvml_wrapper::enum_wrappers::device::Clock::Graphics)
+                .ok()
+                .map(|c| c as u64),
+            device.clock_info(nvml_wrapper::enum_wrappers::device::Clock::Memory)
+                .ok()
+                .map(|c| c as u64),
+            device.temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu)
+                .ok()
+                .map(|t| t as f32),
+            device.utilization_rates().ok().map(|u| u.gpu as f32),
+            device.power_usage().ok().map(|p| p as f32 / 1000.0),
+        );
+
+        // Only the first pass after a suspend may wait: a successful NVML read
+        // right after a D3 wake can report stale nonsense (measured 753 W on a
+        // 150 W-max GPU). Ordinary ticks never acquire a retry loop.
+        if cold_wake {
+            if let Some(watts) = power {
+                power = match device.power_management_limit_constraints() {
+                    Ok(bounds) if bounds.max_limit > 0 => match settle_cold_power(
+                        (watts * 1000.0).round() as u32,
+                        bounds.max_limit,
+                        || device.power_usage().map_err(Into::into),
+                        || std::thread::sleep(std::time::Duration::from_millis(100)),
+                    ) {
+                        Ok(value) => Some(value as f32 / 1000.0),
+                        Err(error) => {
+                            // Keep the remaining telemetry and reach the flag
+                            // consumption below; an early error would leave the
+                            // one-shot armed and wake again on a monitor tick.
+                            log::warn!(target: "hw.detect", "GPU {}: {}", i, error);
+                            None
+                        }
+                    },
+                    // No trustworthy bound: do not certify cold power data.
+                    _ => None,
+                };
+            }
+        }
 
         // Get extended stats via NVAPI
-        let (hotspot_temp, memory_temp, nvapi_voltage) = if !is_suspended && should_poll_nvapi {
+        let (hotspot_temp, memory_temp, nvapi_voltage) = if should_poll_nvapi {
             get_nvidia_extended_stats(i)
         } else {
             (None, None, None)
@@ -2639,30 +3031,11 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
 
         let voltage = nvapi_voltage;
 
-        // RTD3 idle-tier bookkeeping: every executed full pass refreshes the
-        // snapshot + timestamp. A pass only reaches here when the cache was
-        // cold/stale or GetGpuInfoFull forced it — i.e. this NVML touch was
-        // already authorized — so recording "last known values as of now"
-        // re-arms the quiet window. (Conditionally preserving an old
-        // timestamp here would leave the entry permanently stale and turn
-        // the TTL re-poll into a 1 Hz NVML hot loop.)
-        {
-            let mut cache = IDLE_METRICS_CACHE.lock().unwrap();
-            cache.insert(
-                i,
-                IdleCacheEntry {
-                    snapshot: Some(GpuIdleSnapshot {
-                        frequency,
-                        memory_frequency,
-                        temperature,
-                        load,
-                        power,
-                        voltage,
-                    }),
-                    captured_at: Instant::now(),
-                },
-            );
-        }
+        // Bookkeeping for the NEXT tick's tier — the pass's own p-state and
+        // utilization decide it: P0..P2 always live, P3 live while it has work,
+        // otherwise quiet so the kernel can finish its idle-down. Neither value
+        // leaves the daemon as telemetry.
+        record_gpu_probe(&poll_key, &status_from_sysfs, pstate_val, load);
 
         let (min_core_clock, max_core_clock) = (None, None); // NVML wrapper 0.11 doesn't have a getter
 
@@ -2671,7 +3044,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
 
         // Get metadata from cache or fetch it
         let metadata = {
-            let mut cache = NVIDIA_METADATA_CACHE.lock().unwrap();
+            let mut cache = crate::hardware_control::lock_or_recover(&NVIDIA_METADATA_CACHE, "NVIDIA_METADATA_CACHE");
             if let Some(meta) = cache.get(&i) {
                 log::debug!(target: "hw.detect", "GPU {}: Using cached metadata", i);
                 // Check if cached metadata is incomplete - if so, retry getting it
@@ -2684,10 +3057,10 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
                     log::debug!(target: "hw.detect", "GPU {}: Cached metadata is incomplete, retrying detection", i);
                     let minor_number = device.minor_number().unwrap_or(i);
                     
-                    let (vram_type, vram_vendor, vram_bus_width, _) = if incomplete_vram {
-                        get_vram_info(minor_number)
+                    let (vram_type, vram_vendor, vram_bus_width) = if incomplete_vram {
+                        resolve_vram_identity(&device, minor_number)
                     } else {
-                        (meta.vram_type.clone(), meta.vram_vendor.clone(), meta.vram_bus_width, None)
+                        (meta.vram_type.clone(), meta.vram_vendor.clone(), meta.vram_bus_width)
                     };
 
                     let core_range = if meta.core_clock_range.is_none() {
@@ -2749,7 +3122,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
 
                 let minor_number = device.minor_number().unwrap_or(i);
                 log::debug!(target: "hw.detect", "GPU {}: Performing initial VRAM detection for minor {}", i, minor_number);
-                let (vram_type, vram_vendor, vram_bus_width, _) = get_vram_info(minor_number);
+                let (vram_type, vram_vendor, vram_bus_width) = resolve_vram_identity(&device, minor_number);
 
                 let core_range = get_base_gpu_clock_ranges(&device).ok();
                 let mem_range = get_base_memory_clock_ranges(&device).ok();
@@ -2793,7 +3166,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         // Apply current offset to the cached base range for real-time reporting
         let core_clock_range = metadata.core_clock_range.map(|(min, max)| {
             let offset = {
-                let map = crate::MANUAL_GPU_OFFSETS.lock().unwrap();
+                let map = crate::hardware_control::lock_or_recover(&crate::MANUAL_GPU_OFFSETS, "MANUAL_GPU_OFFSETS");
                 map.get(&i).map(|(c, _)| *c).unwrap_or(0.0)
             };
             ((min as f32 + offset).max(0.0) as u32, (max as f32 + offset).max(0.0) as u32)
@@ -2806,7 +3179,7 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         // Log VRAM info for diagnostics (rate-limited)
         static LAST_VRAM_LOG: Lazy<Mutex<HashMap<u32, Instant>>> = Lazy::new(|| Mutex::new(HashMap::new()));
         let should_log_vram = {
-            let mut last_log = LAST_VRAM_LOG.lock().unwrap();
+            let mut last_log = crate::hardware_control::lock_or_recover(&LAST_VRAM_LOG, "LAST_VRAM_LOG");
             match last_log.get(&i) {
                 Some(instant) if instant.elapsed() < std::time::Duration::from_secs(60) => false,
                 _ => {
@@ -2835,9 +3208,13 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
         }
 
         let mut gpu_info = GpuInfo {
+                pci_bus_id: pci_identity,
+                process_snapshot: GpuProcessSnapshot::default(),
+                vram_memory: None,
             name: name.clone(),
             gpu_type,
-            status,
+            runtime_status: Some(status_from_sysfs.clone()),
+            performance_state,
             frequency,
             memory_frequency,
             temperature,
@@ -2875,30 +3252,34 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             vram_total: v_total,
         };
 
-        // Fill in offsets if they exist in global state (assuming first NVIDIA GPU for now)
+        // Currently applied offsets (daemon state: an authoritative now-value,
+        // not a cached measurement).
         if name.to_lowercase().contains("nvidia") && manual_clocks_enabled {
-            let stats_lock = crate::CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
-            if let Some(ref stats) = *stats_lock {
-                gpu_info.freq_offset = Some(stats.freq_offset);
-                gpu_info.drain_offset = Some(stats.drain_offset);
-                gpu_info.power_offset = Some(stats.power_offset);
-                gpu_info.total_offset = Some(stats.total_offset);
-            } else {
-                // Fallback to manual offsets if dynamic is not active
-                let manual_map = crate::MANUAL_GPU_OFFSETS.lock().unwrap();
-                if let Some(offsets) = manual_map.get(&i) {
-                    let core: f32 = offsets.0;
-                    gpu_info.total_offset = Some(core.round() as i32);
-                }
-            }
+            let (freq, drain, power_offset, total) = current_gpu_offsets(i);
+            gpu_info.freq_offset = freq;
+            gpu_info.drain_offset = drain;
+            gpu_info.power_offset = power_offset;
+            gpu_info.total_offset = total;
         }
 
         gpus.push(gpu_info);
     }
 
-    // One-shot GetGpuInfoFull override consumed after the full pass.
-    if force_full_poll {
-        crate::FULL_NVML_REFRESH_REQUESTED.store(false, std::sync::atomic::Ordering::Relaxed);
+    // Adapters sysfs lists but NVML did not expose (or could not identify): they
+    // still belong in the payload, with their own BDF and runtime word, and with
+    // telemetry blank. Identified by BDF, so this cannot duplicate a device the
+    // loop above already reported.
+    for dev in &sysfs_devices {
+        let covered = slots.iter().any(|slot| {
+            slot.bdf
+                .as_deref()
+                .map(|bdf| bdf.eq_ignore_ascii_case(&dev.bdf))
+                .unwrap_or(false)
+        });
+        if !covered {
+            record_gpu_observation(&poll_state_key(Some(&dev.bdf), 0), &dev.runtime_status);
+            gpus.push(degraded_gpu_info(dev));
+        }
     }
 
     Ok(gpus)
@@ -3431,7 +3812,7 @@ fn read_wifi_bytes(interface: &str) -> Option<(u64, u64)> {
 
 fn read_wifi_rates(interface: &str, tx_bytes: u64, rx_bytes: u64) -> (Option<f64>, Option<f64>) {
     let now = Instant::now();
-    let mut stats = PREVIOUS_NET_STATS.lock().unwrap();
+    let mut stats = crate::hardware_control::lock_or_recover(&PREVIOUS_NET_STATS, "PREVIOUS_NET_STATS");
     let rates = if let Some(prev) = stats.get(interface) {
         let elapsed = now.duration_since(prev.timestamp).as_secs_f64();
         if elapsed > 0.0 {
@@ -3825,7 +4206,7 @@ fn calculate_storage_rates(
     sector_size: u64,
 ) -> (Option<f64>, Option<f64>, Option<f64>, Option<f64>) {
     let now = Instant::now();
-    let mut stats = PREVIOUS_STORAGE_STATS.lock().unwrap();
+    let mut stats = crate::hardware_control::lock_or_recover(&PREVIOUS_STORAGE_STATS, "PREVIOUS_STORAGE_STATS");
     let rates = if let Some(prev) = stats.get(device) {
         let elapsed = now.duration_since(prev.timestamp).as_secs_f64();
         if elapsed > 0.0 {
@@ -3955,176 +4336,663 @@ mod wifi_tests {
         assert_eq!(firmware_version, Some("77.b405f9d4.0 cc-a0-77.ucode".to_string()));
     }
 }
-
 // ---------------------------------------------------------------------------
-// RTD3 hybrid-strategy hardware-in-the-loop test.
+// dGPU polling-tier tests.
 //
-// Requires: NVIDIA dGPU present with runtime PM enabled. Exercises the REAL
-// detection path at the REAL 1 Hz cadence — no NVML mocks.
+// The pure tests pin the policy (they run everywhere). The HIL tests exercise
+// the REAL detection path against the REAL driver at the REAL cadence:
 //
-// Acceptance (user spec):
-//   1. With GPU active and idle, repeated get_nvidia_gpu_info(false) calls
-//      must NOT keep resetting the autosuspend timer -> runtime_status
-//      transitions to "suspended" within ~21 s + margin.
-//   2. GetGpuInfoFull override wakes/queries and re-arms the quiet window.
+//   1. Live tier (P0..P2 or a fresh wake) -> full NVML + NVAPI pass, and the
+//      published payload carries live values, never a cached one.
+//   2. Quiet tier (P3 and deeper) -> sysfs-only payload: runtime_status is
+//      published, every dynamic field is blank, and the GPU is still able to
+//      finish its idle-down and reach runtime_status "suspended".
+//   3. Suspended -> sysfs-only payload and the call must not wake the GPU.
+//
+// Run the HIL set with:
+//   cargo test -p lapsphere-daemon --bin lapsphere-daemon -- --ignored --nocapture
 // ---------------------------------------------------------------------------
 #[cfg(test)]
-mod rtd3_hybrid_tests {
-    // Serializes the HIL tests against each other: both mutate process-global
-    // state (FULL_NVML_REFRESH_REQUESTED, IDLE_METRICS_CACHE) and cargo runs
-    // test threads in parallel by default. Production has a single monitor
-    // thread, so this lock guards tests only.
-    static HIL_GLOBAL_STATE_LOCK: once_cell::sync::Lazy<std::sync::Mutex<()>> =
+mod gpu_tier_tests {
+    use super::*;
+
+    fn state(status: &str, pstate: Option<u8>, probed_secs_ago: Option<u64>) -> GpuPollState {
+        state_with_load(status, pstate, None, probed_secs_ago)
+    }
+
+    fn state_with_load(
+        status: &str,
+        pstate: Option<u8>,
+        load: Option<f32>,
+        probed_secs_ago: Option<u64>,
+    ) -> GpuPollState {
+        GpuPollState {
+            last_runtime_status: Some(status.to_string()),
+            last_pstate: pstate,
+            last_load: load,
+            last_probe: probed_secs_ago.map(|secs| Instant::now() - std::time::Duration::from_secs(secs)),
+        }
+    }
+
+    #[test]
+    fn suspended_never_authorizes_a_probe() {
+        assert_eq!(gpu_poll_tier(None, "suspended"), GpuPollTier::Suspended);
+        assert_eq!(
+            gpu_poll_tier(Some(&state("suspended", Some(0), Some(0))), "suspended"),
+            GpuPollTier::Suspended,
+            "even a freshly observed P0 must not authorize a wake"
+        );
+    }
+
+    #[test]
+    fn p0_to_p2_stays_live_every_tick() {
+        for pstate in 0..=2u8 {
+            assert_eq!(
+                gpu_poll_tier(Some(&state("active", Some(pstate), Some(0))), "active"),
+                GpuPollTier::Live,
+                "P{} must be polled live on every tick",
+                pstate
+            );
+        }
+    }
+
+    #[test]
+    fn work_is_live_at_any_pstate_above_p0() {
+        // Light 3D work lands on P3 and oscillates to P5: both must report live
+        // values at the configured polling rate, not blanks.
+        for pstate in [3u8, 5, 8] {
+            assert_eq!(
+                gpu_poll_tier(Some(&state_with_load("active", Some(pstate), Some(27.0), Some(1))), "active"),
+                GpuPollTier::Live,
+                "P{} with utilization must be polled live",
+                pstate
+            );
+        }
+    }
+
+    #[test]
+    fn low_utilization_noise_does_not_open_the_live_tier() {
+        assert_eq!(
+            gpu_poll_tier(Some(&state_with_load("active", Some(8), Some(0.5), Some(1))), "active"),
+            GpuPollTier::Quiet,
+            "a sub-threshold blip must not hold the adapter awake"
+        );
+        assert_eq!(
+            gpu_poll_tier(Some(&state_with_load("active", Some(3), None, Some(1))), "active"),
+            GpuPollTier::Quiet,
+            "an unmeasurable P3 must not be pinned awake"
+        );
+    }
+
+    #[test]
+    fn idle_p3_and_deeper_go_quiet_until_the_reprobe_cadence() {
+        for pstate in [3u8, 5, 8] {
+            assert_eq!(
+                gpu_poll_tier(Some(&state_with_load("active", Some(pstate), Some(0.0), Some(1))), "active"),
+                GpuPollTier::Quiet,
+                "P{} with no work must not be probed while it idles down",
+                pstate
+            );
+        }
+        assert_eq!(
+            gpu_poll_tier(
+                Some(&state("active", Some(8), Some(QUIET_REPROBE_SECS + 1))),
+                "active"
+            ),
+            GpuPollTier::Live,
+            "the bounded re-probe must eventually notice a ramp out of P8"
+        );
+    }
+
+    #[test]
+    fn reprobe_cadence_outlives_the_autosuspend_window() {
+        // The kernel's autosuspend delay is 20 s; the measured dGPU re-suspend
+        // latency after the last NVML touch is ~27 s. A shorter cadence would
+        // keep resetting the timer and pin the GPU awake.
+        assert!(
+            QUIET_REPROBE_SECS > 30,
+            "cadence {} s would interrupt the idle-down transition",
+            QUIET_REPROBE_SECS
+        );
+    }
+
+    #[test]
+    fn wake_from_suspend_authorizes_one_pass() {
+        assert_eq!(
+            gpu_poll_tier(Some(&state("suspended", Some(8), Some(1))), "active"),
+            GpuPollTier::Live,
+            "a suspended -> active transition must be probed"
+        );
+    }
+
+    #[test]
+    fn first_ever_tick_learns_the_pstate_once() {
+        assert_eq!(gpu_poll_tier(None, "active"), GpuPollTier::Live);
+        // A pass that could not report a p-state must not authorize a hot loop.
+        assert_eq!(
+            gpu_poll_tier(Some(&state("active", None, Some(1))), "active"),
+            GpuPollTier::Quiet
+        );
+    }
+}
+
+#[cfg(test)]
+mod degraded_payload_tests {
+    use super::*;
+
+    /// sysfs view of one adapter, for tests that must not depend on hardware.
+    fn sysfs_device(bdf: &str, runtime_status: &str) -> SysfsNvidiaDevice {
+        SysfsNvidiaDevice {
+            bdf: bdf.to_string(),
+            runtime_status: runtime_status.to_string(),
+        }
+    }
+
+    /// The quiet/suspended payload must publish NO dynamic telemetry: no value
+    /// may be carried over from an earlier sample and rendered as live.
+    #[test]
+    fn sysfs_only_payload_has_no_stale_telemetry() {
+        let gpu = degraded_gpu_info(&sysfs_device("0000:01:00.0", "active"));
+        assert_eq!(gpu.runtime_status.as_deref(), Some("active"));
+        assert!(gpu.performance_state.is_none(), "perf state must not be back-filled");
+        assert_eq!(gpu.frequency, None);
+        assert_eq!(gpu.memory_frequency, None);
+        assert_eq!(gpu.temperature, None);
+        assert_eq!(gpu.hotspot_temperature, None);
+        assert_eq!(gpu.memory_temperature, None);
+        assert_eq!(gpu.load, None);
+        assert_eq!(gpu.power, None);
+        assert_eq!(gpu.voltage, None);
+        assert_eq!(gpu.gpu_type, GpuType::Discrete);
+    }
+
+    #[test]
+    fn suspended_payload_reports_the_pm_word_it_was_given() {
+        let gpu = degraded_gpu_info(&sysfs_device("0000:01:00.0", "suspended"));
+        assert_eq!(gpu.runtime_status.as_deref(), Some("suspended"));
+        assert!(gpu.performance_state.is_none());
+        assert_eq!(gpu.power, None);
+    }
+}
+
+/// Regression coverage for the PCI/BDF <-> NVML identity mapping.
+///
+/// The failure mode these tests pin: correlating "sorted sysfs devices[i]" with
+/// "NVML device index[i]". On a multi-GPU machine that silently attaches one
+/// adapter's runtime/power state to another adapter's telemetry, so these tests
+/// exercise the production mapping function with the sysfs enumeration in both
+/// orders and with a deliberately mismatched device.
+#[cfg(test)]
+mod gpu_identity_tests {
+    use super::*;
+
+    /// sysfs view of one adapter.
+    fn sysfs(bdf: &str, status: &str) -> SysfsNvidiaDevice {
+        SysfsNvidiaDevice {
+            bdf: bdf.to_string(),
+            runtime_status: status.to_string(),
+        }
+    }
+
+    /// One NVML device and the BDF NVML reports for it.
+    fn slot(index: u32, bdf: Option<&str>) -> NvmlDeviceSlot {
+        NvmlDeviceSlot {
+            index,
+            bdf: bdf.map(|b| b.to_string()),
+        }
+    }
+
+    #[test]
+    fn nvml_bus_ids_canonicalise_to_sysfs_directory_names() {
+        // NVML reports eight domain digits; sysfs directories use four, lower
+        // case. The fan path used to hand-build this and missed every file.
+        assert_eq!(
+            canonical_bdf("00000000:01:00.0", 0).as_deref(),
+            Some("0000:01:00.0")
+        );
+        assert_eq!(
+            canonical_bdf("00000000:0A:00.0", 0x0001).as_deref(),
+            Some("0001:0a:00.0")
+        );
+        assert_eq!(canonical_bdf("no-colon-here", 0), None);
+        assert_eq!(canonical_bdf("00000000:", 0), None);
+    }
+
+    #[test]
+    fn runtime_status_follows_the_bdf_not_the_list_position() {
+        let gpu_a = "0000:01:00.0"; // suspended
+        let gpu_b = "0000:05:00.0"; // active
+        let devices = [slot(0, Some(gpu_a)), slot(1, Some(gpu_b))];
+
+        // sysfs listed in the same order, in reverse, and interleaved with a
+        // third adapter: the per-device answer must not change.
+        for order in [
+            vec![sysfs(gpu_a, "suspended"), sysfs(gpu_b, "active")],
+            vec![sysfs(gpu_b, "active"), sysfs(gpu_a, "suspended")],
+            vec![
+                sysfs("0000:00:02.0", "active"),
+                sysfs(gpu_b, "active"),
+                sysfs(gpu_a, "suspended"),
+            ],
+        ] {
+            let statuses = runtime_status_by_device(&devices, &order);
+            assert_eq!(
+                statuses[0].as_deref(),
+                Some("suspended"),
+                "device 0 (BDF {}) picked up another adapter's state for order {:?}",
+                gpu_a,
+                order.iter().map(|d| &d.bdf).collect::<Vec<_>>()
+            );
+            assert_eq!(statuses[1].as_deref(), Some("active"), "device 1 (BDF {})", gpu_b);
+        }
+    }
+
+    #[test]
+    fn an_unlisted_bdf_yields_unknown_instead_of_a_neighbours_state() {
+        let devices = [slot(0, Some("0000:02:00.0")), slot(1, Some("0000:03:00.0"))];
+        let sysfs_view = [sysfs("0000:01:00.0", "suspended"), sysfs("0000:09:00.0", "active")];
+
+        // Neither device is present in the sysfs view: both must be unknown, and
+        // crucially neither may borrow the "suspended" entry that sorts first.
+        let statuses = runtime_status_by_device(&devices, &sysfs_view);
+        assert_eq!(statuses, vec![None, None]);
+    }
+
+    #[test]
+    fn a_device_without_reported_bdf_only_falls_back_on_a_single_adapter_system() {
+        let single = [sysfs("0000:01:00.0", "suspended")];
+        // One NVML device, one sysfs adapter: the two views can only be the same
+        // adapter, so the pre-existing single-GPU behaviour is preserved.
+        assert_eq!(
+            runtime_status_by_device(&[slot(0, None)], &single),
+            vec![Some("suspended".to_string())]
+        );
+
+        // Two adapters and no identity: unknown, never the first entry.
+        let two = [sysfs("0000:01:00.0", "suspended"), sysfs("0000:05:00.0", "active")];
+        assert_eq!(
+            runtime_status_by_device(&[slot(0, None), slot(1, None)], &two),
+            vec![None, None]
+        );
+    }
+
+    #[test]
+    fn invalidated_mapping_is_reported_as_suspended_and_never_guessed() {
+        let gpu_a = "0000:01:00.0";
+        let gpu_b = "0000:05:00.0";
+        let sysfs_view = [sysfs(gpu_a, "suspended"), sysfs(gpu_b, "active")];
+
+        // Known association: the answer is that adapter's own word.
+        assert_eq!(suspended_decision(&sysfs_view, Some(gpu_b), 2), Some(false));
+        assert_eq!(suspended_decision(&sysfs_view, Some(gpu_a), 2), Some(true));
+        // BDF that sysfs does not list: unknown, not "whatever sorts first".
+        assert_eq!(suspended_decision(&sysfs_view, Some("0000:07:00.0"), 2), None);
+        // No association on a two-adapter system: unknown (the caller refuses to
+        // query, which is the conservative RTD3 answer).
+        assert_eq!(suspended_decision(&sysfs_view, None, 2), None);
+        // ... but a one-adapter system has only one interpretation.
+        assert_eq!(suspended_decision(&[sysfs(gpu_a, "suspended")], None, 1), Some(true));
+    }
+
+    #[test]
+    fn poll_state_key_is_the_adapter_identity() {
+        // Same adapter, different enumeration position: same key, so the tier
+        // state cannot migrate to another GPU when the order changes.
+        assert_eq!(
+            poll_state_key(Some("0000:01:00.0"), 0),
+            poll_state_key(Some("0000:01:00.0"), 1)
+        );
+        assert_ne!(
+            poll_state_key(Some("0000:01:00.0"), 0),
+            poll_state_key(Some("0000:05:00.0"), 0)
+        );
+        // Case-insensitive identity, and an index-scoped fallback that cannot
+        // collide with a BDF.
+        assert_eq!(
+            poll_state_key(Some("0000:0A:00.0"), 3),
+            poll_state_key(Some("0000:0a:00.0"), 3)
+        );
+        assert_eq!(poll_state_key(None, 3), "index:3");
+        assert_eq!(poll_state_key(Some(""), 3), "index:3");
+    }
+
+    /// End-to-end shape of the failure the audit describes: with the sysfs list
+    /// reversed, GPU A must still be Suspended and GPU B Live, i.e. the tier a
+    /// device receives follows its own runtime state.
+    #[test]
+    fn tier_decisions_survive_a_permuted_sysfs_enumeration() {
+        let gpu_a = "0000:01:00.0"; // suspended in sysfs
+        let gpu_b = "0000:05:00.0"; // active in sysfs
+        let devices = [slot(0, Some(gpu_a)), slot(1, Some(gpu_b))];
+        let forward = [sysfs(gpu_a, "suspended"), sysfs(gpu_b, "active")];
+        let reversed = [sysfs(gpu_b, "active"), sysfs(gpu_a, "suspended")];
+
+        for sysfs_view in [&forward, &reversed] {
+            let statuses = runtime_status_by_device(&devices, sysfs_view);
+            let tiers: Vec<GpuPollTier> = statuses
+                .iter()
+                .enumerate()
+                .map(|(position, status)| {
+                    // Resolve the per-adapter state through the identity key the
+                    // production code uses, then decide the tier from this
+                    // device's own status word.
+                    let key = poll_state_key(
+                        devices[position].bdf.as_deref(),
+                        devices[position].index,
+                    );
+                    assert_eq!(key, devices[position].bdf.clone().unwrap().to_lowercase());
+                    gpu_poll_tier(None, status.as_deref().unwrap_or(""))
+                })
+                .collect();
+            assert_eq!(
+                tiers,
+                vec![GpuPollTier::Suspended, GpuPollTier::Live],
+                "permuted enumeration changed a device's tier"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod holder_filter_tests {
+    use crate::gpu_activity::is_structural_holder;
+
+    #[test]
+    fn non_blocking_holders_are_dropped() {
+        let self_pid = std::process::id();
+        // Confirmed on the XMG: none of these keep the dGPU from suspending.
+        assert!(is_structural_holder("Xorg", 1234));
+        // comm is truncated to 15 bytes by the kernel.
+        assert!(is_structural_holder("nvidia-persiste", 1234));
+        assert!(is_structural_holder("nvidia-persistenced", 1234));
+        // The monitoring daemon's own device handle (its own PID).
+        assert!(is_structural_holder("lapsphere-daemo", self_pid));
+    }
+
+    #[test]
+    fn real_holders_survive_the_filter() {
+        assert!(!is_structural_holder("lapsphere-daemo", 4242));
+        assert!(!is_structural_holder("thorium", 1234));
+        assert!(!is_structural_holder("glxgears", 1234));
+        assert!(!is_structural_holder("", 1234));
+    }
+}
+
+#[cfg(test)]
+mod hil_gpu_tier_tests {
+    // Serializes HIL tests: they share the process-global poll state and the
+    // single physical GPU, while cargo runs test threads in parallel.
+    static HIL_LOCK: once_cell::sync::Lazy<std::sync::Mutex<()>> =
         once_cell::sync::Lazy::new(|| std::sync::Mutex::new(()));
 
     use super::*;
 
     fn runtime_status() -> String {
-        std::fs::read_to_string(
-            "/sys/bus/pci/devices/0000:01:00.0/power/runtime_status",
-        )
-        .unwrap_or_else(|_| "unknown".into())
-        .trim()
-        .to_string()
+        read_runtime_status("0000:01:00.0")
     }
 
-    #[test]
-    #[ignore] // HIL: run explicitly with `cargo test -p lapsphere-daemon -- --ignored`
-    fn hil_rtd3_idle_gate_transitions_to_suspended_and_override_wakes()
-    {
-        let _hil_guard = HIL_GLOBAL_STATE_LOCK.lock().unwrap();
+    fn discrete(gpus: &[GpuInfo]) -> &GpuInfo {
+        gpus.iter()
+            .find(|g| g.gpu_type == GpuType::Discrete)
+            .expect("no discrete GPU in payload")
+    }
 
-        // ---- Phase 0: baseline ------------------------------------------
-        // Make the gate's "bypassing NVML (RTD3 idle tier)" debug line
-        // visible so the run proves the idle tier actually short-circuits
-        // (vs. silently full-polling every tick, which looks identical in
-        // runtime_status alone). Run with RUST_LOG=hw.detect=debug.
+    fn wait_for(status: &str, within_secs: u64) -> bool {
+        let deadline = Instant::now() + std::time::Duration::from_secs(within_secs);
+        while Instant::now() < deadline {
+            if runtime_status() == status {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        runtime_status() == status
+    }
+
+    /// Acceptance 2 + 3: the quiet tier publishes blanks instead of cached
+    /// numbers, and because it issues no invasive call the GPU still reaches
+    /// "suspended" by itself.
+    ///
+    /// State-agnostic on purpose: the machine may be idle (suspended) or busy
+    /// (P0) when this starts, and both flows must satisfy the same invariants.
+    #[test]
+    #[ignore = "HIL: touches the real dGPU and waits for a real suspend"]
+    fn hil_quiet_tier_publishes_no_stale_values_and_lets_gpu_suspend() {
+        let _guard = HIL_LOCK.lock().unwrap();
         let _ = env_logger::Builder::from_env(env_logger::Env::default())
             .is_test(true)
             .try_init();
-        IDLE_METRICS_CACHE.lock().unwrap().clear();
-        let _ = crate::FULL_NVML_REFRESH_REQUESTED.swap(
-            true,
-            std::sync::atomic::Ordering::Relaxed,
-        );
 
-        // Phase 1 — bootstrap pass (cold cache): full poll authorized,
-        // populates IDLE_METRICS_CACHE.
-        let t0 = std::time::Instant::now();
-        let gpus = get_nvidia_gpu_info().expect("bootstrap full poll failed");
-        assert!(!gpus.is_empty(), "no GPUs returned");
-        assert!(
-            IDLE_METRICS_CACHE.lock().unwrap().contains_key(&0),
-            "idle cache not populated by bootstrap pass"
-        );
-        println!("[+] bootstrap pass ok in {:?}, status={}", t0.elapsed(), runtime_status());
+        // Reset the tier state so the first call is a learning pass.
+        crate::hardware_control::lock_or_recover(&GPU_POLL_STATE, "GPU_POLL_STATE").clear();
 
-        // ---- Phase 2: idle gate — 1 Hz ticks, ZERO further NVML ---------
-        // If any tick touched NVML, the 20 s timer would reset and the
-        // status could never reach "suspended".
-        let mut saw_cached = false;
-        for tick in 0..26 {
+        let first = get_nvidia_gpu_info().expect("first pass failed");
+        let gpu = discrete(&first);
+        println!(
+            "[+] first pass: runtime_status={:?} perf={:?} freq={:?} load={:?} power={:?} hotspot={:?}",
+            gpu.runtime_status, gpu.performance_state, gpu.frequency, gpu.load, gpu.power,
+            gpu.hotspot_temperature
+        );
+        assert!(gpu.runtime_status.is_some(), "runtime_status must be published");
+        if gpu.performance_state.is_some() {
+            // Live tier: a reported p-state must come with live telemetry.
+            assert!(
+                gpu.frequency.is_some() && gpu.load.is_some() && gpu.power.is_some(),
+                "live tier published a p-state without telemetry"
+            );
+        } else {
+            // Suspended: sysfs-only, nothing measured.
+            assert_eq!(
+                gpu.runtime_status.as_deref(),
+                Some("suspended"),
+                "a missing p-state is only legitimate while suspended"
+            );
+            assert!(gpu.frequency.is_none() && gpu.power.is_none());
+        }
+
+        let mut saw_quiet_tick = false;
+        let mut saw_live_tick = false;
+        for tick in 0..40 {
             let gpus = get_nvidia_gpu_info().unwrap();
-            if let Some(g) = gpus.iter().find(|g| g.gpu_type == GpuType::Discrete) {
-                if tick < 2 {
-                    // While still fresh+active, values must come from cache.
-                    assert!(
-                        g.voltage.is_some() || g.temperature.is_some(),
-                        "tick {}: expected last-known cached metrics, got all-None",
-                        tick
-                    );
-                    saw_cached = true;
-                }
+            let g = discrete(&gpus);
+            if g.performance_state.is_none() {
+                // Quiet or suspended tier: blanks only, never a value from a
+                // previous sample, and the PM word must still be published.
+                assert!(
+                    g.frequency.is_none()
+                        && g.memory_frequency.is_none()
+                        && g.load.is_none()
+                        && g.power.is_none()
+                        && g.voltage.is_none()
+                        && g.hotspot_temperature.is_none()
+                        && g.memory_temperature.is_none(),
+                    "tick {}: quiet tier published telemetry: freq={:?} load={:?} power={:?} hotspot={:?}",
+                    tick, g.frequency, g.load, g.power, g.hotspot_temperature
+                );
+                assert!(
+                    g.runtime_status.is_some(),
+                    "tick {}: quiet tier must still publish the runtime-PM word",
+                    tick
+                );
+                saw_quiet_tick = true;
+            } else {
+                assert!(
+                    g.frequency.is_some() && g.load.is_some() && g.power.is_some(),
+                    "tick {}: a reported p-state must come with live telemetry",
+                    tick
+                );
+                saw_live_tick = true;
             }
             let status = runtime_status();
-            println!("[tick {:>2}] {:>4.1}s status={}", tick, t0.elapsed().as_secs_f32(), status);
+            println!(
+                "[tick {:>2}] status={} perf={:?} freq={:?} hotspot={:?}",
+                tick, status, g.performance_state, g.frequency, g.hotspot_temperature
+            );
             if status == "suspended" {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(1000));
         }
 
-        let suspended_at = t0.elapsed();
         assert_eq!(
             runtime_status(),
             "suspended",
-            "GPU did NOT suspend within ~26 s of idle ticks — NVML pin survived"
+            "the GPU never suspended: something in the poll path keeps touching it"
         );
         assert!(
-            suspended_at.as_secs() <= 30,
-            "suspension took {:?}, expected ~21 s window",
-            suspended_at
+            saw_quiet_tick,
+            "the quiet tier was never exercised (live={})",
+            saw_live_tick
         );
-        assert!(saw_cached, "idle tier never served cached metrics");
-        println!("[+] ACCEPTANCE 1 MET: active -> suspended in {:?}", suspended_at);
+        println!("[+] ACCEPTANCE: quiet tier publishes blanks and the GPU still suspends");
+    }
 
-        // ---- Phase 3: suspended stub path serves last-known --------------
-        let gpus = get_nvidia_gpu_info().unwrap();
-        let g = gpus.iter().find(|g| g.gpu_type == GpuType::Discrete).unwrap();
-        assert_eq!(g.status, "suspended");
-        assert_eq!(runtime_status(), "suspended", "stub path woke the GPU");
-        println!("[+] suspended path ok, temp={:?} (last-known)", g.temperature);
+    /// Live tier at P0..P3: every call must return live values including
+    /// hotspot/memory temperature. Requires an external GPU load — run it while
+    /// a game or a load generator is active. A light load (one small glxgears)
+    /// lands on P3, which is the case this test exists for as much as P0.
+    #[test]
+    #[ignore = "HIL: needs an external P0 load on the dGPU"]
+    fn hil_p0_returns_live_values_including_hotspot_on_every_call() {
+        let _guard = HIL_LOCK.lock().unwrap();
+        crate::hardware_control::lock_or_recover(&GPU_POLL_STATE, "GPU_POLL_STATE").clear();
 
-        // ---- Phase 4: on-demand full override ---------------------------
-        crate::FULL_NVML_REFRESH_REQUESTED.store(true, std::sync::atomic::Ordering::Relaxed);
-        let before = runtime_status();
-        let gpus = get_nvidia_gpu_info().unwrap(); // flag consumed inside
+        let mut p0_seen = false;
+        for round in 0..6 {
+            let gpus = get_nvidia_gpu_info().expect("pass failed");
+            let g = discrete(&gpus);
+            println!(
+                "[round {}] perf={:?} runtime={:?} freq={:?} load={:?} power={:?} hotspot={:?} memtemp={:?} volt={:?}",
+                round, g.performance_state, g.runtime_status, g.frequency, g.load, g.power,
+                g.hotspot_temperature, g.memory_temperature, g.voltage
+            );
+            if let Some(pstate) = g.performance_state.as_deref() {
+                // Any reported p-state comes from a live pass, and a live pass
+                // publishes every statistic — no silently missing hotspot.
+                p0_seen = true;
+                println!("    ^ live tier at {}", pstate);
+                assert!(
+                    g.frequency.is_some() && g.load.is_some() && g.power.is_some(),
+                    "live pass at {} must publish clocks/load/power",
+                    pstate
+                );
+                assert!(
+                    g.hotspot_temperature.is_some() && g.memory_temperature.is_some(),
+                    "live pass at {} must publish hotspot and memory temperature",
+                    pstate
+                );
+                assert!(g.voltage.is_some(), "live pass at {} must publish voltage", pstate);
+            } else {
+                // Quiet tick: no value may be invented for it.
+                assert!(
+                    g.frequency.is_none()
+                        && g.load.is_none()
+                        && g.power.is_none()
+                        && g.hotspot_temperature.is_none(),
+                    "a quiet tick must not report telemetry"
+                );
+                assert!(g.runtime_status.is_some(), "a quiet tick must still publish the PM word");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+        }
         assert!(
-            !crate::FULL_NVML_REFRESH_REQUESTED.load(std::sync::atomic::Ordering::Relaxed),
-            "override flag not consumed"
-        );
-        let g = gpus.iter().find(|g| g.gpu_type == GpuType::Discrete).unwrap();
-        println!(
-            "[+] override pass ok: was {} -> now {}, voltage={:?}",
-            before, runtime_status(), g.voltage
+            p0_seen,
+            "no live-tier observation: run this test with a real GPU load active"
         );
     }
 
-    /// Override-path coverage that does NOT require suspension (runnable even
-    /// while nvidia-persistenced pins runtime_usage): cold cache -> bootstrap
-    /// full poll -> forced one-shot re-poll consumes the flag and refreshes
-    /// the snapshot timestamp.
+    /// Suspended path: the payload is sysfs-only and the call itself must not
+    /// wake the GPU.
     #[test]
-    #[ignore]
-    fn hil_rtd3_override_flag_consumed_and_snapshot_rearmed()
-    {
-        let _hil_guard = HIL_GLOBAL_STATE_LOCK.lock().unwrap();
-
-        let _ = env_logger::Builder::from_env(env_logger::Env::default())
-            .is_test(true)
-            .try_init();
-
-        IDLE_METRICS_CACHE.lock().unwrap().clear();
-        crate::FULL_NVML_REFRESH_REQUESTED.store(false, std::sync::atomic::Ordering::Relaxed);
-
-        // Bootstrap: cold cache forces a full NVML pass and populates cache.
-        let gpus = get_nvidia_gpu_info().expect("bootstrap poll failed");
-        assert!(!gpus.is_empty());
+    #[ignore = "HIL: requires the dGPU to be runtime-suspended first"]
+    fn hil_suspended_payload_does_not_wake_the_gpu() {
+        let _guard = HIL_LOCK.lock().unwrap();
+        crate::hardware_control::lock_or_recover(&GPU_POLL_STATE, "GPU_POLL_STATE").clear();
         assert!(
-            IDLE_METRICS_CACHE.lock().unwrap().contains_key(&0),
-            "cache not populated"
+            wait_for("suspended", 75),
+            "precondition failed: dGPU did not reach \"suspended\""
         );
+        let gpus = get_nvidia_gpu_info().expect("suspended pass failed");
+        let g = discrete(&gpus);
+        assert_eq!(g.runtime_status.as_deref(), Some("suspended"));
+        assert!(g.performance_state.is_none());
+        assert!(g.power.is_none() && g.frequency.is_none() && g.hotspot_temperature.is_none());
+        assert_eq!(runtime_status(), "suspended", "the poll woke the GPU");
+        println!("[+] suspended payload is sysfs-only and did not wake the GPU");
+    }
 
-        // Idle tier engages on next tick (fresh snapshot, util==0 observed):
-        // this must NOT consume a not-requested flag nor touch NVML.
-        let _ = get_nvidia_gpu_info().unwrap();
-        assert!(
-            !crate::FULL_NVML_REFRESH_REQUESTED.load(std::sync::atomic::Ordering::Relaxed),
-            "idle tick must not set the override flag"
-        );
+    /// "dGPU only": integrated graphics publish no status, no VRAM figures and
+    /// no holder list (an iGPU never runtime-suspends, so all three are constant
+    /// noise), and the holder scan runs for discrete adapters only.
+    #[test]
+    #[ignore = "HIL: reads the real GPU list"]
+    fn hil_integrated_gpu_publishes_no_status_vram_or_holders() {
+        let _guard = HIL_LOCK.lock().unwrap();
+        let gpus = get_gpu_info().expect("get_gpu_info failed");
+        for gpu in &gpus {
+            println!(
+                "[{}] {:28} runtime={:?} perf={:?} vram={:?} holders={} complete={}",
+                format!("{:?}", gpu.gpu_type),
+                gpu.name,
+                gpu.runtime_status,
+                gpu.performance_state,
+                gpu.vram_memory.is_some(),
+                gpu.process_snapshot.processes.len(),
+                gpu.process_snapshot.complete
+            );
+            if gpu.gpu_type == GpuType::Integrated {
+                assert!(gpu.runtime_status.is_none(), "iGPU must not publish a runtime status");
+                assert!(gpu.performance_state.is_none(), "iGPU must not publish a perf state");
+                assert!(gpu.vram_memory.is_none(), "iGPU must not publish VRAM figures");
+                assert!(
+                    gpu.process_snapshot.processes.is_empty(),
+                    "iGPU must not publish a holder list"
+                );
+                assert!(gpu.frequency.is_some(), "iGPU telemetry itself is still published");
+            }
+        }
+        let discrete = gpus.iter().find(|g| g.gpu_type == GpuType::Discrete);
+        if let Some(discrete) = discrete {
+            assert!(discrete.runtime_status.is_some(), "dGPU must publish the PM word");
+            for holder in &discrete.process_snapshot.processes {
+                assert!(
+                    holder.pid != std::process::id(),
+                    "the daemon's own handle must be filtered out"
+                );
+                assert!(
+                    !holder.name.starts_with("Xorg") && !holder.name.starts_with("nvidia-persiste"),
+                    "structural holder {} leaked into the list",
+                    holder.name
+                );
+            }
+            println!("[+] discrete holders after filtering: {:?}",
+                discrete.process_snapshot.processes.iter().map(|p| p.name.clone()).collect::<Vec<_>>());
+        }
+    }
 
-        // Force one-shot override: consumed exactly once, snapshot re-armed.
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-        crate::FULL_NVML_REFRESH_REQUESTED.store(true, std::sync::atomic::Ordering::Relaxed);
-        let _ = get_nvidia_gpu_info().unwrap();
-        assert!(
-            !crate::FULL_NVML_REFRESH_REQUESTED.load(std::sync::atomic::Ordering::Relaxed),
-            "override flag not consumed by forced pass"
-        );
-        println!("[+] override consumed + snapshot re-armed; status={}", runtime_status());
-
-        // Subsequent tick returns to quiet tier again (fresh timestamp).
-        let _ = get_nvidia_gpu_info().unwrap();
-        println!("[+] back to idle tier; final status={}", runtime_status());
+    /// Diagnostic for the direct-ioctl VRAM path (`get_vram_info`): prints what
+    /// the driver returns for RAM type / bus width / vendor, per FB-info index.
+    /// Run with the GPU awake; nothing is cached, so this is the raw driver
+    /// answer to the NV_ESC_RM_ALLOC / RM_CONTROL sequence.
+    #[test]
+    #[ignore = "HIL: opens /dev/nvidiactl and allocates RM objects"]
+    fn hil_vram_ioctl_metadata_readable() {
+        let _guard = HIL_LOCK.lock().unwrap();
+        println!("[*] runtime_status before: {}", runtime_status());
+        match NvidiaDriverHandle::open(0) {
+            Ok(handle) => {
+                for (label, index) in [
+                    ("RAM_TYPE", NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE),
+                    ("BUS_WIDTH", NV2080_CTRL_FB_INFO_INDEX_BUS_WIDTH),
+                    ("VENDOR_ID", NV2080_CTRL_FB_INFO_INDEX_MEMORYINFO_VENDOR_ID),
+                ] {
+                    match handle.get_fb_info(index) {
+                        Ok(value) => println!("[+] {} = 0x{:08x} ({})", label, value, value),
+                        Err(e) => println!("[-] {} failed: {}", label, e),
+                    }
+                }
+            }
+            Err(e) => println!("[-] NvidiaDriverHandle::open(0) failed: {:#}", e),
+        }
+        println!("[*] runtime_status after: {}", runtime_status());
     }
 }

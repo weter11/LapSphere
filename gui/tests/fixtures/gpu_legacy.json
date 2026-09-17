@@ -1,0 +1,60 @@
+{
+  "name": "NVIDIA GeForce RTX 3070 Laptop GPU",
+  "gpu_type": "Discrete",
+  "status": "suspended",
+  "frequency": null,
+  "memory_frequency": null,
+  "temperature": null,
+  "hotspot_temperature": null,
+  "memory_temperature": null,
+  "load": null,
+  "power": null,
+  "voltage": null,
+  "freq_offset": null,
+  "drain_offset": null,
+  "power_offset": null,
+  "total_offset": null,
+  "min_core_clock": null,
+  "max_core_clock": null,
+  "min_memory_clock": null,
+  "max_memory_clock": null,
+  "core_clock_range": [
+    210,
+    2100
+  ],
+  "memory_clock_range": [
+    405,
+    7001
+  ],
+  "core_offset_limits": [
+    -1000,
+    1000
+  ],
+  "memory_offset_limits": [
+    -2000,
+    6000
+  ],
+  "is_desktop": false,
+  "architecture": "Ampere",
+  "nvml_index": 0,
+  "driver_version": null,
+  "supported_p_states": [
+    "Eight",
+    "Five",
+    "Three",
+    "Zero"
+  ],
+  "supports_power_limit": true,
+  "power_limit_range": [
+    1,
+    150
+  ],
+  "supports_gpu_offset": true,
+  "supports_mem_offset": true,
+  "fan_speed_range": null,
+  "vram_type": null,
+  "vram_vendor": null,
+  "vram_bus_width": null,
+  "vram_bandwidth": null,
+  "vram_total": 8192
+}

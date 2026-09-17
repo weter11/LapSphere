@@ -69,7 +69,7 @@ jobs:
     - name: Update Arch Linux
       run: |
           pacman -Syu --noconfirm
-          pacman -S --noconfirm base-devel rustup pkgconf dbus gtk3 libadwaita pango cairo gdk-pixbuf2 atk graphene wayland libxkbcommon git sudo
+          pacman -S --noconfirm base-devel cmake rustup pkgconf dbus gtk3 libadwaita pango cairo gdk-pixbuf2 atk graphene wayland libxkbcommon git sudo
 
     - name: Checkout repository
       uses: actions/checkout@v7

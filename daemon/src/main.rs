@@ -2,6 +2,7 @@ mod dbus_interface;
 mod daemon_settings;
 mod hardware_control;
 mod hardware_detection;
+mod gpu_activity;
 mod tuxedo_io;
 mod battery_control;
 mod polling_scheduler;
@@ -12,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::collections::{VecDeque, HashMap};
 use lapsphere_common::types::*;
 use polling_scheduler::{PollingScheduler, PollJob};
+use hardware_control::lock_or_recover;
 
 pub struct HardwareCache {
     pub cpu_info: Option<CpuInfo>,
@@ -40,11 +42,6 @@ pub static HARDWARE_CACHE: once_cell::sync::Lazy<Arc<Mutex<HardwareCache>>> =
         system_info: None,
     })));
 
-// Set by GetGpuInfoFull D-Bus call to force one full NVML query on the next
-// hardware_monitor tick (on-demand override for the GUI stats panel).
-// The monitor job consumes and clears it, so the override is one-shot.
-pub static FULL_NVML_REFRESH_REQUESTED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
 
 // Global fan daemon state
 pub static FAN_DAEMON_STATE: once_cell::sync::Lazy<Arc<Mutex<Option<FanSettings>>>> = 
@@ -122,7 +119,7 @@ impl log::Log for DaemonLogger {
         };
 
         {
-            let mut logs = DAEMON_LOGS.lock().unwrap();
+            let mut logs = lock_or_recover(&DAEMON_LOGS, "DAEMON_LOGS");
 
             // Deduplicate: avoid adding the same message twice in a row
             let is_duplicate = logs.back().map_or(false, |last| {
@@ -154,7 +151,12 @@ impl log::Log for DaemonLogger {
 async fn main() -> Result<()> {
     let mut builder = env_logger::Builder::from_default_env();
     if std::env::var("RUST_LOG").is_err() {
-        builder.filter_level(log::LevelFilter::Warn);
+        // Default to Info, not Warn: successful API calls and hardware writes
+        // log at Info (api.ok / hw.*), and Warn-only journal output meant a
+        // working profile apply left no trace at all — only failures showed.
+        // A failing or chatty subsystem can still be silenced per-target with
+        // RUST_LOG, which from_default_env() honors when set.
+        builder.filter_level(log::LevelFilter::Info);
         builder.filter(Some("zbus"), log::LevelFilter::Warn);
     }
     let inner = builder.build();
@@ -311,7 +313,7 @@ async fn main() -> Result<()> {
         "hardware_monitor".to_string(),
         // Feeds CPU + Memory + GPU (+ everything else) from one shared cache,
         // so it runs at the fastest of the consumer section rates.
-        DAEMON_POLL_SETTINGS.lock().unwrap().hardware_monitor(),
+        lock_or_recover(&DAEMON_POLL_SETTINGS, "DAEMON_POLL_SETTINGS").hardware_monitor(),
         hw_monitor_fn,
     );
 
@@ -328,7 +330,7 @@ async fn main() -> Result<()> {
             let fan_io = fan_io.clone();
             move || {
                 let settings = {
-                    let state = FAN_DAEMON_STATE.lock().unwrap();
+                    let state = lock_or_recover(&FAN_DAEMON_STATE, "FAN_DAEMON_STATE");
                     state.clone()
                 };
 
@@ -350,7 +352,7 @@ async fn main() -> Result<()> {
 
         let fan_job = PollJob::new(
             "fan_control".to_string(),
-            DAEMON_POLL_SETTINGS.lock().unwrap().fan_control(),
+            lock_or_recover(&DAEMON_POLL_SETTINGS, "DAEMON_POLL_SETTINGS").fan_control(),
             poll_fn,
         );
 
@@ -364,7 +366,7 @@ async fn main() -> Result<()> {
     // Add GPU overclocking polling job
     let gpu_poll_fn = || {
         let settings = {
-            let state = GPU_DAEMON_STATE.lock().unwrap();
+            let state = lock_or_recover(&GPU_DAEMON_STATE, "GPU_DAEMON_STATE");
             state.clone()
         };
 
@@ -372,11 +374,11 @@ async fn main() -> Result<()> {
             apply_gpu_overclocking(gpu_settings)?;
         } else {
             {
-                let mut stats = CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
+                let mut stats = lock_or_recover(&CURRENT_GPU_OVERCLOCK_STATS, "CURRENT_GPU_OVERCLOCK_STATS");
                 *stats = None;
             }
             {
-                let mut last = LAST_APPLIED_OFFSET.lock().unwrap();
+                let mut last = lock_or_recover(&LAST_APPLIED_OFFSET, "LAST_APPLIED_OFFSET");
                 *last = None;
             }
         }
@@ -397,7 +399,7 @@ async fn main() -> Result<()> {
 
     let gpu_job = PollJob::new(
         "gpu_overclock".to_string(),
-        DAEMON_POLL_SETTINGS.lock().unwrap().gpu_overclock(),
+        lock_or_recover(&DAEMON_POLL_SETTINGS, "DAEMON_POLL_SETTINGS").gpu_overclock(),
         gpu_job_poll,
     );
 
@@ -511,7 +513,18 @@ pub fn refresh_hardware_cache() {
     let system_info = hardware_detection::get_system_info().ok();
 
     {
-        let mut cache = HARDWARE_CACHE.lock().unwrap();
+        // Recover from a poisoned mutex rather than panicking the monitor
+        // task. Clearing the poison keeps the D-Bus read paths serving fresh
+        // data; a stale-but-present cache beats a permanently blind daemon.
+        let mut cache = match HARDWARE_CACHE.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                log::error!(target: "hw.cache", "HARDWARE_CACHE poisoned — clearing poison and recovering");
+                let g = e.into_inner();
+                HARDWARE_CACHE.clear_poison();
+                g
+            }
+        };
         cache.cpu_info = cpu_info;
         cache.memory_info = memory_info;
         cache.gpu_info = gpu_info;
@@ -555,17 +568,17 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
     // Clear stats and last offset if advanced control or manual clocks are disabled
     if !gpu_settings.advanced_control || !gpu_settings.manual_clocks {
         {
-            let mut stats = CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
+            let mut stats = lock_or_recover(&CURRENT_GPU_OVERCLOCK_STATS, "CURRENT_GPU_OVERCLOCK_STATS");
             *stats = None;
         }
         {
-            let mut last = LAST_APPLIED_OFFSET.lock().unwrap();
+            let mut last = lock_or_recover(&LAST_APPLIED_OFFSET, "LAST_APPLIED_OFFSET");
             *last = None;
         }
         if !gpu_settings.manual_clocks {
             // Only clear if not already cleared to avoid waking up GPU unnecessarily
             let needs_clear = {
-                let map = MANUAL_GPU_OFFSETS.lock().unwrap();
+                let map = lock_or_recover(&MANUAL_GPU_OFFSETS, "MANUAL_GPU_OFFSETS");
                 map.get(&0).map_or(true, |offsets| offsets.0 != 0.0 || offsets.1 != 0.0)
             };
 
@@ -574,7 +587,7 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
                 let _ = crate::hardware_control::set_gpu_core_offset(0, 0.0);
                 let _ = crate::hardware_control::set_gpu_memory_offset(0, 0.0);
                 {
-                    let mut map = MANUAL_GPU_OFFSETS.lock().unwrap();
+                    let mut map = lock_or_recover(&MANUAL_GPU_OFFSETS, "MANUAL_GPU_OFFSETS");
                     map.insert(0, (0.0, 0.0));
                 }
             }
@@ -588,9 +601,16 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
     let nvidia_gpu = gpus.iter().find(|g| g.name.to_lowercase().contains("nvidia"));
 
     if let Some(gpu) = nvidia_gpu {
-        let status_lower = gpu.status.to_lowercase();
-        let is_suspended = status_lower.contains("suspended");
-        let is_pstate = status_lower.starts_with('p');
+        // The two status values are separate now: the runtime-PM word says
+        // whether the adapter is asleep, the NVML performance state says whether
+        // it is being queried (P0..P15) at all. When the quiet tier is active
+        // there is no performance state and no telemetry to steer offsets with,
+        // so skip rather than acting on absent values.
+        let is_suspended = gpu
+            .runtime_status
+            .as_deref()
+            .map(|status| status.eq_ignore_ascii_case("suspended"))
+            .unwrap_or(false);
 
         // If suspended, don't do anything
         if is_suspended {
@@ -598,7 +618,7 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
         }
 
         // Check if GPU is in an active state for overclocking (typically P0)
-        if !is_pstate {
+        if gpu.performance_state.is_none() || gpu.frequency.is_none() {
             return Ok(());
         }
 
@@ -675,15 +695,17 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
         // Total Offset
         let total_offset = freq_offset + drain_offset + power_offset;
 
-        if status_lower != "p0" {
-            let mut last = LAST_APPLIED_OFFSET.lock().unwrap();
+        // Dynamic offsets only steer the GPU at P0; a quiet-tier or
+        // non-P0 reading leaves the applied offset cleared as before.
+        if gpu.performance_state.as_deref() != Some("P0") {
+            let mut last = lock_or_recover(&LAST_APPLIED_OFFSET, "LAST_APPLIED_OFFSET");
             if *last != Some(0) {
                 crate::hardware_control::set_gpu_core_offset(0, 0.0)?;
                 *last = Some(0);
                 log::debug!("Cleared dynamic GPU offset (P-state not 0)");
             }
             drop(last);
-            let mut stats = CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
+            let mut stats = lock_or_recover(&CURRENT_GPU_OVERCLOCK_STATS, "CURRENT_GPU_OVERCLOCK_STATS");
             *stats = None;
             return Ok(());
         }
@@ -708,7 +730,7 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
 
         // ONLY APPLY IF CHANGED (fix stuttering)
         {
-            let mut last = LAST_APPLIED_OFFSET.lock().unwrap();
+            let mut last = lock_or_recover(&LAST_APPLIED_OFFSET, "LAST_APPLIED_OFFSET");
             if *last != Some(final_offset_i32) {
                 crate::hardware_control::set_gpu_core_offset(0, final_offset_i32 as f32)?;
                 *last = Some(final_offset_i32);
@@ -721,7 +743,7 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
         }
 
         // Update global stats for UI
-        let mut stats = CURRENT_GPU_OVERCLOCK_STATS.lock().unwrap();
+        let mut stats = lock_or_recover(&CURRENT_GPU_OVERCLOCK_STATS, "CURRENT_GPU_OVERCLOCK_STATS");
         *stats = Some(GpuOverclockStats {
             freq_offset: freq_offset as i32,
             drain_offset: drain_offset as i32,
@@ -773,7 +795,7 @@ mod tests {
         // This test verifies that the DaemonLogger captures all log levels
         // Note: In a real environment, we would need to initialize the logger
         // Here we're just verifying the static log buffer can be accessed
-        let logs = DAEMON_LOGS.lock().unwrap();
+        let logs = lock_or_recover(&DAEMON_LOGS, "DAEMON_LOGS");
         assert!(logs.capacity() >= 500, "Log buffer should have capacity of at least 500");
     }
     

@@ -52,7 +52,10 @@ These are separate from the hardware-detection identity backlog and remain
 investigation candidates from the daemon lifecycle deep-dive.
 
 1. Missing scheduler shutdown/join and retained job closures. `[assumed]`
-2. Unguarded concurrent `GetGpuInfoFull` blocking tasks. `[assumed]`
+2. ~~Unguarded concurrent `GetGpuInfoFull` blocking tasks.~~ Removed with
+   `GetGpuInfoFull` itself: GPU telemetry is now polled by the single
+   `hardware_monitor` job, so there is no per-call blocking task to guard.
+   `[verified]`
 3. GPU-index offset entries retained across topology changes. `[assumed]`
 4. Backlog growth in the unbounded scheduler command channel. `[assumed]`
 5. One temporary shutdown thread per non-systemd D-Bus shutdown request.

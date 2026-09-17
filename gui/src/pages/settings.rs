@@ -624,6 +624,44 @@ fn draw_stats_configuration(ui: &mut Ui, state: &mut AppState, dbus_client: Opti
     });
 }
 
+/// Processes with an open handle on the dGPU, from the daemon's passive /proc
+/// scan (no GPU device is ever opened for this, so it cannot wake the adapter).
+///
+/// The daemon already drops holders that are known not to block runtime suspend
+/// — the X server, nvidia-persistenced and its own device handle — so what is
+/// listed here are candidate sleep blockers, still not proof of GPU work.
+fn draw_gpu_holders(ui: &mut Ui, gpu: &lapsphere_common::types::GpuInfo) {
+    ui.label("Device holders:");
+    ui.vertical(|ui| {
+        let snapshot = &gpu.process_snapshot;
+        for process in &snapshot.processes {
+            ui.label(format!("{} (PID {})", process.name, process.pid))
+                .on_hover_text(process.device_nodes.join(", "));
+        }
+        if snapshot.processes.is_empty() {
+            ui.label(if snapshot.complete {
+                "No other process holds this GPU."
+            } else {
+                "Process information unavailable or incomplete."
+            });
+        }
+        if !snapshot.complete {
+            ui.label("Partial visibility: some processes or device mappings were not readable.");
+        }
+        if snapshot.sampled_at_unix_secs > 0 {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            ui.small(format!(
+                "Passive /proc scan; sampled {}s ago",
+                now.saturating_sub(snapshot.sampled_at_unix_secs)
+            ));
+        }
+    });
+    ui.end_row();
+}
+
 fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
     let interface_label = hardware_interface_label(state.hardware_interface.as_deref());
 
@@ -840,6 +878,8 @@ fn draw_hardware_info(ui: &mut Ui, state: &AppState) {
                             ui.label(format!("{} - {} W", min, max));
                             ui.end_row();
                         }
+
+                        draw_gpu_holders(ui, gpu);
                     }
 
                     if let Some(v_total) = gpu.vram_total {
