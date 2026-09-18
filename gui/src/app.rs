@@ -2,7 +2,8 @@ use chrono::Local;
 use egui::{Align, CentralPanel, Context, FontFamily, FontId, Layout, RichText, TextStyle};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::collections::VecDeque;
 use tokio::sync::{mpsc, oneshot};
 use lapsphere_common::types::*;
@@ -30,6 +31,62 @@ pub enum SettingsTab {
     Logs,
     Help,
     About,
+}
+
+// ---------------------------------------------------------------------------
+// Daemon log ring: fetch it only while the Logs tab is actually on screen
+// ---------------------------------------------------------------------------
+//
+// `GetDaemonLogs` hands back the daemon's whole 2000-entry ring on every call
+// (measured: 481,816 bytes of JSON — ~2000 `LogEntry` records carrying four
+// `String`s each). The `logs` component used to be registered at a flat 5 s
+// interval no matter which page was up, so an idle GUI (tray-only, Statistics,
+// any other tab) still allocated, parsed and dropped ~470 kB every 5 s —
+// ~96 kB/s of churn with nobody reading it. That churn is the allocation
+// pressure the allocator has to absorb; it is cheaper to not create it.
+//
+// So: the UI stamps a frame heartbeat once per frame together with whether that
+// frame drew the Logs tab, and the polling callback only spends the D-Bus round
+// trip when both hold. A heartbeat older than `UI_FRAME_FRESH_MS` means no frame
+// is being painted (minimized / hidden-to-tray window), so nothing can be
+// reading logs either. Opening the Logs tab costs at most one polling tick
+// (5 s) before the first refresh.
+
+/// How long a UI frame stamp stays fresh; beyond this the window is not painting.
+const UI_FRAME_FRESH_MS: u64 = 5_000;
+
+/// Wall-clock stamp (ms since the UNIX epoch) of the most recent UI frame.
+static LAST_UI_FRAME_MS: AtomicU64 = AtomicU64::new(0);
+/// Whether the most recent UI frame drew the Logs tab.
+static LOGS_TAB_ON_SCREEN: AtomicBool = AtomicBool::new(false);
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Is the daemon log ring worth one D-Bus round trip right now?
+///
+/// `frame_age_ms` is the age of the last painted frame (0 while painting).
+pub fn logs_fetch_needed(page: Page, tab: SettingsTab, frame_age_ms: u64) -> bool {
+    page == Page::Settings && tab == SettingsTab::Logs && frame_age_ms <= UI_FRAME_FRESH_MS
+}
+
+/// Record that a frame has been painted (called once per frame from the UI loop).
+pub fn note_ui_frame(page: Page, tab: SettingsTab) {
+    LOGS_TAB_ON_SCREEN.store(logs_fetch_needed(page, tab, 0), Ordering::Relaxed);
+    LAST_UI_FRAME_MS.store(now_ms(), Ordering::Relaxed);
+}
+
+/// Gate consulted by the `logs` polling callback.
+pub fn should_fetch_logs() -> bool {
+    if !LOGS_TAB_ON_SCREEN.load(Ordering::Relaxed) {
+        return false;
+    }
+    let last_frame = LAST_UI_FRAME_MS.load(Ordering::Relaxed);
+    logs_fetch_needed(Page::Settings, SettingsTab::Logs, now_ms().saturating_sub(last_frame))
 }
 
 pub struct AppState {
@@ -352,9 +409,14 @@ impl LapSphereApp {
                                 }
                             }
                             "logs" => {
-                                match client.get_daemon_logs().await {
-                                    Ok(Ok(logs)) => { let _ = tx.send(HardwareUpdate::DaemonLogs(logs)).await; }
-                                    _ => {}
+                                // Only while the Logs tab is on screen: this reply is the
+                                // daemon's whole ring (~470 kB of JSON), so polling it for a
+                                // GUI nobody is reading logs in is pure allocation churn.
+                                if should_fetch_logs() {
+                                    match client.get_daemon_logs().await {
+                                        Ok(Ok(logs)) => { let _ = tx.send(HardwareUpdate::DaemonLogs(logs)).await; }
+                                        _ => {}
+                                    }
                                 }
                             }
                             _ => {}
@@ -375,6 +437,8 @@ impl LapSphereApp {
             let _ = handle.register("mount".to_string(), Duration::from_millis(state.config.statistics_sections.storage_poll_rate));
             let _ = handle.register("gpu_overclock".to_string(), Duration::from_millis(state.config.statistics_sections.gpu_overclock_poll_rate));
             let _ = handle.register("webcam".to_string(), Duration::from_secs(5));
+            // Registered, but the callback only fetches while the Logs tab is on
+            // screen (see `should_fetch_logs`): the ring reply is ~470 kB each time.
             let _ = handle.register("logs".to_string(), Duration::from_secs(5));
 
             // Initial system info load
@@ -786,6 +850,12 @@ impl LapSphereApp {
 impl eframe::App for LapSphereApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+
+        // Tell the log-ring poll gate what is actually on screen (see
+        // `should_fetch_logs`): a hidden/minimized window stops painting, so the
+        // ring stops being fetched without any extra teardown logic.
+        note_ui_frame(self.state.current_page, self.state.settings_tab);
+
         if self.startup_frames > 0 {
             let start_in_tray = std::env::args().any(|arg| arg == "--tray");
             if self.state.config.start_minimized || start_in_tray {
@@ -1107,4 +1177,66 @@ fn save_profiles_to_disk(config: &AppConfig) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(&ProfilesConfig::from(config))?;
     std::fs::write(profiles_path, json)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod log_fetch_gate_tests {
+    use super::*;
+
+    // The daemon log ring is the single most expensive polling reply (~470 kB of
+    // JSON), so it must only be fetched while it is on screen.
+    #[test]
+    fn logs_fetched_only_on_the_logs_tab() {
+        assert!(logs_fetch_needed(Page::Settings, SettingsTab::Logs, 0));
+        for tab in [
+            SettingsTab::Main,
+            SettingsTab::StatsConfiguration,
+            SettingsTab::Hardware,
+            SettingsTab::Help,
+            SettingsTab::About,
+        ] {
+            assert!(
+                !logs_fetch_needed(Page::Settings, tab, 0),
+                "Logs must not be polled from the {:?} tab",
+                tab
+            );
+        }
+        for page in [Page::Statistics, Page::Profiles, Page::Tuning] {
+            assert!(
+                !logs_fetch_needed(page, SettingsTab::Logs, 0),
+                "Logs must not be polled from the {:?} page",
+                page
+            );
+        }
+    }
+
+    #[test]
+    fn logs_not_fetched_when_the_window_stops_painting() {
+        // Tray-only / minimized / hidden window: no frames, nothing being read.
+        assert!(!logs_fetch_needed(Page::Settings, SettingsTab::Logs, UI_FRAME_FRESH_MS + 1));
+        assert!(!logs_fetch_needed(Page::Settings, SettingsTab::Logs, 60_000));
+        // A window that is painting normally keeps the ring flowing.
+        assert!(logs_fetch_needed(Page::Settings, SettingsTab::Logs, UI_FRAME_FRESH_MS));
+    }
+
+    #[test]
+    fn should_fetch_logs_follows_the_recorded_frame() {
+        // No frame recorded yet (startup): nothing is on screen, no polling.
+        LOGS_TAB_ON_SCREEN.store(false, Ordering::Relaxed);
+        LAST_UI_FRAME_MS.store(now_ms(), Ordering::Relaxed);
+        assert!(!should_fetch_logs());
+
+        // Frame on the Logs tab: poll.
+        note_ui_frame(Page::Settings, SettingsTab::Logs);
+        assert!(should_fetch_logs());
+
+        // Frame elsewhere: stop.
+        note_ui_frame(Page::Statistics, SettingsTab::Logs);
+        assert!(!should_fetch_logs());
+
+        // Frame on the Logs tab, but paint stopped > freshness window ago.
+        note_ui_frame(Page::Settings, SettingsTab::Logs);
+        LAST_UI_FRAME_MS.store(now_ms() - (UI_FRAME_FRESH_MS + 1), Ordering::Relaxed);
+        assert!(!should_fetch_logs());
+    }
 }
