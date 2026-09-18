@@ -122,19 +122,100 @@ fn check_single_instance_windows() -> Option<isize> {
 // (see heaptrack probe: real Rust heap stayed at 27 MB peak / 22 MB leaked
 // while RSS grew to 3.6 GB). mimalloc bounds arenas and reuses freed blocks.
 //
-// NOTE: mimalloc is NOT retention-free by default. It reserves 1 GiB arenas
-// and only decommits freed pages after `purge_delay` (default 1 s), with THP
-// merging enabled — so an idle GUI still held ~2.9 GiB resident in
-// `[anon:mimalloc]` against a ~27 MB live heap (VmHWM 3.06 GiB, 0 CPU).
-// The purge/decommit knobs are applied in the .desktop Exec line via env vars
-// (MIMALLOC_PURGE_DELAY=0, _ARENA_EAGER_COMMIT=0, _ALLOW_THP=0) since the
-// crate's mi_option_set API requires the unused "extended" feature.
-// See gui/Cargo.toml for the full measurement record.
+// NOTE: mimalloc is NOT retention-free out of the box. It reserves 1 GiB
+// arenas, commits them eagerly on Linux (`arena_eager_commit = 2`) and lets
+// transparent huge pages back them, so the reserved region stays resident in
+// `[anon:mimalloc]` even with a ~27 MB live heap (measured: 57.6 MB of mimalloc
+// RSS of which 51.2 MB was AnonHugePages). `apply_mimalloc_tuning()` sets the
+// three knobs that bound it — in-process, at startup, so every launch path
+// (menu, autostart, terminal, tray) is covered and nothing depends on a
+// `.desktop` Exec line, an env wrapper or a packaging sed. Measured with the
+// installed v3.3.2 build, 5 min per arm, `--tray`, same D-Bus workload:
+// mimalloc-map RSS 57.6 MB -> 12.8 MB and VmRSS 160.8 MB -> 115.9 MB.
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// Bound mimalloc's arena footprint from inside the process.
+///
+/// The mimalloc Rust crate (0.1.52) binds no option API — its `extended`
+/// feature only adds `version()`, `usable_size()` and `stats_json()` — but
+/// `mi_option_set`/`mi_option_get` are exported from the static mimalloc
+/// library that `libmimalloc-sys` links, so a plain `extern "C"` reaches them
+/// without enabling anything or adding a dependency.
+mod mimalloc_tuning {
+    use std::os::raw::{c_int, c_long};
+
+    // Values of `mi_option_t` for mimalloc v3 (libmimalloc-sys 0.1.49 vendors
+    // v3; `MI_MALLOC_VERSION 30302` == 3.3.2). The C ABI takes the enum's
+    // numeric value, so they are pinned here next to the version they were
+    // read from — re-check them when bumping mimalloc.
+    const OPTION_ARENA_EAGER_COMMIT: c_int = 4;
+    const OPTION_PURGE_DELAY: c_int = 15;
+    const OPTION_ALLOW_THP: c_int = 43;
+
+    extern "C" {
+        fn mi_option_set(option: c_int, value: c_long);
+        fn mi_option_get(option: c_int) -> c_long;
+    }
+
+    /// Apply the arena-bounding options. Safe to call at any point in `main`:
+    /// options are read live through `_mi_option_get_fast`, and `mi_option_set`
+    /// marks them initialized, so these values win over the environment.
+    pub fn apply() {
+        unsafe {
+            // 0 = don't commit reserved arena space up front (default 2).
+            mi_option_set(OPTION_ARENA_EAGER_COMMIT, 0);
+            // 0 = don't let THP back the arenas (stops ~2 MB-granular RSS).
+            mi_option_set(OPTION_ALLOW_THP, 0);
+            // 0 = decommit freed pages immediately; the default is 1000 ms and
+            // -1 would disable purging altogether.
+            mi_option_set(OPTION_PURGE_DELAY, 0);
+        }
+    }
+
+    /// Read the effective values back (verifiable at runtime with
+    /// `RUST_LOG=info lapsphere`).
+    pub fn log_effective() {
+        unsafe {
+            log::info!(
+                "mimalloc arena tuning: arena_eager_commit={} allow_thp={} purge_delay_ms={}",
+                mi_option_get(OPTION_ARENA_EAGER_COMMIT),
+                mi_option_get(OPTION_ALLOW_THP),
+                mi_option_get(OPTION_PURGE_DELAY),
+            );
+        }
+    }
+}
+
+/// Run the tuning before mimalloc's own process initialization.
+///
+/// Options are read live, so setting them in `main` already applies — except for
+/// the two things mimalloc does exactly once at process init: it reads
+/// `allow_thp` to decide whether THP may back its regions, and issues
+/// `prctl(PR_SET_THP_DISABLE)` when THP is off. Those already-committed THP pages
+/// are what a main()-time call cannot undo (measured: ~10 MB of AnonHugePages left
+/// behind versus 0 with the same options supplied through `MIMALLOC_*`). An ELF
+/// constructor runs before the first Rust allocation, so it reproduces the
+/// environment-variable behaviour without depending on the environment.
+#[cfg(target_os = "linux")]
+mod early_tuning {
+    use super::mimalloc_tuning;
+
+    extern "C" fn init() {
+        mimalloc_tuning::apply();
+    }
+
+    #[used]
+    #[link_section = ".init_array"]
+    static EARLY_INIT: extern "C" fn() = init;
+}
+
 fn main() -> Result<(), eframe::Error> {
+    // Bound the allocator before anything heavy runs. On Linux this has already
+    // happened in the ELF constructor below; the call is kept for other targets.
+    mimalloc_tuning::apply();
     env_logger::init();
+    mimalloc_tuning::log_effective();
     setup_panic_hook();
 
     let args: Vec<String> = std::env::args().collect();

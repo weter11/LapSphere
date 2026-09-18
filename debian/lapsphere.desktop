@@ -2,7 +2,7 @@
 Name=LapSphere
 GenericName=Hardware Control
 Comment=Control hardware features on Uniwill/Clevo laptops
-Exec=env MIMALLOC_PURGE_DELAY=0 MIMALLOC_ARENA_EAGER_COMMIT=0 MIMALLOC_ALLOW_THP=0 lapsphere
+Exec=lapsphere
 Icon=lapsphere
 Terminal=false
 Type=Application

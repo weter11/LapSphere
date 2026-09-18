@@ -31,21 +31,31 @@ zbus.workspace = true
 # never returns it to the OS. Under the GUI's ~8k alloc/s D-Bus polling load
 # that arena ratchet accumulated ~8 GB of resident-but-free heap over hours
 # (see heaptrack probe: real Rust heap stayed at 27 MB peak / 22 MB leaked
-# while RSS grew to 3.6 GB). mimalloc bounds arenas and reuses freed blocks,
-# which fixed the unbounded growth — but mimalloc is NOT retention-free by
-# default: it reserves 1 GiB arenas and only decommits freed pages after
-# purge_delay (1 s) with THP merging on. On this idle GUI that still left
-# ~2.9 GiB resident in [anon:mimalloc] with a ~27 MB live heap (measured
-# 2026-09-18, VmHWM 3.06 GiB, CPU 0 s/min). The purge/decommit knobs are set
-# in the .desktop Exec line instead of here because the mimalloc crate's
-# option API needs the (unused) "extended" feature — env vars need no code:
-#   MIMALLOC_PURGE_DELAY=0      purge freed pages immediately (MADV_DONTNEED)
-#   MIMALLOC_ARENA_EAGER_COMMIT=0  don't commit whole arenas up front
-#   MIMALLOC_ALLOW_THP=0        stop 1 GiB transparent-huge-page amplification
-# With those, RSS at 25 min idle = 82 MB (peak 115 MB) vs 3,045 MB before.
-# If heap usage ever needs tuning in-code, enable the crate's "extended"
-# feature and set the same options via mi_option_set at startup.
-# Use default features to include the bundled C library (static linkage).
+# while RSS grew to 3.6 GB). mimalloc bounds arenas and reuses freed blocks.
+#
+# mimalloc is NOT retention-free out of the box: it reserves 1 GiB arenas
+# (mi_option_arena_reserve), commits them eagerly on Linux
+# (arena_eager_commit = 2) and lets THP back them, so with a ~27 MB live heap
+# the reservation still shows up as resident [anon:mimalloc]. Three options
+# bound it, and they are applied IN-PROCESS at startup by
+# `mimalloc_tuning::apply()` in src/main.rs — no .desktop Exec/env wrapper and
+# no packaging sed involved, so every launch path (menu, autostart, terminal,
+# tray) behaves the same:
+#   arena_eager_commit = 0  don't commit reserved arena space up front
+#   allow_thp          = 0  stop THP backing the arenas (~2 MB RSS granularity)
+#   purge_delay        = 0  decommit freed pages immediately (default 1000 ms)
+# Measured on the installed v3.3.2 build (5 min per arm, --tray, identical
+# D-Bus workload, /proc sampling): mimalloc-map RSS 57.6 MB -> 12.8 MB and
+# VmRSS 160.8 MB -> 115.9 MB; AnonHugePages 51.2 MB -> 0. Per-knob runs showed
+# `purge_delay` alone barely moves RSS (155.4 MB) while either structural knob
+# alone captures almost all of it (allow_thp 116.2 MB, arena_eager_commit
+# 118.0 MB), which is why all three are set rather than the "obvious" one.
+#
+# The crate exposes no option API of its own (its "extended" feature adds only
+# version()/usable_size()/stats_json()), so the options are reached through a
+# small `extern "C"` block against mi_option_set/mi_option_get, which the linked
+# static mimalloc library exports. The mimalloc Rust crate pulls in the bundled
+# C library (static linkage) via its default features.
 mimalloc = { version = "0.1", default-features = true }
 
 # Time handling
