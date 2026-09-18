@@ -92,14 +92,27 @@ struct DaemonLogger {
 
 impl log::Log for DaemonLogger {
     fn enabled(&self, _metadata: &log::Metadata) -> bool {
-        // All levels are enabled for internal buffer (up to Debug per set_max_level)
-        // Also allow env_logger to control its own filtering
+        // Every record that reaches this logger is offered to the ring, except
+        // Trace (dropped in `log()` — see there). What reaches the logger at all
+        // is bounded by the global max level, which stays at Trace so that
+        // RUST_LOG=trace still prints to the console/journal.
         true
     }
 
     fn log(&self, record: &log::Record) {
-        // Always capture all log levels into the buffer (Error, Warn, Info, Debug, Trace)
-        // The global max level (Trace) controls what reaches this logger
+        // Capture Error..Debug into the ring. The ring is shipped to the GUI
+        // verbatim (GetDaemonLogs returns all 2000 entries, ~470 kB of JSON), so
+        // Trace records are deliberately NOT recorded: they measured ~17% of
+        // that payload and carried nothing the Debug level does not already
+        // carry. They still reach env_logger (console/journal) when RUST_LOG
+        // asks for them — only the ring is spared, so `RUST_LOG=trace` stays a
+        // usable diagnostic lever.
+        if record.level() == log::Level::Trace {
+            if self.inner.enabled(record.metadata()) {
+                self.inner.log(record);
+            }
+            return;
+        }
 
         let mut level = record.level().to_string();
         let target = record.target().to_string();
@@ -168,7 +181,11 @@ async fn main() -> Result<()> {
     let logger = DaemonLogger { inner };
 
     log::set_boxed_logger(Box::new(logger)).unwrap();
-    log::set_max_level(log::LevelFilter::Trace); // Allow up to Trace to reach our logger for buffer
+    // Stays at Trace: RUST_LOG=trace must keep working as the console/journal
+    // diagnostic lever. The *ring* is what gets trimmed — the logger drops Trace
+    // records before recording them, because they measured ~17% of the ~470 kB
+    // that GetDaemonLogs hands to the GUI and carry nothing Debug does not.
+    log::set_max_level(log::LevelFilter::Trace);
 
     log::info!("Starting LapSphere Daemon");
 
