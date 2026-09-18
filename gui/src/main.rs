@@ -120,8 +120,16 @@ fn check_single_instance_windows() -> Option<isize> {
 // never returns it to the OS. Under the GUI's ~8k alloc/s D-Bus polling load
 // that arena ratchet accumulated ~8 GB of resident-but-free heap over hours
 // (see heaptrack probe: real Rust heap stayed at 27 MB peak / 22 MB leaked
-// while RSS grew to 3.6 GB). mimalloc bounds arenas and reuses freed blocks,
-// eliminating the retention entirely.
+// while RSS grew to 3.6 GB). mimalloc bounds arenas and reuses freed blocks.
+//
+// NOTE: mimalloc is NOT retention-free by default. It reserves 1 GiB arenas
+// and only decommits freed pages after `purge_delay` (default 1 s), with THP
+// merging enabled — so an idle GUI still held ~2.9 GiB resident in
+// `[anon:mimalloc]` against a ~27 MB live heap (VmHWM 3.06 GiB, 0 CPU).
+// The purge/decommit knobs are applied in the .desktop Exec line via env vars
+// (MIMALLOC_PURGE_DELAY=0, _ARENA_EAGER_COMMIT=0, _ALLOW_THP=0) since the
+// crate's mi_option_set API requires the unused "extended" feature.
+// See gui/Cargo.toml for the full measurement record.
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

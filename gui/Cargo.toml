@@ -32,7 +32,19 @@ zbus.workspace = true
 # that arena ratchet accumulated ~8 GB of resident-but-free heap over hours
 # (see heaptrack probe: real Rust heap stayed at 27 MB peak / 22 MB leaked
 # while RSS grew to 3.6 GB). mimalloc bounds arenas and reuses freed blocks,
-# eliminating the retention entirely.
+# which fixed the unbounded growth — but mimalloc is NOT retention-free by
+# default: it reserves 1 GiB arenas and only decommits freed pages after
+# purge_delay (1 s) with THP merging on. On this idle GUI that still left
+# ~2.9 GiB resident in [anon:mimalloc] with a ~27 MB live heap (measured
+# 2026-09-18, VmHWM 3.06 GiB, CPU 0 s/min). The purge/decommit knobs are set
+# in the .desktop Exec line instead of here because the mimalloc crate's
+# option API needs the (unused) "extended" feature — env vars need no code:
+#   MIMALLOC_PURGE_DELAY=0      purge freed pages immediately (MADV_DONTNEED)
+#   MIMALLOC_ARENA_EAGER_COMMIT=0  don't commit whole arenas up front
+#   MIMALLOC_ALLOW_THP=0        stop 1 GiB transparent-huge-page amplification
+# With those, RSS at 25 min idle = 82 MB (peak 115 MB) vs 3,045 MB before.
+# If heap usage ever needs tuning in-code, enable the crate's "extended"
+# feature and set the same options via mi_option_set at startup.
 # Use default features to include the bundled C library (static linkage).
 mimalloc = { version = "0.1", default-features = true }
 
