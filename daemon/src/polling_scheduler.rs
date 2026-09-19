@@ -39,17 +39,19 @@ impl PollJob {
     }
 }
 
-// Implement ordering for BinaryHeap (min-heap based on next_run)
+// Min-heap by next_run: BinaryHeap is a max-heap, so Ord is reversed to put
+// the EARLIEST next_run at the top. Ord/PartialOrd/Eq/PartialEq must agree
+// (the Rust contract a == b => cmp == Equal); the old PartialEq keyed on id
+// alone and broke it, which BinaryHeap relies on.
 impl Ord for PollJob {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Reverse ordering for min-heap (earliest next_run has highest priority)
         other.next_run.cmp(&self.next_run)
     }
 }
 
 impl PartialOrd for PollJob {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
+        other.next_run.partial_cmp(&self.next_run)
     }
 }
 
@@ -57,7 +59,7 @@ impl Eq for PollJob {}
 
 impl PartialEq for PollJob {
     fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
+        self.next_run == other.next_run
     }
 }
 
@@ -130,8 +132,7 @@ impl PollingScheduler {
                     match cmd {
                         SchedulerCommand::AddJob(job) => {
                             log::debug!("Adding poll job: {}", job.id);
-                            let mut jobs = self.jobs.write().unwrap();
-                            jobs.push(job);
+                            self.add_or_replace_job(job);
                         }
                         SchedulerCommand::UpdateInterval(id, interval) => {
                             log::debug!("Updating poll interval for {}: {:?}", id, interval);
@@ -200,6 +201,25 @@ impl PollingScheduler {
         }
     }
 
+    /// Add a job, replacing any existing job with the same id. A duplicate id
+    /// in the heap would make `remove_job` act on both copies and
+    /// `update_job_interval` double the poll work; BinaryHeap has no in-place
+    /// replace that preserves the heap invariant, so drain-filter-push like
+    /// `remove_job`.
+    fn add_or_replace_job(&self, job: PollJob) {
+        let mut jobs = self.jobs.write().unwrap();
+        let id = job.id.clone();
+        let before = jobs.len();
+        let mut kept: Vec<PollJob> = jobs.drain().filter(|j| j.id != id).collect();
+        if kept.len() != before {
+            log::warn!("Replaced existing poll job: {id}");
+        }
+        kept.push(job);
+        for j in kept {
+            jobs.push(j);
+        }
+    }
+
     /// Remove a job by ID
     fn remove_job(&self, id: &str) {
         let mut jobs = self.jobs.write().unwrap();
@@ -208,6 +228,86 @@ impl PollingScheduler {
         for job in temp_jobs {
             jobs.push(job);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BinaryHeap;
+    use std::time::{Duration, Instant};
+
+    fn job(id: String, next_run: Instant) -> PollJob {
+        PollJob {
+            id,
+            next_run,
+            interval: Duration::from_secs(1),
+            poll_fn: Arc::new(|| Ok(())),
+        }
+    }
+
+    /// Two jobs with the same id but different next_run: the OLD impls broke
+    /// the Ord/Eq contract (PartialEq said equal, Ord said not), which
+    /// BinaryHeap relies on. The fixed impls key all four traits on
+    /// next_run, so the contract holds.
+    #[test]
+    fn ord_eq_contract_holds() {
+        let now = Instant::now();
+        let a = job("x".to_string(), now + Duration::from_secs(1));
+        let b = job("x".to_string(), now + Duration::from_secs(5));
+        // contract: a == b  <=>  cmp(a,b) == Equal
+        assert_eq!(a == b, a.cmp(&b) == Ordering::Equal);
+        assert!(a != b);
+        // Ord is REVERSED for the min-heap, so the earlier job orders Greater
+        assert_eq!(a.cmp(&b), Ordering::Greater);
+        assert_eq!(b.cmp(&a), Ordering::Less);
+    }
+
+    #[test]
+    fn binary_heap_is_a_min_heap_by_next_run() {
+        let now = Instant::now();
+        let mut heap: BinaryHeap<PollJob> = BinaryHeap::new();
+        heap.push(job("a".to_string(), now + Duration::from_secs(3)));
+        heap.push(job("b".to_string(), now + Duration::from_secs(1)));
+        heap.push(job("c".to_string(), now + Duration::from_secs(2)));
+        // earliest next_run must come out FIRST (min-heap, as the original
+        // reversed Ord intended)
+        let top = heap.pop().unwrap();
+        assert_eq!(top.id, "b");
+        assert_eq!(heap.pop().unwrap().id, "c");
+        assert_eq!(heap.pop().unwrap().id, "a");
+    }
+
+    #[test]
+    fn add_job_with_duplicate_id_replaces_not_doubles() {
+        // Drives the real AddJob code path (add_or_replace_job, the method
+        // the scheduler loop calls) -- no async runtime is available in a
+        // sync test, so the command channel is not used.
+        let sched = PollingScheduler::new();
+        let closure: fn() -> Result<()> = || Ok(());
+
+        // First add: empty heap -> 1 job.
+        let mut first = PollJob::new("hw".to_string(), Duration::from_secs(1), closure);
+        let _ = first.execute();
+        sched.add_or_replace_job(first);
+        assert_eq!(sched.jobs.read().unwrap().len(), 1);
+
+        // Second add with the SAME id: must REPLACE, not append -> still 1.
+        let mut second = PollJob::new("hw".to_string(), Duration::from_secs(5), closure);
+        let _ = second.execute();
+        sched.add_or_replace_job(second);
+
+        let jobs = sched.jobs.read().unwrap();
+        assert_eq!(jobs.len(), 1, "duplicate id must replace, not append");
+        let surviving = jobs.iter().find(|j| j.id == "hw").unwrap();
+        assert_eq!(surviving.interval, Duration::from_secs(5));
+
+        // A different id is unaffected.
+        let mut third = PollJob::new("fan".to_string(), Duration::from_secs(2), closure);
+        let _ = third.execute();
+        drop(jobs);
+        sched.add_or_replace_job(third);
+        assert_eq!(sched.jobs.read().unwrap().len(), 2);
     }
 }
 
