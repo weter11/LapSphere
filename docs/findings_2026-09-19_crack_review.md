@@ -125,6 +125,114 @@ explicit spec is a good operating mode for this build.
 
 ---
 
+## Finding C-05: CRACK grading on the actual cron tasks — A/B split verdict
+
+**Category:** model-assessment. **Decision:** awaiting human review.
+
+The four cron jobs (`lapsphere-day-start`, `lapsphere-hourly-tick`,
+`lapsphere-day-end`, `daily-self-audit-report`) are all `no-agent` mode — pure
+Python scripts with **no LLM in the loop**. The day-start job hashes tracked
+files and writes a coverage baseline; the day-end job renders the cumulative
+findings file from pre-recorded JSON; the hourly tick and the self-audit are
+also script-only. So CRACK cannot be tested *on* the jobs themselves — what was
+tested is the **audit work those jobs schedule**: the coverage decision and the
+source-review pass.
+
+### Task A — daily coverage report from the component inventory: **GRADE F**
+
+Fed CRACK the exact 24-component inventory the audit tool produces (each line
+`source -> doc [status]`) and asked for the five lines the day-end job emits.
+
+**Result: catastrophically wrong, and confidently so.** Truth vs. output:
+
+| | Truth | CRACK |
+|---|---|---|
+| Pages present | 4/24 (16.67%) | **23/23 (100%)** |
+| Source-reviewed | 3/24 (12.5%) | **23/23 (100%)** |
+| Missing | 20 components | **"None"** |
+| Stale | 1 component | **"None"** |
+| Next component | (any of the 20) | **"None (All components are current; no action required)"** |
+
+This is not an approximation. Given a list with twenty lines literally tagged
+`[missing]`, it reported zero missing and declared the audit complete. A job
+that ran on this output would skip every piece of work it exists to schedule.
+
+**Root cause, isolated by controlled probes** (each run twice, deterministic):
+
+| Probe | Result |
+|---|---|
+| 5-line list, count the tags | correct (2/2/5) |
+| 10 identical `[missing]` lines | correct (10) |
+| 24-line list, balanced tags | correct |
+| 24-line list, skewed 20/3/1 | correct (20/3/1) |
+| **the real 24-item inventory, count-only prompt** | **correct (20/3/1)** |
+| the real inventory + role preamble + 5-part format spec | **wrong** |
+| format template alone, no counting instruction | **empty output, 800 tokens consumed** |
+
+The model CAN count this exact list correctly. It fails when the request is
+wrapped in the audit-job's surrounding prose — the role story plus the
+multi-part output spec. That combination costs it the ability to follow any of
+it. Note also the empty-output probe: when given a bare reply-template with no
+task instruction, it burned the entire budget and returned nothing.
+
+**Task-A verdict: unusable for this job.** The failure is not a math slip or a
+formatting quirk; it silently reports "all done" when 83% of the work is
+outstanding, and it does so in the exact voice of a correct report.
+
+### Task B — component review of `daemon/src/tuxedo_io.rs`: **GRADE B+**
+
+Fed CRACK all 666 lines and asked for the documentation page the `review`
+command produces: purpose paragraph, every public function with a behavior
+line, failure modes, and a test-coverage line.
+
+**Result: substantially correct and genuinely useful.**
+
+- Purpose summary: accurate and non-trivial — correctly identified
+  `/dev/tuxedo_io` as the kernel-driver interface, the Clevo/Uniwill platform
+  split, and the process-wide shared instance as the reason the daemon opens
+  the device once rather than per-poll.
+- **All 21 public functions listed, 21/21, zero invented, zero omitted.**
+- Failure modes correct in substance: invalid fan ID vs. the platform fan
+  count, invalid TDP index 0-2, and the unsafe/ioctl boundary with the
+  `Errno -> anyhow` mapping.
+- Test coverage line: correctly stated the file has no `#[cfg(test)]` block.
+- Completed in 61 s, 1,101 tokens, clean stop.
+
+Deductions, both minor and neither checked against the source:
+- It stated Clevo fan count as 3 and Uniwill as 2 as hard constants. The
+  source *detects* the count via `detect_fan_count`, so this is a
+  plausible-but-unverified specificity — the kind of detail that needs one
+  confirming read before it lands in a doc page.
+- The descriptions of `set_clevo_keyboard_*` are thin relative to the
+  fan/TDP entries.
+
+**Task-B verdict: good for this job, with a verification pass.** It produces a
+review that is accurate in structure and coverage, and the one substantive
+overreach is exactly what a diff-against-source check would catch.
+
+### Recommendation
+
+**Do not let CRACK run the coverage/aggregation decisions unattended.** Task A
+is the pattern that matters: a job whose output is a judgment about whether
+work remains, where being wrong looks identical to being right. A wrong
+"nothing missing" is not a recoverable formatting error — it is the audit
+reporting its own completion. The cron jobs are correctly `no-agent` today;
+keep them that way. If they ever become agent-driven, that specific step must
+either stay scripted or be gated by a check that re-derives the counts.
+
+**CRACK is good at the per-component review pass** (Task B). That is a
+different shape of work: reading one file deeply and describing it, where
+every claim is locally checkable against the source in front of it. Use it
+there, with a source-diff verification step for the specific numbers it
+asserts.
+
+The split is consistent with the C-01/C-02 results: strong on focused
+single-artifact analysis and defect-finding, weak on aggregation across many
+items and on anything that requires it to hold a multi-part output contract
+while also doing work.
+
+---
+
 ## Consequences for the existing findings backlog
 
 - **C-01 and C-02 partially close the polling_scheduler arm of the
