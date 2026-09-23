@@ -4095,7 +4095,12 @@ mod rtd3_hybrid_tests {
             .try_init();
 
         IDLE_METRICS_CACHE.lock().unwrap().clear();
-        crate::FULL_NVML_REFRESH_REQUESTED.store(false, std::sync::atomic::Ordering::Relaxed);
+
+        // Bootstrap: force a full NVML pass so the cache gets populated. The
+        // GPU may be suspended when the test starts (nothing is holding it
+        // awake); without the flag the all-suspended stub returns early and
+        // never populates IDLE_METRICS_CACHE, failing the assert below.
+        crate::FULL_NVML_REFRESH_REQUESTED.store(true, std::sync::atomic::Ordering::Relaxed);
 
         // Bootstrap: cold cache forces a full NVML pass and populates cache.
         let gpus = get_nvidia_gpu_info().expect("bootstrap poll failed");
