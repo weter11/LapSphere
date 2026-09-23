@@ -830,12 +830,113 @@ pub fn get_webcam_state() -> Result<bool> {
 use nvml_wrapper::enum_wrappers::device::{Clock, PerformanceState};
 use nvml_wrapper::enums::device::GpuLockedClocksSetting;
 
-static NVML: Lazy<Result<Nvml, nvml_wrapper::error::NvmlError>> = Lazy::new(|| Nvml::init());
+// ---------------------------------------------------------------------------
+// NVML storage: re-initializable so the idle transition can call nvmlShutdown()
+//
+// The handle is NOT a plain Lazy<Result<Nvml>>. nvmlShutdown() consumes self
+// (nvml_wrapper's `shutdown()` takes `mut self`), so a Lazy cell holding an
+// initialized Nvml can never be shut down — NVML would stay initialized, and
+// its open /dev/nvidia{N} descriptors would keep the kernel runtime-PM
+// reference for the whole daemon lifetime, permanently disabling dGPU suspend
+// after the first NVML touch.
+//
+// So we hold an Option in a Mutex and re-initialize on demand. The cost we care
+// about is the libcuda dlopen (~20.7 MB heap + a sticky ~110 MB VMA set that
+// survives nvmlShutdown + dlclose), and that cost is paid ONCE per session:
+// after the first init the mappings are already mapped and the only work is
+// nvmlInit_v2 itself.
+//
+// Two stickiness mechanisms, both relevant to the load gate:
+//   - USERSPACE MEMORY: the libcuda VMAs stay mapped after nvmlShutdown. This
+//     means nvmlShutdown + later re-init is free of additional memory cost.
+//   - KERNEL POWER REFERENCE: the open /dev/nvidia descriptors are what keep
+//     the dGPU out of runtime D3. nvmlShutdown closes them. This is the ref
+//     the idle transition releases, and it is the one that matters — without
+//     it the very first light-load NVML call disables suspend for the rest of
+//     the session.
+//
+// Runtime PM on this x86 laptop is NOT a pm_runtime autosuspend timer:
+// /proc/driver/nvidia/params shows NVreg_DynamicPowerManagement=2 (fine-
+// grained) and /proc/driver/nvidia/gpus/*/power shows "Runtime D3 status:
+// Enabled (fine-grained)". GC6 (D3) entry is driven by the closed RM via
+// rm_ref_dynamic_power COARSE/FINE refs taken in nv_start_device() on open()
+// and released in nv_stop_device() on close. The old comment about a "20 s
+// autosuspend_delay_ms timer" was wrong for this platform; the driver resets
+// nothing, it simply holds a reference.
+// ---------------------------------------------------------------------------
+static NVML: Mutex<Option<Nvml>> = Mutex::new(None);
 
-pub fn get_nvml() -> Result<&'static Nvml> {
-    match &*NVML {
-        Ok(nvml) => Ok(nvml),
-        Err(e) => Err(anyhow!("Failed to initialize NVML: {}", e)),
+/// RAII access to the initialized NVML.
+///
+/// Only constructible via try_nvml()/get_nvml(); Deref gives a plain `&Nvml`.
+/// Dropping it releases the storage lock, so never hold one across a call that
+/// itself takes that lock (get_nvml/shutdown_nvml) — that would self-deadlock.
+/// Every existing call site uses it within a single expression, which is safe.
+pub struct NvmlGuard<'a> {
+    guard: std::sync::MutexGuard<'a, Option<Nvml>>,
+}
+
+impl std::ops::Deref for NvmlGuard<'_> {
+    type Target = Nvml;
+    fn deref(&self) -> &Nvml {
+        // NvmlGuard is only ever built when the slot is Some
+        self.guard.as_ref().expect("NvmlGuard constructed on an empty slot")
+    }
+}
+
+/// NVML, but only if it has already been initialized by a genuine need.
+///
+/// Returns None without touching libcuda when NVML has never been forced.
+/// Use this for nice-to-have fields (driver version, cached metadata lookups)
+/// where forcing the ~110 MB sticky libcuda mapping would be wasteful.
+///
+/// The ONLY places that should force NVML are:
+///   - get_nvml(), called from the control-write paths (set_clock_offset etc.)
+///   - the read fallbacks for utilization and power draw — the two stats
+///     verified (driver 610.57.04) that NVAPI cannot serve
+pub fn try_nvml() -> Option<NvmlGuard<'static>> {
+    let guard = crate::hardware_control::lock_or_recover(&NVML, "NVML");
+    if guard.is_some() {
+        Some(NvmlGuard { guard })
+    } else {
+        None
+    }
+}
+
+/// NVML, forcing initialization if it has not happened yet.
+///
+/// Forcing this dlopens libcuda: a ~20.7 MB heap plus a sticky ~110 MB VMA set
+/// that survives nvmlShutdown + dlclose. Only call this where the stat genuinely
+/// has no NVAPI source — see the two callers noted above.
+pub fn get_nvml() -> Result<NvmlGuard<'static>> {
+    let mut guard = crate::hardware_control::lock_or_recover(&NVML, "NVML");
+    if guard.is_none() {
+        match Nvml::init() {
+            Ok(nvml) => *guard = Some(nvml),
+            Err(e) => return Err(anyhow!("Failed to initialize NVML: {}", e)),
+        }
+    }
+    Ok(NvmlGuard { guard })
+}
+
+/// Shuts NVML down and releases its kernel resources.
+///
+/// Called on the active->idle transition (all GPUs at zero utilization) so the
+/// open /dev/nvidia{N} descriptors release their runtime-PM reference and the
+/// dGPU can enter D3. The libcuda VMAs stay mapped — that is expected and
+/// harmless; see the storage doc above. Re-initialization on the next
+/// light-load poll is just nvmlInit_v2 on already-mapped pages.
+pub fn shutdown_nvml() {
+    let mut guard = crate::hardware_control::lock_or_recover(&NVML, "NVML");
+    if let Some(nvml) = guard.take() {
+        // shutdown() consumes the Nvml and closes the libnvidia-ml handle.
+        // Errors here are not fatal for the daemon, but they do mean the
+        // descriptors may stay open — log at warn so it is visible.
+        if let Err(e) = nvml.shutdown() {
+            log::warn!(target: "hw.gpu", "nvmlShutdown returned an error (kernel descriptors may stay open): {e:?}");
+        } else {
+            log::info!(target: "hw.gpu", "nvmlShutdown ok: released NVML kernel power references, dGPU may now enter D3");
+        }
     }
 }
 
