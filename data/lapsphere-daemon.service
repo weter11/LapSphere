@@ -12,6 +12,21 @@ Type=dbus
 BusName=io.lapsphere.Control
 ExecStart=/usr/bin/lapsphere-daemon
 
+# Bound glibc thread-arena accumulation. The daemon is not mimalloc-allocated
+# (ldd shows only libc/libm/libgcc_s), and glibc gives a thread its own arena
+# when it cannot get an existing one without contending, growing it to
+# HEAP_MAX_SIZE (64 MiB on 64-bit) and never freeing it. Measured on a live
+# daemon after 80 h: five ~64 MiB arenas = 320 MB of 371 MB RSS, 96% of it
+# resident but never referenced (Referenced 14.3 MB process-wide). The default
+# arena_max is 8 * ncpu (128 on this 16-core box), so the kernel was always
+# free to make more. Two arenas matches the daemon's actual steady-state thread
+# count (3), so this costs no measurable contention and caps the worst case at
+# 2 * 64 MiB instead of 8 GiB.
+#
+# This is a backstop, not the fix: the arena-creating path is the unbounded
+# spawn_blocking in GetGpuInfoFull, addressed in daemon/src/dbus_interface.rs.
+Environment=MALLOC_ARENA_MAX=2
+
 # Supervision and resource caps. Without them an unsupervised poll loop can run
 # for days: 2026-09, a daemon re-reading a permanently-failing firmware call at
 # ~2 Hz wrote 4 GiB of kernel log into /var/log and filled the root filesystem.
