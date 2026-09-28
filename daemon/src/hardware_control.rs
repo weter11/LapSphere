@@ -814,6 +814,10 @@ pub fn set_fan_speed(fan_id: u32, speed_percent: u32) -> Result<()> {
     let speed = speed_percent.min(100);
     log::info!(target: "hw.fan", "DBus request: set fan {} to {}%", fan_id, speed);
     let io = TuxedoIo::shared().ok_or_else(|| anyhow!("tuxedo_io not available"))?;
+    // Explicit user command: always write, even if the packed value is already
+    // what we last commanded. Without this a slider set to the current value
+    // would silently no-op, and a firmware-reset fan would not be re-asserted.
+    io.force_next_speed_write();
     io.set_fan_speed(fan_id, speed)?;
     
     log::info!(target: "hw.fan", "set_fan id={} speed={}%", fan_id, speed);
