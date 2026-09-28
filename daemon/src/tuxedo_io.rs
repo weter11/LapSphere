@@ -360,7 +360,24 @@ impl TuxedoIo {
                 let speed_request = Self::iow(MAGIC_WRITE_CL, 0x10, Self::PTR_SIZE);
                 Self::ioctl_write_i32(fd, speed_request, packed)?;
 
-                log::info!(target: "hw.fan", "set_clevo_fan id={} speed={}%", fan_id, speed_percent);
+                // trace!, not info! or debug!. The fan-control job calls this on
+                // every curve evaluation (~1 Hz with two fans), measured at
+                // 2,550 lines/hour. Two filters had to be beaten at once:
+                //
+                //   - the journal: `DaemonLogger` forwards to env_logger only
+                //     when the filter allows it, and the default RUST_LOG is
+                //     info, so anything at debug/trace stops reaching the
+                //     journal while `RUST_LOG=hw.fan=trace` still turns it back
+                //     on for a single targeted diagnosis.
+                //   - the GUI ring: `log()` records Error..Debug and drops
+                //     Trace, so debug! would still have filled the 2,000-entry
+                //     ring (measured live at 595 kB of JSON) and still cost
+                //     four String allocations per write.
+                //
+                // The caller verifies the write by reading the speed back, and
+                // `set_clevo_fan_auto` stays at info! — that one is
+                // user-initiated and rare.
+                log::trace!(target: "hw.fan", "set_clevo_fan id={} speed={}%", fan_id, speed_percent);
                 Ok(())
             }
 

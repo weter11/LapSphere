@@ -54,7 +54,66 @@ macro_rules! log_api_json {
     }};
 }
 
+/// Wait for an in-flight full-GPU refresh to publish, then return its payload.
+///
+/// Called only when `GPU_FULL_REFRESH_INFLIGHT` is already true, i.e. another
+/// caller owns the refresh. Rather than starting a second `spawn_blocking`
+/// (the thing that produced the arenas), wait for the owner to publish into
+/// `HARDWARE_CACHE.gpu_info` and serialize that.
+///
+/// The wait is bounded so a refresh that dies without releasing the slot (a
+/// panic inside `get_gpu_info`, a task abort) degrades to serving the cached
+/// payload rather than hanging the D-Bus caller forever. Serving a payload a
+/// few milliseconds old is the intended behavior of this method anyway — that
+/// is what coalescing means.
+async fn get_gpu_info_full_coalesced() -> Result<String, zbus::fdo::Error> {
+    use std::time::{Duration, Instant};
+
+    // Generous relative to a real NVML pass (single-digit ms typically) but
+    // short enough that a wedged owner is a brief delay, not a hang.
+    const MAX_WAIT: Duration = Duration::from_millis(2000);
+    const POLL: Duration = Duration::from_millis(2);
+    let start = Instant::now();
+
+    while GPU_FULL_REFRESH_INFLIGHT.load(std::sync::atomic::Ordering::Acquire) {
+        if start.elapsed() >= MAX_WAIT {
+            log::warn!(target: "api.fail",
+                "GetGpuInfoFull: coalesce wait exceeded {MAX_WAIT:?}; serving cached payload");
+            break;
+        }
+        tokio::time::sleep(POLL).await;
+    }
+
+    // Read back what the owner published. This is a plain cache read, not a
+    // hardware query, so it cannot block and cannot spawn a thread.
+    let info = cache_guard!().gpu_info.clone();
+    serde_json::to_string(&info).map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+}
+
 pub struct ControlInterface;
+
+/// In-flight guard for `GetGpuInfoFull` (see `get_gpu_info_full`).
+///
+/// Each distinct caller used to get its own `spawn_blocking` task, and tokio's
+/// blocking pool spawns an OS thread per task when saturated. Every one of
+/// those threads is a candidate for a fresh glibc thread arena, each of which
+/// grows to glibc's 64 MiB `HEAP_MAX_SIZE` and is NEVER freed — measured on a
+/// live daemon at five 64 MiB arenas, 320 MB of the 371 MB RSS, 96% of it
+/// resident-but-never-touched (`Referenced` 14.3 MB total). `arena_max`
+/// defaults to `8 * ncpu` (128 here), so the kernel was always free to make
+/// more. This cap is what stops new arenas forming; `MALLOC_ARENA_MAX` in the
+/// unit is what bounds the damage if one slips through anyway.
+static GPU_FULL_REFRESH_INFLIGHT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Outcome of a coalesced full-GPU refresh.
+enum FullRefresh {
+    /// This caller performed the refresh and owns the payload.
+    Owned(Result<Vec<GpuInfo>>),
+    /// Another caller was already refreshing; its payload was published into
+    /// the shared cache and read back from there.
+    Coalesced,
+}
 
 #[interface(name = "io.lapsphere.Control")]
 impl ControlInterface {
@@ -112,23 +171,78 @@ impl ControlInterface {
     /// consumes for exactly ONE full NVML query. Note: if the dGPU is
     /// currently suspended, this deliberately wakes it (explicit user demand
     /// beats power saving) — the same trade-off nvidia-smi makes.
+    ///
+    /// # Concurrency: coalescing, not rejection
+    ///
+    /// Concurrent callers COALESCE onto a single in-flight refresh. A caller
+    /// that arrives while another refresh is running does NOT get an error and
+    /// does NOT return stale data — it waits for the in-flight pass to publish
+    /// into the shared cache and then returns that payload, which is at most
+    /// one refresh interval old (milliseconds). The GUI therefore still sees
+    /// live values at the same cadence as before.
+    ///
+    /// The alternative — rejecting the second caller — would be a behavior
+    /// regression: two overlapping stats-panel refreshes would turn into one
+    /// success and one error. The other alternative — letting every caller
+    /// spawn its own task — is what created the glibc arenas documented on
+    /// `GPU_FULL_REFRESH_INFLIGHT`. Coalescing is the only design that keeps
+    /// the payload fresh for every caller AND bounds the thread count.
     async fn get_gpu_info_full(&self) -> Result<String, zbus::fdo::Error> {
+        // Fast path: a refresh is already running. Wait for it rather than
+        // starting a competing one (see the concurrency note above).
+        if GPU_FULL_REFRESH_INFLIGHT.load(std::sync::atomic::Ordering::Acquire) {
+            log::debug!(target: "api.call",
+                "GetGpuInfoFull: refresh already in flight, coalescing onto it");
+            return get_gpu_info_full_coalesced().await;
+        }
+
         log::debug!(target: "api.call", "GetGpuInfoFull: arming one-shot full NVML refresh");
+
+        // Claim the refresh slot. `swap` is the arbiter: exactly one caller
+        // transitions false->true and does the work, so the check above and
+        // the claim cannot both succeed.
+        if GPU_FULL_REFRESH_INFLIGHT.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            // Lost the race to another caller between the load and the swap.
+            log::debug!(target: "api.call",
+                "GetGpuInfoFull: lost the claim race, coalescing onto the winner");
+            return get_gpu_info_full_coalesced().await;
+        }
+
+        // Arm the one-shot override BEFORE spawning, so the pass we are about
+        // to run sees it set. (Unchanged from the original ordering.)
         crate::FULL_NVML_REFRESH_REQUESTED.store(true, std::sync::atomic::Ordering::Relaxed);
 
-        // Run the full pass right here — it consumes the override flag and
-        // returns live values including voltage. Blocking work goes to the
-        // blocking pool to keep the async reactor responsive.
-        let info = tokio::task::spawn_blocking(crate::hardware_detection::get_gpu_info)
-            .await
-            .map_err(|e| zbus::fdo::Error::Failed(format!("GPU refresh task failed: {}", e)))?
-            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        // Run the full pass on the blocking pool to keep the async reactor
+        // responsive. At most one such task exists at a time now, so the
+        // blocking pool sees at most one new thread from this path.
+        let result = tokio::task::spawn_blocking(crate::hardware_detection::get_gpu_info).await;
 
         // Publish into the shared cache so plain GetGpuInfo serves the same
-        // fresh payload until the next monitor tick.
-        cache_guard!().gpu_info = info.clone();
+        // fresh payload until the next monitor tick, and so coalesced callers
+        // have something to read.
+        //
+        // ORDERING: the publish MUST happen before the slot is released below.
+        // A coalesced caller waits on the slot and then reads the cache; if we
+        // released first, it could wake up and read the PREVIOUS payload.
+        // Single error type (`String`) across all three arms: the two hardware
+        // errors are already Strings, and the serialize error is mapped here so
+        // the match arms agree.
+        let outcome: Result<String, String> = match result {
+            Ok(Ok(info)) => {
+                cache_guard!().gpu_info = info.clone();
+                serde_json::to_string(&info).map_err(|e| e.to_string())
+            }
+            Ok(Err(e)) => Err(e.to_string()),
+            Err(e) => Err(format!("GPU refresh task failed: {}", e)),
+        };
 
-        serde_json::to_string(&info).map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+        // Release the slot on EVERY exit path — success, inner error, or join
+        // error — or the daemon would wedge: every future call would coalesce
+        // onto a refresh that no longer exists. This is the one exit, so there
+        // is no path that can skip it.
+        GPU_FULL_REFRESH_INFLIGHT.store(false, std::sync::atomic::Ordering::Release);
+
+        outcome.map_err(zbus::fdo::Error::Failed)
     }
 
     async fn get_battery_info(&self) -> Result<String, zbus::fdo::Error> {
@@ -663,4 +777,70 @@ pub async fn start_service(connection: Connection) -> Result<()> {
     connection.request_name("io.lapsphere.Control").await?;
     
     Ok(())
+}
+
+#[cfg(test)]
+mod inflight_guard_tests {
+    use super::GPU_FULL_REFRESH_INFLIGHT;
+    use std::sync::atomic::Ordering::{AcqRel, Acquire, Release};
+
+    /// The claim must be exclusive: N threads racing, exactly one wins.
+    ///
+    /// This is the property that bounds thread (and therefore glibc arena)
+    /// creation. If two callers could both win, each would spawn its own
+    /// blocking task and the guard would be decorative.
+    #[test]
+    fn claim_is_exclusive_under_contention() {
+        const THREADS: usize = 16;
+        const ROUNDS: usize = 200;
+
+        for _ in 0..ROUNDS {
+            // store() only accepts Release/Relaxed/SeqCst — AcqRel is
+            // read-modify-write ordering and is rejected on a plain store.
+            GPU_FULL_REFRESH_INFLIGHT.store(false, Release);
+
+            let winners = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let mut handles = Vec::with_capacity(THREADS);
+
+            for _ in 0..THREADS {
+                let w = winners.clone();
+                handles.push(std::thread::spawn(move || {
+                    // Mirrors the real claim: swap() returns the PREVIOUS
+                    // value, so exactly one caller sees false and proceeds.
+                    let previous = GPU_FULL_REFRESH_INFLIGHT.swap(true, AcqRel);
+                    if !previous {
+                        w.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }));
+            }
+            for h in handles {
+                h.join().expect("claim thread panicked");
+            }
+
+            assert_eq!(
+                winners.load(std::sync::atomic::Ordering::Relaxed),
+                1,
+                "exactly one caller may claim the refresh slot"
+            );
+        }
+    }
+
+    /// A coalescing caller must observe the slot as taken (so it routes to the
+    /// wait path) and must observe it clear again once the owner releases.
+    #[test]
+    fn slot_releases_so_later_callers_are_not_wedged() {
+        GPU_FULL_REFRESH_INFLIGHT.store(true, Release);
+        assert!(
+            GPU_FULL_REFRESH_INFLIGHT.load(Acquire),
+            "coalescing fast-path depends on observing the slot as taken"
+        );
+
+        // The owner releases on every exit path; if any path skipped this the
+        // daemon would serve nothing but stale payloads forever.
+        GPU_FULL_REFRESH_INFLIGHT.store(false, Release);
+        assert!(
+            !GPU_FULL_REFRESH_INFLIGHT.load(Acquire),
+            "a released slot must let the next caller do real work"
+        );
+    }
 }
