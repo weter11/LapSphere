@@ -87,6 +87,32 @@ static LAST_CLEVO_COMMANDED: [std::sync::atomic::AtomicU8; 3] = [
 static LAST_CLEVO_PACKED: std::sync::Mutex<Option<(i32, std::time::Instant)>> =
     std::sync::Mutex::new(None);
 
+/// The Clevo write decision, as a pure function of the three speeds and the age
+/// of the last write.
+///
+/// Extracted so the criterion can be unit-tested directly. The tests must not
+/// set up their state by mutating `LAST_CLEVO_COMMANDED` / `LAST_CLEVO_PACKED`:
+/// those are process-wide, Rust runs test threads in parallel, and one test's
+/// `set_state` would land between another's setup and its assertion, making the
+/// result depend on scheduling rather than on the logic under test. The cost of
+/// this split is that the two call sites can drift; the fix is that the tests
+/// call *this* function rather than restating it.
+///
+/// `last_write_age` is `None` when nothing has been written yet, which counts as
+/// stale so the first call after startup always writes — otherwise a fan whose
+/// curve happens to start at 0% would never be commanded.
+fn clevo_should_write(
+    commanded_raw: u8,
+    readback_raw: u8,
+    requested_raw: u8,
+    last_write_age: Option<std::time::Duration>,
+) -> bool {
+    let fresh_reassertion = last_write_age
+        .map(|age| age < CLEVO_RECOMMAND_INTERVAL)
+        .unwrap_or(false);
+    commanded_raw != requested_raw || readback_raw != requested_raw || !fresh_reassertion
+}
+
 /// How long a fan that is already at its commanded speed is left un-written
 /// before being re-issued anyway. Bounded staleness: recovers from a fan that
 /// reads back correctly but was never really driven.
@@ -411,9 +437,14 @@ impl TuxedoIo {
                     }
                 }
                 if !read_ok {
-                    log::warn!(target: "hw.fan",
-                        "Clevo speed read failed; skipping write to avoid commanding from unknown state");
-                    return Ok(());
+                    // Error, not Ok: a silent skip is indistinguishable from a
+                    // successful set at the D-Bus boundary, so SetFanSpeed
+                    // would report "speed set" for a fan we never commanded.
+                    // The poll loop logs this per tick; SetFanSpeed propagates
+                    // it to the GUI, which is the point.
+                    return Err(anyhow!(
+                        "Clevo fan speed read failed; write skipped rather than commanding from unknown state"
+                    ));
                 }
 
                 // What the hardware reports for THIS fan, before we overwrite.
@@ -453,21 +484,19 @@ impl TuxedoIo {
                 // Skipping also skips the ioctl, so the stable case costs one
                 // read instead of a read + write + log.
                 let commanded_raw = LAST_CLEVO_COMMANDED[fan_id as usize].load(Ordering::Relaxed);
-                let hardware_at_target = readback_raw == requested_raw;
-                // No prior write at all counts as stale, so the very first call
-                // after startup always writes — otherwise a fan whose curve
-                // happens to start at 0% would never be commanded.
-                let fresh_reassertion = LAST_CLEVO_PACKED
+                let last_write_age = LAST_CLEVO_PACKED
                     .lock()
                     .unwrap()
-                    .map(|(_, at)| at.elapsed() < CLEVO_RECOMMAND_INTERVAL)
-                    .unwrap_or(false);
+                    .map(|(_, at)| at.elapsed());
 
                 // Write when: the curve moved, OR the fan is not where we
                 // asked, OR the periodic backstop expired.
-                let should_write = commanded_raw != requested_raw
-                    || !hardware_at_target
-                    || !fresh_reassertion;
+                let should_write = clevo_should_write(
+                    commanded_raw,
+                    readback_raw,
+                    requested_raw,
+                    last_write_age,
+                );
 
                 if !should_write {
                     return Ok(());
@@ -815,41 +844,30 @@ impl TuxedoIo {
 #[cfg(test)]
 mod clevo_speed_cache_tests {
     use super::{
-        invalidate_clevo_speed_cache, LAST_CLEVO_COMMANDED, LAST_CLEVO_PACKED,
-        CLEVO_RECOMMAND_INTERVAL,
+        clevo_should_write, invalidate_clevo_speed_cache, CLEVO_RECOMMAND_INTERVAL,
+        LAST_CLEVO_COMMANDED, LAST_CLEVO_PACKED,
     };
     use std::sync::atomic::Ordering;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
-    /// Mirrors the write-decision in `set_fan_speed`. Duplicated rather than
-    /// called because the real path needs a `/dev/tuxedo_io` fd; if the
-    /// production condition changes, this must change with it.
-    ///
-    /// The three inputs mirror the three real conditions:
-    ///   commanded_raw — what we last asked this fan to be
-    ///   readback_raw  — what the hardware reports for this fan
-    ///   requested_raw — what the curve is asking for now
-    fn would_write(commanded_raw: u8, readback_raw: u8, requested_raw: u8) -> bool {
-        let last_write = LAST_CLEVO_PACKED.lock().unwrap().map(|(_, at)| at);
-        let fresh_reassertion = last_write.map(|at| at.elapsed() < CLEVO_RECOMMAND_INTERVAL)
-            // No prior write at all: treat as stale so the first call writes.
-            .unwrap_or(false);
-        commanded_raw != requested_raw || readback_raw != requested_raw || !fresh_reassertion
+    /// A write that just happened, so the freshness backstop is satisfied.
+    fn just_written() -> Option<Duration> {
+        Some(Duration::from_secs(0))
     }
 
-    fn set_state(fan: usize, commanded: u8, wrote_ago: Option<Duration>) {
-        LAST_CLEVO_COMMANDED[fan].store(commanded, Ordering::Relaxed);
-        *LAST_CLEVO_PACKED.lock().unwrap() =
-            wrote_ago.map(|d| (0i32, Instant::now() - d));
-    }
-
+    /// Every test below calls `clevo_should_write` directly with the state it
+    /// wants. None of them touch `LAST_CLEVO_COMMANDED` / `LAST_CLEVO_PACKED`:
+    /// those are process-wide, test threads run in parallel, and a `set_state`
+    /// from one test would land inside another's setup-to-assertion window, so a
+    /// failure would mean a scheduling accident rather than a logic bug. The one
+    /// test that must exercise the globals is the invalidation test, and it is
+    /// the only test that writes them.
     #[test]
     fn first_call_always_writes() {
-        invalidate_clevo_speed_cache();
-        // commanded == requested == readback == 0, but no prior write, so the
-        // freshness backstop is false and we must write.
+        // commanded == requested == readback == 0, but nothing has been written
+        // yet, so the freshness backstop is false and we must write.
         assert!(
-            would_write(0, 0, 0),
+            clevo_should_write(0, 0, 0, None),
             "with no prior write the fan must be commanded even at 0%"
         );
     }
@@ -858,8 +876,10 @@ mod clevo_speed_cache_tests {
     fn stable_speed_is_skipped() {
         // 25% -> raw 64. Commanded, readback, and requested all agree, and the
         // last write was recent: nothing to do.
-        set_state(0, 64, Some(Duration::from_secs(0)));
-        assert!(!would_write(64, 64, 64), "stable fan must not re-write");
+        assert!(
+            !clevo_should_write(64, 64, 64, just_written()),
+            "stable fan must not re-write"
+        );
     }
 
     /// The per-fan criterion: fan 0 is untouched, so its tick is skipped even
@@ -867,15 +887,13 @@ mod clevo_speed_cache_tests {
     /// could not express — the packed word changes when either fan changes.
     #[test]
     fn one_fan_changing_does_not_disturb_the_other() {
-        set_state(0, 64, Some(Duration::from_secs(0)));
         assert!(
-            !would_write(64, 64, 64),
+            !clevo_should_write(64, 64, 64, just_written()),
             "fan 0 is at its commanded speed and must be skipped"
         );
         // fan 1, same moment, has a different target.
-        set_state(1, 0, Some(Duration::from_secs(0)));
         assert!(
-            would_write(0, 0, 128),
+            clevo_should_write(0, 0, 128, just_written()),
             "fan 1 moving to raw 128 must write"
         );
     }
@@ -887,17 +905,18 @@ mod clevo_speed_cache_tests {
     #[test]
     fn readback_drift_forces_a_write_even_when_unchanged() {
         // Commanded 64, hardware actually at 0, curve still asks for 64.
-        set_state(0, 64, Some(Duration::from_secs(0)));
         assert!(
-            would_write(64, 0, 64),
+            clevo_should_write(64, 0, 64, just_written()),
             "hardware not at target must be corrected even though the command is unchanged"
         );
     }
 
     #[test]
     fn curve_change_writes_regardless_of_hardware() {
-        set_state(0, 64, Some(Duration::from_secs(0)));
-        assert!(would_write(64, 64, 128), "curve moved: must write");
+        assert!(
+            clevo_should_write(64, 64, 128, just_written()),
+            "curve moved: must write"
+        );
     }
 
     #[test]
@@ -905,21 +924,40 @@ mod clevo_speed_cache_tests {
         // Everything agrees, but the last write is older than the interval:
         // the backstop exists for a fan that reads back right but was never
         // really driven.
-        set_state(0, 64, Some(CLEVO_RECOMMAND_INTERVAL + Duration::from_secs(1)));
+        let stale = Some(CLEVO_RECOMMAND_INTERVAL + Duration::from_secs(1));
         assert!(
-            would_write(64, 64, 64),
+            clevo_should_write(64, 64, 64, stale),
             "stale-but-correct fan must be re-asserted after the interval"
         );
     }
 
+    /// The only test that touches the process-wide cache, and it does so
+    /// exclusively: the setup it writes, nothing else writes concurrently.
     #[test]
     fn invalidation_forces_the_next_write() {
-        set_state(0, 64, Some(Duration::from_secs(0)));
-        assert!(!would_write(64, 64, 64), "precondition: cached skip");
+        LAST_CLEVO_COMMANDED[0].store(64, Ordering::Relaxed);
+        *LAST_CLEVO_PACKED.lock().unwrap() = Some((0i32, std::time::Instant::now()));
+        assert!(
+            !clevo_should_write(64, 64, 64, just_written()),
+            "precondition: cached skip"
+        );
 
         invalidate_clevo_speed_cache();
+
+        // Invalidation drops both the commanded value and the last-write time,
+        // so the decision is taken from a cold cache: nothing commanded, and no
+        // recent write to be fresh against.
+        assert_eq!(
+            LAST_CLEVO_COMMANDED[0].load(Ordering::Relaxed),
+            0,
+            "invalidation must clear the commanded value"
+        );
         assert!(
-            would_write(0, 64, 64),
+            LAST_CLEVO_PACKED.lock().unwrap().is_none(),
+            "invalidation must clear the last-write time"
+        );
+        assert!(
+            clevo_should_write(0, 64, 64, None),
             "after invalidation the identical speed must write again"
         );
     }

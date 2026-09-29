@@ -23,8 +23,11 @@ ExecStart=/usr/bin/lapsphere-daemon
 # count (3), so this costs no measurable contention and caps the worst case at
 # 2 * 64 MiB instead of 8 GiB.
 #
-# This is a backstop, not the fix: the arena-creating path is the unbounded
-# spawn_blocking in GetGpuInfoFull, addressed in daemon/src/dbus_interface.rs.
+# This is a backstop, not a fix. The arena-creating paths are the blocking
+# calls in the hardware-control job and the D-Bus method handlers, addressed in
+# daemon/src/hardware_control.rs and daemon/src/dbus_interface.rs. (An earlier
+# revision of this comment blamed an unbounded spawn_blocking in
+# GetGpuInfoFull; that method was removed, so the attribution was stale.)
 Environment=MALLOC_ARENA_MAX=2
 
 # Supervision and resource caps. Without them an unsupervised poll loop can run
