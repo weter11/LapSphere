@@ -110,19 +110,27 @@ impl log::Log for DaemonLogger {
             return;
         }
 
-        let mut level = record.level().to_string();
+        let level = record.level().to_string();
         let target = record.target().to_string();
         let message = record.args().to_string();
 
-        // Move messages starting with zbus:: to trace
-        if target.starts_with("zbus") || message.starts_with("zbus::") {
-            level = "TRACE".to_string();
-        }
-
-        // Move all massages hw. to info as requested
-        if target.starts_with("hw.") && level == "DEBUG" {
-            level = "INFO".to_string();
-        }
+        // NOTE: this used to rewrite every `hw.*` record from DEBUG to INFO
+        // ("as requested"), so the GUI's log panel showed them. That rewrite
+        // made the ring dishonest — a Debug record was labelled Info — and it
+        // defeated the per-target escape hatch, because `DaemonLogger::enabled`
+        // returns true for everything and the ring ignored RUST_LOG entirely.
+        // With the fan-control job logging a write at ~1 Hz, the ring filled
+        // with 2,550 lines/hour of `set_clevo_fan` and nothing could turn it
+        // off. The record's real level is recorded now; the hot paths were
+        // demoted to `trace!` at their call sites instead, which the ring drops
+        // outright, so the common case is quiet without lying about the rest.
+        //
+        // If a panel needs a friendlier level, filter on it at render time.
+        let level = if target.starts_with("zbus") || message.starts_with("zbus::") {
+            "TRACE".to_string()
+        } else {
+            level
+        };
 
         let entry = LogEntry {
             level: level.clone(),
