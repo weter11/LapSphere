@@ -12,22 +12,34 @@ Type=dbus
 BusName=io.lapsphere.Control
 ExecStart=/usr/bin/lapsphere-daemon
 
-# Bound glibc thread-arena accumulation. The daemon is not mimalloc-allocated
-# (ldd shows only libc/libm/libgcc_s), and glibc gives a thread its own arena
-# when it cannot get an existing one without contending, growing it to
-# HEAP_MAX_SIZE (64 MiB on 64-bit) and never freeing it. Measured on a live
-# daemon after 80 h: five ~64 MiB arenas = 320 MB of 371 MB RSS, 96% of it
-# resident but never referenced (Referenced 14.3 MB process-wide). The default
-# arena_max is 8 * ncpu (128 on this 16-core box), so the kernel was always
-# free to make more. Two arenas matches the daemon's actual steady-state thread
-# count (3), so this costs no measurable contention and caps the worst case at
-# 2 * 64 MiB instead of 8 GiB.
+# Precaution, not a demonstrated fix. glibc gives a thread its own arena when it
+# cannot get one without contending, grows it to HEAP_MAX_SIZE (64 MiB on
+# 64-bit) and never frees it, so arena_max defaults to 8 * ncpu (128 on this
+# 16-core box) and the process could in principle be allowed to grow without
+# bound. An older build did: after 80 h it held 371 MB RSS, 96% resident but
+# unreferenced (Referenced 14.3 MB process-wide), of which five ~64 MiB arenas
+# accounted for 320 MB.
 #
-# This is a backstop, not a fix. The arena-creating paths are the blocking
-# calls in the hardware-control job and the D-Bus method handlers, addressed in
-# daemon/src/hardware_control.rs and daemon/src/dbus_interface.rs. (An earlier
-# revision of this comment blamed an unbounded spawn_blocking in
-# GetGpuInfoFull; that method was removed, so the attribution was stale.)
+# That measurement was taken against an older binary, and this cap is NOT what
+# is keeping the current daemon small. Measured on the live daemon at 24.5 h
+# with this cap already set: 8.0 MiB total RSS, 85% of it referenced, zero
+# resident arena-shaped regions. The two large mappings are an 85.8 MiB
+# libcuda.so file mapping and a 59.2 MiB PROT_NONE guard region, neither of
+# which is an arena. The 23 MiB the unit holds in swap sits in two ordinary heap
+# regions that are not 64 MiB-aligned and not a multiple of HEAP_MAX_SIZE, i.e.
+# used-and-trimmed heap rather than retained arenas. So the daemon is not
+# accumulating arenas now, and the cap is insurance against a regression that
+# the cap is currently masking rather than preventing.
+#
+# To say more than that, a capped and an uncapped run have to be compared on
+# the same build; that has not been done, so no claim is made about what the
+# uncapped daemon would do. The daemon is glibc-allocated, not mimalloc (ldd
+# shows only libc/libm/libgcc_s), so mimalloc-specific tuning does not apply.
+#
+# Cost: two arenas matches the observed steady-state thread count of 3, so
+# contention is negligible. Worst case is bounded at 2 * 64 MiB instead of
+# 8 GiB. Arenas are never returned within a process lifetime, so if they ever
+# form, only a restart reclaims them.
 Environment=MALLOC_ARENA_MAX=2
 
 # Supervision and resource caps. Without them an unsupervised poll loop can run
