@@ -73,3 +73,9 @@ opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
+
+# Throwaway spike probes (gui/examples/**) need the raw X window id to write
+# EWMH properties at runtime (Q8). The crate is already in Cargo.lock as a
+# transitive dependency of winit and arboard; this only makes it nameable.
+[dev-dependencies]
+raw-window-handle = "0.6"

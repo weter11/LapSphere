@@ -1704,6 +1704,7 @@ dependencies = [
  "lapsphere-common",
  "log",
  "mimalloc",
+ "raw-window-handle",
  "rustls",
  "serde",
  "serde_json",

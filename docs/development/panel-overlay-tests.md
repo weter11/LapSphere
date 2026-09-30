@@ -55,7 +55,7 @@ Reference colours used for pixel assertions:
 | Scenario | Result | How it was checked |
 | --- | --- | --- |
 | **B1** windowed cube + panel always-on-top | **WORKS.** Panel draws above the cube; `18,18,20` over `51,51,51` in the overlap region | pixel sampling inside the panel's own rect + `xprop _NET_WM_STATE`; `b1-panel-over-cube.png` |
-| **B2** cube in borderless fullscreen, panel AOT | **PANEL IS COVERED.** With a genuine fullscreen cube (2560x1440 @ 0,0) the pixel inside the panel is `51,51,51` — the cube. The panel reappears only after re-activation, or after forcing `_NET_WM_STATE_ABOVE` externally | F11 via xfwm4's own binding (setting `_NET_WM_STATE_FULLSCREEN` via `xprop` changed the property but left the geometry at 900x600 — no real fullscreen); pixel sampling at three points; `b2-fullscreen-cube-panel-covered.png`, `b2-fullscreen-cube-panel-visible.png`, `b2-fullscreen-transition.mp4` |
+| **B2** cube in borderless fullscreen, panel AOT **set at startup** | **PANEL IS COVERED.** With a genuine fullscreen cube (2560x1440 @ 0,0) the pixel inside the panel is `51,51,51` — the cube. The panel reappears only after re-activation, or after forcing `_NET_WM_STATE_ABOVE` externally. **Superseded by B9**: the cause is that the level was set via `ViewportBuilder::with_window_level` at startup, which xfwm4 ignores. Setting it at runtime fixes it completely | F11 via xfwm4's own binding (setting `_NET_WM_STATE_FULLSCREEN` via `xprop` changed the property but left the geometry at 900x600 — no real fullscreen); pixel sampling at three points; `b2-fullscreen-cube-panel-covered.png`, `b2-fullscreen-cube-panel-visible.png`, `b2-fullscreen-transition.mp4` |
 | **B2** compositor on vs off | **NOT TESTED.** This session has no compositor, and enabling xfwm4 compositing requires restarting the WM | `xprop -root _NET_WM_COMPOSITING` absent; no sudo |
 | **B3** does the panel steal focus when it appears? | **YES.** On creation the panel holds focus (`_NET_WM_STATE_FOCUSED`, `xdotool getwindowfocus` → panel) | focus query immediately after launch |
 | **B3** clicks reach the game with `MousePassthrough(true)`? | **WORKS.** Without passthrough a click over the panel moves focus to the panel. With passthrough, focus moves to whatever is **underneath** — the cube when the panel overlaps it, the desktop when it does not | 4-case matrix (over cube / over desktop × with / without), each starting from the desktop focused so any focus change is attributable; `xdotool mousemove … click 1` then `getwindowfocus` |
@@ -70,11 +70,48 @@ Reference colours used for pixel assertions:
 | **B7** changing scale/order **while running** | **NOT TESTED.** `--scale` and `--items` are startup flags in the demo, so each configuration above is a **fresh launch**, not a hot change. Hot-reload behaviour in the real app is untested | demo source: the config is read once in `main()` |
 | **B8** transparent background | **Transparency is applied, but shows black rather than the desktop.** Opaque run: `18,18,20` through the panel. `--transparent` run: `8,8,8` — the root window, not the wallpaper or the cube behind. Without a compositor there is nothing to blend against | paired opaque/transparent control runs, vertical pixel strip through the panel centre compared against a desktop reference sampled 40 px to the side; `b8-opaque-control.png`, `b8-transparent.png` |
 | **B8** transparency with compositor enabled | **NOT TESTED** — no compositor available | as B2 |
+| **B9** does runtime `WindowLevel(AlwaysOnTop)` hold over a fullscreen cube? | **YES — Q7 is solved.** A single runtime command set `_NET_WM_STATE_ABOVE`, and the panel stayed `PANEL-ON-TOP` through: focus returned to the cube, a click on the cube (focus confirmed on the cube), Alt+Tab away and back, and **5 minutes idle** (10 samples at 30 s). **No re-assertion needed.** Idle cost: 0.3% CPU, ~100 MB RSS | pixel verdict inside the panel's own rect, panel background colour learned at runtime rather than hardcoded; log `ov/b9_baseline.log`; `b9-runtime-aot-over-fullscreen.png` |
+| **B10** `X11WindowType` variants vs the fullscreen cube | **All five types sit on top of a fullscreen cube.** `Dock`, `Utility`, `Toolbar`, `Desktop`, `Normal` → `PANEL-ON-TOP` in every case. **`Dock` and `Desktop` do not take focus and do not take clicks**; `Normal`/`Utility`/`Toolbar` do. All created at `744x81` with no oversized intermediate window across 11 samples at 0.5 s | `xprop` for type/state, `xdotool` focus before/after a click, pixel verdict; `ov/b10_b11.log` |
+| **B10** `override_redirect(true)` | Window has **no `WM_STATE`, no `_NET_WM_STATE`, and is absent from `_NET_CLIENT_LIST`** — the WM no longer manages it. Sits on top of the fullscreen cube, takes no focus, takes no clicks. Correct behaviour, but the panel would be invisible to any WM-driven UI (alt-tab list, taskbar, raise-on-click) | `xprop` / `xdotool`; `ov/b10_b11.log` |
+| **B11** `_NET_WM_STATE_SKIP_TASKBAR` by property write, after the window exists | **False positive.** The write succeeds — atoms present **1.8 ms** later: `_NET_WM_STATE_SKIP_TASKBAR, _NET_WM_STATE_SKIP_PAGER` — but on a *normal* window xfwm4 **strips them within seconds**. A 24 s sample at 2 s intervals never once saw them persist | `xprop -f _NET_WM_STATE 32a -set` from inside the egui loop, then continuous sampling; `ov/b11b_normal.probe.log` |
+| **B11** same via ClientMessage | **Ignored.** `xdotool windowstate --add SKIP_TASKBAR` returned "not found" for `_NET_WM_STATE` on the normal window | same; `ov/b11_skip-msg.probe.log` |
+| **B11** window **type** instead of a flag | **WORKS — Q8 is solved.** `X11WindowType::Dock` → xfwm4 itself grants `SKIP_TASKBAR` + `SKIP_PAGER` + `STICKY`, stable across the full 24 s sample. `Utility` and `Toolbar` also get SKIP_TASKBAR + SKIP_PAGER; `Desktop` adds STICKY | `ov/b11b_dock.probe.log`, `ov/b10_b11.log` |
+| **B11** is `x11rb` available, and is the raw X window id reachable from eframe? | **Yes to both.** `x11rb 0.13.2` is already in `Cargo.lock` (transitively via `winit` and `arboard`) but is not a *direct* dependency of `gui`, so naming it needs a `gui/Cargo.toml` entry. The window id needs **no new runtime dependency**: `eframe::Frame` implements `HasWindowHandle` (`epi.rs:717`) and `Frame::window_handle()` gives a `RawWindowHandle::Xlib` whose `.window` is the X id | `cargo tree -i x11rb`; probe reads it on the first frame and logs it |
+| **B12** cost of recreating the window to change its type | **79–89 ms with no panel on screen** (5 trials: 79, 89, 88, 86, 89 ms), and **no flash** — 40 geometry samples at 50 ms across the handover were `744x81` throughout, never oversized. The GL context and all in-process state would still be lost, which a single `ViewportCommand` does not cost | `date +%s%N` around the handover, geometry polled at 50 ms; `ov/b12_recreate.log` |
+| **B12** does the tray survive a window recreate? | **NOT TESTED.** `panel_q78_probe.rs` has no tray, and the session bus showed only `org.kde.StatusNotifierWatcher` with no LapSphere `StatusNotifierItem` before or after — there was nothing to observe. Tray survival across an in-window mode switch is already covered by `panel-spike.md` §4(г) | `gdbus ListNames` on the session bus |
 | A2.4 absent data shows `—` in reserved width, window does not resize | **WORKS in the demo.** The synthetic producer drops the dGPU fields on every 5th snapshot and WiFi on every 7th; the panel renders `—` and the window geometry was unchanged across the run (584x81 for the whole session) | synthetic data mode + `xdotool` geometry sampled throughout; window size in the demo is computed only from the config, never from data |
 
-## Root cause: why B4 fails
+## Root cause: why B2 failed, and why B9 fixed it
 
-`egui-winit-0.34.2/src/lib.rs:2003` applies the taskbar flag like this:
+B2 found the panel covered by a fullscreen cube. B9 found the same setup
+holding perfectly. The difference is **one line**, and it is a startup-vs-runtime
+distinction:
+
+| How the level is requested | `_NET_WM_STATE_ABOVE` | Result vs fullscreen cube |
+| --- | --- | --- |
+| `ViewportBuilder::with_window_level(AlwaysOnTop)` at startup | **never appears** | panel covered (B2) |
+| `ViewportCommand::WindowLevel(AlwaysOnTop)` at runtime | appears and stays | panel on top for 5 min (B9) |
+
+xfwm4 4.20.0 silently ignores the builder hint. The runtime command goes
+through winit's `set_window_level`, which the WM honours.
+
+This is the single most useful result in this document, because it converts a
+"the primary use case does not work" finding into a one-line implementation
+requirement: **request always-on-top after the window exists.** In
+particular, "start directly in panel mode" — which ADR-1 proposes via
+`ViewportBuilder` so that there is no large-window flash — must still set the
+level on the first frame, or the panel comes up underneath the game.
+
+No re-assertion was needed. The periodic re-assert mechanism was built
+(`--reassert-sec`) and then went unused, which is the better outcome: a timer
+that re-raises the panel every N seconds would be a busy-wait running against
+a game.
+
+## Root cause: why B4 failed, and what actually works
+
+Two independent causes, both established from source and then confirmed.
+
+**1. egui's `with_taskbar` is Windows-only.** `egui-winit-0.34.2/src/lib.rs:2003`:
 
 ```rust
 #[cfg(target_os = "windows")]
@@ -87,37 +124,53 @@ Reference colours used for pixel assertions:
 }
 ```
 
-The call is inside a `#[cfg(target_os = "windows")]` block, so on Linux the
-value is destructured into `_taskbar` and **discarded** (see the same file,
-line 1865: `taskbar: _taskbar,`). `with_taskbar(false)` is a documented
-Windows-only option; there is no X11 or Wayland equivalent in egui.
+On Linux the value is destructured to `_taskbar` and discarded (same file,
+line 1865). There is no X11 or Wayland equivalent.
 
-A panel that must stay out of the taskbar on X11 therefore needs a different
-mechanism than `ViewportBuilder`. The EWMH levers that do exist are
-`_NET_WM_WINDOW_TYPE` (egui exposes `X11WindowType`, including `Dock` and
-`Utility`) and setting `_NET_WM_STATE_SKIP_TASKBAR` directly. Which of those
-xfwm4 honours is **not yet tested** and should be, since B4 is an acceptance
-criterion.
+**2. Writing the EWMH atom directly is a false positive.** Setting
+`_NET_WM_STATE` by property write on a *normal* window appears to work — the
+atoms are readable 1.8 ms later — but xfwm4 removes them within seconds, and
+a 24 s sample never saw them persist. The ClientMessage route is ignored
+outright. Had this been judged on the immediate read-back, it would have been
+recorded as a success.
 
-## Root cause: why B2 fails
+**What works is the window type, not the flag.** `egui::X11WindowType::Dock`
+makes xfwm4 grant `SKIP_TASKBAR` + `SKIP_PAGER` (plus `STICKY`) itself, and
+those persist. `Utility` and `Toolbar` also get the two skip atoms; `Desktop`
+adds `STICKY`.
 
-Two independent facts, both measured:
+| Type | SKIP_TASKBAR + SKIP_PAGER | Takes focus | Takes clicks | Above fullscreen cube |
+| --- | --- | --- | --- | --- |
+| `Normal` | no | yes | yes | yes (with runtime AOT) |
+| `Utility` | **yes** | yes | yes | yes |
+| `Toolbar` | **yes** | no | yes | yes |
+| `Dock` | **yes** (+STICKY) | **no** | **no** | yes |
+| `Desktop` | **yes** (+STICKY) | no | yes | yes |
+| `override_redirect` | n/a — no `WM_STATE` at all | no | no | yes |
 
-1. **`with_window_level(AlwaysOnTop)` at startup does not take effect.** With
-   the level set in `ViewportBuilder`, `_NET_WM_STATE` never gains
-   `_NET_WM_STATE_ABOVE` (checked at t+5 s and t+10 s; still only
-   `_NET_WM_STATE_FOCUSED`).
-2. **The runtime `ViewportCommand::WindowLevel(AlwaysOnTop)` path does work.**
-   A separate run driving `panel_probe cmds` shows the atom appear:
-   `_NET_WM_STATE_ABOVE, _NET_WM_STATE_FOCUSED`, and later revert to
-   `_NET_WM_STATE_BELOW` for `AlwaysOnBottom` and to clear for `Normal`.
+The `Dock` row is attractive for an overlay: it stays above the game *and*
+ignores input, so a click can never disturb the game even without explicit
+click-through. But it is conventionally a non-interactive screen-edge surface,
+and on xfwm4 that means the panel's back button would not be clickable.
+`Utility` is the compromise that keeps the panel interactive.
 
-So the panel must request always-on-top **after** the window exists. Even
-then, on xfwm4 without a compositor, a fullscreen window takes the top
-stacking position regardless, and only an explicit re-raise brings the panel
-back. This is the single most consequential result in this document for the
-MangoHud-replacement goal: **the fullscreen case needs a different mechanism
-than a normal window**, and it was the stated primary use case.
+## What B12 says about ADR-1
+
+ADR-1 keeps mode switching inside one process and treats a process restart as
+a fallback. B12 tested the intermediate option it did not mention —
+recreating the *window* to change its type:
+
+* **79–89 ms with no panel on screen** (5 trials), and **no flash**: 40
+  geometry samples at 50 ms across the handover were `744x81` throughout,
+  never an oversized or intermediate window.
+* It would still throw away the GL context and all in-process state, which a
+  single `ViewportCommand` does not.
+
+So recreation is cheap in time and still wrong in kind. The amendment proposed
+in `panel-design.md` records the one real constraint B9–B12 exposed: the
+`X11WindowType` is fixed at startup and cannot be changed by any
+`ViewportCommand`, so it must serve both modes and has to be decided **before**
+the panel work starts.
 
 ## Two measurement errors, corrected
 
@@ -134,6 +187,16 @@ original conclusion was an artifact of the instrument.
 `--transparent` was invoked without the flag, so it was a second opaque run
 and showed no difference. Fixed by passing the flag and re-running as a
 paired control; that is the result reported above.
+
+**B9, first attempt — a hardcoded pixel colour made everything read
+"OTHER".** The Q78 probe does not use the overlay demo's dark theme, so its
+panel background is `27,27,27`, not the `18,18,20` the verdict function was
+looking for. Every sample came back `OTHER(...)` and the run proved nothing.
+Fixed by *learning* the panel's background colour at runtime, while the cube
+is still windowed and the panel is known to be on top of it. A second, smaller
+bug in the same area: the first "no re-assert" run never sent a
+`WindowLevel` at all, because the initial send was inside the re-assert code
+path — so the baseline was not actually testing what it claimed.
 
 Also worth recording: B3 needed three attempts. The first was invalid because
 the panel sat outside the cube, so a pass-through click landed on the
@@ -174,6 +237,26 @@ Useful flags (full list via `--help`, item table via `--dump-items`):
 | `--seconds <n>` | auto-exit |
 | `--dump-items` | print the id → D-Bus source → width table and exit |
 
+`panel_q78_probe.rs` (the Q7/Q8 probe) takes `--reassert-sec N`,
+`--skip-taskbar-prop`, `--skip-taskbar-msg`, `--x11-type
+normal|dock|utility|toolbar|desktop` and `--override-redirect`. It sends
+`WindowLevel(AlwaysOnTop)` once at runtime, which is the finding of B9; note
+it does **not** set the level in the builder, because that is the path B2
+showed to be ignored.
+
+To reproduce the Q7/Q8 experiments (B9–B12) — this is the probe that closed
+them:
+
+```bash
+# Q7: runtime always-on-top over a fullscreen cube, held for 5 minutes
+cargo run --release --example panel_q78_probe -- --x 300 --y 700 --seconds 400
+
+# Q8: window types, and SKIP_TASKBAR by property write vs window type
+cargo run --release --example panel_q78_probe -- --x11-type dock      --skip-taskbar-prop
+cargo run --release --example panel_q78_probe -- --x11-type utility   --skip-taskbar-msg
+cargo run --release --example panel_q78_probe -- --override-redirect
+```
+
 To reproduce the fullscreen case, run the cube and toggle xfwm4's own
 fullscreen binding:
 
@@ -202,5 +285,10 @@ Under `probe/` on the agent's machine, not committed to the repository:
 | `b6c_controlled.sh` | B6 3-phase runtime-PM control |
 | `b7_b8.sh`, `b7_clip.sh` | B7 geometry + stills, B7 MP4 |
 | `b8_decisive.sh` | B8 paired opaque/transparent control |
+| `b9_aot_hold.sh` | **B9** — runtime AOT vs fullscreen cube, incl. the 5-minute idle wait |
+| `b9_shot.sh` | B9 screenshot, with a fullscreen-geometry assertion |
+| `b10_b11_matrix.sh` | **B10/B11** — window-type and override-redirect matrix, SKIP_TASKBAR routes |
+| `b11b_persist.sh` | **B11** — does the SKIP_TASKBAR property survive on normal vs dock |
+| `b12_recreate.sh` | **B12** — cost of recreating the window to change its type |
 | `watch_x11.sh` | generic PID-resolved X11 sampler |
 | `shot.sh` | `xwd` → downscaled PNG (ImageMagick absent) |

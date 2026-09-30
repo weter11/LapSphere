@@ -229,6 +229,59 @@ coarse in practice.
 
 ---
 
+### ADR-1 amendment (proposed, from B9–B12) — mode switching stays in-process, and the window type does not change
+
+**Proposed change to ADR-1.** B9–B12 were run specifically to stress the
+assumption that mode switching is purely a matter of `ViewportCommand` on one
+long-lived window. On xfwm4 4.20.0 the assumption holds, with one amendment:
+
+* **The X11 window type is fixed for the life of the process, and that is
+  acceptable.** `X11WindowType` is set in `ViewportBuilder` and there is no
+  `ViewportCommand` to change it. Since ADR-2 requires the panel to keep
+  drawing and Q7/Q8 are both solved *by* the window type, the type must be
+  chosen once at startup and must serve **both** modes — not be changed on
+  mode switch.
+
+  This is a constraint the original ADR-1 did not state, and it is the reason
+  the window type decision (Q8) has to be made **before** the panel work
+  starts rather than during it.
+
+* **Consequence: the full window stays a `Normal`-type window.** The window
+  type is chosen for the *process*, and the process also hosts the full GUI.
+  A `Dock` window for the whole app would be wrong: the full-size GUI is an
+  ordinary application window. So the realistic choice is `Utility` — it
+  satisfies SKIP_TASKBAR + SKIP_PAGER, stays on top of a fullscreen game
+  (B10), and remains interactive (unlike `Dock`, which is click-through on
+  xfwm4 and would break the panel's back button).
+
+  `Utility` + a runtime `WindowLevel(AlwaysOnTop)` is the untested
+  combination noted in Q8. It is the first thing to verify when the panel
+  work begins.
+
+* **B12 removes the last reason to consider recreating the window.** The cost
+  of destroying and recreating the window to change its type was measured:
+  **79–89 ms with no panel on screen** (5 trials: 79, 89, 88, 86, 89 ms), and
+  **no flash** — 40 geometry samples at 50 ms across the handover showed
+  `744x81` throughout, with no oversized or intermediate window. A full
+  process restart, by contrast, would additionally drop the D-Bus connection,
+  re-run discovery and flicker the tray icon.
+
+  So the "recreate the window" escape hatch is cheap in time but still wrong
+  in kind: it throws away the GL context and every piece of in-process state
+  for no benefit, when a single `ViewportCommand` already achieves the
+  required effect. **ADR-1's core decision is unchanged and is now supported
+  by measurement rather than assumption.**
+
+* **B12 caveat, stated plainly:** the tray question could not be answered by
+  that probe, because `panel_q78_probe.rs` has no tray. The session bus showed
+  only `org.kde.StatusNotifierWatcher` and no LapSphere
+  `StatusNotifierItem` before or after, so there was nothing to observe. Tray
+  survival across a *process* restart is therefore `NOT TESTED` here; the
+  in-window path is already covered by the B-series in
+  `panel-spike.md` §4(г) (tray alive and reachable after 300 mode switches).
+
+---
+
 ## Acceptance criteria
 
 Each item is checkable, and each names the staged-plan step that delivers it
@@ -250,8 +303,8 @@ listed here so they are not lost:
 
 | # | Criterion | Status |
 | --- | --- | --- |
-| 7 | The panel must stay visible **above a borderless-fullscreen game** — the primary use case. | **FAILS on xfwm4 4.20.0 without a compositor.** With a genuine fullscreen cube (2560x1440@0,0) the panel is covered; it returns only after re-activation or a forced `_NET_WM_STATE_ABOVE`. Also: `with_window_level(AlwaysOnTop)` at startup does **not** take effect, while the runtime `ViewportCommand::WindowLevel(AlwaysOnTop)` **does**. See B2 and Q7. |
-| 8 | The panel must not appear in the taskbar / window switcher. | **FAILS on X11.** `with_taskbar(false)` is Windows-only in egui — it is destructured away under `#[cfg(target_os = "windows")]` (egui-winit `lib.rs:2003`), so no `_NET_WM_STATE_SKIP_TASKBAR` is set and the window stays in `_NET_CLIENT_LIST`. See B4 and Q8. |
+| 7 | The panel must stay visible **above a borderless-fullscreen game** — the primary use case. | **SOLVED on xfwm4 4.20.0 without a compositor (B9).** With a genuine fullscreen cube (2560x1440@0,0) the panel stayed on top through focus return to the cube, a click on the cube, Alt+Tab away and back, and **5 minutes idle** — with a single runtime `ViewportCommand::WindowLevel(AlwaysOnTop)` and **no re-assertion**. B2's failure was entirely the *startup* path: `with_window_level()` is ignored, the runtime command is honoured. |
+| 8 | The panel must not appear in the taskbar / window switcher. | **SOLVED on xfwm4 4.20.0 (B10/B11), by window type rather than by flag.** `egui::X11WindowType::Dock` (also Utility, Toolbar, Desktop) yields `_NET_WM_STATE_SKIP_TASKBAR` + `_SKIP_PAGER`, stable across 24 s of sampling. A `_NET_WM_STATE` **property write** on a *normal* window succeeds (1.8 ms, atoms present immediately) but xfwm4 **strips it** within seconds; a ClientMessage route is likewise ignored. `with_taskbar(false)` remains Windows-only in egui. |
 
 ---
 
@@ -419,35 +472,82 @@ bounded entirely by the single `request_repaint_after(500ms)`
 (`gui/src/app.rs:917`). A live meter in a 72-point-tall panel will visibly
 lag. This is independent of the panel and worth doing first (staged step 1).
 
-**Q7 — How does the panel stay above a borderless-fullscreen game?** This is
-the primary use case and it **currently fails on xfwm4 4.20.0 without a
-compositor** (B2). Three facts constrain the options:
+**Q7 — RESOLVED on xfwm4 4.20.0: request always-on-top at runtime, once.**
+Closed by B9. The answer is simpler than the question anticipated.
 
-* `ViewportBuilder::with_window_level(AlwaysOnTop)` at startup does **not**
-  stick — `_NET_WM_STATE_ABOVE` never appears.
-* The runtime `ViewportCommand::WindowLevel(AlwaysOnTop)` **does** work.
-* Even with `ABOVE` set, a fullscreen window still ended up on top in our
-  test; only an explicit re-raise after the game claimed fullscreen brought
-  the panel back.
+* Send `ViewportCommand::WindowLevel(AlwaysOnTop)` **once, after the window
+  exists**. It is honoured: `_NET_WM_STATE_ABOVE` appears and stays.
+* The panel then **held on top for the whole test**: focus returned to the
+  cube, a click on the cube, Alt+Tab away and back, and 5 minutes of complete
+  inactivity. Every sample read `PANEL-ON-TOP`.
+* **No periodic re-assertion is needed.** The re-assert machinery was built
+  and then not required. A re-assert loop would have been a busy-wait running
+  against a game, so dropping it is the better outcome — and the panel cost
+  0.3% CPU / ~100 MB RSS while idle over the 5-minute window.
 
-So the panel needs to (a) request the level *after* the window exists, and
-(b) detect that something else took fullscreen and re-raise itself. (b) is the
-open part: there is no reliable "another window just went fullscreen" signal
-in egui. Options worth discussing: a periodic re-raise (cheap, but a busy
-loop against a game), an X11-specific `_NET_WM_STATE` property listener (X11
-only, which the design already tolerates), or accepting that the user re-raises
-the panel manually after starting a game. **A compositor would probably fix
-this outright**, which makes "does the owner run one?" worth asking — the
-agent's host does not, so every fullscreen result here is the harder case.
+The original B2 failure was entirely a **startup-vs-runtime** distinction:
+`ViewportBuilder::with_window_level(AlwaysOnTop)` is silently ignored by
+xfwm4, while the runtime `ViewportCommand` works. The design implication is
+that "start directly in panel mode" (ADR-1, staged step 6) must set the
+level on the first frame rather than in the builder, or it will come up
+*underneath* the game.
 
-**Q8 — How does the panel stay out of the taskbar on X11?**
-`ViewportBuilder::with_taskbar(false)` is Windows-only in egui: the value is
-destructured to `_taskbar` and dropped under `#[cfg(target_os = "windows")]`
-(egui-winit `lib.rs:2003`), so nothing happens on Linux (B4). The EWMH
-levers that do exist are `egui::X11WindowType` (which includes `Dock` and
-`Utility`) and setting `_NET_WM_STATE_SKIP_TASKBAR` directly. Which of these
-xfwm4 honours is untested. Also worth deciding: is taskbar presence actually a
-problem for a panel, or is this a Windows-portability requirement only?
+Still open: this is xfwm4 4.20.0 with **no compositor**. Whether mutter or
+kwin behave the same is `NOT TESTED`. A compositor would likely honour the
+startup hint and make the whole question moot, which is a further reason to
+ask whether the owner runs one.
+
+**Q8 — RESOLVED on xfwm4 4.20.0: use `X11WindowType`, not a flag.**
+Closed by B10/B11, with a result that inverts the obvious approach.
+
+* `egui::X11WindowType::Dock` produces `_NET_WM_WINDOW_TYPE_DOCK`, and xfwm4
+  then grants `_NET_WM_STATE_SKIP_TASKBAR` **and** `_SKIP_PAGER` itself,
+  plus `_NET_WM_STATE_STICKY`. Verified stable across 24 s of sampling.
+  `Utility` and `Toolbar` also carry SKIP_TASKBAR + SKIP_PAGER; `Desktop`
+  additionally gets STICKY.
+* `ViewportBuilder::with_taskbar(false)` does nothing on X11 — egui
+  destructures it to `_taskbar` and drops it under
+  `#[cfg(target_os = "windows")]` (egui-winit `lib.rs:2003`).
+* Setting `_NET_WM_STATE` by **property write** on a *normal* window appears
+  to work — the atoms are present 1.8 ms later — but xfwm4 **removes them
+  within seconds**; a 24 s sample never once saw them survive. The
+  ClientMessage route (`xdotool windowstate --add`) is ignored outright. A
+  property write is therefore a **false positive** and must not be used.
+
+`Dock` also answers Q7 more thoroughly: the dock window sat on top of the
+fullscreen cube in **every** B10 case, and unlike `Normal` it **does not take
+focus** and **does not take clicks** — which is exactly the wanted behaviour
+over a game.
+
+Two costs, both real:
+
+* A `Dock` window is still listed in `_NET_CLIENT_LIST` (that is EWMH
+  compliance); xfwm4 merely keeps it out of its own panel UI. Whether
+  GNOME/KDE honour it is `NOT TESTED`.
+* `Dock` is conventionally a non-interactive screen-edge surface. On xfwm4
+  that means the panel's **back button would not be clickable**. If the panel
+  must be interactive, `Utility` is the compromise: it also gets
+  SKIP_TASKBAR + SKIP_PAGER, but it **does** take focus and clicks.
+
+**Which type to ship is still open**, and the choice is a real trade-off:
+`Utility` if the panel must be clickable, `Dock` if it must stay above the
+game. `Utility` plus a runtime `WindowLevel(AlwaysOnTop)` would probably give
+both — B9 shows the runtime command alone is sufficient for layering — but
+**that combination was not tested together** and should be before it is
+relied on.
+
+Dependency question, answered: **`x11rb 0.13.2` is already in `Cargo.lock`**,
+transitively via `winit` and `arboard`, but it is not a *direct* dependency of
+the `gui` crate, so naming it would mean adding it to `gui/Cargo.toml`. The
+raw X window id needs **no new runtime dependency**: `eframe::Frame`
+implements `HasWindowHandle` (eframe `epi.rs:717`), and
+`Frame::window_handle()` yields a `RawWindowHandle::Xlib` whose `.window`
+field is the X id — that is exactly what `panel_q78_probe.rs` does.
+`raw-window-handle 0.6` was added as a **dev-dependency only**, for the
+throwaway example. The B11 property and ClientMessage writes were done by
+shelling out to `xprop`/`xdotool`, which the test harness already required;
+production code would use `x11rb`.
+
 
 ---
 
