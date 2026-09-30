@@ -1,24 +1,75 @@
 # Mini-panel design (gkrellm-style compact mode)
 
 Status: **DRAFT for discussion.** No application code has been written.
-Companion evidence document: [`panel-spike.md`](./panel-spike.md).
+Companion evidence documents: [`panel-spike.md`](./panel-spike.md) (frame
+delivery, `ViewportCommand` behaviour) and
+[`panel-overlay-tests.md`](./panel-overlay-tests.md) (live overlay behaviour
+over another window, B1–B8).
 
 Base: `5c57bc7` (branch `feat/mini-panel` from `origin/lapsphere`).
-Measurement environment for the claims below: **X11 / XFCE / xfwm4 only.**
-Everything Wayland is `NOT TESTED` and is designed for on the assumption
-that it degrades to a no-op, not on the assumption that it works.
+Measurement environment for the claims below: **X11 / XFCE / xfwm4 4.20.0,
+no compositor.** Everything Wayland is `NOT TESTED` and is designed for on the
+assumption that it degrades to a no-op, not on the assumption that it works.
 
 ---
 
-## Goal
+## Goals and non-goals
 
-Add a compact, always-visible "panel" mode to the existing GUI, in the spirit
-of gkrellm: a single undecorated strip, a few rows or one row of meters,
-draggable anywhere, showing the hardware you care about at a glance. It is a
-**mode of the same window**, not a second window and not a second process.
+### Goal
 
-Non-goal: replacing the Statistics page, or adding new data sources. The panel
-renders a chosen subset of what Statistics already shows.
+Replace **MangoHud** in the case where the panel's window is visible *over* a
+running game — that is, in two situations:
+
+* **Windowed games**, with the panel placed beside the game window.
+* **Borderless fullscreen** (compositor-style fullscreen), where the game
+  covers the whole screen and the panel is drawn on top of it.
+* **A second monitor**, with the game on one screen and the panel on the
+  other.
+
+In other words the target is an *overlay HUD for games*, not a desktop
+sidebar. That distinction matters: an overlay has to survive stacking above a
+fullscreen window, must not steal focus while the game has it, and must not
+cost the game frames. Criteria 5 and 6 in the acceptance list below exist
+because of it.
+
+Secondary goal: a compact always-visible meter in normal desktop use, in the
+spirit of gkrellm — a single undecorated strip, draggable anywhere, showing
+the hardware you care about at a glance. It is a **mode of the same window**,
+not a second window and not a second process.
+
+### Non-goal: an exclusive fullscreen mode
+
+**The owner has decided against an exclusive-fullscreen panel mode.** This is
+recorded as a product decision, not a technical one.
+
+Rationale as given by the owner:
+
+* Exclusive fullscreen (grabbing the display, hiding the desktop) is poorly
+  behaved with modern desktop environments.
+* It gives **no measurable fps benefit** over a borderless/fullscreen-window
+  arrangement, per the owner's own measurements.
+* Most games do not use it by default.
+
+So the panel will never request exclusive fullscreen. If a game is
+borderless-fullscreen, the panel is an ordinary window that sits above it —
+which is exactly the case that is **currently failing** on xfwm4 (see
+[`panel-overlay-tests.md`](./panel-overlay-tests.md) B2: with a genuine
+fullscreen cube, the panel is covered until it is re-raised or
+`_NET_WM_STATE_ABOVE` is set). This is the single most important open risk
+against the primary goal and is tracked as an open question (Q7).
+
+### Non-goals, other
+
+* Replacing the Statistics page, or adding new data sources. The panel
+  renders a chosen subset of what Statistics already shows.
+
+### Wayland
+
+Best-effort. **Not tested on the owner's machine — their Wayland session does
+not start**, and this agent host has no Wayland session either. The design
+position is that a window command which does not take effect is a harmless
+no-op: the panel still draws, at whatever size the compositor gave it. This is
+a deliberate choice to degrade rather than a claim that it works.
 
 ---
 
@@ -178,6 +229,109 @@ coarse in practice.
 
 ---
 
+## Acceptance criteria
+
+Each item is checkable, and each names the staged-plan step that delivers it
+(see "Staged implementation plan" at the end). Status column refers to what
+the throwaway `gui/examples/panel_overlay_demo.rs` has already demonstrated,
+not to shipped code — no application code exists yet.
+
+| # | Criterion | Verified in | Step | Status |
+| --- | --- | --- | --- | --- |
+| 1 | Panel elements can be in **any order**. The ordering UI reuses the existing pattern from `gui/src/pages/settings.rs:446-471` — ⬆/⬉ buttons per row, normalised through `normalize_section_order` exactly as the statistics section order is. | demo `--items a,b,c` | 3 | **PARTIAL** — reordering changes draw order and leaves the window size unchanged (584x81 reversed vs 584x81 original). The settings UI itself is not written. |
+| 2 | **Font size**: a global panel scale plus an optional per-item override. The window size and every reserved field width are computed from the metrics of the *selected font*, not from a constant. Restating ADR-2 for the font case: **window size depends only on the set of selected elements and their fonts, never on data availability.** | demo `--scale`, `--item-scale` | 3, 4 | **PARTIAL** — geometry follows the config: 4 items 584px → 903px at scale 1.6; 12 items 1743px. Hot-reload of scale at runtime is **NOT TESTED** (demo flags are startup-only). |
+| 3 | **Units and labels preserve case**: `MHz`, `dBi`, `dBm`, `°C`, `mA`, `Wh`, `W`, `V`. All unit strings live in **one module**; no widget formats a unit inline. An element's label can be overridden with user text. | `panel_overlay_demo.rs` `mod unit` + `--label` | 4 | **PARTIAL** — the demo centralises units in one `mod unit` and takes `--label id=text`. Two corrections to the brief, both verified in source: **`dBi` does not exist anywhere in the codebase** (WiFi is `signal_level`, dBm only), and **`BatteryInfo` has no Wh field** (only `voltage_mv`, `current_ma`, `capacity_mah`). See the config-schema table. `statistics.rs` still formats units inline — that is the code to fix. |
+| 4 | **Unavailable data** (dGPU, gamepad, WiFi) shows as `—` in an already-reserved width; the window never resizes. | demo synthetic mode | 4 | **WORKS in the demo** — dGPU fields drop every 5th snapshot, WiFi every 7th; panel renders `—` and geometry held at 584x81 for the whole session. |
+| 5 | The panel **does not bring a discrete GPU out of runtime suspend**. | B6c, 3-phase control | 4, 5 | **PASSES** — from a genuinely `suspended` dGPU, the panel running with live `GetGpuInfo` left it `suspended` at all ten 3-second samples and 5s after exit. Control: no panel, identical. Control 2: `nvidia-smi` polling alone wakes it in 6s. (The panel itself renders on the **AMD iGPU** — it maps `libgallium`/`libGLX_mesa`, no NVIDIA libs.) |
+| 6 | With click-through enabled, **clicks on the panel must not disturb the game**. | B3, 4-case matrix | 6 | **WORKS** — without passthrough a click moves focus to the panel; with `MousePassthrough(true)` the click reaches the window underneath (the cube when overlapped, the desktop when not). Keyboard pass-through is **NOT TESTED**. |
+
+Two criteria that came out of the overlay testing and are **not yet met**,
+listed here so they are not lost:
+
+| # | Criterion | Status |
+| --- | --- | --- |
+| 7 | The panel must stay visible **above a borderless-fullscreen game** — the primary use case. | **FAILS on xfwm4 4.20.0 without a compositor.** With a genuine fullscreen cube (2560x1440@0,0) the panel is covered; it returns only after re-activation or a forced `_NET_WM_STATE_ABOVE`. Also: `with_window_level(AlwaysOnTop)` at startup does **not** take effect, while the runtime `ViewportCommand::WindowLevel(AlwaysOnTop)` **does**. See B2 and Q7. |
+| 8 | The panel must not appear in the taskbar / window switcher. | **FAILS on X11.** `with_taskbar(false)` is Windows-only in egui — it is destructured away under `#[cfg(target_os = "windows")]` (egui-winit `lib.rs:2003`), so no `_NET_WM_STATE_SKIP_TASKBAR` is set and the window stays in `_NET_CLIENT_LIST`. See B4 and Q8. |
+
+---
+
+## Config schema (proposal for discussion — not an implementation)
+
+A proposed shape for `settings.json`, to be argued over rather than adopted:
+
+```jsonc
+"panel": {
+  "mode_active": true,          // start in panel mode
+  "font_scale": 1.0,            // global scale
+  "always_on_top": true,
+  "click_through": false,
+  "position": [200, 500],       // [x, y] in points, or null for "let the WM place it"
+  "items": [
+    { "id": "cpu_load_percent", "visible": true, "label": null, "font_scale": null },
+    { "id": "memory",           "visible": true, "label": "RAM", "font_scale": 1.2 }
+  ]
+}
+```
+
+`label: null` means "use the built-in default"; a string overrides it
+(criterion 3). `font_scale: null` means "inherit the global scale".
+Array order **is** the display order (criterion 1).
+
+### Item table
+
+Every row verified against `common/src/types.rs` and the live D-Bus
+interface. `width` is the reserved slot in points at `font_scale = 1.0` and is
+the number that makes ADR-2 computable without looking at any data. **No
+`GetGpuInfoFull` exists** — the live interface exposes `GetGpuInfo`,
+`GetGpuClockRanges`, `GetGpuCoreOffsetLimits` and `GetGpuMemoryOffsetLimits`,
+and nothing else GPU-related; the expensive part is a `process_snapshot` field
+*inside* `GetGpuInfo`.
+
+| id | Data source | Field (`common::types`) | Unit | width |
+| --- | --- | --- | --- | --- |
+| `hostname` | `GetSystemInfo` | `SystemInfo.product_name` | — | 150 |
+| `cpu_load_percent` | `GetCpuInfo` | `CpuInfo.average_load` (f32) | `%` | 62 |
+| `cpu_core_chart` | `GetCpuInfo` | `CpuInfo.cores[].load` (`Vec<CoreInfo>`, one fixed-height strip) | `%` | 92 |
+| `cpu_freq` | `GetCpuInfo` | `CpuInfo.average_frequency` (u64) | `MHz` | 74 |
+| `cpu_temp` | `GetCpuInfo` | `CpuInfo.package_temp` (f32) | `°C` | 62 |
+| `cpu_power` | `GetCpuInfo` | `CpuInfo.package_power` (`Option<f32>`) | `W` | 64 |
+| `gpu_load` | `GetGpuInfo` | `GpuInfo.load` (`Option<f32>`) | `%` | 62 |
+| `gpu_temp` | `GetGpuInfo` | `GpuInfo.temperature` (`Option<f32>`) | `°C` | 62 |
+| `gpu_clock` | `GetGpuInfo` | `GpuInfo.frequency` (`Option<u64>`) | `MHz` | 74 |
+| `gpu_power` | `GetGpuInfo` | `GpuInfo.power` (`Option<f32>`) | `W` | 64 |
+| `memory` | `GetMemoryInfo` | `MemoryInfo.used_percent` (f32) + `used_gib` (f64) | `%`, `GiB` | 84 |
+| `battery` | `GetBatteryInfo` | `BatteryInfo.charge_percent` (u64) | `%` | 62 |
+| `wifi_signal` | `GetWifiInfo` | `WiFiInfo.signal_level` (`Option<i32>`) | `dBm` | 70 |
+| `fans` | `GetFanInfo` | `FanInfo.rpm_or_percent` (u32) + `is_rpm` (bool) | `rpm` or `%` | 62 |
+| `gamepad_1` | `GetGamepadInfo` | `GamepadInfo.name`, `battery_level` (`Option<u8>`), `status` | `%` | 120 |
+| `gamepad_2` | `GetGamepadInfo` | same, second entry | `%` | 120 |
+
+Notes on the table, all checked in source rather than assumed:
+
+* **`dBi` is not a field anywhere.** `WiFiInfo` carries `signal_level` in dBm
+  (negative, closer to 0 is stronger) and nothing in dBi. The brief listed
+  `dBi`; it should be dropped or the field added to the daemon first.
+* **No watt-hours.** `BatteryInfo` has `voltage_mv` (u64), `current_ma` (i64)
+  and `capacity_mah` (u64) but no Wh. Wh is computable from
+  `voltage_mv × capacity_mah`, so an energy readout is possible without a
+  daemon change, but it is a derived value and should be labelled as one.
+* **`hostname` is a name, not a hostname.** `GetSystemInfo` returns
+  `product_name`, `product_sku`, `manufacturer`, `board_name`,
+  `bios_version`, `kernel_modules`. The daemon also has a `GetMachineId`
+  method. Deciding which of these the user means by "hostname" is part of Q1.
+* **`fans` is ambiguous.** `FanInfo.rpm_or_percent` is RPM *or* percent
+  depending on `is_rpm`, and the array can hold several fans. One slot for
+  several fans needs a rule (first, max, or a cycle) — part of Q1.
+* **`gamepad_*` slots.** `GetGamepadInfo` returns a `Vec<GamepadInfo>` whose
+  length is however many are connected. "Slot 1" and "slot 2" therefore mean
+  *array index*, which shifts when a controller disconnects. Part of Q1.
+* **Optional-ness drives the `—`.** `GpuInfo.load`, `.temperature`,
+  `.frequency` and `.power` are all `Option<f32>`/`Option<u64>`, as are
+  `WiFiInfo.signal_level`, `CpuInfo.package_power` and
+  `GamepadInfo.battery_level`. That is exactly the case criterion 4 covers.
+
+---
+
 ## Interface
 
 **In the main window.** A toggle button in the existing top bar
@@ -264,6 +418,36 @@ visible window, update→draw latency is **min 0.1 / avg 222 / max 484 ms**,
 bounded entirely by the single `request_repaint_after(500ms)`
 (`gui/src/app.rs:917`). A live meter in a 72-point-tall panel will visibly
 lag. This is independent of the panel and worth doing first (staged step 1).
+
+**Q7 — How does the panel stay above a borderless-fullscreen game?** This is
+the primary use case and it **currently fails on xfwm4 4.20.0 without a
+compositor** (B2). Three facts constrain the options:
+
+* `ViewportBuilder::with_window_level(AlwaysOnTop)` at startup does **not**
+  stick — `_NET_WM_STATE_ABOVE` never appears.
+* The runtime `ViewportCommand::WindowLevel(AlwaysOnTop)` **does** work.
+* Even with `ABOVE` set, a fullscreen window still ended up on top in our
+  test; only an explicit re-raise after the game claimed fullscreen brought
+  the panel back.
+
+So the panel needs to (a) request the level *after* the window exists, and
+(b) detect that something else took fullscreen and re-raise itself. (b) is the
+open part: there is no reliable "another window just went fullscreen" signal
+in egui. Options worth discussing: a periodic re-raise (cheap, but a busy
+loop against a game), an X11-specific `_NET_WM_STATE` property listener (X11
+only, which the design already tolerates), or accepting that the user re-raises
+the panel manually after starting a game. **A compositor would probably fix
+this outright**, which makes "does the owner run one?" worth asking — the
+agent's host does not, so every fullscreen result here is the harder case.
+
+**Q8 — How does the panel stay out of the taskbar on X11?**
+`ViewportBuilder::with_taskbar(false)` is Windows-only in egui: the value is
+destructured to `_taskbar` and dropped under `#[cfg(target_os = "windows")]`
+(egui-winit `lib.rs:2003`), so nothing happens on Linux (B4). The EWMH
+levers that do exist are `egui::X11WindowType` (which includes `Dock` and
+`Utility`) and setting `_NET_WM_STATE_SKIP_TASKBAR` directly. Which of these
+xfwm4 honours is untested. Also worth deciding: is taskbar presence actually a
+problem for a panel, or is this a Windows-portability requirement only?
 
 ---
 
