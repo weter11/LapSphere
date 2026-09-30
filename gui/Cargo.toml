@@ -79,3 +79,6 @@ strip = true
 # transitive dependency of winit and arboard; this only makes it nameable.
 [dev-dependencies]
 raw-window-handle = "0.6"
+# B13: send a real EWMH _NET_WM_STATE ClientMessage. Already in Cargo.lock
+# (transitively via winit and arboard); this only makes it nameable.
+x11rb = "0.13"

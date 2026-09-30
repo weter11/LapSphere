@@ -79,6 +79,13 @@ Reference colours used for pixel assertions:
 | **B11** is `x11rb` available, and is the raw X window id reachable from eframe? | **Yes to both.** `x11rb 0.13.2` is already in `Cargo.lock` (transitively via `winit` and `arboard`) but is not a *direct* dependency of `gui`, so naming it needs a `gui/Cargo.toml` entry. The window id needs **no new runtime dependency**: `eframe::Frame` implements `HasWindowHandle` (`epi.rs:717`) and `Frame::window_handle()` gives a `RawWindowHandle::Xlib` whose `.window` is the X id | `cargo tree -i x11rb`; probe reads it on the first frame and logs it |
 | **B12** cost of recreating the window to change its type | **79–89 ms with no panel on screen** (5 trials: 79, 89, 88, 86, 89 ms), and **no flash** — 40 geometry samples at 50 ms across the handover were `744x81` throughout, never oversized. The GL context and all in-process state would still be lost, which a single `ViewportCommand` does not cost | `date +%s%N` around the handover, geometry polled at 50 ms; `ov/b12_recreate.log` |
 | **B12** does the tray survive a window recreate? | **NOT TESTED.** `panel_q78_probe.rs` has no tray, and the session bus showed only `org.kde.StatusNotifierWatcher` with no LapSphere `StatusNotifierItem` before or after — there was nothing to observe. Tray survival across an in-window mode switch is already covered by `panel-spike.md` §4(г) | `gdbus ListNames` on the session bus |
+| **B13** real EWMH `_NET_WM_STATE` ClientMessage via **x11rb**, Normal window | **REFUSED — and the message is provably well-formed.** Sent to the root window, `type=_NET_WM_STATE`, `format=32`, `event_mask=SubstructureRedirect\|SubstructureNotify`, `data=[1, <atom>, 0, 0, 0]` — the exact layout winit's `set_netwm` uses (`winit-0.30.13/.../x11/window.rs`). After 60 s of sampling at 5 s intervals, `_NET_WM_STATE` was `_NET_WM_STATE_FOCUSED` at **every** sample; the window stayed in `_NET_CLIENT_LIST` and `_NET_CLIENT_LIST_STACKING`. The same binary, same code, same message, other window types: **utility → `SKIP_PAGER, SKIP_TASKBAR, FOCUSED`; dock → `+ STICKY`; toolbar → `SKIP_PAGER, SKIP_TASKBAR`; normal → nothing.** | x11rb `RustConnection::send_event`; `xprop`, `_NET_CLIENT_LIST`; `ov/b13.log`, `ov/b13_ctl_*.log` |
+| **B13** comparison with a reference implementation | `wmctrl` is **not installed and not installable** (`apt-get install -s` fails: archive unavailable, and no network/sudo). The comparison was made against **winit's own `set_netwm`**, which is a better reference because B9 proved it works on this host: the first attempt used `data=[action, atom, 1, target, 0]`, was ignored, and was corrected to winit's `[action, atom, 0, 0, 0]`. It made **no difference** — the message is correct and is still refused for a Normal window | source: `winit-0.30.13/src/platform_impl/linux/x11/window.rs` `toggle_atom` / `set_netwm` |
+| **B14** `Utility` + runtime `WindowLevel(AlwaysOnTop)`, fullscreen cube | **PASSES — the proposed Q8 combination works.** `_NET_WM_STATE` = `SKIP_PAGER, SKIP_TASKBAR, ABOVE, FOCUSED`, and the panel was `PANEL-ON-TOP` at every point: after F11 fullscreen (2560x1440), after focus returned to the cube, after a click on the cube, after Alt+Tab away and back, and across **5 minutes idle** (10 samples at 30 s). CPU 0.3%, RSS ~106 MB | pixel verdict with the panel background learned at runtime; `ov/b14_utility.log` |
+| **B14** is the panel still clickable in `Utility` mode? | **YES.** A click inside the panel moved focus from the cube to the panel, and a click on an actual egui widget registered (5 `BUTTON-CLICKABLE` log lines across three click strategies: simple click, press-hold-release straddling a repaint, and hover-then-click). This is the property `Dock` lacks | `xdotool` focus before/after; widget click count in the probe log; `ov/b14_click.log` |
+| **B15** full window (`Normal`) vs the same window as `Utility` in taskbar / switcher / panel | **Both appear in `_NET_CLIENT_LIST`.** Normal: 5 windows in the stacking list, state `ABOVE, FOCUSED`. Utility: **6 windows**, state `SKIP_PAGER, SKIP_TASKBAR, ABOVE, FOCUSED`. So `Utility` does **not** remove the window from the EWMH client list — xfwm4 only keeps it out of its own UI. **Taskbar and Alt+Tab visuals are NOT TESTED**: this XFCE session has **no taskbar plugin loaded** (nothing in the `xfce4-panel` windows ever showed a window button) and the alt-tab switcher window was not locatable by name, so only the EWMH evidence exists | `xprop -root _NET_CLIENT_LIST[_STACKING]`, window counts, `xdotool`; `b15-normal-desktop.png`, `b15-utility-desktop.png` |
+| **B16** can eframe 0.34.2 recreate the **root** window via `ViewportBuilder::patch` → `recreate_window`? | **NO — the root window cannot be re-created or re-typed.** `ViewportBuilder::patch()` *does* return `recreate_window = true` for `window_type` (`egui/src/viewport.rs:912`), but eframe only acts on that flag inside `initialize_or_update_viewport()` (`eframe glow_integration.rs:1432`), which is reached exclusively for **Immediate and Deferred (child)** viewports. The root viewport is built once from `NativeOptions` at startup and never re-patched. Empirically: no `ViewportCommand` changes a root window's X11 type, and `ViewportCommand::Close` on the root ends the process rather than re-creating the window. **App state, GL context and RSS across a root recreate are therefore NOT APPLICABLE — the operation does not exist.** | source read of `egui` and `eframe`; runtime check that no command re-types the root |
+
 | A2.4 absent data shows `—` in reserved width, window does not resize | **WORKS in the demo.** The synthetic producer drops the dGPU fields on every 5th snapshot and WiFi on every 7th; the panel renders `—` and the window geometry was unchanged across the run (584x81 for the whole session) | synthetic data mode + `xdotool` geometry sampled throughout; window size in the demo is computed only from the config, never from data |
 
 ## Root cause: why B2 failed, and why B9 fixed it
@@ -134,6 +141,39 @@ a 24 s sample never saw them persist. The ClientMessage route is ignored
 outright. Had this been judged on the immediate read-back, it would have been
 recorded as a success.
 
+**3. Even a correct ClientMessage is refused for a Normal window.** B13 sent
+a real EWMH message from Rust via `x11rb` — to the root window, `type=
+_NET_WM_STATE`, `format=32`, `event_mask=SubstructureRedirect|
+SubstructureNotify`, `data=[1, <atom>, 0, 0, 0]`, one message per atom
+because a ClientMessage carries a single property. Over 60 s of sampling the
+window's state was `_NET_WM_STATE_FOCUSED` at every single sample.
+
+The message is not the problem, and this is established by a control rather
+than asserted: the **same binary and the same code**, pointed at other window
+types, produces
+
+| Window type | `_NET_WM_STATE` after the identical message |
+| --- | --- |
+| `normal` | `_NET_WM_STATE_FOCUSED` (nothing added) |
+| `utility` | `SKIP_PAGER, SKIP_TASKBAR, FOCUSED` |
+| `dock` | `STICKY, SKIP_PAGER, SKIP_TASKBAR, FOCUSED` |
+| `toolbar` | `SKIP_PAGER, SKIP_TASKBAR` |
+
+So **xfwm4 4.20.0 grants SKIP_TASKBAR according to `_NET_WM_WINDOW_TYPE` and
+refuses to grant it on request to a Normal window.** There is no message,
+flag, or ordering that gets a Normal-typed window out of the taskbar on this
+WM. Q8 without a window-type change is therefore **not possible here**, not
+merely awkward.
+
+Reference-implementation comparison: `wmctrl` is not installed and could not
+be installed (`apt-get install -s wmctrl` reports the archive is unavailable,
+and there is no network or sudo on this host). The comparison was made against
+**winit's `set_netwm`**, which is a stronger reference because B9 proved that
+path works on this host. The first attempt used
+`data=[action, atom, 1, target, 0]` and was ignored; corrected to winit's
+`[action, atom, 0, 0, 0]` it was **still** ignored for a Normal window — the
+layout was never the issue.
+
 **What works is the window type, not the flag.** `egui::X11WindowType::Dock`
 makes xfwm4 grant `SKIP_TASKBAR` + `SKIP_PAGER` (plus `STICKY`) itself, and
 those persist. `Utility` and `Toolbar` also get the two skip atoms; `Desktop`
@@ -154,6 +194,25 @@ click-through. But it is conventionally a non-interactive screen-edge surface,
 and on xfwm4 that means the panel's back button would not be clickable.
 `Utility` is the compromise that keeps the panel interactive.
 
+## B16: the root window cannot be re-created, so ADR-1's constraint is permanent
+
+`ViewportBuilder::patch()` returns `recreate_window = true` when the X11
+window type changes (`egui/src/viewport.rs:912`), and eframe *does* implement
+window recreation — but only in `initialize_or_update_viewport()`
+(`eframe glow_integration.rs:1432`), which is reached exclusively for
+**Immediate and Deferred (child)** viewports. The root viewport is created once
+from `NativeOptions` and is never re-patched.
+
+Confirmed empirically as well: no `ViewportCommand` changes a root window's
+X11 type, and `ViewportCommand::Close` on the root terminates the process
+rather than re-creating the window.
+
+The consequence is worth stating plainly, because it closes off a whole family
+of designs: **"app state, GL context and RSS across a root re-create" are not
+applicable, because that operation does not exist in eframe 0.34.2.** The
+window type is a permanent property of the process, and the only way to change
+it is to end the process and start a new one.
+
 ## What B12 says about ADR-1
 
 ADR-1 keeps mode switching inside one process and treats a process restart as
@@ -166,11 +225,24 @@ recreating the *window* to change its type:
 * It would still throw away the GL context and all in-process state, which a
   single `ViewportCommand` does not.
 
-So recreation is cheap in time and still wrong in kind. The amendment proposed
-in `panel-design.md` records the one real constraint B9–B12 exposed: the
-`X11WindowType` is fixed at startup and cannot be changed by any
-`ViewportCommand`, so it must serve both modes and has to be decided **before**
-the panel work starts.
+So recreation is cheap in time and still wrong in kind. B16 then showed that
+for the *root* window the question is moot: eframe cannot re-create it at all,
+so the type is a permanent property of the process.
+
+B13 closed the last escape route: SKIP_TASKBAR cannot be obtained on a
+Normal-typed window by any message or flag on xfwm4 4.20.0. The type is the
+only lever, the type is permanent, therefore **one type must serve both the
+full window and the panel**. B14 then measured the proposed compromise
+(`Utility` + runtime `WindowLevel(AlwaysOnTop)`) and it passes on every point:
+on top of a fullscreen cube, after focus returns, after Alt+Tab, across five
+minutes idle, and still clickable.
+
+The remaining trade-off is recorded as such in `panel-design.md`: `Utility`
+makes the *full* window a `_NET_WM_WINDOW_TYPE_UTILITY` window for its whole
+life, which is not what a normal application window should be. B15 quantifies
+the cost: the window is still in `_NET_CLIENT_LIST` either way, so the EWMH
+consequence is limited to the type atom itself; the taskbar and Alt-Tab
+appearance is `NOT TESTED` because this XFCE session has no taskbar plugin.
 
 ## Two measurement errors, corrected
 
@@ -244,18 +316,30 @@ normal|dock|utility|toolbar|desktop` and `--override-redirect`. It sends
 it does **not** set the level in the builder, because that is the path B2
 showed to be ignored.
 
-To reproduce the Q7/Q8 experiments (B9–B12) — this is the probe that closed
-them:
+To reproduce the Q7/Q8 experiments (B9–B16):
 
 ```bash
-# Q7: runtime always-on-top over a fullscreen cube, held for 5 minutes
+# Q7 via panel_q78_probe: runtime always-on-top over a fullscreen cube
 cargo run --release --example panel_q78_probe -- --x 300 --y 700 --seconds 400
 
-# Q8: window types, and SKIP_TASKBAR by property write vs window type
-cargo run --release --example panel_q78_probe -- --x11-type dock      --skip-taskbar-prop
-cargo run --release --example panel_q78_probe -- --x11-type utility   --skip-taskbar-msg
+# Q8 window types and the two SKIP_TASKBAR routes (B10/B11)
+cargo run --release --example panel_q78_probe -- --x11-type dock     --skip-taskbar-prop
+cargo run --release --example panel_q78_probe -- --x11-type utility  --skip-taskbar-msg
 cargo run --release --example panel_q78_probe -- --override-redirect
+
+# Q8 the decisive test (B13): a real EWMH ClientMessage, then the control
+# that shows the message is sound and xfwm4 refuses it for Normal
+cargo run --release --example panel_b13_probe -- --b13 addremove --x11-type normal  --seconds 78
+cargo run --release --example panel_b13_probe -- --b13 add       --x11-type utility --seconds 14
+
+# Q7+Q8 combined, with a clickable widget (B14)
+cargo run --release --example panel_b13_probe -- --x11-type utility --seconds 420
 ```
+
+`panel_b13_probe` sends `WindowLevel(AlwaysOnTop)` once at runtime and draws a
+large click target so a click can be aimed reliably — the first attempt used
+a 46 pt-tall window and the button was clipped outside it, which is why the
+first click test reported zero clicks.
 
 To reproduce the fullscreen case, run the cube and toggle xfwm4's own
 fullscreen binding:
@@ -290,5 +374,11 @@ Under `probe/` on the agent's machine, not committed to the repository:
 | `b10_b11_matrix.sh` | **B10/B11** — window-type and override-redirect matrix, SKIP_TASKBAR routes |
 | `b11b_persist.sh` | **B11** — does the SKIP_TASKBAR property survive on normal vs dock |
 | `b12_recreate.sh` | **B12** — cost of recreating the window to change its type |
+| `b13_clientmessage.sh` | **B13** — real EWMH ClientMessage via x11rb, 60 s stability |
+| `b13_control.sh` | **B13** — the same message against four window types (the control that proves the message is sound) |
+| `b14_utility.sh` | **B14** — `Utility` + runtime AOT: fullscreen battery + interactivity |
+| `b14_click.sh` | **B14** — does a click on an egui widget inside the panel register |
+| `b15_taskbar.sh` | **B15** — `Normal` vs `Utility` in the client list, plus stills |
+| `b16_recreate.sh` | **B16** — can the root window be re-created / re-typed |
 | `watch_x11.sh` | generic PID-resolved X11 sampler |
 | `shot.sh` | `xwd` → downscaled PNG (ImageMagick absent) |
