@@ -229,73 +229,86 @@ coarse in practice.
 
 ---
 
-### ADR-1 amendment (from H1–H6) — mode switching stays in-process; the panel becomes a second native window
+### ADR-1 amendment (B9–B21) — one window, with an EWMH message; the second window is the fallback
 
-**The core decision is unchanged: mode switching is in-process, via
-`ViewportCommand`, on the existing GUI window.** What changed is where the
-*panel* lives. It is no longer a reshape of the root window; it is a second
-native window in the same process, created with
-`Context::show_viewport_immediate` and
-`ViewportBuilder::with_window_type(Utility)`.
+**The core decision is unchanged and is now the cheaper one: mode switching
+is in-process, on one long-lived window.** No second native window, no
+second GL surface, no tray re-targeting.
 
-**Why the amendment.** The earlier rounds concluded that the X11 window type
-was permanent (B16) and that Q8 required a `Utility` type, so the root had to
-be `Utility` too — which made the *main* GUI window a Utility window for its
-whole life. H5 removes that constraint: a child viewport gets its own window
-and its own type, so the root can stay `Normal`.
+**The change of plan, and why.** Three rounds have moved here, and the
+reasons are worth recording because the recommendation flipped twice:
 
-```
-root  "LapSphere"          NORMAL, _NET_WM_STATE empty       <- ordinary window
-child "LapSphere Panel"    UTILITY, SKIP_PAGER + SKIP_TASKBAR <- the panel
-```
+| Round | Recommendation | What changed it |
+| --- | --- | --- |
+| B9–B16 | type the **root** `Utility` for the whole process | the main GUI would be a `Utility` window for life — a cost we did not want |
+| H1–H5 | a **second native window** (Immediate child, `Utility`), root stays `Normal` | works, but brings a second GL surface and its own lifecycle |
+| **B18** | **one window**, root stays `Normal`, hide from the taskbar with an EWMH message | the cause of the earlier refusals turned out to be ours |
 
-Measured on xfwm4 4.20.0, no compositor: the child stays above a fullscreen
-cube through focus return, Alt-Tab both ways and 5 minutes idle; it is
-clickable; RSS is flat at ~105–107 MB with no window-count growth.
+**The design, concretely.**
 
-**What this costs, and it is not free:**
+* **Root window**: `Normal`, reshaped in place by `ViewportCommand`, as
+  originally intended.
+* **Entering panel mode**: `ViewportCommand::WindowLevel(AlwaysOnTop)` —
+  the **runtime** command, not the builder hint, which xfwm4 ignores (B9) —
+  plus an EWMH `_NET_WM_STATE` ClientMessage adding `SKIP_TASKBAR` and
+  `SKIP_PAGER`, sent **after the window has settled** and retried if the
+  read-back shows the atom is absent.
+* **Leaving panel mode**: REMOVE of both atoms, `WindowLevel(Normal)`.
 
-1. **A second native window and a second GL surface.** This is the original
-   objection to a second window and it stands. The WM now sees two windows for
-   one application, which affects alt-tab grouping and any WM task UI.
-2. **The child is a separate lifecycle.** Mode switching must explicitly show
-   and hide the child. Whether it keeps painting while the root is hidden is
-   `NOT TESTED` — `ViewportInfo::visible()` derives from
-   `minimized`/`occluded` and nothing here establishes a guarantee for a child.
-3. **The tray has to learn about two windows.** Today `TrayEvent::ShowWindow`
-   maps to the root's `Visible(true)` (`gui/src/app.rs:827`), which is the
-   wrong target in panel mode. `NOT TESTED`.
-4. **Taskbar / Alt-Tab appearance is `NOT TESTED`** — this host has no tasklist
-   plugin. `panel-owner-check.sh` exists for the owner to settle it by eye.
+**The numbers behind the recommendation** (xfwm4 4.20.0, no compositor):
 
-**Alternatives, with their measured status:**
+| | H5, second window | B18b, single window |
+| --- | --- | --- |
+| native windows / GL surfaces | 2 / 2 | **1 / 1** |
+| main window type | `Utility` (or a child) | **`Normal`, unchanged** |
+| tray target | must change | unchanged |
+| fullscreen stacking | measured: on top for 5 min idle | each half proven (B9 level, B18b atoms); **the combination is `NOT TESTED`** |
+| RSS over 20 switches | flat (H5 run) | **flat: 107 004 kB, window count constant at 5** |
+| reliability | proven over 5 min idle + Alt+Tab + focus return | 3/3 trials, stable at +0.5…+8 s; 20 switches |
+| extra risk | second window's lifecycle, GL, focus, taskbar | WM-specific message; needs retry logic |
 
-| Option | Status |
-| --- | --- |
-| Root window reshaped, type `Utility` for the process | worked (B14) but makes the main GUI a Utility window — **superseded by H5** |
-| Root window reshaped, type `Dock` | **rejected**: B10 measured that a Dock window takes no clicks, which breaks the panel's back button |
-| Message-based SKIP_TASKBAR on a Normal window | **`wmctrl` proves it works on xfwm4 4.20.0**, but our own x11rb message is refused and the root cause is unknown (see the open bug in Q8). Cheaper than H5 if solved: no second window. Worth one more attempt before committing to H5. |
-| Withdrawn-cycle re-read (H2) | **rejected**: the withdraw/re-show is clean, but the atoms do not survive to the re-show |
-| `WM_TRANSIENT_FOR` (H4), KDE switcher atom (H3) | **rejected**: no measurable effect on xfwm4 |
-| Separate process for the panel | **rejected**: breaks the single-instance guard and the shared tray; ADR-1's reason |
+The single window is recommended because it removes three whole categories of
+cost, and the one thing it does not have measured — the combined stacking
+behaviour — is a measurement, not a redesign.
 
-**Recommendation.** Implement H5, but first spend one short attempt on the
-message route, because `wmctrl` demonstrates it is achievable on this WM and
-H5 carries costs 2–4 above. If the message route cannot be made to work,
-H5 is the fallback and it is measured to work.
+**Implementation requirements this implies** (the app is not changed in this
+PR):
 
-**Always-on-top, unchanged.** B9/B14/H5 all agree: send
-`ViewportCommand::WindowLevel(AlwaysOnTop)` **once, after the window exists**.
-It holds indefinitely; no re-assertion, which would be a busy-wait against a
-game. `ViewportBuilder::with_window_level` is ignored by xfwm4, so a
-start-in-panel-mode path must still set the level on the first frame.
+1. The X window id is available without a new dependency: `eframe::Frame`
+   implements `HasWindowHandle` (`epi.rs:717`) and `Frame::window_handle()`
+   gives a `RawWindowHandle::Xlib`. Production code would add `x11rb` to
+   `gui/Cargo.toml` — it is already in `Cargo.lock` at 0.13.2 via `winit` and
+   `arboard`; the probes use it as a dev-dependency.
+2. The message must be sent after the first frames, not on frame 0. Measured
+   threshold on this WM: 0 ms and 50 ms fail, 100 ms+ works. **Do not
+   hard-code 100 ms** — send after the first frame, read back, retry once.
+3. `data.l[3] = 0`. Wine's comment says 1; xfwm4 4.20.0 refuses 1. Treat the
+   field as WM-specific and verify by read-back rather than by faith in
+   either source.
+4. The always-on-top level must be requested at runtime, on the first frame.
+   `ViewportBuilder::with_window_level` is ignored.
 
-**Unverified.** All of this is xfwm4 4.20.0 with **no compositor**. Whether
-mutter, kwin, GNOME or KDE behave the same — for the window-type rule, for
-the runtime `WindowLevel`, and for whether a child viewport stays above a
-fullscreen game — is `NOT TESTED`. A compositor would most likely honour the
-startup hint, making the always-on-top part moot, which remains the strongest
-reason to ask whether the owner runs one.
+**The fallback, if the message route misbehaves elsewhere.** H5's second
+window is fully measured and works: the child viewport is `Utility` and
+keeps `SKIP_TASKBAR`+`SKIP_PAGER` from the type alone, no message needed. If
+the message route turns out to be unreliable on a WM we cannot test, H5 is
+the design to fall back to, and its costs are the ones tabulated above.
+
+**Always-on-top, unchanged throughout.** B9, B14 and H5 all agree: send
+`WindowLevel(AlwaysOnTop)` once, after the window exists. It held
+indefinitely — 5 minutes idle, focus return, Alt+Tab — with no
+re-assertion, which would have been a busy-wait running against a game.
+
+**What remains `NOT TESTED`.** All of this is **xfwm4 4.20.0 with the
+compositor OFF**. B21 could not obtain a compositing session at all: Xvfb
+offers the Composite extension but xfwm4 refuses it with
+`Unsupported GL renderer (llvmpipe)`, and the live session's setting only
+takes effect at the next WM start. A compositor would most likely change
+both the always-on-top result and the fps result — without one, a
+fullscreen window is unredirected, which is the easy case for an overlay.
+Whether mutter, kwin, GNOME or KDE honour `data.l[3]=0`, and with what
+timing, is `NOT TESTED`. Commands for the owner are in
+`docs/development/tools/README.md`.
 
 ---
 
@@ -321,7 +334,7 @@ listed here so they are not lost:
 | # | Criterion | Status |
 | --- | --- | --- |
 | 7 | The panel must stay visible **above a borderless-fullscreen game** — the primary use case. | **SOLVED on xfwm4 4.20.0 without a compositor (B9/B14), and confirmed for the H5 child viewport**: the `Utility` child stayed on top through a fullscreen cube, focus return, Alt+Tab both ways and 5 min idle, while the root stayed `Normal`. (B9/B14 detail: (fullscreen cube, focus return, click on the cube, Alt+Tab both ways, 5 min idle — all `PANEL-ON-TOP`; 0.3% CPU). Also established in B9: With a genuine fullscreen cube (2560x1440@0,0) the panel stayed on top through focus return to the cube, a click on the cube, Alt+Tab away and back, and **5 minutes idle** — with a single runtime `ViewportCommand::WindowLevel(AlwaysOnTop)` and **no re-assertion**. B2's failure was entirely the *startup* path: `with_window_level()` is ignored, the runtime command is honoured. |
-| 8 | The panel must not appear in the taskbar / window switcher. | **SOLVED on xfwm4 4.20.0 by H5 — two windows in one process.** The **child** viewport is `Utility`, so xfwm4 grants `SKIP_TASKBAR`+`SKIP_PAGER` (measured); the **root** stays `_NET_WM_WINDOW_TYPE_NORMAL` with empty `_NET_WM_STATE`, so the main window is an ordinary window. Also measured: `_KDE_NET_WM_STATE_SKIP_SWITCHER` and `WM_TRANSIENT_FOR` have no effect (H3, H4), and the withdrawn-cycle trick does not help (H2). **Caveat: B13/H1's message-based route failed in *our* implementation while `wmctrl` succeeded — see the open bug below; a message-based solution may still exist.** |
+| 8 | The panel must not appear in the taskbar / window switcher. | **SOLVED on xfwm4 4.20.0 by B18 — a single window, message sent after it settles.** ADD of `SKIP_TASKBAR`+`SKIP_PAGER` via an EWMH `ClientMessage` with `data.l[3]=0` is honoured on a **Normal**-type window: 3/3 trials, stable at +0.5…+8 s; 20 alternating switches with constant window count and RSS. The earlier "refused by type" conclusion was our own bug. Control that mattered: `wmctrl` on the same window, not a Utility window. The **child** viewport is `Utility`, so xfwm4 grants `SKIP_TASKBAR`+`SKIP_PAGER` (measured); the **root** stays `_NET_WM_WINDOW_TYPE_NORMAL` with empty `_NET_WM_STATE`, so the main window is an ordinary window. Also measured: `_KDE_NET_WM_STATE_SKIP_SWITCHER` and `WM_TRANSIENT_FOR` have no effect (H3, H4), and the withdrawn-cycle trick does not help (H2). **Caveat: B13/H1's message-based route failed in *our* implementation while `wmctrl` succeeded — see the open bug below; a message-based solution may still exist.** |
 
 ---
 
@@ -514,100 +527,85 @@ kwin behave the same is `NOT TESTED`. A compositor would likely honour the
 startup hint and make the whole question moot, which is a further reason to
 ask whether the owner runs one.
 
-**Q8 — RESOLVED on xfwm4 4.20.0 by H5: the panel is a second native window,
-so the main window does not have to be a `Utility` window.**
+**Q8 — RESOLVED on xfwm4 4.20.0, and the answer is now the cheap one: a
+single window, with an EWMH message sent after the window has settled.**
 
-The previous round accepted a permanent `Utility` type for the whole process
-and paid for it with the main window. H5 removes that cost.
+This supersedes both earlier answers. B18 traced the two clients byte for
+byte and found the cause.
 
-**The working design.** One process, two native windows:
+**The root cause.** Our message was well-formed; it was being refused for
+two reasons, both ours:
 
-```
-root  "…LapSphere"          _NET_WM_WINDOW_TYPE_NORMAL, _NET_WM_STATE empty
-child "LapSphere Panel"      _NET_WM_WINDOW_TYPE_UTILITY,
-                             _NET_WM_STATE = SKIP_PAGER, SKIP_TASKBAR, ABOVE
-```
+1. `data.l[3]` must be **0**, not 1. Wine's source comment calls that field
+   "source: application" = 1, and B13/H1 sent 1 — and were refused on every
+   attempt. `wmctrl` sends 0 and is accepted. Decoded from `strace -x` on the
+   X socket: every other byte of the two SendEvent requests was identical
+   (opcode 25, `propagate=0`, destination = root, mask `0x00180000`, window =
+   target, format 32, one atom per message, `l[0]=1`, `l[1]` the same atom
+   `430`).
+2. **Timing is the blocker.** With `l[3]=0` the message is still refused when
+   sent on the first frame, and is accepted from about **100 ms** onward.
+   Measured: 0 ms and 50 ms fail (3/3), 100/150/200/300 ms work (200 ms
+   repeated 3/3). The reading — a reading, not a proven mechanism — is that
+   xfwm4 ignores a `SubstructureRedirect` `ClientMessage` for a window it has
+   not finished managing. **Do not hard-code 100 ms**: send after the first
+   frame and retry.
 
-The root is the existing GUI, unchanged in every respect that matters. The
-child is created with `Context::show_viewport_immediate` and a
-`ViewportBuilder::with_window_type(Utility)`; egui gives it its own native
-window and its own GL surface. Measured on xfwm4 4.20.0 without a compositor,
-this satisfies all four of the owner's goals simultaneously:
+So the design is back to a single window:
 
-| Goal | Result |
-| --- | --- |
-| (a) out of the taskbar and window switcher | child is Utility → `SKIP_TASKBAR` + `SKIP_PAGER` present |
-| (b) above a fullscreen game | on top through a fullscreen cube, focus return, Alt+Tab both ways, 5 min idle |
-| (c) clickable | `CHILD-CLICK registered`; focus moved from the game to the panel |
-| (d) the full-size GUI stays an ordinary window | root keeps `NORMAL` and empty `_NET_WM_STATE` |
+* **enter panel mode** — `ViewportCommand::WindowLevel(AlwaysOnTop)` (B9: the
+  runtime command works, the builder hint is ignored) plus ADD of
+  `SKIP_TASKBAR` and `SKIP_PAGER`, sent once the window has settled.
+* **leave panel mode** — REMOVE of both, and `WindowLevel(Normal)`.
 
-Overhead measured: RSS flat at ~105–107 MB across the 5-minute run (the
-single-window probes sat at the same level), CPU 1.6–4.1 %, and
-`_NET_CLIENT_LIST` stable at 9 windows from start to finish — no window or GL
-leak.
+**B18b measured it** (3 fresh-window trials, atoms sampled at +0.5/1/2/4/8 s;
+then 20 alternating switches): the atoms appeared and stayed at every sample
+in 3/3 trials; `_NET_CLIENT_LIST` constant at 5 windows and **RSS constant at
+107 004 kB** across the switches — no window or memory growth.
 
-**The trade-offs, named:**
+**What H5 taught us that still applies.** The child-viewport approach also
+works (H5: 3/3, on top of a fullscreen cube through 5 min idle, clickable,
+RSS flat). It is no longer *needed*, because the message route removes the
+reason it existed. It stays in the record as the fallback if the message
+route proves unreliable on a WM we cannot test.
 
-* A **second native window and a second GL surface**. This was the original
-  objection to a second window in ADR-1 and it is real: one more window to
-  track, and the WM sees two windows per application. Measured memory did
-  not grow, but that is one host and one run.
-* **The child must be explicitly shown/hidden** with the mode, rather than
-  following the root automatically. Whether the child keeps painting while
-  the root is hidden is `NOT TESTED` — `ViewportInfo::visible()` is derived
-  from `minimized`/`occluded` (panel-spike §1б) and a child viewport has no
-  measured guarantee here.
-* **Tray interaction has to be re-pointed** at whichever window is live; the
-  current tray maps `ShowWindow` to the root's `Visible(true)`, which is now
-  the wrong window in panel mode. Not measured.
-* Taskbar and Alt-Tab appearance is **`NOT TESTED`** on this host (no tasklist
-  plugin). `docs/development/panel-owner-check.sh` exists so the owner can
-  settle it by eye.
+**Open, and the first thing to measure when the panel work starts:** the
+**combination** — one window that is simultaneously always-on-top and
+skip-taskbar, above a fullscreen cube. The two halves are each proven
+(B9 for the runtime level, B18b for the atoms); their combination over a
+fullscreen game is `NOT TESTED`. Everything else about the single-window
+route is already measured.
 
-**What was tried and did not work** (all measured, all on xfwm4 4.20.0):
+**Caveat that applies to any WM.** The `l[3]=0` and the settle-timing
+findings are **xfwm4 4.20.0 observations**. Another WM may accept `l[3]=1`,
+or require a different delay. The implementation should therefore treat the
+message as best-effort: send it, read back `_NET_WM_STATE` after a short
+delay, and retry once if the atom is absent. That makes the design
+self-correcting on WMs where our specific request is not honoured, and costs
+nothing where it is.
 
-* **H1 — the Wine-exact ClientMessage** on a Normal window: refused at every
-  sample from +5 ms to +10 s, across four variants (`l[3]` 0/1, second atom
-  packed or not, both send masks). **But see the open bug below — this is a
-  statement about our message, not about xfwm4.**
-* **H2 — the withdrawn cycle**: `Visible(false)` really does withdraw (30
-  `Withdrawn` samples at 50 ms) and re-show cleanly, no flash, position and
-  focus preserved — but writing `_NET_WM_STATE` while withdrawn does not
-  survive to the re-show.
-* **H3 — `_KDE_NET_WM_STATE_SKIP_SWITCHER`**: no effect. A KDE-private atom;
-  xfwm4 does not implement it.
-* **H4 — `WM_TRANSIENT_FOR` to a hidden owner**: no effect; the window stayed
-  in `_NET_CLIENT_LIST` and still took focus. Weakened by the owner window
-  being `0` rather than a real 1×1 window (x11rb 0.13's `create_window` was
-  not usable here).
-* **H6 — `WM_CLASS`, `WM_HINTS`, `_MOTIF_WM_HINTS`**: no "skip taskbar" meaning
-  for xfwm4. Multi-type `_NET_WM_WINDOW_TYPE` lists were not tested; egui
-  exposes a single `X11WindowType`, not a list.
+**Other routes, all measured and all rejected on xfwm4 4.20.0:**
 
-**Open bug — our ClientMessage is wrong, `wmctrl`'s is not.** `wmctrl 1.07`
-turned out to be present on this host (it was absent and uninstallable in the
-previous round; a package change made it available). Running it against the
-same Normal window: `wmctrl -b add,_NET_WM_STATE_SKIP_TASKBAR` **works** —
-present at +0.5 s, +2 s, +10 s, and removable — while our x11rb message on the
-same window is refused. So **xfwm4 does honour a correct message on a Normal
-window, and the earlier "xfwm4 refuses by type" conclusion was wrong**; what
-is refused is our specific message, whose root cause is not yet identified.
+* **H2** — withdrawn cycle: `Visible(false)` genuinely withdraws (30
+  `Withdrawn` samples at 50 ms) and re-shows cleanly, no flash, position
+  preserved — but atoms written while withdrawn do not survive to the re-show.
+* **H3** — `_KDE_NET_WM_STATE_SKIP_SWITCHER`: no effect (KDE-private atom).
+* **H4** — `WM_TRANSIENT_FOR` to a hidden owner: no effect; still in
+  `_NET_CLIENT_LIST`, still took focus. Weakened by the owner being `0`
+  rather than a real 1x1 window.
+* **H6** — `WM_CLASS`, `WM_HINTS`, `_MOTIF_WM_HINTS`: no skip-taskbar
+  meaning. Multi-atom `_NET_WM_WINDOW_TYPE` lists not tested; egui exposes a
+  single `X11WindowType`.
 
-This matters for the design: **a message-based solution may well exist**, which
-would be simpler than H5 (no second window). It is not available today because
-we cannot send the message. Before committing to H5's second window, the
-cheaper option is to root-cause the message — and in production code the
-immediate workaround is to shell out to the same call `wmctrl` makes, or to
-copy its framing.
-
-Dependency note: the raw X window id needs **no new runtime dependency** —
+**Dependency note.** The raw X window id needs **no new runtime dependency**:
 `eframe::Frame` implements `HasWindowHandle` (`epi.rs:717`) and
 `Frame::window_handle()` yields a `RawWindowHandle::Xlib` whose `.window` is
-the X id. `raw-window-handle 0.6` and `x11rb 0.13` are **dev-dependencies of
-the throwaway probes only**. For anyone porting the probe: in x11rb 0.13 the
-client data is `From<[u32; 5]>`, not `[u32; 8]`, and `ClientMessageEvent` has
-no `event_mask` field — the mask belongs to `send_event`, which is why EWMH
-messages go to the root window.
+the X id. For production, add `x11rb` to `gui/Cargo.toml` (it is already in
+`Cargo.lock` at 0.13.2, via `winit` and `arboard`; `raw-window-handle` and
+`x11rb` are currently dev-dependencies of the probes only). Porting notes for
+anyone doing so: in x11rb 0.13 the client data is `From<[u32; 5]>`, not
+`[u32; 8]`, and `ClientMessageEvent` has no `event_mask` field — the mask
+belongs to `send_event`, which is why EWMH messages go to the root window.
 
 
 ---
@@ -634,36 +632,47 @@ One commit each. No code in this PR.
    `RefreshCoordinator::UpdateInterval` to park unselected components at a
    long interval (or add a pause/unregister). Never poll `logs` in panel
    mode. *Prerequisite: step 3; needs the pause mechanism.*
-6. **Window switching, H5 shape:** the panel becomes a **second native
-   window** via `Context::show_viewport_immediate` with
-   `with_window_type(Utility)`; the root stays `Normal` and is reshaped in
-   full mode. Mode switching shows/hides the child; the root keeps its own
-   geometry. Plus mode and position persistence (X11) with clamping against
-   monitor size (ADR-1) and a no-op-tolerant path for Wayland (ADR-3).
-   Things this step must get right, all measured:
-   * The **child** is `Utility`; the **root** is never re-typed (H5; B16
-     showed the root cannot be re-typed at all).
-   * Always-on-top is requested with
-     `ViewportCommand::WindowLevel(AlwaysOnTop)` on the **first frame**,
-     not in the builder — the builder hint is ignored by xfwm4 (B9/B14).
-   * The child's own show/hide, and the tray's `ShowWindow`, must target the
-     right window (`gui/src/app.rs:827` currently targets the root). **Both
-     `NOT TESTED`.**
-   * Before committing to the second window: spend one attempt on the
-     message route, since `wmctrl` proves it works on xfwm4 4.20.0 and our
-     message is refused for an unknown reason (Q8 open bug).
+6. **Window switching, single-window shape (B18b):** the root stays
+   `Normal` and is reshaped in place. Entering panel mode sends
+   `ViewportCommand::WindowLevel(AlwaysOnTop)` **at runtime** plus an EWMH
+   `ClientMessage` adding `SKIP_TASKBAR`+`SKIP_PAGER`; leaving sends REMOVE
+   and `WindowLevel(Normal)`. Plus mode and position persistence (X11) with
+   clamping against monitor size (ADR-1) and a no-op-tolerant path for
+   Wayland (ADR-3). Things this step must get right, all measured:
+   * The message is sent **after the first frames, not on frame 0** — 0 ms
+     and 50 ms fail, 100 ms+ works (B18d). Send, read back, retry once; do
+     not hard-code the threshold.
+   * `data.l[3] = 0` (B18). Verify by read-back rather than trusting either
+     Wine's comment or ours.
+   * Always-on-top goes through the **runtime** `ViewportCommand`, never the
+     builder hint, which xfwm4 ignores (B9/B14).
+   * **First measurement to run:** the *combination* over a fullscreen game —
+     one window that is both always-on-top and skip-taskbar. Each half is
+     proven; the combination is `NOT TESTED`.
+   * Fallback if the message proves unreliable: H5's second window, fully
+     measured, at the costs tabulated in the ADR-1 amendment.
    *Prerequisite: steps 3-5.*
 7. **README section** describing panel mode, the element list, and the
    Wayland caveats. *Prerequisite: step 6.*
 
+**One change to step 1, justified by the spike, not by B19.** B19's CPU
+columns are inconclusive (a debug build, no true idle baseline — see the B19
+section), so the argument for changing the repaint policy is the measured
+**latency**, not a CPU saving: the only repaint request is
+`request_repaint_after(500ms)`, and update→draw latency measured
+**min 0.1 / avg 222 / max 484 ms** with the window visible. Requesting a
+repaint on data arrival fixes that and, as a side effect, removes the
+periodic wakeups. Whether it also reduces CPU enough to matter for a game is
+`NOT TESTED` here and needs the B20 tooling on a real title.
+
 Steps 1 and 2 are independent of the panel and could ship on their own.
 
-**Step 0, revised:** the earlier version asked for a window-type decision up
-front, because the type was permanent for the process (B16). Under H5 that
-constraint is lifted for the *root*: the panel's type lives on the child
-viewport, created and destroyed with the mode. What remains a one-time
-decision is whether to use H5's second window at all, or first try to fix the
-EWMH message — see Q8 and the open bug there.
+**Step 0, now settled:** the window type is no longer a decision. B18 found
+why the message was refused, and a single `Normal` root window with a
+best-effort EWMH message satisfies every goal. The only remaining step-0
+question is whether to keep H5's second-window implementation as a fallback;
+the recommendation is to do so, since it is already measured and costs
+nothing until used.
 Steps 3-6 are one feature; splitting them further would ship a mode that
 draws but does not switch, or switches but does not poll.
 
@@ -704,6 +713,15 @@ this document are **xfwm4 4.20.0, X11, no compositor**
   window, because x11rb 0.13's `create_window` was not usable here.
 * **Multi-atom `_NET_WM_WINDOW_TYPE`** (e.g. `[UTILITY, NORMAL]`) and atom
   ordering: not tested; egui exposes a single `X11WindowType`, not a list.
+* **The single-window stacking combination**: one window that is both
+  runtime always-on-top *and* skip-taskbar, above a fullscreen game. B9
+  proves the level, B18b proves the atoms, neither proves them together.
+* **`data.l[3]` on other WMs.** 0 is what xfwm4 4.20.0 accepts; Wine's
+  comment says 1. Whether mutter, kwin, GNOME or KDE want 0, 1, or ignore
+  the field is `NOT TESTED` — which is why the implementation must verify by
+  read-back and retry rather than hard-code the byte.
+* **The settle delay on other WMs.** ~100 ms is where it started working on
+  this host, with this WM, at these window sizes. Not a general threshold.
 * **The root cause of our ClientMessage being refused while `wmctrl`'s is
   accepted.** Unresolved; see the open bug in Q8.
 * From earlier rounds, still open: keyboard pass-through; hot-reload of font

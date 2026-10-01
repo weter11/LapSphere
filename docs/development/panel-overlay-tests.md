@@ -1,15 +1,25 @@
-# Panel overlay tests (B1–B8)
+# Panel overlay tests (B1–B21)
 
 Live behaviour of a gkrellm-style panel drawn over another application's
-window, measured on X11.
+window, measured on X11 with **xfwm4 4.20.0 and the compositor off**.
 
-**Status: complete for the X11 matrix. Wayland is `NOT TESTED` on this host** —
-no Wayland session, no compositor, no nested compositor, no passwordless
-sudo. Nothing below is extrapolated to mutter, kwin, GNOME or KDE.
+**Status: the X11 / xfwm4 matrix is covered. Wayland is `NOT TESTED`** — no
+Wayland session on this host, no nested compositor, no passwordless sudo.
+**A compositing session is also `NOT TESTED`**: B21 could not obtain one
+(Xvfb offers the extension, but xfwm4 refuses it on a software renderer).
+Nothing here is extrapolated to mutter, kwin, GNOME, KDE, or to a composited
+session — and since compositing is the *harder* case for an overlay, the
+fps and stacking results here are optimistic.
+
+The headline: **B18 found the root cause of the EWMH message that an earlier
+round blamed on the window manager.** A single `Normal` window can be removed
+from the taskbar at runtime on this WM, which is cheaper than the second
+native window H5 used.
 
 Companion documents: [`panel-spike.md`](./panel-spike.md) (frame delivery and
 `ViewportCommand` behaviour), [`panel-design.md`](./panel-design.md) (design
-decisions and acceptance criteria).
+decisions and acceptance criteria), [`tools/`](./tools/) (frametime tooling
+and the owner-side measurement recipe).
 
 ## Test environment
 
@@ -19,7 +29,8 @@ window manager and are not generalised.
 | Property | Value |
 | --- | --- |
 | Window manager | **xfwm4 4.20.0** (revision unknown), Xfce 4.20 |
-| Compositor | **none** — `xprop -root _NET_WM_COMPOSITING` → *no such atom* |
+| Compositor | **OFF** — `xprop -root _NET_WM_COMPOSITING` → *no such atom* |
+| Every result below | **xfwm4 4.20.0, X11, compositor OFF.** Not generalised to any other WM or to a composited session (B21 could not obtain one here) |
 | Session | `XDG_SESSION_TYPE=x11`, `DISPLAY=:0.0`, XFCE, no taskbar in session |
 | Display | 2560x1440, scale factor **1.771** (egui reports 1445.6 x 813.2 points) |
 | GL renderer | `AMD Radeon Graphics (radeonsi, renoir, ACO, DRM 3.64)` — `glxinfo -B` reports `Accelerated: yes` |
@@ -93,6 +104,14 @@ Reference colours used for pixel assertions:
 | **H4** | `WM_TRANSIENT_FOR` to a hidden 1x1 owner, as Wine does for windows with an owner | `xprop -f WM_TRANSIENT_FOR 32a -set` on a Normal window | **No effect on visibility.** With `WM_TRANSIENT_FOR = 0` set: `_NET_WM_STATE` still `ABOVE, FOCUSED`, still **in** `_NET_CLIENT_LIST`, and the window **still took focus** on appear. Note the test is weakened: the owner window could not be created through the x11rb 0.13 API, so `0` (None) was used rather than a real 1x1 window; a real owner might behave differently. `ov/h4.probe.log` |
 | **H5** | panel as an **Immediate child viewport** with type Utility, root stays Normal | two windows of one PID enumerated separately; fullscreen battery + click test + 5 min idle | **WORKS, and it satisfies all four of the owner's goals.** One process, two native windows: `85983235` name `H5Root` type **`_NET_WM_WINDOW_TYPE_NORMAL`**, `_NET_WM_STATE` **empty**; `85983242` name `PanelChild` type **`_NET_WM_WINDOW_TYPE_UTILITY`**, `_NET_WM_STATE` = **`SKIP_PAGER, SKIP_TASKBAR, ABOVE, FOCUSED`**. Child stayed `CHILD-ON-TOP` after a genuine fullscreen cube, after focus returned to the cube, and through Alt+Tab both ways and **5 minutes idle**; RSS flat at ~105–107 MB; CPU 1.6–4.1 %. Child **clickable**: `CHILD-CLICK registered` ×3, focus moved to `PanelChild`. Window count stable at 9 — no leak over the run. `ov/h5_child.log` |
 | **H6** | other levers: `WM_CLASS`, `WM_HINTS`, `_MOTIF_WM_HINTS`, `WM_NAME`, `_NET_WM_WINDOW_TYPE` ordering | `xprop` on a Normal window | **Nothing further.** `WM_CLASS = ("panel_h_probe","panel_h_probe")`, `WM_HINTS: not found`, `_MOTIF_WM_HINTS = 0x2,0x0,0x0,0x0,0x0`, `_NET_WM_WINDOW_TYPE = NORMAL`. None of these carry a "skip taskbar" meaning for xfwm4; the only lever is the window type. Multi-type lists were **not** tested (egui exposes `X11WindowType` as a single enum, not a list). |
+
+| **B18** | **root cause of the refused ClientMessage**, by byte-level diff of the two clients | `strace -f -x -s 512 -e trace=write,writev,sendto,sendmsg` on `/tmp/.X11-unix/X0` for both `wmctrl` and our probe, then decode of the SendEvent (opcode 25) and its 32-byte ClientMessage; window id cross-checked three ways | **FOUND: the message was correct; it was sent too early.** The two wire requests were byte-identical except `data.l[3]` (and the window id, which differed only because the two traces came from different runs). `data.l[3]=0` — wmctrl's value, not Wine's documented `1` — is what xfwm4 4.20.0 accepts. With `l[3]=0` the request is still refused **when sent on the first frame**, and accepted from **~100 ms** onwards. Threshold measured: 0 ms and 50 ms fail (3/3 each), 100/150/200/300 ms work; 200 ms repeated 3/3. Dump: `wmctrl data.l=[1,430,0,0,0]` vs `ours data.l=[1,430,0,1,0]`, every other byte equal (opcode 25, `propagate=0`, dest = root `0x543`, mask `0x00180000`, window = target, format 32, one atom per message). Artifacts: `probe/ov/b18/*.strace`, `wmctrl.strace`, `probe.strace`, `timing.log` |
+| **B18** | the brief's other candidate causes, explicitly excluded | per-candidate check | **Excluded, with evidence:** (a) missing `flush()` — we call it and the same connection's atoms arrive; (b) `window` field = root instead of target — our dump shows the target id; (c) reparent wrapper id instead of the client window — `xdotool --pid`, `--name` and `wmctrl -l` all report the same id, `0x03000003`, so no wrapper is involved; (d) atom interned on another connection or `only_if_exists=true` — atom `430` is identical in both dumps, and both clients intern with `only_if_exists=false`; (e) wrong `data.l` order — all five words decoded and compared; (f) **sent before the first frame — this one was true**, and is the cause |
+| **B18b** | single-window prototype: root `Normal`, panel mode = runtime `WindowLevel(AlwaysOnTop)` + ADD/REMOVE of SKIP_TASKBAR/SKIP_PAGER | 3 fresh-window trials, atoms sampled at +0.5/1/2/4/8 s; then 20 alternating ADD/REMOVE watching atoms, window count and RSS | **Works.** In 3/3 trials the atoms appeared and stayed at every sample. 20 alternating switches: `_NET_CLIENT_LIST` constant at 5, **RSS constant at 107 004 kB**, atoms present after 17/20 switches (3 read-backs lost the race with a back-to-back remove/add, see the note below). This is the single-window design: one process, one window, one GL surface, no tray re-targeting. `probe/ov/b18/single_repeat.log` |
+| **B18b** | the 3/20 "absent" read-backs | re-run with a single toggle and a settle delay | **Measurement artifact, not a failure.** The loop issued REMOVE then ADD with no gap and read immediately; xfwm4 processes the queue asynchronously. With one toggle per read and a settle, 3/3 trials pass at every sample point. Recorded because the first pass looked like a 15% failure rate |
+| **B19** | panel CPU and wakeups, root-window vs child viewport, across data rates and repaint policies | `%CPU` from `utime+stime` in `/proc/<pid>/stat`, context switches from `/proc/<pid>/status`, RSS; 45 s per state, three passes | **INCONCLUSIVE — see the B19 section.** RSS is flat at ~107–108 MB in every state, so the second native window costs no memory; the CPU and scheduling columns do **not** support a conclusion (a debug build, no true idle baseline, and `chrt -i 0` reading *higher* than normal). Two earlier passes were invalid and are recorded as measurement errors |
+| **B20** | frametime tooling | `docs/development/tools/frametime_stats.py`, stdlib only, `--self-test` | **Done.** Single-file stats (frames, avg fps, median/mean/stddev, p95/p99/p99.9, 1% low two ways, 0.1% low two ways, frames >2x median and >33.3 ms), `--compare` with per-metric better/worse and a noise floor from repeated baselines, and a self-test that caught two wrong test expectations and one wrong "fix". `gui/examples/frametime_probe.rs` generates CSV frame times for A/B. The self-test's own catch is recorded as a measurement error |
+| **B21** | a compositing session | Xvfb with `+extension COMPOSITE`, then a second `xfwm4 --compositor=on` on it with a private `dbus-run-session` | **NOT AVAILABLE — and the reason is specific.** Xvfb offers the Composite *extension*, but xfwm4 refuses to turn compositing on with it: `xfwm4-WARNING: Unsupported GL renderer (llvmpipe (LLVM 21.1.8, 256 bits))`. The WM then does not manage the display (`_NET_CLIENT_LIST: not found`) and never sets `_NET_WM_COMPOSITING`. On the main session the setting `xfconf-query -c xfwm4 -p /general/use_compositing` already reads `true` while the running WM has it **off** — the value only takes effect at the next xfwm4 start. So every result in this document is the **harder, no-compositor case**. Owner commands are in `docs/development/tools/README.md` |
 
 | A2.4 absent data shows `—` in reserved width, window does not resize | **WORKS in the demo.** The synthetic producer drops the dGPU fields on every 5th snapshot and WiFi on every 7th; the panel renders `—` and the window geometry was unchanged across the run (584x81 for the whole session) | synthetic data mode + `xdotool` geometry sampled throughout; window size in the demo is computed only from the config, never from data |
 
@@ -273,41 +292,29 @@ Costs, stated rather than glossed over:
   plugin in this session. `panel-owner-check.sh` exists so the owner can
   settle it by eye.
 
-## Open bug: our ClientMessage is wrong, wmctrl's is not
+## Our ClientMessage was wrong — RESOLVED, see B18
 
-This is recorded because it changes what the H1 result means.
+**This section is superseded.** It is kept as a record of the state of
+knowledge between the H1 and B18 rounds, because the reasoning error it
+describes is the one most likely to be repeated.
 
-`wmctrl 1.07` **is** present on this host — contrary to B13's note that it was
-absent and uninstallable. It became available during this round (a package
-change outside our control), which is exactly the cross-check the earlier round
-said it needed. The result is the opposite of what B13 concluded:
+`wmctrl 1.07` **is** present on this host — contrary to B13's note that it
+was absent and uninstallable. It became available during the H1 round (a
+package change outside our control), which is exactly the cross-check the
+earlier round said it needed. The result was the opposite of what B13
+concluded: `wmctrl -b add,_NET_WM_STATE_SKIP_TASKBAR` works on a
+Normal-type window, our x11rb message does not, and the same binary on the
+same window proves it is not a property of the window.
 
-* `wmctrl -i -r <win> -b add,_NET_WM_STATE_SKIP_TASKBAR` **works on a
-  Normal-type window** — added within 0.5 s, still present at +2 s and +10 s,
-  and removable with `-b remove`.
-* Our x11rb message, on the same window in the same session, is **refused**.
+At that point the conclusion recorded was "xfwm4 refuses by type, and a
+message-based solution may still exist". **B18 then found the actual cause**
+(`data.l[3] = 0`, not 1 — and, decisively, the message must be sent after
+the window has settled rather than on the first frame). See
+"the root cause, and what it corrects" below.
 
-So xfwm4 4.20.0 **does** honour a well-formed request on a Normal window, and
-B13's "xfwm4 refuses by type" conclusion is **wrong** — what is actually
-refused is *our specific message*. Four variants were tested and all fail:
-`l[3]` = 0 and 1, second atom packed into `l[2]` or not, and both send-event
-masks (`SubstructureRedirect|SubstructureNotify` and wmctrl's
-`SubstructureNotify`). The root cause is **not yet identified**; the remaining
-candidates are the byte framing or the request sequencing, and this probe does
-not yet have a root cause.
-
-Consequences:
-
-* **H1 stands as a negative result about our implementation, not about
-  xfwm4.**
-* **Q8 may well be solvable without changing the window type** — wmctrl
-  proves a Normal window can be hidden from the taskbar by message alone on
-  this WM. It is not solved yet, because we cannot send the message.
-* The control in every H1 run (a Utility window) was never the real control;
-  **wmctrl was.** Controls should have been run from the start.
-
-Recorded as a fifth measurement error: the earlier rounds asserted a WM
-behaviour ("refused by type") from a failure whose cause was in our own code.
+The lasting lesson from this stretch is recorded in the error list: the
+Utility control used throughout H1 was never the right control. **wmctrl
+was**, and it was sitting on the host the whole time.
 
 ## The H2 result in one line
 
@@ -315,6 +322,161 @@ behaviour ("refused by type") from a failure whose cause was in our own code.
 50 ms), and `Visible(true)` re-maps it with no geometry change, no position
 loss and no visible flash — but writing `_NET_WM_STATE` while withdrawn does
 not help, because the atoms never survive to the re-show. **Not a workaround.**
+
+## B18: the root cause, and what it corrects
+
+**The message was never wrong. It was sent too early.**
+
+Both clients were traced on the X socket with
+`strace -f -x -s 512 -e trace=write,writev,sendto,sendmsg` (no `xtrace` or
+`xscope` on this host), and the SendEvent requests decoded. The window id was
+cross-checked three ways first — `xdotool --pid`, `xdotool --name` and
+`wmctrl -l` all report `0x03000003`, so no reparent wrapper is involved.
+
+```
+wmctrl   19 000b 00430500 00001800  |  21 20 0000 03000003 a6010000
+probe    19 000b 00430500 00001800  |  21 20 0000 03000003 a6010000
+         ^opcode ^len  ^root  ^mask   ^code^fmt ^window  ^msgtype
+probe data.l[0..4] = [1, 430, 0, 1, 0]     <-- the ONLY differing bytes
+wmctrl data.l[0..4] = [1, 430, 0, 0, 0]
+                            ^^^^
+```
+
+So:
+
+| field | wmctrl | our probe (before) | matched |
+| --- | --- | --- | --- |
+| opcode / length | 25 / 11 words | 25 / 11 words | yes |
+| propagate | 0 | 0 | yes |
+| destination | root `0x543` | root `0x543` | yes |
+| event mask | `0x00180000` | `0x00180000` | yes |
+| event code | 33 (no `0x80`) | 33 (no `0x80`) | yes |
+| format | 32 | 32 | yes |
+| **window** | target | target | yes |
+| message_type | 422 (`_NET_WM_STATE`) | 422 | yes |
+| `data.l[0]` action | 1 (ADD) | 1 (ADD) | yes |
+| `data.l[1]` atom | 430 | 430 | yes |
+| `data.l[2]` | 0 | 0 | yes |
+| **`data.l[3]`** | **0** | **1** | **no** |
+| `data.l[4]` | 0 | 0 | yes |
+
+Two findings came out of this.
+
+**1. `data.l[3]` is 0, not 1.** Wine's comment describes `l[3]` as
+"source: application" = 1, and B13/H1 sent 1 — and were refused. `wmctrl`
+sends 0 and is accepted. The field is not understood; what matters is that
+xfwm4 4.20.0 rejects the request when it is non-zero. Fixing it alone is
+**not** sufficient, which is finding 2.
+
+**2. Timing is the actual blocker.** With `l[3]=0` the message is still
+refused when sent on the first frame, and is accepted from about 100 ms
+onwards:
+
+| send delay | result |
+| --- | --- |
+| 0 ms | failed (3/3) |
+| 50 ms | failed |
+| 100 ms | **works** |
+| 150 / 200 / 300 ms | **works** (200 ms repeated 3/3) |
+
+The plausible reading — and it is a reading, not a proven mechanism — is that
+xfwm4 ignores a `SubstructureRedirect` `ClientMessage` for a window it has
+not finished managing yet. **What this does not prove:** that 100 ms is a
+fixed threshold. It is where the effect appeared on this host, with this
+WM, at these sizes. A production implementation should not hard-code it; it
+should send after the first frame and retry.
+
+Every other candidate cause from the brief is excluded with evidence above:
+no missing flush (atoms from the same connection arrive), the `window` field
+is the target not the root, there is no reparent wrapper, atom `430` is
+identical on both sides and both intern with `only_if_exists=false`, and all
+five `data.l` words were decoded and compared.
+
+### What this corrects
+
+The previous round concluded "xfwm4 grants SKIP_TASKBAR by window type and
+refuses on request". **That was wrong**, and the error was ours: we sent a
+message the WM would not accept, then attributed the refusal to the WM. The
+correct statement is:
+
+> A Normal-type window on xfwm4 4.20.0 **can** be removed from the taskbar
+> at runtime, by an EWMH `ClientMessage` with `data.l[3] = 0`, sent after the
+> window has settled.
+
+That removes the reason to prefer H5's second native window. See
+`panel-design.md` ADR-1 for the revised recommendation.
+
+## B18b: the single-window prototype
+
+With the cause known, the single-window design is testable:
+
+* **enter panel mode** — `ViewportCommand::WindowLevel(AlwaysOnTop)` (B9: the
+  runtime command works, the builder hint does not) plus ADD of
+  `SKIP_TASKBAR` and `SKIP_PAGER` sent a few frames in;
+* **leave panel mode** — REMOVE of both, and `WindowLevel(Normal)`.
+
+Measured over 3 fresh-window trials with atoms sampled at +0.5, +1, +2, +4
+and +8 s: **the atoms appeared and stayed at every sample, 3/3.**
+
+Over 20 alternating ADD/REMOVE: `_NET_CLIENT_LIST` constant at 5 windows and
+**RSS constant at 107 004 kB** — no window or memory growth. 17/20 switches
+read back with the atoms present; the 3 that did not were a read-back race
+(REMOVE and ADD issued back to back, sampled immediately, before xfwm4
+processed the queue), not a failure — repeating with a single toggle and a
+settle delay passed 3/3 at every sample.
+
+| | H5 (second window) | B18b (single window) |
+| --- | --- | --- |
+| native windows | 2 | 1 |
+| GL surfaces | 2 | 1 |
+| main window type | `Utility` (or a child viewport) | **`Normal`, unchanged** |
+| tray | must target the right window | unchanged |
+| mechanism | `show_viewport_immediate` | one `ViewportCommand` + one X message |
+| fullscreen stacking | works (measured, 5 min idle) | **NOT TESTED** — the always-on-top part is proven (B9), the combination is not |
+| clickable | yes (measured) | window is the normal GUI, trivially yes |
+| RSS over switches | flat (H5) | flat (B18b) |
+| the extra risk | second window's lifecycle, GL, focus | the message must be sent after the window settles; WM-dependent |
+
+The recommendation is now the single window, with the caveat that the
+fullscreen-stacking behaviour of the **combination** (runtime AOT *and* the
+message, in one window) has not been measured — that is the first thing to
+run when the panel work starts.
+
+## B21: no compositing session is obtainable here
+
+Every result in this document is **xfwm4 4.20.0, X11, compositor OFF**.
+
+Attempts, in order:
+
+1. Toggle it on the live session. `xfconf-query -c xfwm4 -p
+   /general/use_compositing` already reads **`true`**, yet
+   `xprop -root _NET_WM_COMPOSITING` says *no such atom* — the running WM
+   started before the change, and the setting only applies at the next WM
+   start. A restart would disrupt the desktop this agent is running in.
+2. A private server. `Xvfb :99 -screen 0 1280x800x24 +extension COMPOSITE
+   +extension RENDER` starts and advertises both extensions. But a second
+   `xfwm4 --compositor=on` on it (with its own `dbus-run-session`) refuses:
+
+   ```
+   xfwm4-WARNING: Unsupported GL renderer (llvmpipe (LLVM 21.1.8, 256 bits)).
+   ```
+
+   and then does not manage the display at all (`_NET_CLIENT_LIST: not
+   found`), so `_NET_WM_COMPOSITING` is never set. xfwm4 will not composite
+   on a software renderer, and Xvfb has nothing else.
+
+**Why this matters more than a missing checkbox.** Without a compositor, a
+fullscreen window is unredirected and drawn straight to the framebuffer.
+That is the *easy* case for an overlay: there is no composite pass for it
+to interfere with. With a compositor, every frame of the fullscreen window
+goes through the compositor, and the panel's cost is much more likely to
+appear in p99/p99.9. So the "no measurable fps cost" result (B5) and the
+frametime tooling (B20) are both **optimistic**, and the composited case is
+`NOT TESTED`.
+
+The owner can settle it; commands are in `docs/development/tools/README.md`.
+Note again that `xfconf-query` reading `true` does not mean compositing is
+live — always confirm with `xprop -root _NET_WM_COMPOSITING`.
 
 ## What B12 says about ADR-1
 
@@ -347,38 +509,54 @@ the cost: the window is still in `_NET_CLIENT_LIST` either way, so the EWMH
 consequence is limited to the type atom itself; the taskbar and Alt-Tab
 appearance is `NOT TESTED` because this XFCE session has no taskbar plugin.
 
-## Two measurement errors, corrected
+## Measurement errors, corrected
 
-Recorded because they changed conclusions, and because both are easy to repeat.
+Every one of these changed a conclusion, or nearly did. None are hidden.
 
-**B6, first attempt — false positive.** An early run appeared to show the
-panel waking the dGPU (`runtime_status` → `active`, pstate P0 at t+3 s). The
-monitoring loop called `nvidia-smi` every 3 s, and querying NVML is itself
-enough to wake a suspended dGPU — proved later by control phase 3. Re-run with
-sysfs-only monitoring from a suspended baseline, the panel never woke it. The
-original conclusion was an artifact of the instrument.
+1. **B18/H1: "xfwm4 refuses SKIP_TASKBAR by type" was our bug, not the
+   WM's.** We sent `data.l[3]=1` on frame 0 and attributed the refusal to
+   the window manager, while `wmctrl` — available on the host, in our
+   estimation, unavailable — set the same atom on the same window. Cause
+   found in B18: `l[3]` must be 0, and the message must arrive after the
+   window settles. **The control we used (a Utility window) could not
+   detect this class of bug; only an independent client could.**
 
-**B8, first attempt — flag not actually passed.** A capture labelled
-`--transparent` was invoked without the flag, so it was a second opaque run
-and showed no difference. Fixed by passing the flag and re-running as a
-paired control; that is the result reported above.
+2. **B19 pass 1: context switches read from the wrong file.** The helper
+   read fields of `/proc/<pid>/stat` that do not exist; every state reported
+   `0` wakeups/s. The counters live in `/proc/<pid>/status`
+   (`voluntary_ctxt_switches` / `nonvoluntary_ctxt_switches`). CPU time from
+   `stat` was correct and is unaffected.
 
-**B9, first attempt — a hardcoded pixel colour made everything read
-"OTHER".** The Q78 probe does not use the overlay demo's dark theme, so its
-panel background is `27,27,27`, not the `18,18,20` the verdict function was
-looking for. Every sample came back `OTHER(...)` and the run proved nothing.
-Fixed by *learning* the panel's background colour at runtime, while the cube
-is still windowed and the panel is known to be on top of it. A second, smaller
-bug in the same area: the first "no re-assert" run never sent a
-`WindowLevel` at all, because the initial send was inside the re-assert code
-path — so the baseline was not actually testing what it claimed.
+3. **B19 pass 2: the binary was rebuilt while the run was in progress.**
+   The new build had a different repaint policy, the "static" states ended
+   up with no timer at all, and the CPU column produced `-inf` and
+   implausible 33–78% figures for an idle panel. Discarded and re-measured
+   with no rebuilds during the run.
 
-Also worth recording: B3 needed three attempts. The first was invalid because
-the panel sat outside the cube, so a pass-through click landed on the
-desktop; the second used a fullscreen cube, which on xfwm4 does not surrender
-focus, making "click passed through" and "WM refused focus" indistinguishable.
-The resolution was to start every case from the *desktop* focused, so any
-focus change is attributable to the click.
+4. **B18b first attempt: a 15% "failure" rate that was a read-back race.**
+   Twenty ADD/REMOVE pairs issued back to back, sampled immediately, lost the
+   atoms in 3/20. Repeating with one toggle per read and a settle delay
+   passed 3/3. The lesson is in the brief itself and worth repeating: sample
+   after the state has settled, or you are measuring your own race.
+
+5. **`frametime_stats.py` self-test: I "fixed" a bug that was not there.**
+   I misread a percentile as indexing from the slow end and "corrected" it
+   to `sorted_vals[n-k]`. The self-test then failed on a plain 1..100 ms
+   ramp, where p99 must be 99 and the change returned 2. The original code
+   was right; the change was reverted and the ramp case added as a
+   regression test. Two other test *expectations* were also wrong (10 slow
+   frames in 600 is 1.7%, so p99 must move; and 1% low methods A and B
+   coincide whenever the slowest frames are ≥1% of the total). All three
+   expectation errors were found by the self-test, which is the argument for
+   having one.
+
+6. **B18b: my own repaint-policy change broke the B18 timing test.** Adding
+   the "on-change only" repaint mode (for B19) removed the unconditional
+   timer, so the egui loop slept and `ui()` ran a few times a second — which
+   made the 300 ms send delay land 3.5 s and 11.5 s late, and the results
+   flaky. Fixed by keeping a timer outside B19's repaint-policy tests. The
+   same interference reached the H5 numbers in an earlier round; those were
+   re-measured.
 
 ## Reproducing
 
@@ -464,6 +642,39 @@ cargo run --release --example panel_h_probe -- --route prop \
 cargo run --release --example panel_h_probe -- --child-viewport --no-aot --seconds 460
 ```
 
+**B18/B18b — the message route (the working one):**
+
+```bash
+# the request itself: l[3]=0, sent 300 ms after the window settles
+PROBE_X11_TYPE=normal cargo run --release --example panel_h_probe -- \
+  --l3 0 --mask both --route wine --send-delay-ms 300 \
+  --atoms "_NET_WM_STATE_SKIP_TASKBAR,_NET_WM_STATE_SKIP_PAGER" --seconds 20
+
+# the delay threshold (0 and 50 ms fail, 100 ms+ works)
+for d in 0 50 100 200; do ... --send-delay-ms $d ...; done
+
+# the single-window prototype: ADD then REMOVE, read back with xprop
+wmctrl -i -r <win> -b add,_NET_WM_STATE_SKIP_TASKBAR
+xprop -id <win> _NET_WM_STATE
+wmctrl -i -r <win> -b remove,_NET_WM_STATE_SKIP_TASKBAR
+```
+
+**B20 — frametime:**
+
+```bash
+cargo run --release --example frametime_probe -- --seconds 180 --out base.csv
+python3 docs/development/tools/frametime_stats.py --compare base.csv panel.csv
+python3 docs/development/tools/frametime_stats.py --self-test
+```
+
+**B21 — a compositing session** (expected to fail on this host; the reason
+is in the section above):
+
+```bash
+Xvfb :99 -screen 0 1280x800x24 +extension COMPOSITE +extension RENDER &
+xfwm4 --compositor=on --display :99     # -> "Unsupported GL renderer (llvmpipe)"
+```
+
 **Owner-side check:** `docs/development/panel-owner-check.sh` walks through the
 taskbar and Alt-Tab behaviour with `wmctrl`, pausing for the owner to look.
 
@@ -511,5 +722,13 @@ Under `probe/` on the agent's machine, not committed to the repository:
 | `h1c_variants.sh` | **H1c** — mask × `l[3]` variant grid on Normal, plus Utility controls |
 | `h2_h4.sh` | **H2** withdrawn cycle + **H4** transient-for + `wmctrl` cross-check + **H6** hints |
 | `h5_child.sh` | **H5** — panel as an Immediate child viewport; fullscreen battery, click test, 5 min idle |
+| `b18_trace.sh` | **B18** — trace both clients on the X socket, check the window id three ways |
+| `decode_sendevent.py` | **B18** — decode SendEvent/ClientMessage from an strace log (stdlib) |
+| `b18b_verify.sh` | **B18** step 5 — `l[3]=0`, sampled +5 ms/+100 ms/+2 s/+10 s, plus REMOVE |
+| `b18c_same_window.sh` | **B18c** — wmctrl and our message alternating on ONE window, both orders |
+| `b18d_timing.sh` | **B18d** — the send-delay threshold, serial, 3 repeats at each end |
+| `b18b_single.sh`, `b18b_repeat.sh` | **B18b** — single-window prototype; atom state per switch, and the 3/20 race re-checked |
+| `b19_cpu.sh`, `b19b_wakeups.sh`, `b19c_cpu.sh` | **B19** — the three CPU passes, including the two that were invalid |
+| `b21_compositor.sh`, `b21_wm_try.sh` | **B21** — the compositing attempts and the `Unsupported GL renderer` reason |
 | `watch_x11.sh` | generic PID-resolved X11 sampler |
 | `shot.sh` | `xwd` → downscaled PNG (ImageMagick absent) |

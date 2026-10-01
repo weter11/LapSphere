@@ -66,12 +66,28 @@ fn sh(c: &str) -> String {
 
 // ---------------------------------------------------------------- EWMH
 
-/// Wine-faithful `_NET_WM_STATE` ClientMessage.
+/// `_NET_WM_STATE` ClientMessage, in the framing that actually works here.
 ///
-/// Note the two details that differ from what B13 sent:
-///   * `data.l[3] = 1` (source indication: application), not 0
-///   * `data.l[2] = second atom or 0` -- Wine packs a second atom in l[2]
-///     even though it also sends one message per atom
+/// B18 settled this by decoding both clients' wire bytes (strace -x on the
+/// X socket, see probe/ov/b18/*.strace). wmctrl 1.07 and this probe produced
+/// byte-identical SendEvent requests EXCEPT for one byte:
+///
+///   wmctrl:  ...ae010000 00000000 00000000 00000000   data.l = [1, 430, 0, 0, 0]
+///   ours:   ...ae010000 00000000 00010000 00000000   data.l = [1, 430, 0, 1, 0]
+///                                                        ^^^^^^^^^^^ l[3]
+///
+/// Wine's comment says l[3] is "source: application" = 1, and B13/H1 sent 1,
+/// and xfwm4 4.20.0 silently refused every one of them. wmctrl sends 0 and
+/// the same request is honoured on the same Normal-typed window. So the
+/// "source indication" field, which several EWMH descriptions call the
+/// source, must be 0 for xfwm4 -- or xfwm4 treats a non-zero l[3] as
+/// "not from the application" and drops the request. Not fully understood,
+/// but the byte is the byte.
+///
+/// The other fields, confirmed identical to wmctrl:
+///   opcode 25, propagate=0, destination = ROOT (not the target window),
+///   event-mask 0x00180000 (SubstructureRedirect|SubstructureNotify),
+///   window = the TARGET window, format 32, one atom per message.
 fn send_wine_msg(
     conn: &x11rb::rust_connection::RustConnection,
     target: u32,
@@ -180,8 +196,16 @@ struct Cfg {
     child_viewport: bool,
     /// runtime always-on-top (B9 finding)
     aot: bool,
+    /// B19: repaint period. 0 = repaint only when the simulated value changes.
+    refresh_hz: f32,
+    /// B19: whether the simulated data changes at all
+    data_changes: bool,
+    /// B19: this run is specifically testing the repaint policy, so the timer
+    /// above must not be reinstated
+    b19_repaint_test: bool,
     seconds: u64,
     max_cycles: u64,
+    send_delay_ms: u64,
     x: f32,
     y: f32,
     title: String,
@@ -197,11 +221,15 @@ struct App {
     conn: Option<x11rb::rust_connection::RustConnection>,
     sent: bool,
     sent_aot: bool,
+    t_start: Instant,
     // H2 phases
     phase: u32,
     phase_t: Instant,
     cycles: u64,
+    repaints: u64,
+    next_tick: std::time::Duration,
     max_cycles: u64,
+    delay_ms: u64,
     saw_withdrawn: bool,
     _rx: mpsc::Receiver<u8>,
 }
@@ -271,9 +299,20 @@ impl eframe::App for App {
             }
         }
 
-        // one-shot setup
-        if !self.sent && self.win.is_some() {
+        // B18 candidate cause: sending on frame 0, before the WM has finished
+        // mapping the window and adding it to its client list. wmctrl always
+        // runs against an already-settled window. Delay is configurable so
+        // the hypothesis can be tested rather than assumed.
+        if !self.sent
+            && self.win.is_some()
+            && self.t_start.elapsed() >= Duration::from_millis(self.delay_ms)
+        {
             self.sent = true;
+            self.tele.note(&format!(
+                "sending after {} ms (frame {})",
+                self.t_start.elapsed().as_millis(),
+                self.frames
+            ));
             match x11rb::rust_connection::RustConnection::connect(None) {
                 Ok((c, _)) => {
                     if self.cfg.transient {
@@ -422,8 +461,31 @@ impl eframe::App for App {
             }
         });
 
-        // The root must keep painting even when hidden, for H5.
-        ctx.request_repaint_after(Duration::from_millis(250));
+        // ---- B19: two repaint strategies ----
+        //  (1) as the app does today: a periodic timer every frame
+        //  (2) only when the value changes: no periodic timer at all
+        if self.cfg.refresh_hz > 0.0 {
+            ctx.request_repaint_after(Duration::from_secs_f32(1.0 / self.cfg.refresh_hz));
+        } else if !self.cfg.b19_repaint_test {
+            // NOT a B19 repaint-policy test: keep a timer so the loop stays
+            // awake. Without it ui() is called only a few times a second and
+            // any time-based action in ui() (like the B18 send) is delayed by
+            // seconds -- which made the first B18b attempts flaky.
+            ctx.request_repaint_after(Duration::from_millis(250));
+        } else {
+            // On-change only: repaint exactly when the simulated value ticks,
+            // and never on a timer.
+            if self.cfg.data_changes {
+                let period = Duration::from_secs_f32(1.0 / self.cfg.refresh_hz.max(1.0));
+                if self.t_start.elapsed() >= self.next_tick {
+                    self.next_tick += period;
+                    self.repaints += 1;
+                    ctx.request_repaint();
+                }
+            }
+            // data_changes == false: no repaint request at all beyond what the
+            // first frame needs, which is the "static data" measurement.
+        }
 
         if self.cfg.seconds > 0 && self.t0.elapsed() > Duration::from_secs(self.cfg.seconds) {
             self.tele.note(&format!(
@@ -451,7 +513,7 @@ fn main() {
     let logp = std::env::var("PROBE_LOG")
         .unwrap_or_else(|_| "/home/wer/devis/lapsphere/probe/ov/h.log".into());
     let mut cfg = Cfg {
-        l3: 1,
+        l3: 0,
         pack_second: false,
         mask_mode: "both".into(),
         atoms: vec![
@@ -464,8 +526,12 @@ fn main() {
         transient: false,
         child_viewport: false,
         aot: true,
+        refresh_hz: 0.0,
+        data_changes: false,
+        b19_repaint_test: false,
         seconds: 60,
         max_cycles: 1,
+        send_delay_ms: 0,
         x: 300.0,
         y: 700.0,
         title: "HProbe".into(),
@@ -489,8 +555,12 @@ fn main() {
             "--transient" => { cfg.transient = true; i += 1 }
             "--child-viewport" => { cfg.child_viewport = true; i += 1 }
             "--no-aot" => { cfg.aot = false; i += 1 }
+            "--refresh" => { cfg.refresh_hz = a[i + 1].parse().unwrap_or(0.0); i += 2 }
+            "--data-changes" => { cfg.data_changes = true; i += 1 }
+            "--b19-repaint-test" => { cfg.b19_repaint_test = true; i += 1 }
             "--seconds" => { cfg.seconds = a[i + 1].parse().unwrap_or(60); i += 2 }
             "--max-cycles" => { cfg.max_cycles = a[i + 1].parse().unwrap_or(1); i += 2 }
+            "--send-delay-ms" => { cfg.send_delay_ms = a[i + 1].parse().unwrap_or(0); i += 2 }
             "--x" => { cfg.x = a[i + 1].parse().unwrap_or(300.0); i += 2 }
             "--y" => { cfg.y = a[i + 1].parse().unwrap_or(700.0); i += 2 }
             "--title" => { cfg.title = a[i + 1].clone(); i += 2 }
@@ -530,6 +600,8 @@ fn main() {
 
     let opts = eframe::NativeOptions { viewport: vb, ..Default::default() };
     let mx = cfg.max_cycles;
+    let mx_send_delay = cfg.send_delay_ms;
+    let cfg_refresh_hz = cfg.refresh_hz;
     let app = App {
         tele: tele.clone(),
         cfg,
@@ -540,9 +612,13 @@ fn main() {
         conn: None,
         sent: false,
         sent_aot: false,
+        delay_ms: mx_send_delay,
+        t_start: Instant::now(),
         phase: 0,
         phase_t: Instant::now(),
         cycles: 0,
+        repaints: 0,
+        next_tick: Duration::from_secs_f32(1.0 / cfg_refresh_hz.max(0.1)),
         max_cycles: mx,
         saw_withdrawn: false,
         _rx: rx,
