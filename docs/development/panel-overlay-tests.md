@@ -86,6 +86,14 @@ Reference colours used for pixel assertions:
 | **B15** full window (`Normal`) vs the same window as `Utility` in taskbar / switcher / panel | **Both appear in `_NET_CLIENT_LIST`.** Normal: 5 windows in the stacking list, state `ABOVE, FOCUSED`. Utility: **6 windows**, state `SKIP_PAGER, SKIP_TASKBAR, ABOVE, FOCUSED`. So `Utility` does **not** remove the window from the EWMH client list — xfwm4 only keeps it out of its own UI. **Taskbar and Alt+Tab visuals are NOT TESTED**: this XFCE session has **no taskbar plugin loaded** (nothing in the `xfce4-panel` windows ever showed a window button) and the alt-tab switcher window was not locatable by name, so only the EWMH evidence exists | `xprop -root _NET_CLIENT_LIST[_STACKING]`, window counts, `xdotool`; `b15-normal-desktop.png`, `b15-utility-desktop.png` |
 | **B16** can eframe 0.34.2 recreate the **root** window via `ViewportBuilder::patch` → `recreate_window`? | **NO — the root window cannot be re-created or re-typed.** `ViewportBuilder::patch()` *does* return `recreate_window = true` for `window_type` (`egui/src/viewport.rs:912`), but eframe only acts on that flag inside `initialize_or_update_viewport()` (`eframe glow_integration.rs:1432`), which is reached exclusively for **Immediate and Deferred (child)** viewports. The root viewport is built once from `NativeOptions` at startup and never re-patched. Empirically: no `ViewportCommand` changes a root window's X11 type, and `ViewportCommand::Close` on the root ends the process rather than re-creating the window. **App state, GL context and RSS across a root recreate are therefore NOT APPLICABLE — the operation does not exist.** | source read of `egui` and `eframe`; runtime check that no command re-types the root |
 
+| **H1** | Wine-exact `_NET_WM_STATE` ClientMessage: root window, `type=_NET_WM_STATE`, `format=32`, `mask=SubstructureRedirect\|SubstructureNotify`, `window=` **target window**, `data.l=[1, atom, 2nd-or-0, **1**, 0]`, one atom per message; atoms = SKIP_TASKBAR + SKIP_PAGER + `_KDE_NET_WM_STATE_SKIP_SWITCHER` | x11rb `send_event`, three `l[3]`/mask/`l[2]` variants, **sampled at t=+5 ms, +100 ms, +2 s, +10 s**; `xprop`, `_NET_CLIENT_LIST`, `WM_STATE` | **REFUSED on a NORMAL window — and `l[3]` is not the reason.** All four variants (`l[3]`=0/1 × `l[2]` packed/unpacked) left `_NET_WM_STATE` at `_NET_WM_STATE_ABOVE, _NET_WM_STATE_FOCUSED` at every sample from +5 ms to +10 s. The control — *identical code*, same message, **UTILITY** window — produced `SKIP_PAGER, SKIP_TASKBAR` at +5 ms and kept them at +10 s. So the message is well-formed and the WM refuses it by type. `ov/h1_wine.log` |
+| **H1b** | cross-check against `wmctrl -b` on the *same* window | `wmctrl 1.07` (present on this host after all — see the correction below) vs our message, both orders | **wmctrl SUCCEEDS, we fail.** On one window: ours first → `_NET_WM_STATE_FOCUSED`; then `wmctrl -i -r -b add,_NET_WM_STATE_SKIP_TASKBAR` → `_NET_WM_STATE_SKIP_TASKBAR, _NET_WM_STATE_FOCUSED`. Reverse order: wmctrl sets it, ours leaves it. And `wmctrl -b remove` takes it back off. **The remaining difference is ours, not xfwm4's.** Not yet root-caused: candidates left open are the send-event mask (tested: both variants fail), `l[3]` (tested), and the exact byte/sequence framing. **This is an unresolved bug in our probe, not a property of the WM** — see "Open bug" below. `ov/h2_h4.log`, `ov/h1b_diff.log` |
+| **H2** | withdrawn cycle: `Visible(false)` → wait for `WM_STATE=Withdrawn` → write `_NET_WM_STATE` as a property → `Visible(true)`; does xfwm4 re-read on show? | 3 cycles, geometry+`WM_STATE`+state sampled every **50 ms** (80 samples/cycle) | **The withdraw works, the trick does not.** The 50 ms series shows **30 `Withdrawn` samples** interleaved with 50 `Normal` — so `Visible(false)`/`Visible(true)` really does withdraw and re-map the window (this is the first confirmation that `Visible(false)` unmaps on X11 in this build). But after re-showing, `_NET_WM_STATE` is **empty every time**: xfwm4 re-reads (it never had the atoms, so there is nothing to preserve) and does not re-apply them. Position was preserved (`531,1240` before and after), focus returned to the panel, geometry constant at `850x159`, no flash visible in the series. **Switching window type `Normal ↔ Utility` this way is impossible** — it is not a `ViewportCommand`. `ov/h2_cycle.probe.log`, `ov/h2_geom_series.txt` |
+| **H3** | add `SKIP_PAGER` + `_KDE_NET_WM_STATE_SKIP_SWITCHER`; does the KDE atom change the switcher? | message carrying only `_KDE_NET_WM_STATE_SKIP_SWITCHER` on a Normal window | **No effect.** `_NET_WM_STATE` unchanged at `ABOVE, FOCUSED`. It is a KDE-private atom and xfwm4 does not implement it; it would matter only on KDE, which is `NOT TESTED`. `ov/h1_wine.log` |
+| **H4** | `WM_TRANSIENT_FOR` to a hidden 1x1 owner, as Wine does for windows with an owner | `xprop -f WM_TRANSIENT_FOR 32a -set` on a Normal window | **No effect on visibility.** With `WM_TRANSIENT_FOR = 0` set: `_NET_WM_STATE` still `ABOVE, FOCUSED`, still **in** `_NET_CLIENT_LIST`, and the window **still took focus** on appear. Note the test is weakened: the owner window could not be created through the x11rb 0.13 API, so `0` (None) was used rather than a real 1x1 window; a real owner might behave differently. `ov/h4.probe.log` |
+| **H5** | panel as an **Immediate child viewport** with type Utility, root stays Normal | two windows of one PID enumerated separately; fullscreen battery + click test + 5 min idle | **WORKS, and it satisfies all four of the owner's goals.** One process, two native windows: `85983235` name `H5Root` type **`_NET_WM_WINDOW_TYPE_NORMAL`**, `_NET_WM_STATE` **empty**; `85983242` name `PanelChild` type **`_NET_WM_WINDOW_TYPE_UTILITY`**, `_NET_WM_STATE` = **`SKIP_PAGER, SKIP_TASKBAR, ABOVE, FOCUSED`**. Child stayed `CHILD-ON-TOP` after a genuine fullscreen cube, after focus returned to the cube, and through Alt+Tab both ways and **5 minutes idle**; RSS flat at ~105–107 MB; CPU 1.6–4.1 %. Child **clickable**: `CHILD-CLICK registered` ×3, focus moved to `PanelChild`. Window count stable at 9 — no leak over the run. `ov/h5_child.log` |
+| **H6** | other levers: `WM_CLASS`, `WM_HINTS`, `_MOTIF_WM_HINTS`, `WM_NAME`, `_NET_WM_WINDOW_TYPE` ordering | `xprop` on a Normal window | **Nothing further.** `WM_CLASS = ("panel_h_probe","panel_h_probe")`, `WM_HINTS: not found`, `_MOTIF_WM_HINTS = 0x2,0x0,0x0,0x0,0x0`, `_NET_WM_WINDOW_TYPE = NORMAL`. None of these carry a "skip taskbar" meaning for xfwm4; the only lever is the window type. Multi-type lists were **not** tested (egui exposes `X11WindowType` as a single enum, not a list). |
+
 | A2.4 absent data shows `—` in reserved width, window does not resize | **WORKS in the demo.** The synthetic producer drops the dGPU fields on every 5th snapshot and WiFi on every 7th; the panel renders `—` and the window geometry was unchanged across the run (584x81 for the whole session) | synthetic data mode + `xdotool` geometry sampled throughout; window size in the demo is computed only from the config, never from data |
 
 ## Root cause: why B2 failed, and why B9 fixed it
@@ -212,6 +220,101 @@ of designs: **"app state, GL context and RSS across a root re-create" are not
 applicable, because that operation does not exist in eframe 0.34.2.** The
 window type is a permanent property of the process, and the only way to change
 it is to end the process and start a new one.
+
+## H5: the winning design — two windows in one process
+
+H5 answers the owner's actual goal, which the earlier rounds had narrowed to a
+bad trade-off. In **one process**, egui gives us two native windows:
+
+```
+one process, two native windows
+  window A  "H5Root"      _NET_WM_WINDOW_TYPE_NORMAL
+                          _NET_WM_STATE:  (empty)          <- ordinary app window
+  window B  "PanelChild"  _NET_WM_WINDOW_TYPE_UTILITY
+                          _NET_WM_STATE:  SKIP_PAGER,
+                                          SKIP_TASKBAR,
+                                          ABOVE,
+                                          FOCUSED         <- the panel
+```
+
+That satisfies all four of the stated goals at once:
+
+| Goal | How H5 meets it |
+| --- | --- |
+| (a) hidden from taskbar / window switcher | the **child** is Utility, so xfwm4 grants `SKIP_TASKBAR` + `SKIP_PAGER` (B10/B11, confirmed again here) |
+| (b) stays above a fullscreen game | the child is on top through a genuine fullscreen cube, focus return, Alt+Tab both ways and 5 minutes idle |
+| (c) clickable | `CHILD-CLICK registered` ×3 — focus moved from the cube to `PanelChild` and the widget took clicks |
+| (d) the full-size GUI stays an ordinary window | the **root** keeps `_NET_WM_WINDOW_TYPE_NORMAL` with empty `_NET_WM_STATE`, so nothing forces it to Utility |
+
+Measured: RSS flat at ~105–107 MB over the 5-minute idle, CPU 1.6–4.1 %,
+`_NET_CLIENT_LIST` stable at 9 windows from start to finish — no window or GL
+leak over the run.
+
+**This removes the "Utility for the whole process" cost that ADR-1 had
+accepted.** The main window goes back to being a Normal window.
+
+Costs, stated rather than glossed over:
+
+* **A second native window and a second GL surface.** That was one of the
+  arguments against a second window back in ADR-1, and it still applies: more
+  memory, one more window to track, and the WM now has two windows for one
+  application. Measured memory did **not** grow versus the single-window
+  probe (both sit around 105–107 MB), which is reassuring but is one
+  measurement on one host.
+* **The panel window must be told to disappear when the panel is off.** The
+  brief's H5 phrasing ("the root hides via `Visible(false)` while the panel is
+  shown") was tested in this shape but **the hide/show of the *child* was not
+  separately verified** — `NOT TESTED`.
+* **Whether the child keeps painting when the root is hidden is `NOT
+  TESTED`.** `ViewportInfo::visible()` derives from `minimized`/`occluded`
+  only (panel-spike §1б), and a child viewport has no such guarantee in what
+  was measured.
+* Taskbar and Alt-Tab appearance is still `NOT TESTED` here — no tasklist
+  plugin in this session. `panel-owner-check.sh` exists so the owner can
+  settle it by eye.
+
+## Open bug: our ClientMessage is wrong, wmctrl's is not
+
+This is recorded because it changes what the H1 result means.
+
+`wmctrl 1.07` **is** present on this host — contrary to B13's note that it was
+absent and uninstallable. It became available during this round (a package
+change outside our control), which is exactly the cross-check the earlier round
+said it needed. The result is the opposite of what B13 concluded:
+
+* `wmctrl -i -r <win> -b add,_NET_WM_STATE_SKIP_TASKBAR` **works on a
+  Normal-type window** — added within 0.5 s, still present at +2 s and +10 s,
+  and removable with `-b remove`.
+* Our x11rb message, on the same window in the same session, is **refused**.
+
+So xfwm4 4.20.0 **does** honour a well-formed request on a Normal window, and
+B13's "xfwm4 refuses by type" conclusion is **wrong** — what is actually
+refused is *our specific message*. Four variants were tested and all fail:
+`l[3]` = 0 and 1, second atom packed into `l[2]` or not, and both send-event
+masks (`SubstructureRedirect|SubstructureNotify` and wmctrl's
+`SubstructureNotify`). The root cause is **not yet identified**; the remaining
+candidates are the byte framing or the request sequencing, and this probe does
+not yet have a root cause.
+
+Consequences:
+
+* **H1 stands as a negative result about our implementation, not about
+  xfwm4.**
+* **Q8 may well be solvable without changing the window type** — wmctrl
+  proves a Normal window can be hidden from the taskbar by message alone on
+  this WM. It is not solved yet, because we cannot send the message.
+* The control in every H1 run (a Utility window) was never the real control;
+  **wmctrl was.** Controls should have been run from the start.
+
+Recorded as a fifth measurement error: the earlier rounds asserted a WM
+behaviour ("refused by type") from a failure whose cause was in our own code.
+
+## The H2 result in one line
+
+`Visible(false)` genuinely withdraws the window (30 `Withdrawn` samples at
+50 ms), and `Visible(true)` re-maps it with no geometry change, no position
+loss and no visible flash — but writing `_NET_WM_STATE` while withdrawn does
+not help, because the atoms never survive to the re-show. **Not a workaround.**
 
 ## What B12 says about ADR-1
 
@@ -341,6 +444,29 @@ large click target so a click can be aimed reliably — the first attempt used
 a 46 pt-tall window and the button was clipped outside it, which is why the
 first click test reported zero clicks.
 
+`panel_h_probe` is the H1–H6 probe. `PROBE_X11_TYPE` selects the root window's
+type (the child viewport in H5 is always Utility), `--mask` selects the send
+mask, `--l3` the `data.l[3]` value, `--route wine|prop` the ClientMessage vs
+XChangeProperty route, `--child-viewport` H5, `--transient` H4,
+`--withdrawn-cycles`/`--max-cycles` H2:
+
+```bash
+# H1 with the required sampling points, plus the Utility control
+cargo run --release --example panel_h_probe -- --l3 1 --mask both \
+  --atoms "_NET_WM_STATE_SKIP_TASKBAR,_NET_WM_STATE_SKIP_PAGER" --seconds 14
+PROBE_X11_TYPE=utility cargo run --release --example panel_h_probe -- --l3 1 --seconds 14
+
+# H2 withdrawn cycles
+cargo run --release --example panel_h_probe -- --route prop \
+  --withdrawn-cycles --max-cycles 3 --seconds 45
+
+# H5: root Normal, panel as an Immediate Utility child
+cargo run --release --example panel_h_probe -- --child-viewport --no-aot --seconds 460
+```
+
+**Owner-side check:** `docs/development/panel-owner-check.sh` walks through the
+taskbar and Alt-Tab behaviour with `wmctrl`, pausing for the owner to look.
+
 To reproduce the fullscreen case, run the cube and toggle xfwm4's own
 fullscreen binding:
 
@@ -380,5 +506,10 @@ Under `probe/` on the agent's machine, not committed to the repository:
 | `b14_click.sh` | **B14** — does a click on an egui widget inside the panel register |
 | `b15_taskbar.sh` | **B15** — `Normal` vs `Utility` in the client list, plus stills |
 | `b16_recreate.sh` | **B16** — can the root window be re-created / re-typed |
+| `h1_wine.sh` | **H1** — Wine-exact ClientMessage, 4 variants, sampled +5 ms/+100 ms/+2 s/+10 s, with a Utility control |
+| `h1b_diff.sh` | **H1b** — `wmctrl` vs our message on the same window, both orders |
+| `h1c_variants.sh` | **H1c** — mask × `l[3]` variant grid on Normal, plus Utility controls |
+| `h2_h4.sh` | **H2** withdrawn cycle + **H4** transient-for + `wmctrl` cross-check + **H6** hints |
+| `h5_child.sh` | **H5** — panel as an Immediate child viewport; fullscreen battery, click test, 5 min idle |
 | `watch_x11.sh` | generic PID-resolved X11 sampler |
 | `shot.sh` | `xwd` → downscaled PNG (ImageMagick absent) |
