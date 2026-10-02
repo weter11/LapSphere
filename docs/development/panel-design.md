@@ -251,8 +251,9 @@ reasons are worth recording because the recommendation flipped twice:
 * **Entering panel mode**: `ViewportCommand::WindowLevel(AlwaysOnTop)` —
   the **runtime** command, not the builder hint, which xfwm4 ignores (B9) —
   plus an EWMH `_NET_WM_STATE` ClientMessage adding `SKIP_TASKBAR` and
-  `SKIP_PAGER`, sent **after the window has settled** and retried if the
-  read-back shows the atom is absent.
+  `SKIP_PAGER`. The message is **event-driven and self-confirming**, not
+  delayed: wait for the WM to accept the window, send, read the property
+  back from the X server, retry while the atoms are absent.
 * **Leaving panel mode**: REMOVE of both atoms, `WindowLevel(Normal)`.
 
 **The numbers behind the recommendation** (xfwm4 4.20.0, no compositor):
@@ -279,20 +280,57 @@ PR):
    gives a `RawWindowHandle::Xlib`. Production code would add `x11rb` to
    `gui/Cargo.toml` — it is already in `Cargo.lock` at 0.13.2 via `winit` and
    `arboard`; the probes use it as a dev-dependency.
-2. The message must be sent after the first frames, not on frame 0. Measured
-   threshold on this WM: 0 ms and 50 ms fail, 100 ms+ works. **Do not
-   hard-code 100 ms** — send after the first frame, read back, retry once.
-3. `data.l[3] = 0`. Wine's comment says 1; xfwm4 4.20.0 refuses 1. Treat the
-   field as WM-specific and verify by read-back rather than by faith in
-   either source.
+2. **No fixed delay.** Wait until the WM has accepted the window (id appears
+   in `_NET_CLIENT_LIST`, or the window is mapped), then send, then read
+   `_NET_WM_STATE` back from the X server and retry if the atoms are absent.
+   Measured: frame 0 and 50 ms fail, 100–300 ms work — but even at 82 ms,
+   *after* acceptance, the first send was ignored. The retry is what makes
+   it reliable, not the timing.
+3. **Atom values are unremarkable here**: Wine's documented `data.l[3]=1`
+   works (6/6 with a delay); so does `0`. The earlier claim that `l[3]`
+   "must be 0" came from a confounded experiment and has been withdrawn.
 4. The always-on-top level must be requested at runtime, on the first frame.
    `ViewportBuilder::with_window_level` is ignored.
 
-**The fallback, if the message route misbehaves elsewhere.** H5's second
-window is fully measured and works: the child viewport is `Utility` and
-keeps `SKIP_TASKBAR`+`SKIP_PAGER` from the type alone, no message needed. If
-the message route turns out to be unreliable on a WM we cannot test, H5 is
-the design to fall back to, and its costs are the ones tabulated above.
+**The fallback: H5, the second window.** H5 is fully measured and works —
+the child viewport is `Utility` and keeps `SKIP_TASKBAR` + `SKIP_PAGER` from
+the **window type alone, with no message at all**. That is its real
+advantage: it depends on a WM honouring `_NET_WM_WINDOW_TYPE`, not on
+accepting a particular EWMH request at a particular moment. If the message
+route proves unreliable on a WM we cannot test — which is exactly the risk,
+since every message result here is xfwm4-specific — H5 is the design to
+fall back to. Its costs are the ones tabulated above: a second native
+window, a second GL surface, and a separate show/hide lifecycle.
+
+Recommendation: implement the single window, keep the H5 path available as a
+fallback, and do not remove either until the panel has run on more than one
+window manager.
+
+**Wayland and other platforms — the limits of this design, stated plainly.**
+
+* **Wayland: the whole message mechanism does not exist.** `_NET_WM_STATE` is
+  an X11 protocol; there is no Wayland equivalent that a client may send to
+  the compositor, and Wayland clients cannot set `_NET_WM_STATE` at all. So
+  on Wayland the panel **cannot** be removed from the switcher by the app —
+  only by `xdg-toplevel` hints whose effect is compositor-specific, and that
+  path is `NOT TESTED` here (this host has no Wayland session and the owner's
+  does not start).
+* **Window position** is compositor-owned on Wayland: eframe documents
+  `ViewportInfo.outer_rect` as always `None` there, so a saved position is a
+  hint at best. The panel must not depend on it (ADR-3 already says this).
+* **`override_redirect`, `WindowLevel` and click-through** are all X11- or
+  WM-specific; their Wayland behaviour is `NOT TESTED`.
+* **The fallback is worse on Wayland, not better**: H5 relies on
+  `_NET_WM_WINDOW_TYPE`, which is also X11-only. So on Wayland neither
+  route is verified, and the honest position is that panel mode there is
+  best-effort and may simply appear in the compositor's window list.
+* **Other X11 WMs (mutter, kwin, GNOME, KDE): `NOT TESTED`.** Everything in
+  this amendment is xfwm4 4.20.0 with the compositor off. The single-window
+  design is deliberately built to *detect* that: the send is confirmed by
+  reading the property back and retried, so a WM that ignores the request
+  shows up as "atoms absent after N attempts" rather than as a silent
+  failure — at which point H5 is the fallback. What is genuinely unknown for
+  other WMs is whether the *retry* converges there.
 
 **Always-on-top, unchanged throughout.** B9, B14 and H5 all agree: send
 `WindowLevel(AlwaysOnTop)` once, after the window exists. It held
@@ -333,7 +371,7 @@ listed here so they are not lost:
 
 | # | Criterion | Status |
 | --- | --- | --- |
-| 7 | The panel must stay visible **above a borderless-fullscreen game** — the primary use case. | **SOLVED on xfwm4 4.20.0 without a compositor (B9/B14), and confirmed for the H5 child viewport**: the `Utility` child stayed on top through a fullscreen cube, focus return, Alt+Tab both ways and 5 min idle, while the root stayed `Normal`. (B9/B14 detail: (fullscreen cube, focus return, click on the cube, Alt+Tab both ways, 5 min idle — all `PANEL-ON-TOP`; 0.3% CPU). Also established in B9: With a genuine fullscreen cube (2560x1440@0,0) the panel stayed on top through focus return to the cube, a click on the cube, Alt+Tab away and back, and **5 minutes idle** — with a single runtime `ViewportCommand::WindowLevel(AlwaysOnTop)` and **no re-assertion**. B2's failure was entirely the *startup* path: `with_window_level()` is ignored, the runtime command is honoured. |
+| 7 | The panel must stay visible **above a borderless-fullscreen game** — the primary use case. | **SOLVED on xfwm4 4.20.0, compositor OFF (B18b combined).** One `Normal` window, runtime `WindowLevel(AlwaysOnTop)` + SKIP_TASKBAR/SKIP_PAGER together, stayed `PANEL-ON-TOP` against a real 2560x1440 fullscreen cube through focus return, a click on the cube, Alt+Tab both ways, a click on the panel (which focused it), and 5 min idle — then 300 mode switches with RSS and window count unchanged. (Earlier detail, B9/B14: (fullscreen cube, focus return, click on the cube, Alt+Tab both ways, 5 min idle — all `PANEL-ON-TOP`; 0.3% CPU). Also established in B9: With a genuine fullscreen cube (2560x1440@0,0) the panel stayed on top through focus return to the cube, a click on the cube, Alt+Tab away and back, and **5 minutes idle** — with a single runtime `ViewportCommand::WindowLevel(AlwaysOnTop)` and **no re-assertion**. B2's failure was entirely the *startup* path: `with_window_level()` is ignored, the runtime command is honoured. |
 | 8 | The panel must not appear in the taskbar / window switcher. | **SOLVED on xfwm4 4.20.0 by B18 — a single window, message sent after it settles.** ADD of `SKIP_TASKBAR`+`SKIP_PAGER` via an EWMH `ClientMessage` with `data.l[3]=0` is honoured on a **Normal**-type window: 3/3 trials, stable at +0.5…+8 s; 20 alternating switches with constant window count and RSS. The earlier "refused by type" conclusion was our own bug. Control that mattered: `wmctrl` on the same window, not a Utility window. The **child** viewport is `Utility`, so xfwm4 grants `SKIP_TASKBAR`+`SKIP_PAGER` (measured); the **root** stays `_NET_WM_WINDOW_TYPE_NORMAL` with empty `_NET_WM_STATE`, so the main window is an ordinary window. Also measured: `_KDE_NET_WM_STATE_SKIP_SWITCHER` and `WM_TRANSIENT_FOR` have no effect (H3, H4), and the withdrawn-cycle trick does not help (H2). **Caveat: B13/H1's message-based route failed in *our* implementation while `wmctrl` succeeded — see the open bug below; a message-based solution may still exist.** |
 
 ---
@@ -533,23 +571,33 @@ single window, with an EWMH message sent after the window has settled.**
 This supersedes both earlier answers. B18 traced the two clients byte for
 byte and found the cause.
 
-**The root cause.** Our message was well-formed; it was being refused for
-two reasons, both ours:
+**The root cause: one thing only — timing.**
 
-1. `data.l[3]` must be **0**, not 1. Wine's source comment calls that field
-   "source: application" = 1, and B13/H1 sent 1 — and were refused on every
-   attempt. `wmctrl` sends 0 and is accepted. Decoded from `strace -x` on the
-   X socket: every other byte of the two SendEvent requests was identical
-   (opcode 25, `propagate=0`, destination = root, mask `0x00180000`, window =
-   target, format 32, one atom per message, `l[0]=1`, `l[1]` the same atom
-   `430`).
-2. **Timing is the blocker.** With `l[3]=0` the message is still refused when
-   sent on the first frame, and is accepted from about **100 ms** onward.
-   Measured: 0 ms and 50 ms fail (3/3), 100/150/200/300 ms work (200 ms
-   repeated 3/3). The reading — a reading, not a proven mechanism — is that
-   xfwm4 ignores a `SubstructureRedirect` `ClientMessage` for a window it has
-   not finished managing. **Do not hard-code 100 ms**: send after the first
-   frame and retry.
+Decoding both clients' SendEvent requests from `strace -x` on the X socket
+showed they are byte-identical except `data.l[3]` (opcode 25,
+`propagate=0`, destination = root, mask `0x00180000`, window = target,
+format 32, one atom per message, `l[0]=1`, `l[1]` the same atom `430`).
+That difference looked like the cause and **was not**. The original
+experiment was confounded — the `l[3]=1` runs sent on frame 0 and the
+`l[3]=0` runs used a delay, so two variables moved together. A control
+settled it: **`l[3]=1` with a 200/300 ms delay works, 3 repeats each**
+(6/6). Wine's documented value of 1 is correct and `l[3]` is irrelevant.
+
+What actually matters is when the message arrives:
+
+| send | result |
+| --- | --- |
+| on frame 0 | fails (3/3) |
+| 50 ms | fails |
+| 100 / 150 / 200 / 300 ms | works (200 ms 3/3) |
+
+And even "the WM has accepted the window" is not the same moment as "the WM
+will act on a SubstructureRedirect for it": in the event-driven run the
+window was already in `_NET_CLIENT_LIST` at t+82 ms and the **first** send
+was still ignored; the second, ~1.1 s later, worked.
+
+So the requirement is not a delay at all: **wait for acceptance, send, read
+`_NET_WM_STATE` back from the X server, retry if the atoms are absent.**
 
 So the design is back to a single window:
 
@@ -716,12 +764,18 @@ this document are **xfwm4 4.20.0, X11, no compositor**
 * **The single-window stacking combination**: one window that is both
   runtime always-on-top *and* skip-taskbar, above a fullscreen game. B9
   proves the level, B18b proves the atoms, neither proves them together.
-* **`data.l[3]` on other WMs.** 0 is what xfwm4 4.20.0 accepts; Wine's
-  comment says 1. Whether mutter, kwin, GNOME or KDE want 0, 1, or ignore
-  the field is `NOT TESTED` — which is why the implementation must verify by
-  read-back and retry rather than hard-code the byte.
-* **The settle delay on other WMs.** ~100 ms is where it started working on
-  this host, with this WM, at these window sizes. Not a general threshold.
+* **`data.l[3]` on other WMs** — moot in the sense that the field is *not*
+  the cause here: Wine's `1` and wmctrl's `0` both work on xfwm4 4.20.0 once
+  the message arrives at the right time (6/6 each). Whether any other WM
+  cares about the field is `NOT TESTED` and is not worth worrying about,
+  because the design confirms by read-back rather than trusting a byte.
+* **The "wait for acceptance" signal on other WMs.** Observed here as the id
+  appearing in `_NET_CLIENT_LIST`; a WM need not maintain that list the same
+  way. `NOT TESTED`.
+* **Wayland cannot do this at all**: `_NET_WM_STATE` is X11-only and a
+  Wayland client may not set it. Panel-mode switcher exclusion on Wayland is
+  `NOT TESTED` and, on the evidence available here, not achievable by the
+  same mechanism. The same is true of H5's `_NET_WM_WINDOW_TYPE` fallback.
 * **The root cause of our ClientMessage being refused while `wmctrl`'s is
   accepted.** Unresolved; see the open bug in Q8.
 * From earlier rounds, still open: keyboard pass-through; hot-reload of font

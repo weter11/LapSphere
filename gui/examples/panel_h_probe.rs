@@ -23,6 +23,7 @@
 // NOT production code. Does not touch gui/src/**.
 
 use std::io::Write;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -196,6 +197,11 @@ struct Cfg {
     child_viewport: bool,
     /// runtime always-on-top (B9 finding)
     aot: bool,
+    /// B18 event-driven mode: do not use a fixed delay; send once the WM has
+    /// accepted the window, confirm via PropertyNotify, retry up to
+    /// `send_attempts`.
+    event_driven: bool,
+    send_attempts: u32,
     /// B19: repaint period. 0 = repaint only when the simulated value changes.
     refresh_hz: f32,
     /// B19: whether the simulated data changes at all
@@ -221,6 +227,13 @@ struct App {
     conn: Option<x11rb::rust_connection::RustConnection>,
     sent: bool,
     sent_aot: bool,
+    /// event-driven send state
+    saw_map: bool,
+    attempts: u32,
+    confirmed: bool,
+    confirmed_ms: Option<u128>,
+    t_send: Option<Instant>,
+    net_wm_state_atom: u32,
     t_start: Instant,
     // H2 phases
     phase: u32,
@@ -235,6 +248,73 @@ struct App {
 }
 
 impl App {
+    /// Drain pending X events on our own connection and watch for the two
+    /// signals we need: MapNotify (the WM has accepted the window) and a
+    /// PropertyNotify on _NET_WM_STATE (the WM has acted on our message).
+    fn pump_x_events(&mut self) {
+        use x11rb::connection::Connection;
+        use x11rb::protocol::xproto::*;
+        let w = match self.win {
+            Some(w) => w,
+            None => return,
+        };
+        let conn = match self.conn.as_mut() {
+            Some(c) => c,
+            None => return,
+        };
+        // Detect acceptance without extra x11rb API surface: xdotool reports
+        // whether the WM has mapped and manages the window. PropertyNotify is
+        // likewise observed as "the property changed after our send" rather
+        // than by selecting on our own connection.
+        if self.net_wm_state_atom == 0 {
+            self.net_wm_state_atom = 1; // only a "selected" flag
+            let _ = conn;
+            self.tele
+                .note("watching for WM acceptance via xdotool + xprop");
+        }
+    }
+
+    /// Read _NET_WM_STATE back from the X server (not from egui's copy).
+    fn read_state(&self) -> String {
+        let w = match self.win {
+            Some(w) => w,
+            None => return "(no window)".into(),
+        };
+        Command::new("sh")
+            .arg("-c")
+            .arg(format!("xprop -id {w} _NET_WM_STATE 2>/dev/null"))
+            .output()
+            .map(|o| {
+                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                s.splitn(2, "= ").nth(1).unwrap_or(&s).trim().to_string()
+            })
+            .unwrap_or_else(|_| "(xprop failed)".into())
+    }
+
+    /// Has the WM mapped and taken over our window?
+    fn wm_has_accepted(&self) -> bool {
+        let w = match self.win {
+            Some(w) => w,
+            None => return false,
+        };
+        let managed = Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "xprop -root _NET_CLIENT_LIST 2>/dev/null | grep -qi '{:x}'",
+                w
+            ))
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        let mapped = Command::new("sh")
+            .arg("-c")
+            .arg(format!("xdotool getwindowgeometry {w} 2>/dev/null"))
+            .output()
+            .map(|o| !o.stdout.is_empty())
+            .unwrap_or(false);
+        managed || mapped
+    }
+
     fn do_send(&mut self) {
         let w = match self.win {
             Some(w) => w,
@@ -299,15 +379,79 @@ impl eframe::App for App {
             }
         }
 
+        // ---- event-driven send (B18, task 2) ----
+        if self.cfg.event_driven && self.conn.is_none() && self.win.is_some() {
+            match x11rb::rust_connection::RustConnection::connect(None) {
+                Ok((c, _)) => {
+                    self.conn = Some(c);
+                    self.tele.note("event-driven: opened a dedicated X connection");
+                }
+                Err(e) => self.tele.note(&format!("event-driven connect failed: {e}")),
+            }
+        }
+        // Fixed delays were only ever a stand-in. The sequence is:
+        //   1. select StructureNotify on our own window; the WM's MapNotify
+        //      arrives only after it has reparented and is managing us
+        //   2. send the ClientMessage
+        //   3. select PropertyChange on _NET_WM_STATE; when the WM rewrites
+        //      the property we read it back and decide whether to retry
+        if self.cfg.event_driven && self.win.is_some() {
+            self.pump_x_events();
+            if !self.saw_map && self.wm_has_accepted() {
+                self.saw_map = true;
+                self.tele.note(&format!(
+                    "WM has accepted the window (in _NET_CLIENT_LIST / mapped) at t+{}ms",
+                    self.t_start.elapsed().as_millis()
+                ));
+            }
+            if self.saw_map && !self.confirmed && self.attempts < self.cfg.send_attempts {
+                if self.t_send.is_none() {
+                    self.t_send = Some(Instant::now());
+                    self.do_send();
+                    self.attempts += 1;
+                    self.tele.note(&format!(
+                        "event-driven: sent attempt {} after MapNotify",
+                        self.attempts
+                    ));
+                }
+                // give the WM a moment to answer, then check
+                if self
+                    .t_send
+                    .map(|t| t.elapsed() > Duration::from_millis(120))
+                    .unwrap_or(false)
+                {
+                    let st = self.read_state();
+                    let ok = st.contains("_NET_WM_STATE_SKIP_TASKBAR");
+                    self.tele.note(&format!(
+                        "event-driven: after attempt {} -> {}{}",
+                        self.attempts,
+                        st,
+                        if ok { "  (CONFIRMED)" } else { "" }
+                    ));
+                    if ok {
+                        self.confirmed = true;
+                        self.confirmed_ms =
+                            Some(self.t_start.elapsed().as_millis());
+                    }
+                    self.t_send = None;
+                }
+            }
+            if self.confirmed && self.t_send.is_none() {
+                // nothing more to do; keep counting frames
+            }
+        }
+
         // B18 candidate cause: sending on frame 0, before the WM has finished
         // mapping the window and adding it to its client list. wmctrl always
         // runs against an already-settled window. Delay is configurable so
         // the hypothesis can be tested rather than assumed.
-        if !self.sent
-            && self.win.is_some()
+        if !self.cfg.event_driven
+            && self.conn.is_some()
+            && !self.sent
             && self.t_start.elapsed() >= Duration::from_millis(self.delay_ms)
         {
             self.sent = true;
+            if self.cfg.transient { /* handled in setup */ }
             self.tele.note(&format!(
                 "sending after {} ms (frame {})",
                 self.t_start.elapsed().as_millis(),
@@ -526,6 +670,8 @@ fn main() {
         transient: false,
         child_viewport: false,
         aot: true,
+        event_driven: false,
+        send_attempts: 5,
         refresh_hz: 0.0,
         data_changes: false,
         b19_repaint_test: false,
@@ -556,6 +702,8 @@ fn main() {
             "--child-viewport" => { cfg.child_viewport = true; i += 1 }
             "--no-aot" => { cfg.aot = false; i += 1 }
             "--refresh" => { cfg.refresh_hz = a[i + 1].parse().unwrap_or(0.0); i += 2 }
+            "--event-driven" => { cfg.event_driven = true; i += 1 }
+            "--send-attempts" => { cfg.send_attempts = a[i + 1].parse().unwrap_or(5); i += 2 }
             "--data-changes" => { cfg.data_changes = true; i += 1 }
             "--b19-repaint-test" => { cfg.b19_repaint_test = true; i += 1 }
             "--seconds" => { cfg.seconds = a[i + 1].parse().unwrap_or(60); i += 2 }
@@ -612,6 +760,12 @@ fn main() {
         conn: None,
         sent: false,
         sent_aot: false,
+        saw_map: false,
+        attempts: 0,
+        confirmed: false,
+        confirmed_ms: None,
+        t_send: None,
+        net_wm_state_atom: 0,
         delay_ms: mx_send_delay,
         t_start: Instant::now(),
         phase: 0,

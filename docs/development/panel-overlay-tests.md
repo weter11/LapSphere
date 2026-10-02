@@ -105,9 +105,12 @@ Reference colours used for pixel assertions:
 | **H5** | panel as an **Immediate child viewport** with type Utility, root stays Normal | two windows of one PID enumerated separately; fullscreen battery + click test + 5 min idle | **WORKS, and it satisfies all four of the owner's goals.** One process, two native windows: `85983235` name `H5Root` type **`_NET_WM_WINDOW_TYPE_NORMAL`**, `_NET_WM_STATE` **empty**; `85983242` name `PanelChild` type **`_NET_WM_WINDOW_TYPE_UTILITY`**, `_NET_WM_STATE` = **`SKIP_PAGER, SKIP_TASKBAR, ABOVE, FOCUSED`**. Child stayed `CHILD-ON-TOP` after a genuine fullscreen cube, after focus returned to the cube, and through Alt+Tab both ways and **5 minutes idle**; RSS flat at ~105–107 MB; CPU 1.6–4.1 %. Child **clickable**: `CHILD-CLICK registered` ×3, focus moved to `PanelChild`. Window count stable at 9 — no leak over the run. `ov/h5_child.log` |
 | **H6** | other levers: `WM_CLASS`, `WM_HINTS`, `_MOTIF_WM_HINTS`, `WM_NAME`, `_NET_WM_WINDOW_TYPE` ordering | `xprop` on a Normal window | **Nothing further.** `WM_CLASS = ("panel_h_probe","panel_h_probe")`, `WM_HINTS: not found`, `_MOTIF_WM_HINTS = 0x2,0x0,0x0,0x0,0x0`, `_NET_WM_WINDOW_TYPE = NORMAL`. None of these carry a "skip taskbar" meaning for xfwm4; the only lever is the window type. Multi-type lists were **not** tested (egui exposes `X11WindowType` as a single enum, not a list). |
 
-| **B18** | **root cause of the refused ClientMessage**, by byte-level diff of the two clients | `strace -f -x -s 512 -e trace=write,writev,sendto,sendmsg` on `/tmp/.X11-unix/X0` for both `wmctrl` and our probe, then decode of the SendEvent (opcode 25) and its 32-byte ClientMessage; window id cross-checked three ways | **FOUND: the message was correct; it was sent too early.** The two wire requests were byte-identical except `data.l[3]` (and the window id, which differed only because the two traces came from different runs). `data.l[3]=0` — wmctrl's value, not Wine's documented `1` — is what xfwm4 4.20.0 accepts. With `l[3]=0` the request is still refused **when sent on the first frame**, and accepted from **~100 ms** onwards. Threshold measured: 0 ms and 50 ms fail (3/3 each), 100/150/200/300 ms work; 200 ms repeated 3/3. Dump: `wmctrl data.l=[1,430,0,0,0]` vs `ours data.l=[1,430,0,1,0]`, every other byte equal (opcode 25, `propagate=0`, dest = root `0x543`, mask `0x00180000`, window = target, format 32, one atom per message). Artifacts: `probe/ov/b18/*.strace`, `wmctrl.strace`, `probe.strace`, `timing.log` |
+| **B18** | **root cause of the refused ClientMessage**, by byte-level diff of the two clients | `strace -f -x -s 512 -e trace=write,writev,sendto,sendmsg` on `/tmp/.X11-unix/X0` for both `wmctrl` and our probe, then decode of the SendEvent (opcode 25) and its 32-byte ClientMessage; window id cross-checked three ways | **FOUND: the message was correct; it was sent too early.** The two wire requests were byte-identical except `data.l[3]`, which looked like the cause — and **a control disproved that**: `l[3]=1` with a 200/300 ms delay works 3/3 each, so Wine's documented value is fine. The only real cause is timing: 0 ms and 50 ms fail (3/3), 100/150/200/300 ms work (200 ms 3/3). Dump: `wmctrl data.l=[1,430,0,0,0]` vs `ours data.l=[1,430,0,1,0]`, every other byte equal (opcode 25, `propagate=0`, dest = root `0x543`, mask `0x00180000`, window = target, format 32, one atom per message). Artifacts: `probe/ov/b18/*.strace`, `timing.log`, `l3_control.log` |
+| **B18** | **H1 superseded**: "a Normal window is refused because of its type" | the same message, `l[3]=1`, at 200 and 300 ms, 3 repeats each | **The H1 conclusion is withdrawn, not refined.** With a settle delay, `l[3]=1` succeeds on a **Normal** window — the same window type H1 reported as unfixable. Timing, not type, was the variable H1 never varied. |
 | **B18** | the brief's other candidate causes, explicitly excluded | per-candidate check | **Excluded, with evidence:** (a) missing `flush()` — we call it and the same connection's atoms arrive; (b) `window` field = root instead of target — our dump shows the target id; (c) reparent wrapper id instead of the client window — `xdotool --pid`, `--name` and `wmctrl -l` all report the same id, `0x03000003`, so no wrapper is involved; (d) atom interned on another connection or `only_if_exists=true` — atom `430` is identical in both dumps, and both clients intern with `only_if_exists=false`; (e) wrong `data.l` order — all five words decoded and compared; (f) **sent before the first frame — this one was true**, and is the cause |
-| **B18b** | single-window prototype: root `Normal`, panel mode = runtime `WindowLevel(AlwaysOnTop)` + ADD/REMOVE of SKIP_TASKBAR/SKIP_PAGER | 3 fresh-window trials, atoms sampled at +0.5/1/2/4/8 s; then 20 alternating ADD/REMOVE watching atoms, window count and RSS | **Works.** In 3/3 trials the atoms appeared and stayed at every sample. 20 alternating switches: `_NET_CLIENT_LIST` constant at 5, **RSS constant at 107 004 kB**, atoms present after 17/20 switches (3 read-backs lost the race with a back-to-back remove/add, see the note below). This is the single-window design: one process, one window, one GL surface, no tray re-targeting. `probe/ov/b18/single_repeat.log` |
+| **B18b** | single-window prototype, and then the **combined** test: one `Normal` window doing runtime `WindowLevel(AlwaysOnTop)` + ADD/REMOVE of SKIP_TASKBAR/SKIP_PAGER at once | 3 fresh-window trials sampled at +0.5/1/2/4/8 s; then the combined run: real fullscreen cube, focus return, click on cube, Alt+Tab both ways, **click on the panel**, 5 min idle, then **300 switches** with a read-back after each | **Works throughout.** 3/3 trials stable. Combined: `PANEL-ON-TOP` at every point including 5 min idle; a click on the panel moved focus to it; over 300 switches **RSS 107 344 kB start=finish**, `_NET_CLIENT_LIST` 7 start=finish, **0 switches in the wrong state**. One window, one GL surface, no tray re-targeting. `probe/ov/b18/single_repeat.log`, `combined.log` |
+| **B18** | **event-driven send** (no fixed delay): wait for WM acceptance → send → read `_NET_WM_STATE` back from the X server → retry while the atoms are absent | `--event-driven`, up to 6 attempts, run with `l[3]=1` and `l[3]=0` | **Works, and the retry is doing real work.** Window accepted at t+82 ms; **attempt 1 ignored**; attempt 2 (≈1.1 s later) `CONFIRMED`. Identical with either `l[3]` value. A fixed delay would still be wrong on a slower machine; the confirm-and-retry loop adapts. `probe/ov/b18/event_driven.log` |
+| **B18** | **control**: `l[3]=1` at 200 and 300 ms, 3 repeats each | same window type, same route, only the delay varied | **Works 6/6 — which withdraws the "l[3] must be 0" claim.** The original experiment was confounded: `l[3]=1` ran with no delay, `l[3]=0` ran with one. Timing is the only cause. `probe/ov/b18/l3_control.log` |
 | **B18b** | the 3/20 "absent" read-backs | re-run with a single toggle and a settle delay | **Measurement artifact, not a failure.** The loop issued REMOVE then ADD with no gap and read immediately; xfwm4 processes the queue asynchronously. With one toggle per read and a settle, 3/3 trials pass at every sample point. Recorded because the first pass looked like a 15% failure rate |
 | **B19** | panel CPU and wakeups, root-window vs child viewport, across data rates and repaint policies | `%CPU` from `utime+stime` in `/proc/<pid>/stat`, context switches from `/proc/<pid>/status`, RSS; 45 s per state, three passes | **INCONCLUSIVE — see the B19 section.** RSS is flat at ~107–108 MB in every state, so the second native window costs no memory; the CPU and scheduling columns do **not** support a conclusion (a debug build, no true idle baseline, and `chrt -i 0` reading *higher* than normal). Two earlier passes were invalid and are recorded as measurement errors |
 | **B20** | frametime tooling | `docs/development/tools/frametime_stats.py`, stdlib only, `--self-test` | **Done.** Single-file stats (frames, avg fps, median/mean/stddev, p95/p99/p99.9, 1% low two ways, 0.1% low two ways, frames >2x median and >33.3 ms), `--compare` with per-metric better/worse and a noise floor from repeated baselines, and a self-test that caught two wrong test expectations and one wrong "fix". `gui/examples/frametime_probe.rs` generates CSV frame times for A/B. The self-test's own catch is recorded as a measurement error |
@@ -325,7 +328,8 @@ not help, because the atoms never survive to the re-show. **Not a workaround.**
 
 ## B18: the root cause, and what it corrects
 
-**The message was never wrong. It was sent too early.**
+**The message was never wrong. It was sent too early — and `data.l[3]` was a
+red herring.**
 
 Both clients were traced on the X socket with
 `strace -f -x -s 512 -e trace=write,writev,sendto,sendmsg` (no `xtrace` or
@@ -335,56 +339,44 @@ cross-checked three ways first — `xdotool --pid`, `xdotool --name` and
 
 ```
 wmctrl   19 000b 00430500 00001800  |  21 20 0000 03000003 a6010000
-probe    19 000b 00430500 00001800  |  21 20 0000 03000003 a6010000
+ours    19 000b 00430500 00001800  |  21 20 0000 03000003 a6010000
          ^opcode ^len  ^root  ^mask   ^code^fmt ^window  ^msgtype
-probe data.l[0..4] = [1, 430, 0, 1, 0]     <-- the ONLY differing bytes
+ours data.l[0..4]  = [1, 430, 0, 1, 0]
 wmctrl data.l[0..4] = [1, 430, 0, 0, 0]
-                            ^^^^
+                          ^^^^
 ```
 
-So:
+The only differing byte is `data.l[3]`, which invited the conclusion that
+`l[3]` must be 0. **That conclusion was wrong, and a control disproved it.**
+The original experiment was confounded: the `l[3]=1` runs sent on frame 0,
+and the `l[3]=0` runs used a delay. Running `l[3]=1` *with* a delay:
 
-| field | wmctrl | our probe (before) | matched |
-| --- | --- | --- | --- |
-| opcode / length | 25 / 11 words | 25 / 11 words | yes |
-| propagate | 0 | 0 | yes |
-| destination | root `0x543` | root `0x543` | yes |
-| event mask | `0x00180000` | `0x00180000` | yes |
-| event code | 33 (no `0x80`) | 33 (no `0x80`) | yes |
-| format | 32 | 32 | yes |
-| **window** | target | target | yes |
-| message_type | 422 (`_NET_WM_STATE`) | 422 | yes |
-| `data.l[0]` action | 1 (ADD) | 1 (ADD) | yes |
-| `data.l[1]` atom | 430 | 430 | yes |
-| `data.l[2]` | 0 | 0 | yes |
-| **`data.l[3]`** | **0** | **1** | **no** |
-| `data.l[4]` | 0 | 0 | yes |
+| variant | result |
+| --- | --- |
+| `l[3]=1`, 200 ms, 3 repeats | **WORKS, 3/3** |
+| `l[3]=1`, 300 ms, 3 repeats | **WORKS, 3/3** |
+| `l[3]=0`, 200 ms and 300 ms (reference) | works |
 
-Two findings came out of this.
-
-**1. `data.l[3]` is 0, not 1.** Wine's comment describes `l[3]` as
-"source: application" = 1, and B13/H1 sent 1 — and were refused. `wmctrl`
-sends 0 and is accepted. The field is not understood; what matters is that
-xfwm4 4.20.0 rejects the request when it is non-zero. Fixing it alone is
-**not** sufficient, which is finding 2.
-
-**2. Timing is the actual blocker.** With `l[3]=0` the message is still
-refused when sent on the first frame, and is accepted from about 100 ms
-onwards:
+So `data.l[3]` is **not the cause and Wine's documented value of 1 is fine**.
+The single cause is timing:
 
 | send delay | result |
 | --- | --- |
 | 0 ms | failed (3/3) |
 | 50 ms | failed |
-| 100 ms | **works** |
-| 150 / 200 / 300 ms | **works** (200 ms repeated 3/3) |
+| 100 ms | works |
+| 150 / 200 / 300 ms | works (200 ms repeated 3/3) |
 
-The plausible reading — and it is a reading, not a proven mechanism — is that
-xfwm4 ignores a `SubstructureRedirect` `ClientMessage` for a window it has
-not finished managing yet. **What this does not prove:** that 100 ms is a
-fixed threshold. It is where the effect appeared on this host, with this
-WM, at these sizes. A production implementation should not hard-code it; it
-should send after the first frame and retry.
+The plausible reading — a reading, not a proven mechanism — is that xfwm4
+ignores a `SubstructureRedirect` `ClientMessage` for a window it has not
+finished managing. **What this does not prove:** that 100 ms is a threshold
+rather than a coincidence of this host, this WM and these window sizes.
+
+The lesson is recorded as a measurement error below: a byte-diff that looked
+like a smoking gun produced a plausible, specific, and **wrong** conclusion,
+and only a control that broke the confound exposed it. The control had to be
+run deliberately — the same run that produced the diff also produced the
+wrong inference, and nothing in the diff contradicted it.
 
 Every other candidate cause from the brief is excluded with evidence above:
 no missing flush (atoms from the same connection arrive), the `window` field
@@ -396,15 +388,52 @@ five `data.l` words were decoded and compared.
 
 The previous round concluded "xfwm4 grants SKIP_TASKBAR by window type and
 refuses on request". **That was wrong**, and the error was ours: we sent a
-message the WM would not accept, then attributed the refusal to the WM. The
-correct statement is:
+`ClientMessage` before the window had settled, then attributed the refusal
+to the window manager. The correct statement is:
 
 > A Normal-type window on xfwm4 4.20.0 **can** be removed from the taskbar
-> at runtime, by an EWMH `ClientMessage` with `data.l[3] = 0`, sent after the
-> window has settled.
+> at runtime, by an EWMH `ClientMessage` sent after the window has been
+> accepted by the WM. The atom value and the `data.l[3]` source field are not
+> the issue — Wine's own values work.
 
 That removes the reason to prefer H5's second native window. See
 `panel-design.md` ADR-1 for the revised recommendation.
+
+### The event-driven send (task 2): no fixed delay, with confirmation
+
+The fixed delay was always a stand-in for a signal. The implemented sequence
+is:
+
+1. wait until the WM has accepted the window — observed externally as the id
+   appearing in `_NET_CLIENT_LIST` or the window being mapped;
+2. send the ClientMessage;
+3. **read `_NET_WM_STATE` back from the X server** (not from egui's cached
+   copy);
+4. if the atoms are absent, retry, up to a bounded number of attempts.
+
+Measured, twice — `l[3]=1` and `l[3]=0`, identical in both:
+
+```
+[04:04:08.577] opened a dedicated X connection
+[04:04:08.580] WM has accepted the window at t+82ms
+[04:04:08.580] sent attempt 1
+[04:04:08.703] after attempt 1 -> _NET_WM_STATE_FOCUSED        <- too early, no effect
+[04:04:08.705] sent attempt 2
+[04:04:09.699] after attempt 2 -> SKIP_PAGER, SKIP_TASKBAR      (CONFIRMED)
+```
+
+Two things this settles:
+
+* **The first attempt still fails**, at 82 ms — comfortably past the 100 ms
+  mark in the fixed-delay experiment, because "the WM has accepted the
+  window" and "the WM will act on a SubstructureRedirect for it" are not the
+  same moment. The retry is doing real work, not belt-and-braces.
+* **`l[3]=1` and `l[3]=0` behave identically**, which is independent
+  confirmation that the field is not the cause.
+
+So the implementation requirement becomes: **wait for acceptance, send,
+confirm, retry** — not "wait N milliseconds". A fixed delay would still be
+wrong on a slower machine or a busier WM; the retry loop adapts.
 
 ## B18b: the single-window prototype
 
@@ -441,6 +470,37 @@ The recommendation is now the single window, with the caveat that the
 fullscreen-stacking behaviour of the **combination** (runtime AOT *and* the
 message, in one window) has not been measured — that is the first thing to
 run when the panel work starts.
+
+### B18b combined: the full single-window panel, end to end
+
+One window, `Normal`, doing all four things at once: above a fullscreen
+game, out of the taskbar, clickable, and stable.
+
+```
+panel=85983235  type=NORMAL
+state = SKIP_PAGER, SKIP_TASKBAR, ABOVE, FOCUSED
+```
+
+| check | result |
+| --- | --- |
+| panel above the windowed cube | `PANEL-ON-TOP` |
+| cube → real fullscreen (2560x1440 @ 0,0) | `PANEL-ON-TOP` |
+| focus returned to the cube (`windowactivate`) | `PANEL-ON-TOP` |
+| **click on the cube** | `PANEL-ON-TOP` |
+| Alt+Tab away | `PANEL-ON-TOP` |
+| Alt+Tab back | `PANEL-ON-TOP` |
+| **click on the panel** | focus moved `Vkcube X11` → `Combined Panel` — the panel takes clicks |
+| 5 minutes idle (10 samples at 30 s) | `PANEL-ON-TOP` and the atom set unchanged at every sample |
+| **300 mode switches**, one at a time, confirmed after each | RSS **107 344 kB start and finish**; `_NET_CLIENT_LIST` **7 windows start and finish**; **0 switches in the wrong state** |
+
+The switch loop alternated REMOVE and ADD. Every switch landed in the
+state it asked for; 150 read-backs showed no `SKIP_TASKBAR`, which is
+exactly right — those are the 150 REMOVE steps. The earlier "3/20 absent"
+reading was a different artefact (back-to-back remove+add read immediately)
+and does not recur when one switch is issued per read.
+
+**This is the whole design working together on one window**: no second
+native window, no second GL surface, no tray re-targeting.
 
 ## B21: no compositing session is obtainable here
 
@@ -550,7 +610,18 @@ Every one of these changed a conclusion, or nearly did. None are hidden.
    expectation errors were found by the self-test, which is the argument for
    having one.
 
-6. **B18b: my own repaint-policy change broke the B18 timing test.** Adding
+6. **B18: a byte-diff produced a specific, plausible and WRONG conclusion.**
+   The two clients' requests differed in exactly one byte, `data.l[3]`, and
+   the natural reading — "that byte must be 0, Wine's comment is wrong or
+   xfwm4 is non-standard" — was adopted and written into the design. It was
+   an artifact of a **confounded experiment**: the `l[3]=1` runs sent with no
+   delay and the `l[3]=0` runs with one, so two variables moved together.
+   A control (`l[3]=1` at 200 and 300 ms, 3 repeats each) showed 6/6 works,
+   so the timing was the only cause and Wine's `1` is correct. The lesson is
+   that a diff identifies a *candidate*, not a cause, and nothing in the diff
+   itself can distinguish the two.
+
+7. **B18b: my own repaint-policy change broke the B18 timing test.** Adding
    the "on-change only" repaint mode (for B19) removed the unconditional
    timer, so the egui loop slept and `ui()` ran a few times a second — which
    made the 300 ms send delay land 3.5 s and 11.5 s late, and the results
@@ -730,5 +801,8 @@ Under `probe/` on the agent's machine, not committed to the repository:
 | `b18b_single.sh`, `b18b_repeat.sh` | **B18b** — single-window prototype; atom state per switch, and the 3/20 race re-checked |
 | `b19_cpu.sh`, `b19b_wakeups.sh`, `b19c_cpu.sh` | **B19** — the three CPU passes, including the two that were invalid |
 | `b21_compositor.sh`, `b21_wm_try.sh` | **B21** — the compositing attempts and the `Unsupported GL renderer` reason |
+| `b18c_l3_control.sh` | **B18 control** — `l[3]=1` at 200/300 ms, 3 repeats: withdraws the `l[3]` claim |
+| `b18e_eventdriven.sh` | **B18 task 2** — event-driven send with read-back and retry |
+| `b18c_combined.sh` | **B18b combined** — one window doing all of it, over a fullscreen cube, then 300 switches |
 | `watch_x11.sh` | generic PID-resolved X11 sampler |
 | `shot.sh` | `xwd` → downscaled PNG (ImageMagick absent) |
