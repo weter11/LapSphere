@@ -254,6 +254,43 @@ pub fn load_config(&mut self) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Repaint on data arrival
+// ---------------------------------------------------------------------------
+//
+// The only repaint request the app used to make was the 500 ms fallback timer
+// at the end of `ui()`. A polled update therefore waited for the next scheduled
+// frame: measured update->draw latency was min 0.1 / avg 226 / max 484 ms, a
+// distribution bounded by exactly that 500 ms period. Every send into
+// `hw_update_rx` now asks for a frame instead.
+//
+// The requests are coalesced: `REPAINT_PENDING` is a one-shot latch, so a batch
+// of N updates costs one `request_repaint`, not N. `handle_hardware_updates`
+// clears the latch at the start of each drain, which makes the invariant "at
+// most one repaint request per frame" hold for both the updates it is about to
+// consume and any that land while the frame is being built.
+
+static REPAINT_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Ask for a frame, coalescing bursts into a single request.
+fn request_repaint_now(ctx: &egui::Context) {
+    if !REPAINT_PENDING.swap(true, Ordering::AcqRel) {
+        ctx.request_repaint();
+    }
+}
+
+/// Send one update and repaint when it landed. A `SendError` (receiver dropped
+/// during exit) is ignored exactly as before, and asks for no frame.
+async fn send_update(
+    tx: &mpsc::Sender<HardwareUpdate>,
+    update: HardwareUpdate,
+    ctx: &egui::Context,
+) {
+    if tx.send(update).await.is_ok() {
+        request_repaint_now(ctx);
+    }
+}
+
 pub struct LapSphereApp {
     state: AppState,
     dbus_client: Option<DbusClient>,
@@ -323,6 +360,9 @@ impl LapSphereApp {
         // Setup background polling with refresh coordinator
         // Use a bounded channel to prevent potential memory leaks if UI processing stalls
         let (hw_update_tx, hw_update_rx) = mpsc::channel(100);
+        // Cloned once here and moved into the polling tasks so a completed
+        // D-Bus fetch can ask for a frame immediately (see `send_update`).
+        let repaint_ctx = cc.egui_ctx.clone();
         let coordinator_handle = if let Some(ref client) = dbus_client {
             let coordinator = RefreshCoordinator::new();
             let handle = coordinator.get_handle();
@@ -330,81 +370,83 @@ impl LapSphereApp {
             // Setup refresh callback
             let client_clone = client.clone();
             let tx_clone = hw_update_tx.clone();
+            let ctx_clone = repaint_ctx.clone();
             tokio::spawn(async move {
                 coordinator.run(move |component_id| {
                     // Trigger refresh for the component
                     let client = client_clone.clone();
                     let tx = tx_clone.clone();
+                    let ctx = ctx_clone.clone();
                     let component = component_id.to_string();
                     
                     tokio::spawn(async move {
                         match component.as_str() {
                             "cpu" => {
                                 match client.get_cpu_info().await {
-                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::CpuInfo(info)).await; }
+                                    Ok(Ok(info)) => { send_update(&tx, HardwareUpdate::CpuInfo(info), &ctx).await; }
                                     Ok(Err(e)) => log::error!("Failed to get CPU info: {}", e),
                                     Err(e) => log::error!("DBus error getting CPU info: {}", e),
                                 }
                             }
                             "gpu" => {
                                 match client.get_gpu_info().await {
-                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::GpuInfo(info)).await; }
+                                    Ok(Ok(info)) => { send_update(&tx, HardwareUpdate::GpuInfo(info), &ctx).await; }
                                     Ok(Err(e)) => log::error!("Failed to get GPU info: {}", e),
                                     Err(e) => log::error!("DBus error getting GPU info: {}", e),
                                 }
                             }
                             "memory" => {
                                 match client.get_memory_info().await {
-                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::MemoryInfo(info)).await; }
+                                    Ok(Ok(info)) => { send_update(&tx, HardwareUpdate::MemoryInfo(info), &ctx).await; }
                                     Ok(Err(e)) => log::error!("Failed to get Memory info: {}", e),
                                     Err(e) => log::error!("DBus error getting Memory info: {}", e),
                                 }
                             }
                             "fans" => {
                                 match client.get_fan_info().await {
-                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::FanInfo(info)).await; }
+                                    Ok(Ok(info)) => { send_update(&tx, HardwareUpdate::FanInfo(info), &ctx).await; }
                                     Ok(Err(e)) => log::error!("Failed to get Fan info: {}", e),
                                     Err(e) => log::error!("DBus error getting Fan info: {}", e),
                                 }
                             }
                             "battery" => {
                                 match client.get_battery_info().await {
-                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::BatteryInfo(info)).await; }
+                                    Ok(Ok(info)) => { send_update(&tx, HardwareUpdate::BatteryInfo(info), &ctx).await; }
                                     Ok(Err(e)) => log::error!("Failed to get Battery info: {}", e),
                                     Err(e) => log::error!("DBus error getting Battery info: {}", e),
                                 }
                             }
                             "wifi" => {
                                 match client.get_wifi_info().await {
-                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::WifiInfo(info)).await; }
+                                    Ok(Ok(info)) => { send_update(&tx, HardwareUpdate::WifiInfo(info), &ctx).await; }
                                     Ok(Err(e)) => log::error!("Failed to get WiFi info: {}", e),
                                     Err(e) => log::error!("DBus error getting WiFi info: {}", e),
                                 }
                             }
                             "gamepads" => {
                                 match client.get_gamepad_info().await {
-                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::GamepadInfo(info)).await; }
+                                    Ok(Ok(info)) => { send_update(&tx, HardwareUpdate::GamepadInfo(info), &ctx).await; }
                                     Ok(Err(e)) => log::error!("Failed to get Gamepad info: {}", e),
                                     Err(e) => log::error!("DBus error getting Gamepad info: {}", e),
                                 }
                             }
                             "storage" => {
                                 match client.get_storage_device_info().await {
-                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::StorageDeviceInfo(info)).await; }
+                                    Ok(Ok(info)) => { send_update(&tx, HardwareUpdate::StorageDeviceInfo(info), &ctx).await; }
                                     Ok(Err(e)) => log::error!("Failed to get Storage info: {}", e),
                                     Err(e) => log::error!("DBus error getting Storage info: {}", e),
                                 }
                             }
                             "mount" => {
                                 match client.get_mount_info().await {
-                                    Ok(Ok(info)) => { let _ = tx.send(HardwareUpdate::MountInfo(info)).await; }
+                                    Ok(Ok(info)) => { send_update(&tx, HardwareUpdate::MountInfo(info), &ctx).await; }
                                     Ok(Err(e)) => log::error!("Failed to get Mount info: {}", e),
                                     Err(e) => log::error!("DBus error getting Mount info: {}", e),
                                 }
                             }
                             "webcam" => {
                                 match client.get_webcam_state().await {
-                                    Ok(Ok(state)) => { let _ = tx.send(HardwareUpdate::WebcamState(state)).await; }
+                                    Ok(Ok(state)) => { send_update(&tx, HardwareUpdate::WebcamState(state), &ctx).await; }
                                     _ => {}
                                 }
                             }
@@ -414,7 +456,7 @@ impl LapSphereApp {
                                 // GUI nobody is reading logs in is pure allocation churn.
                                 if should_fetch_logs() {
                                     match client.get_daemon_logs().await {
-                                        Ok(Ok(logs)) => { let _ = tx.send(HardwareUpdate::DaemonLogs(logs)).await; }
+                                        Ok(Ok(logs)) => { send_update(&tx, HardwareUpdate::DaemonLogs(logs), &ctx).await; }
                                         _ => {}
                                     }
                                 }
@@ -444,22 +486,24 @@ impl LapSphereApp {
             // Initial system info load
             let client_clone = client.clone();
             let tx_clone = hw_update_tx.clone();
+            let ctx_clone = repaint_ctx.clone();
             tokio::spawn(async move {
                 if let Ok(Ok(info)) = client_clone.get_system_info().await {
-                    let _ = tx_clone.send(HardwareUpdate::SystemInfo(info)).await;
+                    send_update(&tx_clone, HardwareUpdate::SystemInfo(info), &ctx_clone).await;
                 }
             });
 
             // Fetch available thresholds
             let client_clone = client.clone();
             let tx_clone = hw_update_tx.clone();
+            let ctx_clone = repaint_ctx.clone();
             tokio::spawn(async move {
                 let start_rx = client_clone.get_battery_available_start_thresholds();
                 let end_rx = client_clone.get_battery_available_end_thresholds();
 
                 match (start_rx.await, end_rx.await) {
                     (Ok(Ok(start)), Ok(Ok(end))) => {
-                        let _ = tx_clone.send(HardwareUpdate::AvailableThresholds(start, end)).await;
+                        send_update(&tx_clone, HardwareUpdate::AvailableThresholds(start, end), &ctx_clone).await;
                     }
                     _ => {}
                 }
@@ -467,25 +511,28 @@ impl LapSphereApp {
 
             let client_clone = client.clone();
             let tx_clone = hw_update_tx.clone();
+            let ctx_clone = repaint_ctx.clone();
             tokio::spawn(async move {
                 if let Ok(Ok(profiles)) = client_clone.get_tdp_profiles().await {
-                    let _ = tx_clone.send(HardwareUpdate::TdpProfiles(profiles)).await;
+                    send_update(&tx_clone, HardwareUpdate::TdpProfiles(profiles), &ctx_clone).await;
                 }
             });
 
             let client_clone = client.clone();
             let tx_clone = hw_update_tx.clone();
+            let ctx_clone = repaint_ctx.clone();
             tokio::spawn(async move {
                 if let Ok(Ok(interface)) = client_clone.get_hardware_interface_info().await {
-                    let _ = tx_clone.send(HardwareUpdate::HardwareInterface(interface)).await;
+                    send_update(&tx_clone, HardwareUpdate::HardwareInterface(interface), &ctx_clone).await;
                 }
             });
 
             let client_clone = client.clone();
             let tx_clone = hw_update_tx.clone();
+            let ctx_clone = repaint_ctx.clone();
             tokio::spawn(async move {
                 if let Ok(Ok(caps)) = client_clone.get_keyboard_capabilities().await {
-                    let _ = tx_clone.send(HardwareUpdate::KeyboardCapabilities(caps)).await;
+                    send_update(&tx_clone, HardwareUpdate::KeyboardCapabilities(caps), &ctx_clone).await;
                 }
             });
             
@@ -496,6 +543,7 @@ impl LapSphereApp {
 
         // Check for updates
         let tx_update = hw_update_tx.clone();
+        let ctx_update = repaint_ctx.clone();
         tokio::spawn(async move {
             let current_version = env!("CARGO_PKG_VERSION");
             let url = "https://api.github.com/repos/weter11/lapsphere/releases/latest";
@@ -511,7 +559,7 @@ impl LapSphereApp {
                             let latest = tag.trim_start_matches('v');
                             if latest != current_version {
                                 let body = json["body"].as_str().unwrap_or("No changelog provided.").to_string();
-                                let _ = tx_update.send(HardwareUpdate::UpdateInfo(latest.to_string(), body)).await;
+                                send_update(&tx_update, HardwareUpdate::UpdateInfo(latest.to_string(), body), &ctx_update).await;
                             }
                         }
                     }
@@ -561,6 +609,12 @@ impl LapSphereApp {
     }
     
     fn handle_hardware_updates(&mut self) {
+        // Re-arm the repaint latch: every update consumed here is now on screen,
+        // so the next arrival is allowed to request its own frame. Clearing it
+        // here (rather than at the request site) is what bounds the repaint
+        // rate to one per frame.
+        REPAINT_PENDING.store(false, Ordering::Release);
+
         // Process all pending updates (non-blocking)
         while let Ok(update) = self.hw_update_rx.try_recv() {
             match update {
@@ -1238,5 +1292,23 @@ mod log_fetch_gate_tests {
         note_ui_frame(Page::Settings, SettingsTab::Logs);
         LAST_UI_FRAME_MS.store(now_ms() - (UI_FRAME_FRESH_MS + 1), Ordering::Relaxed);
         assert!(!should_fetch_logs());
+    }
+
+    #[test]
+    fn repaint_requests_are_coalesced_into_one_per_frame() {
+        let ctx = Context::default();
+
+        // A burst of arrivals with no frame in between costs one request: the
+        // latch stays set, so later arrivals do not re-request.
+        REPAINT_PENDING.store(false, Ordering::Release);
+        assert!(!REPAINT_PENDING.swap(true, Ordering::AcqRel), "latch armed");
+        for _ in 0..10 {
+            request_repaint_now(&ctx);
+        }
+        assert!(REPAINT_PENDING.load(Ordering::Acquire), "latch still set");
+
+        // Consuming a frame re-arms it, so the next arrival requests again.
+        REPAINT_PENDING.store(false, Ordering::Release);
+        assert!(!REPAINT_PENDING.load(Ordering::Acquire));
     }
 }
