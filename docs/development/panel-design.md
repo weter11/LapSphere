@@ -2,9 +2,11 @@
 
 Status: **DRAFT for discussion.** No application code has been written.
 Companion evidence documents: [`panel-spike.md`](./panel-spike.md) (frame
-delivery, `ViewportCommand` behaviour) and
+delivery, `ViewportCommand` behaviour),
 [`panel-overlay-tests.md`](./panel-overlay-tests.md) (live overlay behaviour
-over another window, B1–B8).
+over another window, B1–B8), and
+[`frametime-layer-spike.md`](./frametime-layer-spike.md) (the in-game Vulkan
+implicit layer that supplies fps, F22).
 
 Base: `5c57bc7` (branch `feat/mini-panel` from `origin/lapsphere`).
 Measurement environment for the claims below: **X11 / XFCE / xfwm4 4.20.0,
@@ -36,6 +38,58 @@ Secondary goal: a compact always-visible meter in normal desktop use, in the
 spirit of gkrellm — a single undecorated strip, draggable anywhere, showing
 the hardware you care about at a glance. It is a **mode of the same window**,
 not a second window and not a second process.
+
+### Goal: fps and frame-time are in the **first release**
+
+**Owner decision (2026-10-03), recorded as a product decision.** `fps`,
+`frametime_ms` and `frametime_graph` are panel elements from the first
+release, not a later milestone. This is what makes the panel a genuine
+MangoHud replacement rather than a hardware meter that happens to sit on top
+of a game.
+
+**The technical consequence, and why it forces an in-process layer.** An
+external process **cannot see the game's present**. Every host-side counter is
+either invisible to the game (`/proc` gives CPU time per thread, not frames)
+or too coarse (a compositor's damage count, a DRM vblank counter, `nvidia-smi`
+samples). The panel therefore needs **a layer inside the game process**:
+
+* a **Vulkan implicit layer** (Rust `cdylib`), which the loader inserts into
+  every Vulkan app that opts in via an environment variable;
+* it timestamps `vkQueuePresentKHR` — the one call that marks a frame boundary
+  — and writes the intervals into **shared memory**;
+* the panel (an external process) reads that shared memory and computes the
+  statistics.
+
+`docs/development/frametime-layer-spike.md` is the feasibility spike for that
+layer, with its go/no-go criteria and measured results.
+
+### Non-goals of the first release: frame measurement
+
+Stated so that the scope is not silently widened later:
+
+* **No OpenGL hook.** GLX/EGL interception would be a second, separate layer
+  (GLX extension or `LD_PRELOAD`) with its own dispatch chain. The first
+  release is **Vulkan only**; a GL game shows `—` in every frame element.
+* **No 32-bit games.** The shipped layer will be a 64-bit `cdylib`. A 32-bit
+  Vulkan app runs in a 32-bit process and cannot load it. Shm protocol v1 is
+  architecture-neutral so a 32-bit build is *possible* later, but nothing in
+  the first release provides one.
+* **No Wayland-specific layer work.** The layer is an **API-level** mechanism,
+  not a protocol-level one: implicit Vulkan layers are loaded by the Vulkan
+  loader and are indifferent to whether the surface is X11, Wayland or DRM.
+  So the layer itself has **no Wayland-specific code** — but every Wayland
+  *claim about it is `NOT TESTED`*, because this host has no Wayland session
+  (`XDG_SESSION_TYPE` is `x11` on every run here). What that means
+  specifically: the loader path, the intercept, the shm write, and the
+  MangoHud comparison have all been exercised only on X11. Wayland-specific
+  frame pacing (presentation timing, explicit sync, `wp_presentation`) changes
+  *what a present means*, and whether present timestamps still correspond to
+  displayed frames is `NOT TESTED`.
+* **No anti-cheat interaction.** Anti-cheat suites commonly enumerate loaded
+  layers and shared objects. Nothing here has been tested against one, and
+  no statement about any is made. See the spike's `NOT TESTED` list.
+* **No DXVK/Proton coverage.** Untested, and untestable here without the
+  games in question — the spike ran against `vkcube`.
 
 ### Non-goal: an exclusive fullscreen mode
 
@@ -374,6 +428,178 @@ listed here so they are not lost:
 | 7 | The panel must stay visible **above a borderless-fullscreen game** — the primary use case. | **SOLVED on xfwm4 4.20.0, compositor OFF (B18b combined).** One `Normal` window, runtime `WindowLevel(AlwaysOnTop)` + SKIP_TASKBAR/SKIP_PAGER together, stayed `PANEL-ON-TOP` against a real 2560x1440 fullscreen cube through focus return, a click on the cube, Alt+Tab both ways, a click on the panel (which focused it), and 5 min idle — then 300 mode switches with RSS and window count unchanged. (Earlier detail, B9/B14: (fullscreen cube, focus return, click on the cube, Alt+Tab both ways, 5 min idle — all `PANEL-ON-TOP`; 0.3% CPU). Also established in B9: With a genuine fullscreen cube (2560x1440@0,0) the panel stayed on top through focus return to the cube, a click on the cube, Alt+Tab away and back, and **5 minutes idle** — with a single runtime `ViewportCommand::WindowLevel(AlwaysOnTop)` and **no re-assertion**. B2's failure was entirely the *startup* path: `with_window_level()` is ignored, the runtime command is honoured. |
 | 8 | The panel must not appear in the taskbar / window switcher. | **SOLVED on xfwm4 4.20.0 by B18 — a single window, message sent after it settles.** ADD of `SKIP_TASKBAR`+`SKIP_PAGER` via an EWMH `ClientMessage` with `data.l[3]=0` is honoured on a **Normal**-type window: 3/3 trials, stable at +0.5…+8 s; 20 alternating switches with constant window count and RSS. The earlier "refused by type" conclusion was our own bug. Control that mattered: `wmctrl` on the same window, not a Utility window. The **child** viewport is `Utility`, so xfwm4 grants `SKIP_TASKBAR`+`SKIP_PAGER` (measured); the **root** stays `_NET_WM_WINDOW_TYPE_NORMAL` with empty `_NET_WM_STATE`, so the main window is an ordinary window. Also measured: `_KDE_NET_WM_STATE_SKIP_SWITCHER` and `WM_TRANSIENT_FOR` have no effect (H3, H4), and the withdrawn-cycle trick does not help (H2). **Caveat: B13/H1's message-based route failed in *our* implementation while `wmctrl` succeeded — see the open bug below; a message-based solution may still exist.** |
 
+Criteria 9–13 cover the frame-measurement layer (owner decision: fps in the
+first release). Status column: what the spike in
+[`frametime-layer-spike.md`](./frametime-layer-spike.md) measured, on this
+host, release build.
+
+| # | Criterion | Why it is a criterion | Status |
+| --- | --- | --- | --- |
+| 9 | **Layer overhead on present is small and measured.** The cost added to a frame by the layer: **median and p99 in microseconds**, taken as the wall time of the `vkQueuePresentKHR` hook itself (clock around the whole hook body, layer instrumentation versus a layer-loaded-but-pass-through build). | An overlay that costs the game frames is not a replacement for MangoHud. Median is the per-frame cost; p99 is the cost that shows up as a spike. | **Measured in the spike** — see `frametime-layer-spike.md` §3 for median/p99 and the 3-repeat requirement. Both are microsecond figures from a release build of the layer on `vkcube`; they do not transfer to a heavy title without re-measuring. |
+| 10 | **Fail-open.** *Any* layer failure — shm cannot be created, the ring is full, a write faults, the exe name is unavailable — must have **no effect on the game**. The layer never changes a return value, never aborts, never panics across FFI (`catch_unwind` on every hook entry), and never blocks: if the segment cannot be written, that frame is dropped from the record and the game proceeds. | This is the one criterion that matters more than overhead. A crash or a stall in the measurement path would turn a diagnostic into the fault. | **Measured in the spike** — the fail-open cases (unwritable runtime dir, no reader, two writers, `kill -9` stale segment) were exercised deliberately. NOT TESTED: failure modes under an anti-cheat or a driver that aborts on an unexpected layer. |
+| 11 | **The layer is inactive without its environment variable.** With `LAPSPHERE_FRAMES` unset, the layer is loaded but writes nothing, creates no segment, and adds no measurable overhead. Activation is opt-in only, so no existing app changes behaviour. | A layer that activates itself would silently change behaviour for every Vulkan program on the host, including the user's games, with no way to attribute a regression. | **Measured in the spike** — §1: the loader enumerates the layer with and without the variable, and the no-variable run produces no `frames-<pid>` segment and an unchanged frame-time distribution. What this does **not** prove: that the loader's layer *ordering* is identical in a real game that has other implicit layers (MangoHud, `VK_LAYER_MESA_device_select`, NVIDIA layers all present here). |
+| 12 | **Values agree with MangoHud on the same run.** Running the layer and MangoHud against the same workload in the same session: **median frametime within 1 %**, **p99 within the measured run-to-run noise** of MangoHud against itself. | Otherwise the panel's fps is a second, differently-wrong number, and the user has no way to tell which to believe. | **Measured in the spike** — §2, layer-vs-MangoHud median/p99/p99.9, with MangoHud-vs-MangoHud repeats establishing the noise floor that p99 must sit inside. Median within 1 % is the hard gate; p99 is gated on noise, not on an absolute number, because p99 of a 60 fps idle-vsync workload is dominated by scheduling jitter. What this does **not** prove: agreement on a *GPU-bound* title, where present-to-present time includes GPU work the layer's CPU-side timestamp also includes — the spike workload (`vkcube`) is not GPU-bound. |
+| 13 | **Statistics are defined once, by formula, in one place.** `1% low`, `0.1% low`, `max` and the count of frames over 33 ms are computed **exactly** as `docs/development/tools/frametime_stats.py` defines them: `low_percent()` for the worst-N-average definition, nearest-rank `percentile()` for p-values, and `over_33ms = count(interval > 33.3 ms)`. `1% low` is reported **both ways** (A: `1000/p99`; B: mean of the worst 1 % inverted), as that tool documents, because the two diverge on a mixed tail. | "1 % low" is used inconsistently across the ecosystem; a panel that silently picks one definition is not comparable to the overlays it replaces. Re-deriving it in Rust would create a second, subtly different definition. | **BY CONSTRUCTION, not yet verified in Rust** — the Rust reader must reuse these definitions exactly; the spike verifies agreement by **feeding the layer's raw intervals through `frametime_stats.py`**, not by comparing two independent implementations. NOT TESTED: a unit-test harness proving the Rust port matches `frametime_stats.py` on adversarial inputs (the tool's own `--self-test` covers the Python side only). That parity test is a build-time prerequisite for shipping the Rust reader. |
+
+**The GO gate for the layer as a whole** is: criteria 1–4 of the spike's test
+list (loads/inactive-without-var, distribution matches MangoHud, overhead
+below 10 µs median, survives exit / `kill -9` / resize / two instances / no
+reader), with no influence on the game on any failure. The spike's verdict and
+the fallback if it is not met are in
+[`frametime-layer-spike.md`](./frametime-layer-spike.md).
+
+---
+
+### ADR-5 — Frame data travels through a versioned shared-memory segment, one writer, lock-free readers
+
+**Decision.** The Vulkan layer writes frame intervals into a POSIX shared
+memory object; the GUI process reads it. The protocol below is **v1** and is
+frozen — a later protocol gets a new `version` in the header, not a
+reinterpretation of this one.
+
+**Layout.** One file per game process:
+
+```
+$XDG_RUNTIME_DIR/lapsphere/frames-<pid>
+```
+
+`$XDG_RUNTIME_DIR` is the right root: it is `0700` and per-user by
+specification, so the segment is unreachable to other users without an
+additional permission decision, and it is emptied on logout by convention.
+The directory `lapsphere/` is created by the writer with mode `0700`; the
+segment file itself is **mode `0600`**, and it is created with
+`O_CREAT|O_EXCL` so a pre-existing file can never be adopted or truncated by
+a different process. The spike used the mmap-backed path
+(`/dev/shm`-equivalent via `XDG_RUNTIME_DIR`) rather than a SysV segment,
+because the file name carries the pid and the header carries everything a
+reader needs — no `shmget` key collision space to get wrong.
+
+**Header** (fixed 128 bytes, at offset 0; all little-endian, matching the
+x86-64 and aarch64 targets):
+
+| offset | size | field | notes |
+| --- | --- | --- | --- |
+| 0 | 8 | `magic` | `"LSPFRS01"`; a reader that does not match this closes the file without reading further |
+| 8 | 4 | `version` | `1`; a reader refuses a version it does not know |
+| 12 | 4 | `header_len` | `128`, so a future header can grow without moving the ring |
+| 16 | 4 | `pid` | the writing process |
+| 20 | 4 | `api` | `1` = Vulkan, `2` = reserved (GL), so a future protocol can label its source |
+| 24 | 8 | `exe_name[64]` | NUL-padded, `/proc/self/comm` — what `game_name` shows |
+| 88 | 4 | `ring_capacity` | number of `u64` slots (see below) |
+| 92 | 4 | `flags` | bit 0: writer alive (heartbeat maintained) |
+| 96 | 8 | `write_seq` | seqlock sequence — see below |
+| 104 | 8 | `last_present_ns` | `CLOCK_MONOTONIC` nanoseconds of the most recent present; doubles as the heartbeat |
+| 112 | 8 | `frame_count` | total presents observed, monotonic |
+| 120 | 8 | `dropped_count` | presents the layer chose not to record (see "fail-open") |
+
+**Ring buffer of intervals.** Immediately after the header, `ring_capacity`
+slots of `u64`, each a **frame interval in nanoseconds** — not a timestamp, so
+a reader needs no reference point and cannot be fooled by a clock change.
+Capacity is fixed at creation (the spike used 4096 slots = 32 kB, which is
+~68 s of history at 60 fps and ~17 s at 240 fps; the reader's window is a
+configurable *subset* of the ring, which is what makes a fixed size possible).
+A single frame's interval is the delta between consecutive presents. The
+first present after activation establishes the origin and writes nothing, so
+there is no fabricated interval for the gap between process start and first
+frame.
+
+**One writer, lock-free readers — a seqlock.** Only the game process writes;
+readers never write and never block, and the writer never waits for a reader:
+
+1. writer: `seq` += 1 (now odd — "write in progress"), as a release store;
+2. writer: write the new interval at slot `count % capacity`, update
+   `frame_count`, `last_present_ns`;
+3. writer: `seq` += 1 (now even), release store;
+4. reader: read `seq` (acquire); if odd, a write is in progress — retry or
+   skip; copy the slots; read `seq` again; if it changed, discard the copy.
+
+The alternative considered and rejected: an atomic free-running index with no
+seqlock. It is marginally cheaper per frame, but a reader can then observe a
+torn frame — an interval from one slot and a `frame_count` from another — and
+a 0.1 % low computed over torn frames is a wrong number shown to the user. The
+seqlock costs one atomic increment per frame and makes the reader's failure
+mode "one stale sample", which is harmless. **Chosen.**
+
+The writer's stores are relaxed atomics on the two `seq` words and plain
+stores for the payload; there is no mutex and no syscall on the present path
+after the segment exists. `last_present_ns` is a `CLOCK_MONOTONIC` read
+(1 vDSO call, no syscall) and also serves as the liveness signal — see
+"choosing the active process".
+
+**Choosing the active process (the rule proposed here).** A panel can see
+several segments at once (a launcher plus a game, two games, a leftover from a
+crash), so it needs one rule. Proposed:
+
+> **The active process is the segment with the most recent `last_present_ns`,
+> provided that timestamp is younger than `STALE_AFTER = 2 s`. If no segment
+> qualifies, the frame elements show `—`. Ties are broken by the larger pid.**
+
+Why "most recent present" and not "most recently created" or "largest ring":
+the element must reflect the process that is *actually presenting frames*, and
+only the present timestamp distinguishes a running game from a live-but-idle
+launcher. Why a timeout rather than trusting `flags`: a `kill -9`'d game
+leaves a segment that still says "alive", and without the timeout the panel
+would show a frozen frame time from a dead process indefinitely. 2 s is
+chosen because it is several times the longest plausible gap between presents
+in a running game (a 2 s gap *is* a 0.5 fps stall worth showing as `—` rather
+than as a stale number) while being short enough that the panel reacts to a
+game exit quickly. The cost of this rule: it is checked at the panel's refresh
+cadence, not continuously, so the panel can show a number up to one refresh
+interval after the game exits. That is acceptable — the next refresh shows
+`—`.
+
+**Cleaning up stale segments.** Two layers, both best-effort:
+
+* **The writer removes its own segment** at `vkDestroyInstance`, and installs
+  no signal handlers — it does not need to: the timeout rule already makes an
+  orphan harmless, and a signal handler in a game process is a behaviour
+  change (criterion 11) that the layer has no business making.
+* **The reader prunes orphans.** Before choosing an active segment it may
+  `unlink` any `frames-<pid>` whose pid does not exist (`kill(pid, 0)` →
+  `ESRCH`) or whose timestamp is older than a much larger bound
+  (`ORPHAN_AFTER = 300 s`). `kill(pid,0)` is advisory only: a recycled pid
+  cannot cause a wrong deletion because the timestamp bound is checked too,
+  and the worst case of a wrong decision is one missing segment, never a
+  crash.
+
+So an orphan is invisible within 2 s (by the timeout rule) and removed within
+one panel session or on the next logout (by pruning). Nothing blocks on it
+either way.
+
+**`dropped_count`, and what fail-open means on the write path.** The present
+hook is: read the clock, call the next function, write the interval. If the
+write cannot happen — segment vanished (reader pruned it, or the runtime dir
+was cleaned), mapping lost, header magic no longer matches (another writer) —
+the frame is counted in `dropped_count` and the game is untouched. The layer
+does **not** try to re-create the segment on the hot path: a failed
+`mmap`/`open` in the hot path is the thing most likely to cost a frame, and
+losing samples is preferable to costing frames. Re-creation is attempted
+once, on the swapchain-create path, which is not hot.
+
+**Why not the alternatives.**
+
+* *A D-Bus method from the game process.* The game would have to link our
+  library and speak D-Bus; that couples the layer to zbus inside the game's
+  process and puts a bus round trip on the present path.
+* *A file the game appends to.* `write(2)` per frame is a syscall per frame
+  and, more importantly, an unbounded-growth file; the ring gives bounded
+  memory with the same information.
+* *The panel `ptrace`s the game.* Root-only, and it perturbs the game —
+  directly contradicting criterion 10.
+* *MangoHud's own output as the source.* Viable fallback, and the least-bad
+  one if the layer fails; its drawbacks are in
+  [`frametime-layer-spike.md`](./frametime-layer-spike.md) §7 (it requires
+  MangoHud to be running, gives no low-percentile window control, and its log
+  is a file the panel must tail with a delay).
+
+**NOT TESTED on this design:** 32-bit processes (a `u64` header is
+architecture-neutral in the layout but the cdylib is not loadable there),
+Wayland presentation timing, and whether `CLOCK_MONOTONIC` in the game process
+and in the panel agree — they need not, which is why the ring stores
+*intervals*, and only `last_present_ns` crosses processes (used solely for
+staleness comparison, where a skew between the two processes' monotonic clocks
+does not matter).
+
 ---
 
 ## Config schema (proposal for discussion — not an implementation)
@@ -389,8 +615,16 @@ A proposed shape for `settings.json`, to be argued over rather than adopted:
   "position": [200, 500],       // [x, y] in points, or null for "let the WM place it"
   "items": [
     { "id": "cpu_load_percent", "visible": true, "label": null, "font_scale": null },
-    { "id": "memory",           "visible": true, "label": "RAM", "font_scale": 1.2 }
-  ]
+    { "id": "memory",           "visible": true, "label": "RAM", "font_scale": 1.2 },
+    { "id": "fps",              "visible": true, "label": null, "font_scale": null },
+    { "id": "frametime_graph",   "visible": true, "label": null, "font_scale": null },
+    { "id": "game_name",         "visible": false, "label": null, "font_scale": null }
+  ],
+  "frames": {
+    "window_seconds": 10,        // statistics window for fps/low-1pct/low-0.1pct (Q9)
+    "refresh_hz": 4,             // panel redraw cadence for frame elements (Q10)
+    "graph_samples": 120         // points drawn in frametime_graph, not its height
+  }
 }
 ```
 
@@ -410,6 +644,12 @@ and nothing else GPU-related; the expensive part is a `process_snapshot` field
 
 | id | Data source | Field (`common::types`) | Unit | width |
 | --- | --- | --- | --- | --- |
+| `game_name` | shm `frames-<pid>` header | `exe_name` (char[64]) | — | 130 |
+| `fps` | shm ring buffer | derived: `1000 / mean(interval)` | `fps` | 62 |
+| `frametime_ms` | shm ring buffer | derived: `median(interval)` | `ms` | 78 |
+| `frametime_graph` | shm ring buffer | last N intervals, **one fixed-height strip** (ADR-2) | `ms` | 120 |
+| `low_1pct` | shm ring buffer | `1000 / mean(worst 1 %)` — see criteria 5 | `fps` | 62 |
+| `low_01pct` | shm ring buffer | `1000 / mean(worst 0.1 %)` — see criteria 5 | `fps` | 62 |
 | `hostname` | `GetSystemInfo` | `SystemInfo.product_name` | — | 150 |
 | `cpu_load_percent` | `GetCpuInfo` | `CpuInfo.average_load` (f32) | `%` | 62 |
 | `cpu_core_chart` | `GetCpuInfo` | `CpuInfo.cores[].load` (`Vec<CoreInfo>`, one fixed-height strip) | `%` | 92 |
@@ -428,6 +668,24 @@ and nothing else GPU-related; the expensive part is a `process_snapshot` field
 | `gamepad_2` | `GetGamepadInfo` | same, second entry | `%` | 120 |
 
 Notes on the table, all checked in source rather than assumed:
+
+* **The six frame rows are not D-Bus data, and deliberately so.** Every other
+  row comes from a cache-backed daemon getter (ADR-4). The frame rows cannot:
+  the data exists only inside the game process, in the shm segment the Vulkan
+  layer wrote. So **the GUI process reads `frames-<pid>` itself** — no daemon
+  method, no new interface, and therefore no versioned D-Bus change. The
+  consequence to record: the panel's frame elements depend on
+  `$XDG_RUNTIME_DIR/lapsphere/` being readable by the GUI's user, which it is
+  by construction (both run as the same user, mode 0600, see protocol v1).
+* **Absent source renders `—`, in an already-reserved slot.** With no layer
+  active (env var unset), no Vulkan process (an OpenGL or 32-bit game), or no
+  reader access, all six rows show `—` and the window keeps its size. This is
+  ADR-2 applied to the frame rows: the width table above is fixed regardless
+  of whether frame data ever arrives.
+* **`frametime_graph` is one fixed-height strip**, exactly like
+  `cpu_core_chart`. The number of samples in the window changes with the
+  statistics window (see Q9) and with the refresh rate; a strip whose height
+  tracked that would resize the window.
 
 * **`dBi` is not a field anywhere.** `WiFiInfo` carries `signal_level` in dBm
   (negative, closer to 0 is stronger) and nothing in dBi. The brief listed
@@ -655,12 +913,154 @@ anyone doing so: in x11rb 0.13 the client data is `From<[u32; 5]>`, not
 `[u32; 8]`, and `ClientMessageEvent` has no `event_mask` field — the mask
 belongs to `send_event`, which is why EWMH messages go to the root window.
 
+**Q9 — What is the statistics window for `low_1pct` / `low_01pct`?** The
+definitions are fixed (criterion 13), but they need a *sample set*, and the
+natural answers disagree with each other:
+
+* "last N seconds" (proposed default `window_seconds: 10`) — stable, and the
+  window is what the user can reason about;
+* "the whole run so far" — what a benchmark tool reports, but it never
+  forgets an early stutter, so the number ratchets down and stops being
+  actionable an hour in;
+* "since the last display change" — needs event plumbing the panel does not
+  have.
+
+The sub-question underneath: **should the window slide on a timer (a ring of
+the last N seconds) or on a frame count (the last M frames)?** A time window
+means a 240 fps game contributes 4× the samples of a 60 fps one, so `1% low`
+means different things at different frame rates — the same reason
+`frametime_stats.py` prints *both* definitions. Proposed: a **time window**
+(`window_seconds`), because "what my 1 % low was over the last 10 seconds" is
+the question a player actually asks, and because it is what makes the graph
+strip and the numbers describe the same interval. Needs an owner decision.
+
+**Q10 — How often does the panel refresh its frame elements, and does that
+cost the game?** Two coupled questions.
+
+* *Cadence.* The panel's repaint policy is already in question (Q6: the
+  current one is a 500 ms timer, and staged step 1 changes it). Frame
+  elements invite repainting at the game's frame rate, which would make the
+  panel a 144 Hz redraw source over a game. Proposed: `refresh_hz: 4` — fast
+  enough that fps looks live, slow enough not to compete. Whether 4 Hz is
+  enough for `frametime_graph` to look like a graph rather than a staircase is
+  `NOT TESTED` and is really a design question about what the element is for.
+* *Cost.* With a compositor off, the panel's own window redraw is cheap
+  (measured 4.4 % / 1.9 % CPU at 1 Hz / 2 Hz in the earlier round); with a
+  compositor on, every panel redraw may cost a composite pass. The earlier
+  numbers are all **no-compositor** (B21), so the panel-plus-frames cadence
+  under a compositor is `NOT TESTED` and is the same untested condition that
+  Q10 in the PR body flags for the panel as a whole.
+
+**Q11 — What does a present mean when the game uses frame generation
+(FSR 2 / DLSS / XeSS / AFMF)?** This is the largest conceptual gap in the
+design and the owner should decide how the panel should behave.
+
+* A frame-generation present **interpolates** frames the GPU never rendered.
+  A present-interval histogram will therefore contain a large population of
+  roughly-half intervals, and `fps` will read the *displayed* rate — which is
+  what the user sees and arguably the right thing to show.
+* But `1% low` computed over that population measures the generator's cadence,
+  not the game's ability, and MangoHud handles this with a per-game toggle
+  (`fsr2_measure_gpu` and equivalents) rather than by an automatic rule.
+* The spike's workload has no frame generation, so **nothing here is
+  measured.** Proposed default: show presented fps, and let the user select
+  "base fps" or "GPU fps" per title later. Whether the layer can distinguish
+  them at all — DLSS exposes markers, FSR 2 does not — is `NOT TESTED` and
+  differs per technology.
+
+**Q12 — Two swapchains in one process, and two processes on one screen.**
+Both happen:
+
+* *Multiple swapchains per process* (e.g. a game window plus an internal
+  thumbnail/preview swapchain, or a second window). The layer's swapchain
+  hooks know how many exist, but which one defines "the frame" is a policy
+  choice. Proposed: **count presents from the swapchain that presents most
+  often**, tracked per-process, and expose the choice in the header
+  (`ring_capacity`'s neighbour would need a `primary_swapchain` field — a
+  protocol v1 amendment, not a reinterpretation). The spike measured window
+  *resizing* (swapchain recreation, §4 of the spike) but **not** two
+  simultaneous swapchains.
+* *Two Vulkan games at once* (a game and a launcher, or two instances). ADR-5's
+  rule — most recent present within 2 s, larger pid on ties — resolves it, but
+  the user may want the panel to *follow* one game rather than switch to
+  whichever presented last, which would make the number flicker between
+  processes. Proposed: once a process is selected, keep it until it goes stale
+  for `STALE_AFTER`. Needs an owner decision.
+
+**Q13 — Does the owner accept shipping an implicit Vulkan layer with the
+product?** Not a technical question, and the only one in this list that cannot
+be answered by measurement. Points to weigh: it must be installed into the
+Vulkan loader's search path on the host (a package or a udev-managed symlink
+under `/usr/share/vulkan/implicit_layer.d/`), it is opt-in per process via
+`LAPSPHERE_FRAMES=1`, and an implicit layer is loaded by *every* Vulkan
+application on the machine even when inactive. The alternative — an explicit
+layer, activated by `VK_INSTANCE_LAYERS` per launch — does not require host
+installation and is more obviously scoped, at the cost of the user having to
+set the variable for every launch (or Steam launch options), and of not
+covering a launcher that spawns the game itself. The spike builds a manifest
+with **both** an `enable_environment` and a `disable_environment` key, so both
+routes are available; which one ships is this question.
+
 
 ---
 
 ## Staged implementation plan
 
 One commit each. No code in this PR.
+
+The owner's staging table for this work is **PR A → PR D → PR C → PR E**
+(repaint, panel without fps, the layer, fps in the panel). Below, the seven
+steps that existed before fps were added are mapped onto that table, and
+**three problems with the ordering are stated**, because two of them change
+what should be committed.
+
+### Mapping to the owner's PR letters
+
+| Owner PR | Contains | Steps | Depends on |
+| --- | --- | --- | --- |
+| **A** | `request_repaint` on data arrival | 1 (+2 only if Q3 says so) | nothing |
+| **D** | the panel, **with no fps** | 3, 4, 5, 6, 7 | A (a panel that repaints at 500 ms is not a panel); Q1 answered |
+| **C** | the Vulkan implicit layer + the shm protocol, **as a library and its tests — no panel code** | C1–C4 below | nothing in the app; only the loader, `ash` and the host |
+| **E** | fps elements in the panel: the shm reader, the six frame elements, the config surface | C5 below | D (there must be a panel to add elements to) and C (there must be a layer producing data) |
+
+### Problem 1 — the layer (C) has **no dependency on the panel (D)**, so C should be developed and merged in parallel, not after D
+
+Nothing in C touches `gui/src`, `daemon/` or `common/`: the layer is a
+`cdylib` in its own crate, the shm protocol is a document plus a Python and a
+Rust reader, and its acceptance criteria (9–13) are all about the *layer and
+the loader*. Putting C after D therefore buys nothing and costs wall-clock
+time on the only part of this work with a genuine feasibility risk. C is also
+the part that can invalidate the most design: if the overhead or the MangoHud
+agreement fails, the owner wants to know before the panel is finished, not
+after.
+
+Recommended order: **A, then C and D in parallel, then E.** If C comes back
+NO-GO or conditional, D is unaffected and still ships — which is exactly why
+D must not contain any fps code.
+
+### Problem 2 — D must not contain a *placeholder* for fps, and E must not re-touch the layout
+
+The temptation when staging is to put an fps slot with a `—` into D. That
+would violate ADR-2 as soon as E lands (the slot's reserved width changes at
+the moment the data appears, which is the reflow criterion 4 forbids), and it
+would make D→E a window-resize change rather than a data change. The width
+table above is the contract: **D reserves the widths for all six frame rows
+from the start** even though it draws nothing but `—`, so E only changes what
+is drawn inside slots that already exist. That is a one-line config default in
+D (`"visible": false`) and an addition to the drawing code in E.
+
+### Problem 3 — C is one PR, not four, and its "commits" are not mergeable independently
+
+C1–C4 below are four *commits inside PR C* (protocol + reader, manifest +
+negotiation, present hook, hardening), chosen so that each is reviewable and
+each compiles. They are **not** four PRs: the layer is useless without the
+manifest, and the manifest is worthless without the hook. Do not ship C1–C3
+without C4 — the fail-open work is what makes criterion 10 true, and a
+half-hardened layer that can panic in a game process is worse than no layer.
+
+### The steps, in the letters' order
+
+**PR A**
 
 1. **`request_repaint` on data arrival.** When a `HardwareUpdate` is
    consumed (or arrives), request an immediate repaint instead of waiting for
@@ -670,12 +1070,16 @@ One commit each. No code in this PR.
 2. **Move the channel drain into `logic()`** — *only if Q3 concludes the
    iconify case is in scope.* Otherwise skip. Per the spike this is a no-op
    for `Visible(false)`. *Prerequisite: Q3 answered.*
+
+**PR D — the panel, no fps**
+
 3. **Panel mode in `AppState` and settings.** Add the mode enum and the
    `show_*` config surface following the `statistics_sections` shape; persist
    and reload. No drawing yet. *Prerequisite: Q1 answered.*
 4. **`pages/panel.rs` with a fixed layout and `—` placeholders.** Fixed
    widths per ADR-2, reserved slots, single fixed-height core strip. Draws
-   with whatever data is in `AppState`. *Prerequisite: step 3.*
+   with whatever data is in `AppState`. **Includes the six frame rows'
+   reserved widths, drawn as `—`.** *Prerequisite: step 3.*
 5. **Narrow the polled component set in panel mode.** Use
    `RefreshCoordinator::UpdateInterval` to park unselected components at a
    long interval (or add a pause/unregister). Never poll `logs` in panel
@@ -702,6 +1106,38 @@ One commit each. No code in this PR.
    *Prerequisite: steps 3-5.*
 7. **README section** describing panel mode, the element list, and the
    Wayland caveats. *Prerequisite: step 6.*
+
+**PR C — the layer, four commits, no application code**
+
+C1. **Protocol v1 and its readers.** ADR-5 as code: the header layout and
+ring as a documented `#[repr(C)]` struct in one module, the Rust reader with
+the seqlock, and a Python reader used by the spike's measurements. Plus the
+unit test that proves the Rust `low_percent`/`percentile` port matches
+`frametime_stats.py` on the same inputs (criterion 13's parity requirement).
+*No loader involvement yet — this commit is testable on its own with a fake
+writer.*
+C2. **Manifest, negotiation and the dispatch chain.** The implicit-layer JSON
+with `enable_environment: LAPSPHERE_FRAMES` and `disable_environment`,
+`vkNegotiateLayerInterfaceVersion`, `vkGetInstanceProcAddr` chaining,
+instance/device dispatch tables, and `vkCreateSwapchainKHR`/
+`vkDestroySwapchainKHR` hooks. Test: with the variable unset, the loader
+enumerates the layer and no segment appears (criterion 11).
+C3. **The `vkQueuePresentKHR` hook.** Timestamp, forward, write the interval
+to the ring. Test: a segment appears, monotonic, and its intervals go through
+`frametime_stats.py` with the expected median (criteria 9, 12).
+C4. **Hardening, and this is the commit that must not be skipped.**
+`catch_unwind` on every hook entry, no allocation and no syscall on the
+present path, `O_EXCL` creation, 0600, stale-segment pruning, `dropped_count`,
+and the fail-open cases (no reader, two instances, `kill -9`, unwritable
+runtime dir). Test: the game is unaffected in every case (criterion 10).
+
+**PR E — fps in the panel**
+
+C5. **The shm reader in the GUI, the six frame elements, and the `frames`
+config block.** Selection by ADR-5's rule (`STALE_AFTER = 2 s`), the
+statistics window from Q9, the refresh cadence from Q10, `frametime_graph` as
+one fixed-height strip, `—` when no source. *Prerequisite: PR D shipped and
+PR C merged; Q9, Q10, Q12, Q13 answered.*
 
 **One change to step 1, justified by the spike, not by B19.** B19's CPU
 columns are inconclusive (a debug build, no true idle baseline — see the B19
@@ -781,14 +1217,53 @@ this document are **xfwm4 4.20.0, X11, no compositor**
 * From earlier rounds, still open: keyboard pass-through; hot-reload of font
   scale and item order; flicker as a subjective judgement; a real tray click;
   the 10-minute iconify soak; tray survival across a window recreate.
-* **Runtime-PM on a discrete GPU** was measured only on this host's NVIDIA
-  3070 Laptop GPU under one compositing-less X11 session.
+**Runtime-PM on a discrete GPU** was measured only on this host's NVIDIA
+3070 Laptop GPU under one compositing-less X11 session.
+
+**Frame measurement — nothing below has any evidence on this host.**
+
+* **DXVK / Proton / Wine.** The spike's workload is a native Vulkan
+  application (`vkcube`). A DXVK-translated Direct3D game presents through the
+  same Vulkan entry point, so the mechanism should work, but whether a
+  translation layer's present cadence matches what the user sees, and whether
+  any of them interacts badly with an implicit layer, is `NOT TESTED`. **This
+  is the single largest gap**: most Windows games reach this host through
+  exactly this path, so a spike on `vkcube` is a mechanism proof, not a
+  product proof.
+* **OpenGL / GLX / EGL games.** Not hooked at all — a first-release non-goal.
+  Whatever those games show in the frame elements is `—`, untested because
+  never attempted.
+* **32-bit games.** The layer is a 64-bit `cdylib`; a 32-bit process cannot
+  load it. Not attempted.
+* **Anti-cheat.** No game with an anti-cheat suite was run. Whether any suite
+  enumerates layers, objects or `$XDG_RUNTIME_DIR/lapsphere/` and objects is
+  `NOT TESTED`, and no claim is made.
+* **Wayland.** No Wayland session on this host. The layer has no Wayland code
+  (it is API-level), but whether a present on a Wayland surface still marks a
+  displayed frame — presentation timing, explicit sync, `wp_presentation`
+  feedback — is `NOT TESTED`, and that is what the numbers would depend on.
+* **A GPU-bound game.** The spike workload is not GPU-bound, so the
+  MangoHud-agreement result (criterion 12) is measured where present-to-present
+  time is dominated by CPU and vsync. On a GPU-bound title the CPU-side
+  timestamp includes GPU work too, so the same code path yields *different*
+  numbers, and agreement has not been shown there.
+* **Frame generation** (FSR 2 / DLSS / XeSS / AFMF): see Q11 — untested and
+  conceptually undecided.
+* **Multiple swapchains in one process** (Q12): swapchain *recreation* on
+  window resize was measured; two live swapchains at once was not.
+* **The Rust reader's parity with `frametime_stats.py`** beyond the spike's
+  cross-check of raw intervals: no adversarial unit-test harness (criterion
+  13).
 
 ## What is deliberately not decided here
 
 * Whether the panel can be dragged by any part of its surface or only by a
   dedicated handle (interacts with Q2 and with ADR-3's position story).
 * Whether multiple panels are ever wanted (out of scope; would change ADR-1).
-* The exact element→width table (blocked on Q1).
+* The exact element→width table (blocked on Q1) — the frame rows are the
+  exception: their widths are proposed above and, unlike the D-Bus rows, no
+  source code or live interface can confirm them, because the data does not
+  exist yet. They are **design decisions, not measurements**, and the panel's
+  size will be whatever the first real font metrics say.
 * Whether panel mode should be startable from the CLI (`--panel`) alongside
   the existing `--tray`.
