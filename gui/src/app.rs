@@ -363,6 +363,8 @@ impl LapSphereApp {
         // Cloned once here and moved into the polling tasks so a completed
         // D-Bus fetch can ask for a frame immediately (see `send_update`).
         let repaint_ctx = cc.egui_ctx.clone();
+        // Bounded concurrency for the polling callbacks (see `InFlightSet`).
+        let in_flight = crate::polling_scheduler::InFlightSet::new();
         let coordinator_handle = if let Some(ref client) = dbus_client {
             let coordinator = RefreshCoordinator::new();
             let handle = coordinator.get_handle();
@@ -371,15 +373,37 @@ impl LapSphereApp {
             let client_clone = client.clone();
             let tx_clone = hw_update_tx.clone();
             let ctx_clone = repaint_ctx.clone();
+            let in_flight = in_flight.clone();
             tokio::spawn(async move {
                 coordinator.run(move |component_id| {
+                    // One request per component at a time. If the previous tick's
+                    // fetch has not finished, this tick is skipped rather than
+                    // stacked: with the window hidden nothing drains the update
+                    // channel, and a queued task per tick is unbounded growth.
+                    let Some(permit) = in_flight.try_begin(component_id) else {
+                        // Rate-limited: a hidden window skips every tick, and an
+                        // unconditional debug line per skip would be a firehose.
+                        let skipped = in_flight.skipped_ticks();
+                        if skipped <= 4 || skipped % 64 == 0 {
+                            log::debug!(
+                                "polling tick skipped, request still in flight: {} ({} skipped so far, {} in flight)",
+                                component_id,
+                                skipped,
+                                in_flight.active_len(),
+                            );
+                        }
+                        return;
+                    };
+
                     // Trigger refresh for the component
                     let client = client_clone.clone();
                     let tx = tx_clone.clone();
                     let ctx = ctx_clone.clone();
                     let component = component_id.to_string();
-                    
+
                     tokio::spawn(async move {
+                        // Released when this fetch ends, on every path.
+                        let _permit = permit;
                         match component.as_str() {
                             "cpu" => {
                                 match client.get_cpu_info().await {

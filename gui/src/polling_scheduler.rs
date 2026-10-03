@@ -1,7 +1,93 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use anyhow::Result;
+
+// ---------------------------------------------------------------------------
+// One outstanding request per component
+// ---------------------------------------------------------------------------
+//
+// The coordinator fires a tick on a timer and hands the component id to the
+// callback, which spawns a D-Bus fetch. Nothing tied the fetch's lifetime to
+// the next tick, so when the consumer stalls — a hidden/iconified window stops
+// calling `ui()` and `logic()`, and therefore stops draining the update
+// channel — the fetch tasks pile up: each one parked on `Sender::send()` while
+// the coordinator keeps starting more. The queue is bounded (100 slots), so the
+// growth does not stop at 100: it moves into the task set, one blocked task per
+// tick, for as long as the window stays hidden.
+//
+// `InFlightSet` bounds that instead. A component with a request still in flight
+// is skipped for this tick (counted, not queued), and the permit is released
+// when the fetch task finishes — including on the paths where the fetch returns
+// nothing to send.
+
+/// Components with an outstanding request, plus a count of skipped ticks.
+#[derive(Default)]
+pub struct InFlightSet {
+    active: Mutex<HashMap<String, u32>>,
+    skipped: AtomicU64,
+}
+
+impl InFlightSet {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Claim `id` for a new request, or `None` when one is already in flight.
+    ///
+    /// A refused claim is a skipped tick, not a queued one: the caller simply
+    /// does not spawn anything this round.
+    pub fn try_begin(self: &Arc<Self>, id: &str) -> Option<InFlightPermit> {
+        let mut active = self.lock();
+        let entry = active.entry(id.to_string()).or_insert(0);
+        if *entry > 0 {
+            drop(active);
+            self.skipped.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        *entry = 1;
+        Some(InFlightPermit {
+            set: Arc::clone(self),
+            id: id.to_string(),
+        })
+    }
+
+    /// Number of ticks skipped because a request was still in flight.
+    pub fn skipped_ticks(&self) -> u64 {
+        self.skipped.load(Ordering::Relaxed)
+    }
+
+    /// How many components currently have a request in flight.
+    pub fn active_len(&self) -> usize {
+        self.lock().values().filter(|n| **n > 0).count()
+    }
+
+    pub fn is_active(&self, id: &str) -> bool {
+        self.lock().get(id).copied().unwrap_or(0) > 0
+    }
+
+    fn lock(&self) -> MutexGuard<'_, HashMap<String, u32>> {
+        self.active.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// Releases its component's claim when dropped, so the claim cannot outlive
+/// the fetch task even on an early return or a panic.
+pub struct InFlightPermit {
+    set: Arc<InFlightSet>,
+    id: String,
+}
+
+impl Drop for InFlightPermit {
+    fn drop(&mut self) {
+        let mut active = self.set.lock();
+        if let Some(entry) = active.get_mut(&self.id) {
+            *entry = 0;
+        }
+    }
+}
 
 /// Lightweight UI refresh coordinator - manages when to trigger UI updates
 /// Unlike a full scheduler, this just tracks intervals and notifies when refresh is needed
