@@ -89,6 +89,86 @@ impl Drop for InFlightPermit {
     }
 }
 
+#[cfg(test)]
+mod in_flight_tests {
+    use super::*;
+
+    #[test]
+    fn a_second_claim_is_refused_while_the_first_is_held() {
+        let set = InFlightSet::new();
+        let first = set.try_begin("cpu").expect("first claim must succeed");
+
+        assert!(set.is_active("cpu"));
+        assert!(set.try_begin("cpu").is_none(), "second claim must be refused");
+        assert_eq!(set.skipped_ticks(), 1);
+        assert_eq!(set.active_len(), 1);
+
+        drop(first);
+        assert!(!set.is_active("cpu"));
+        assert!(set.try_begin("cpu").is_some(), "claim must be free again");
+        assert_eq!(set.skipped_ticks(), 1, "a refusal is the only skip");
+    }
+
+    #[test]
+    fn claims_are_per_component() {
+        let set = InFlightSet::new();
+        let _cpu = set.try_begin("cpu").expect("cpu");
+        let _gpu = set.try_begin("gpu").expect("gpu");
+
+        assert!(set.try_begin("cpu").is_none());
+        assert!(set.try_begin("gpu").is_none());
+        assert_eq!(set.active_len(), 2);
+        assert_eq!(set.skipped_ticks(), 2);
+    }
+
+    #[test]
+    fn a_stalled_consumer_bounds_the_task_set_to_one_per_component() {
+        // The iconify scenario: the consumer never drains, and the coordinator
+        // keeps ticking. Task count must stay at the number of components.
+        let set = InFlightSet::new();
+        let components = ["cpu", "gpu", "memory", "fans", "battery"];
+        let mut permits = Vec::new();
+
+        for _tick in 0..500 {
+            for id in components {
+                if let Some(permit) = set.try_begin(id) {
+                    // A tick that claims the slot models the spawned fetch;
+                    // the fetch that never completes keeps its permit.
+                    if permits.iter().any(|p: &InFlightPermit| p.id == id) {
+                        drop(permit);
+                    } else {
+                        permits.push(permit);
+                    }
+                }
+            }
+        }
+
+        assert_eq!(set.active_len(), components.len());
+        assert_eq!(set.skipped_ticks(), 500 * components.len() as u64 - components.len() as u64);
+    }
+
+    #[test]
+    fn the_permit_survives_being_moved_into_a_task() {
+        let set = InFlightSet::new();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+
+        let set_in_task = Arc::clone(&set);
+        let set_outer = Arc::clone(&set);
+        rt.block_on(async move {
+            let handle = tokio::spawn(async move {
+                let _permit = set_in_task.try_begin("gpu").expect("claim in task");
+                assert!(set_outer.is_active("gpu"), "held while the fetch runs");
+            });
+            handle.await.expect("task");
+        });
+
+        assert!(!set.is_active("gpu"), "released when the task ended");
+        assert!(set.try_begin("gpu").is_some());
+    }
+}
+
 /// Lightweight UI refresh coordinator - manages when to trigger UI updates
 /// Unlike a full scheduler, this just tracks intervals and notifies when refresh is needed
 pub struct RefreshCoordinator {
