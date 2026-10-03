@@ -281,6 +281,11 @@ fn request_repaint_now(ctx: &egui::Context) {
 
 /// Send one update and repaint when it landed. A `SendError` (receiver dropped
 /// during exit) is ignored exactly as before, and asks for no frame.
+///
+/// This is the lossless path, reserved for the one-shot startup requests
+/// (`SystemInfo`, `AvailableThresholds`, `TdpProfiles`, the update check): they
+/// carry state nothing else will re-fetch, so they wait for room rather than
+/// being dropped. Polling replies use `send_polled_update` instead.
 async fn send_update(
     tx: &mpsc::Sender<HardwareUpdate>,
     update: HardwareUpdate,
@@ -288,6 +293,69 @@ async fn send_update(
 ) {
     if tx.send(update).await.is_ok() {
         request_repaint_now(ctx);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Polled updates: drop rather than block
+// ---------------------------------------------------------------------------
+//
+// A polled reply is a snapshot of a sample that is already ageing — the next
+// tick supersedes it. Blocking on `send()` is therefore the wrong trade for
+// these: the sender waits for a consumer that may not exist (hidden window),
+// and each waiter is one more live task holding its payload. The bounded queue
+// does not fix that; it just relocates the growth into the task set.
+//
+// So polled replies use `try_send`. Full channel means the UI is behind and the
+// update is stale: it is dropped, and the frame that eventually arrives is the
+// newer sample. `Closed` (receiver dropped at exit) is ignored, as before.
+//
+// Dropped is not silent: the running count is logged at debug, rate-limited so
+// a long iconified stretch cannot turn the log into the next firehose.
+
+static DROPPED_UPDATES: AtomicU64 = AtomicU64::new(0);
+static DROPPED_LOGS: AtomicU64 = AtomicU64::new(0);
+
+/// Log the first few drops and then every 64th, so the counter stays visible
+/// without becoming a hot path of its own.
+fn should_log_drop() -> bool {
+    let n = DROPPED_UPDATES.fetch_add(1, Ordering::Relaxed) + 1;
+    n <= 4 || n % 64 == 0
+}
+
+/// Total polled updates dropped so far because the channel was full.
+pub fn dropped_update_count() -> u64 {
+    DROPPED_UPDATES.load(Ordering::Relaxed)
+}
+
+/// The subset of those that were daemon-log-ring replies (the largest payload).
+pub fn dropped_log_update_count() -> u64 {
+    DROPPED_LOGS.load(Ordering::Relaxed)
+}
+
+/// Send a polled reply, dropping it when the queue is full, and repaint on
+/// success.
+fn send_polled_update(
+    tx: &mpsc::Sender<HardwareUpdate>,
+    update: HardwareUpdate,
+    ctx: &egui::Context,
+) {
+    let is_log_ring = matches!(update, HardwareUpdate::DaemonLogs(_));
+    match tx.try_send(update) {
+        Ok(()) => request_repaint_now(ctx),
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            if is_log_ring {
+                DROPPED_LOGS.fetch_add(1, Ordering::Relaxed);
+            }
+            if should_log_drop() {
+                log::debug!(
+                    "dropped polled update: update channel full ({} dropped so far, {} of them daemon logs)",
+                    dropped_update_count(),
+                    dropped_log_update_count(),
+                );
+            }
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {}
     }
 }
 
@@ -407,70 +475,70 @@ impl LapSphereApp {
                         match component.as_str() {
                             "cpu" => {
                                 match client.get_cpu_info().await {
-                                    Ok(Ok(info)) => { send_update(&tx, HardwareUpdate::CpuInfo(info), &ctx).await; }
+                                    Ok(Ok(info)) => { send_polled_update(&tx, HardwareUpdate::CpuInfo(info), &ctx); }
                                     Ok(Err(e)) => log::error!("Failed to get CPU info: {}", e),
                                     Err(e) => log::error!("DBus error getting CPU info: {}", e),
                                 }
                             }
                             "gpu" => {
                                 match client.get_gpu_info().await {
-                                    Ok(Ok(info)) => { send_update(&tx, HardwareUpdate::GpuInfo(info), &ctx).await; }
+                                    Ok(Ok(info)) => { send_polled_update(&tx, HardwareUpdate::GpuInfo(info), &ctx); }
                                     Ok(Err(e)) => log::error!("Failed to get GPU info: {}", e),
                                     Err(e) => log::error!("DBus error getting GPU info: {}", e),
                                 }
                             }
                             "memory" => {
                                 match client.get_memory_info().await {
-                                    Ok(Ok(info)) => { send_update(&tx, HardwareUpdate::MemoryInfo(info), &ctx).await; }
+                                    Ok(Ok(info)) => { send_polled_update(&tx, HardwareUpdate::MemoryInfo(info), &ctx); }
                                     Ok(Err(e)) => log::error!("Failed to get Memory info: {}", e),
                                     Err(e) => log::error!("DBus error getting Memory info: {}", e),
                                 }
                             }
                             "fans" => {
                                 match client.get_fan_info().await {
-                                    Ok(Ok(info)) => { send_update(&tx, HardwareUpdate::FanInfo(info), &ctx).await; }
+                                    Ok(Ok(info)) => { send_polled_update(&tx, HardwareUpdate::FanInfo(info), &ctx); }
                                     Ok(Err(e)) => log::error!("Failed to get Fan info: {}", e),
                                     Err(e) => log::error!("DBus error getting Fan info: {}", e),
                                 }
                             }
                             "battery" => {
                                 match client.get_battery_info().await {
-                                    Ok(Ok(info)) => { send_update(&tx, HardwareUpdate::BatteryInfo(info), &ctx).await; }
+                                    Ok(Ok(info)) => { send_polled_update(&tx, HardwareUpdate::BatteryInfo(info), &ctx); }
                                     Ok(Err(e)) => log::error!("Failed to get Battery info: {}", e),
                                     Err(e) => log::error!("DBus error getting Battery info: {}", e),
                                 }
                             }
                             "wifi" => {
                                 match client.get_wifi_info().await {
-                                    Ok(Ok(info)) => { send_update(&tx, HardwareUpdate::WifiInfo(info), &ctx).await; }
+                                    Ok(Ok(info)) => { send_polled_update(&tx, HardwareUpdate::WifiInfo(info), &ctx); }
                                     Ok(Err(e)) => log::error!("Failed to get WiFi info: {}", e),
                                     Err(e) => log::error!("DBus error getting WiFi info: {}", e),
                                 }
                             }
                             "gamepads" => {
                                 match client.get_gamepad_info().await {
-                                    Ok(Ok(info)) => { send_update(&tx, HardwareUpdate::GamepadInfo(info), &ctx).await; }
+                                    Ok(Ok(info)) => { send_polled_update(&tx, HardwareUpdate::GamepadInfo(info), &ctx); }
                                     Ok(Err(e)) => log::error!("Failed to get Gamepad info: {}", e),
                                     Err(e) => log::error!("DBus error getting Gamepad info: {}", e),
                                 }
                             }
                             "storage" => {
                                 match client.get_storage_device_info().await {
-                                    Ok(Ok(info)) => { send_update(&tx, HardwareUpdate::StorageDeviceInfo(info), &ctx).await; }
+                                    Ok(Ok(info)) => { send_polled_update(&tx, HardwareUpdate::StorageDeviceInfo(info), &ctx); }
                                     Ok(Err(e)) => log::error!("Failed to get Storage info: {}", e),
                                     Err(e) => log::error!("DBus error getting Storage info: {}", e),
                                 }
                             }
                             "mount" => {
                                 match client.get_mount_info().await {
-                                    Ok(Ok(info)) => { send_update(&tx, HardwareUpdate::MountInfo(info), &ctx).await; }
+                                    Ok(Ok(info)) => { send_polled_update(&tx, HardwareUpdate::MountInfo(info), &ctx); }
                                     Ok(Err(e)) => log::error!("Failed to get Mount info: {}", e),
                                     Err(e) => log::error!("DBus error getting Mount info: {}", e),
                                 }
                             }
                             "webcam" => {
                                 match client.get_webcam_state().await {
-                                    Ok(Ok(state)) => { send_update(&tx, HardwareUpdate::WebcamState(state), &ctx).await; }
+                                    Ok(Ok(state)) => { send_polled_update(&tx, HardwareUpdate::WebcamState(state), &ctx); }
                                     _ => {}
                                 }
                             }
@@ -480,7 +548,7 @@ impl LapSphereApp {
                                 // GUI nobody is reading logs in is pure allocation churn.
                                 if should_fetch_logs() {
                                     match client.get_daemon_logs().await {
-                                        Ok(Ok(logs)) => { send_update(&tx, HardwareUpdate::DaemonLogs(logs), &ctx).await; }
+                                        Ok(Ok(logs)) => { send_polled_update(&tx, HardwareUpdate::DaemonLogs(logs), &ctx); }
                                         _ => {}
                                     }
                                 }
