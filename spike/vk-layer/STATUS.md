@@ -5,37 +5,58 @@ produced a measurement yet.
 
 ## One-line state
 
-The layer **compiles in release**, the loader **enumerates and loads it**, and
-`vkCreateInstance` is entered — but **no shared-memory segment is ever created**
-and **no frame is ever recorded**. Debugging is in progress.
+**Progress: the segment is now created. No frames are recorded yet.**
 
-## What is measured
+`vkCreateInstance` completes, `frames-<pid>` appears in
+`$XDG_RUNTIME_DIR/lapsphere/` with mode 0600 and the right size — but it holds
+`frame_count = 0`, and the counters show the device/present path is never
+reached.
 
-| # | Test | Method | Result |
-| --- | --- | --- | --- |
-| 1a | Layer is found by the loader | manifest installed to `~/.local/share/vulkan/implicit_layer.d/`, `VK_LOADER_DEBUG=layer`, `vkcube --gpu_number 0 --c 30` | **PASS** — manifest listed in the implicit-layer search path |
-| 1b | Inert without the environment variable | same run with `LAPSPHERE_FRAMES` unset | **PASS** — manifest found, **no** `frames-<pid>` segment, game unaffected |
-| — | `VK_LAYER_PATH` as an install location | manifest placed there instead | **FAIL, and the finding matters** — the loader lists it under *"Searching for **explicit** layer manifest files"* and never honours `enable_environment`, which is only read for implicit layers. Install into a real implicit search directory, or use `VK_IMPLICIT_LAYER_PATH`. |
-
-That is all. Tests 1c, 2, 3, 4, 5 and 6 of the agreed list have **no result**:
-no MangoHud comparison, no per-hook overhead, no robustness matrix, no reader
-latency/CPU, no `frametime_stats.py --compare` A/B.
-
-## Where it stops, exactly
-
-Observed output of a run (release build, `LAPSPHERE_FRAMES=1`):
+## Exact counters from the last run
 
 ```
-[lapsphere-frames] negotiate: loader offered 2
-[lapsphere-frames] vkCreateInstance entered
-[lapsphere-frames] next_gipa present: true
+enabled; segment created gipa=0 create_instance=1 create_device=0 gdpa=0
+  destroy_device=0 create_swapchain=0 destroy_swapchain=0 queue_present=0
 ```
 
-and then nothing: no `cd.is_some()`/`di.is_some()` line, no segment, and the
-process runs the cube normally until the timeout kills it. So the failure is
-after the instance chain is successfully walked and inside
-`vk_create_instance`, between retrieving `next_gipa` and installing the
-instance state.
+Read literally, that says:
+
+* `vk_create_instance` ran once and succeeded;
+* **our `vkGetInstanceProcAddr` was never called** (`gipa=0`) — not even for
+  the names the loader must ask about;
+* consequently `vk_create_device` was never entered, so no device state was
+  registered, so `vkQueuePresentKHR` was never intercepted.
+
+**The layer is loaded, the instance is created, and then the loader never
+routes anything else through it.** That is the whole remaining problem, and it
+is a loader-interface question, not a frame-timing one.
+
+## What was fixed in this round (each confirmed by a printed value)
+
+* **Owner hypothesis (в) was correct and it was the blocker.** The
+  `pfnNextGetInstanceProcAddr` in the *first* `VkLayerInstanceLink` belongs to
+  `libVkLayer_MESA_device_select.so`, and calling *that* function with a real
+  instance handle **never returns** on this host — the main thread spins in
+  user space with no syscalls (`/proc/<pid>/stat` shows `state=R`, `utime`
+  climbing; `strace` shows nothing after the last log write). Walking the link
+  chain to its **last** entry and using that gipa — which belongs to
+  `libvulkan.so.1.4.341`, the loader terminator — fixed it. The lookups now
+  return, `cd.is_some()=true di.is_some()=true`, and the segment is created.
+* The full link chain is now logged with the object each gipa belongs to:
+
+  | link | gipa belongs to |
+  | --- | --- |
+  | `link[0]` | `libVkLayer_MESA_device_select.so` |
+  | `link[1]` | `libMangoHud.so` |
+  | `link[2]` | `libvulkan.so.1.4.341` (**terminator — use this one**) |
+
+* MangoHud is **not** implicated: the same hang occurs with `MANGOHUD=0`.
+* `dlsym(RTLD_DEFAULT, "vkGetInstanceProcAddr")` returns **NULL** inside the
+  layer on this host, so the terminator route is the only working one.
+* Build-identity stamping is in (`build.sh` writes `src/buildid.rs`;
+  `negotiate` prints the stamp, the source mtime and its own pid). Run
+  `run.sh`, which also prints the mapped `.so` from `/proc/<pid>/maps`. This
+  exists because a stale build was twice mistaken for a behavioural result.
 
 ## Bugs already found and fixed (do not re-introduce)
 
@@ -57,6 +78,46 @@ Each was confirmed by a value printed at the failure point.
    `"vkQueuePresentKHR": "lapsphere_frames_layer::vk_queue_present_khr"` does
    not resolve.
 4. **`VK_LAYER_PATH` does not install an implicit layer** (see the table).
+
+## What is now EXCLUDED (do not re-test these)
+
+* **MangoHud interference** — same hang with `MANGOHUD=0`.
+* **The first link's gipa being usable** — it belongs to
+  `libVkLayer_MESA_device_select.so` and loops on a real instance handle here.
+  Use the terminator (`link[2]`).
+* **`VK_LAYER_PATH`** — does not install an implicit layer at all.
+* **A crash in our code** — there is none; the main thread spins, it does not
+  fault, and there is no `catch_unwind` trigger.
+* **Stale build** — `build.sh` stamps the id into the binary and `run.sh`
+  prints the mapped `.so`; every result above is from a stamped build.
+
+## Code reference needed to finish
+
+The remaining blocker is a **loader-interface** question, not a Vulkan-timing
+one, and it is not answerable by more of my own guessing. The most useful
+thing the owner could bring, in order of usefulness:
+
+1. **Any working implicit layer for Vulkan 1.3/1.4 on this loader**, as source
+   or as something to read — specifically its `vkCreateInstance` /
+   `vkCreateDevice` / `vkGetDeviceProcAddr` and its manifest. I want to see
+   how a layer that *is* routed after instance creation is written. Candidates:
+   `VK_LAYER_MESA_device_select` itself is on this host
+   (`/usr/lib/x86_64-linux-gnu/libVkLayer_MESA_device_select.so`) and is the
+   layer whose gipa I am calling — its own source
+   (`src/amd/vulkan/layers/device_select`) is the closest reference available
+   without downloading anything, and it is the layer I can *remove* from the
+   picture by setting `NODEVICE_SELECT=1`.
+2. **The loader's own rules for a layer's manifest `functions` map and the
+   deprecated-vs-negotiated `vkGetInstanceProcAddr` tag.** The loader logged a
+   deprecation warning for our manifest's `vkGetInstanceProcAddr` /
+   `vkGetDeviceProcAddr` tags. A manifest that drops those tags and relies
+   solely on `vkNegotiateLoaderLayerInterfaceVersion` is the obvious next
+   experiment — it is cheap and I did not get to it before the time-box.
+3. **Confirmation of which concrete next step is right**: with `gipa=0`, the
+   loader appears to be resolving device entry points from the *manifest*
+   (`functions`) rather than by calling our gipa. If so the fix is a manifest
+   problem — either correct `functions` entries, or dropping them entirely and
+   letting negotiation supply the pointers. I would test (2) first.
 
 ## Process notes that cost time — apply them
 

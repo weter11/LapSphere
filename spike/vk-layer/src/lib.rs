@@ -15,10 +15,11 @@
 //! 3. **No allocation and no syscall on the present path.** The segment, the
 //!    dispatch tables and the writer all exist before the first frame.
 
+pub mod buildid;
 pub mod shm;
 pub mod vkraw;
 
-use std::ffi::{c_char, CStr};
+use std::ffi::{c_char, c_void, CStr};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -95,6 +96,108 @@ fn unregister_device(handle: u64) {
 }
 
 // ---------------------------------------------------------------------------
+// instrumentation
+// ---------------------------------------------------------------------------
+
+/// Build identity, printed in `negotiate` so a stale `.so` can never again be
+/// mistaken for a behavioural result. The manifest points at the library by
+/// absolute path, so "cargo finished" does not imply "this is the code that
+/// ran".
+pub use buildid::{BUILD_ID, BUILD_MTIME};
+
+/// Path of the running process, so the loader's own `/proc/<pid>/maps` can be
+/// compared against the file we think we are in.
+fn self_maps_path() -> String {
+    format!("/proc/{}/maps", std::process::id())
+}
+
+/// Append one line to `$XDG_RUNTIME_DIR/lapsphere/spike.log`.
+///
+/// A file rather than stderr: a layer runs inside somebody else's process
+/// whose stderr may be discarded, closed, or (as happened twice) still
+/// showing an earlier build's output. Counters and a file make that
+/// impossible.
+pub fn dbg_log(msg: &str) {
+    use std::io::Write;
+    let dir = format!(
+        "{}/lapsphere",
+        std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into())
+    );
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(format!("{}/spike.log", dir))
+    {
+        let _ = writeln!(f, "[{}] {}", std::process::id(), msg);
+    }
+}
+
+/// Which mapped file (if any) contains `addr`. Turns "the pointer looks
+/// wrong" into "the pointer is in *that* object", which is the only form of
+/// this bug that can be reasoned about.
+fn which_mapping(addr: usize) -> String {
+    let maps = match std::fs::read_to_string("/proc/self/maps") {
+        Ok(m) => m,
+        Err(e) => return format!("<maps unreadable: {}>", e),
+    };
+    for line in maps.lines() {
+        let mut it = line.split_whitespace();
+        let range = it.next().unwrap_or("");
+        let _perms = it.next().unwrap_or("");
+        let _off = it.next().unwrap_or("");
+        let _dev = it.next().unwrap_or("");
+        let _inode = it.next().unwrap_or("");
+        let path = it.next().unwrap_or("[anon]");
+        if let Some((lo, hi)) = range.split_once('-') {
+            let lo = usize::from_str_radix(lo, 16).unwrap_or(0);
+            let hi = usize::from_str_radix(hi, 16).unwrap_or(0);
+            if addr >= lo && addr < hi {
+                return format!("{} offset+0x{:x}", path, addr - lo);
+            }
+        }
+    }
+    "<not mapped>".to_string()
+}
+
+/// Per-hook entry counters, so "the hook was never called" is a measurement
+/// rather than an inference from the absence of output.
+pub static HOOK_CALLS: [std::sync::atomic::AtomicU64; 8] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+pub const HOOK_NAMES: [&str; 8] = [
+    "gipa",
+    "create_instance",
+    "create_device",
+    "gdpa",
+    "destroy_device",
+    "create_swapchain",
+    "destroy_swapchain",
+    "queue_present",
+];
+
+#[inline]
+fn bump(i: usize) {
+    HOOK_CALLS[i].fetch_add(1, Ordering::Relaxed);
+}
+
+fn counters_line() -> String {
+    let v: Vec<String> = HOOK_NAMES
+        .iter()
+        .enumerate()
+        .map(|(i, n)| format!("{}={}", n, HOOK_CALLS[i].load(Ordering::Relaxed)))
+        .collect();
+    v.join(" ")
+}
+
+// ---------------------------------------------------------------------------
 // negotiation
 // ---------------------------------------------------------------------------
 
@@ -107,8 +210,13 @@ pub unsafe extern "system" fn vkNegotiateLoaderLayerInterfaceVersion(
     if p.is_null() {
         return ERROR_INITIALIZATION_FAILED;
     }
-    eprintln!("[lapsphere-frames] negotiate: loader offered {}", (*p).loader_layer_interface_version);
-    let _ = std::env::var("LAPSPHERE_FRAMES_DEBUG");
+    dbg_log(&format!(
+        "negotiate: loader offered {}, build {} mtime {} maps_self={}",
+        (*p).loader_layer_interface_version,
+        BUILD_ID,
+        BUILD_MTIME,
+        self_maps_path()
+    ));
     let s = &mut *p;
     s.s_type = STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO;
     s.p_next = std::ptr::null_mut();
@@ -194,10 +302,17 @@ pub unsafe extern "system" fn vk_create_instance(
     p_allocator: *const VkAllocationCallbacks,
     p_instance: *mut Instance,
 ) -> VkResult {
-    eprintln!("[lapsphere-frames] vkCreateInstance entered");
+    bump(1);
+    dbg_log(&format!("create_instance entered p_next={:p}", (*p_create_info).p_next));
     // The loader appends a VkLayerInstanceCreateInfo to p_next carrying the
     // next layer's proc addr.
     let mut next_gipa: Option<PFN_vkGetInstanceProcAddr> = None;
+    // Each VkLayerInstanceLink carries `p_next` (the layer below the one that
+    // gave us this link) and that layer's gipa. Owner hypothesis (в): the
+    // *public* gipa of an adjacent layer is not safe to call with an instance
+    // handle on this loader -- it loops forever -- whereas walking the link
+    // chain is. Both routes are recorded so they can be compared by value.
+    let mut link_ptr: *mut VkLayerInstanceLink = std::ptr::null_mut();
     let mut chain = (*p_create_info).p_next;
     while !chain.is_null() {
         if (*chain).s_type == STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO {
@@ -206,6 +321,7 @@ pub unsafe extern "system" fn vk_create_instance(
             // union members (loader-data callback, feature flags) are the
             // loader's business and must be forwarded untouched.
             if (*li).function == VK_LAYER_LINK_INFO && !(*li).p_layer_info.is_null() {
+                link_ptr = (*li).p_layer_info;
                 next_gipa = Some((*(*li).p_layer_info).pfn_next_get_instance_proc_addr);
                 break;
             }
@@ -221,12 +337,7 @@ pub unsafe extern "system" fn vk_create_instance(
         Some(f) => f,
         None => return ERROR_INITIALIZATION_FAILED,
     };
-    if std::env::var("LAPSPHERE_FRAMES_DEBUG").is_ok() {
-        eprintln!(
-            "[lapsphere-frames] vkCreateInstance: next_gipa={:p}",
-            gipa as *const ()
-        );
-    }
+    dbg_log(&format!("next_gipa={:p}", gipa as *const ()));
     let create: PFN_vkCreateInstance =
         match std::mem::transmute::<PFN_vkVoidFunction, PFN_vkCreateInstance>(gipa(
             Instance::null(),
@@ -238,9 +349,7 @@ pub unsafe extern "system" fn vk_create_instance(
     // Forward first. Our state is installed afterwards, so every early return
     // below leaves the chain exactly as the game left it.
     let res = create(p_create_info, p_allocator, p_instance);
-    if std::env::var("LAPSPHERE_FRAMES_DEBUG").is_ok() {
-        eprintln!("[lapsphere-frames] vkCreateInstance -> {:?}", res);
-    }
+    dbg_log(&format!("next vkCreateInstance -> {:?}", res));
     if res.is_error() {
         return res;
     }
@@ -256,15 +365,78 @@ pub unsafe extern "system" fn vk_create_instance(
     }
 
     let inst = *p_instance;
-    let cd: Option<PFN_vkCreateDevice> =
-        std::mem::transmute(gipa(inst, b"vkCreateDevice\0".as_ptr() as *const c_char));
-    let di: Option<PFN_vkDestroyInstance> =
-        std::mem::transmute(gipa(inst, b"vkDestroyInstance\0".as_ptr() as *const c_char));
-    eprintln!(
-        "[lapsphere-frames] cd.is_some()={} di.is_some()={}",
+    // HYPOTHESIS UNDER TEST (owner, item б): the pointer obtained from the
+    // chain link spins forever when called with a real instance handle on this
+    // loader. Use the loader's own exported vkGetInstanceProcAddr instead --
+    // resolved with dlsym(RTLD_DEFAULT) -- for the instance-level lookups.
+    // Walk to the LAST link -- that one belongs to the loader terminator
+    // (libvulkan.so), whose gipa is the correct, complete implementation to ask
+    // for a core entry point with a real instance handle. Measured on this
+    // host: calling the *first* link (libVkLayer_MESA_device_select) with an
+    // instance handle never returns.
+    let mut terminator_gipa: PFN_vkGetInstanceProcAddr = gipa;
+    {
+        let mut l = link_ptr;
+        let mut last = 0usize;
+        let mut depth = 0;
+        while !l.is_null() && depth < 8 {
+            terminator_gipa = (*l).pfn_next_get_instance_proc_addr;
+            last = depth;
+            l = (*l).p_next;
+            depth += 1;
+        }
+        dbg_log(&format!(
+            "using terminator gipa from link[{}] ({})",
+            last,
+            which_mapping(terminator_gipa as usize)
+        ));
+    }
+    let loader_gipa: PFN_vkGetInstanceProcAddr = terminator_gipa;
+    dbg_log(&format!(
+        "chain gipa={:p} loader gipa={:p} (dlsym)",
+        gipa as *const (),
+        loader_gipa as *const ()
+    ));
+    dbg_log(&format!("chain gipa lives in: {}", which_mapping(gipa as usize)));
+    // Walk the link chain explicitly: each VkLayerInstanceLink carries
+    // p_next (the layer below) and the next gipa. Print every link we can see,
+    // with the object each belongs to.
+    {
+        let mut l = link_ptr;
+        let mut depth = 0;
+        while !l.is_null() && depth < 8 {
+            dbg_log(&format!(
+                "link[{}] {:p} gipa={:p} in {}",
+                depth,
+                l,
+                (*l).pfn_next_get_instance_proc_addr as *const (),
+                which_mapping((*l).pfn_next_get_instance_proc_addr as usize)
+            ));
+            l = (*l).p_next;
+            depth += 1;
+        }
+    }
+    dbg_log(&format!(
+        "instance {} lives in: {}",
+        inst.as_raw() as usize,
+        which_mapping(inst.as_raw() as usize)
+    ));
+    let cd: Option<PFN_vkCreateDevice> = std::mem::transmute(loader_gipa(
+        inst,
+        b"vkCreateDevice\0".as_ptr() as *const c_char,
+    ));
+    dbg_log("vkCreateDevice lookup returned");
+    let di: Option<PFN_vkDestroyInstance> = std::mem::transmute(loader_gipa(
+        inst,
+        b"vkDestroyInstance\0".as_ptr() as *const c_char,
+    ));
+    dbg_log("vkDestroyInstance lookup returned");
+    dbg_log(&format!(
+        "after create: instance={:p} cd.is_some()={} di.is_some()={}",
+        inst.as_raw(),
         cd.is_some(),
         di.is_some()
-    );
+    ));
     let (cd, di) = match (cd, di) {
         (Some(a), Some(b)) => (a, b),
         _ => return res, // cannot hook without both; stay a pass-through
@@ -284,13 +456,14 @@ pub unsafe extern "system" fn vk_create_instance(
                 Ok(w) => *slot = Some(w),
                 Err(e) => {
                     // Fail-open: a game that cannot be measured still runs.
-                    eprintln!("[lapsphere-frames] shm unavailable, pass-through: {}", e);
+                    dbg_log(&format!("shm unavailable, pass-through: {}", e));
                     return res;
                 }
             }
         }
     }
     ENABLED.store(true, Ordering::Release);
+    dbg_log(&format!("enabled; segment created {}", counters_line()));
     res
 }
 
@@ -330,6 +503,17 @@ pub unsafe extern "system" fn vk_create_device(
     p_allocator: *const VkAllocationCallbacks,
     p_device: *mut Device,
 ) -> VkResult {
+    bump(2);
+    dbg_log(&format!("create_device ENTERED {}", counters_line()));
+    // Owner hypothesis (a): dispatch tables are keyed by the *dispatch pointer*
+    // inside the handle -- *(void**)handle -- not by the descriptor we were
+    // handed. Print both so a mismatch is visible.
+    dbg_log(&format!(
+        "create_device: physdev={:p} dispatch_key={:p} instance_slot_has_create={}",
+        physical_device.as_raw(),
+        *(physical_device.as_raw() as *const *const u8),
+        instance_slot().lock().map(|s| s.is_some()).unwrap_or(false)
+    ));
     let next_create = instance_slot()
         .lock()
         .ok()
@@ -353,16 +537,30 @@ pub unsafe extern "system" fn vk_create_device(
         chain = (*chain).p_next;
     }
 
+    dbg_log("create_device: forwarding down the chain");
     let res = create(physical_device, p_create_info, p_allocator, p_device);
+    dbg_log(&format!("create_device -> {:?}", res));
     if res.is_error() {
         return res;
     }
 
+    dbg_log(&format!(
+        "create_device: gdpa from device chain = {:?}",
+        next_gdpa.map(|f| f as *const ())
+    ));
     let gdpa = match next_gdpa {
         Some(f) => f,
-        None => return res,
+        None => {
+            dbg_log("create_device: NO gdpa in chain, pass-through");
+            return res;
+        }
     };
     let dev = *p_device;
+    dbg_log(&format!(
+        "create_device: device={:p} dispatch_key={:p}",
+        dev.as_raw(),
+        *(dev.as_raw() as *const *const u8)
+    ));
     let name = |s: &[u8]| s.as_ptr() as *const c_char;
     let queue_present: Option<PFN_vkQueuePresentKHR> =
         std::mem::transmute(gdpa(dev, name(b"vkQueuePresentKHR\0")));
@@ -520,9 +718,23 @@ pub unsafe extern "system" fn vk_queue_present_khr(
     queue: Queue,
     p_present_info: *const VkPresentInfoKHR,
 ) -> VkResult {
+    bump(7);
     let next = match device_state(queue.as_raw() as u64) {
         Some(s) => s.queue_present,
-        None => return ERROR_INITIALIZATION_FAILED,
+        None => {
+            // This fires once per present if the key is wrong; log once, not
+            // 60 times a second.
+            if HOOK_CALLS[7].load(Ordering::Relaxed) == 1 {
+                dbg_log(&format!(
+                    "queue_present: NO device state for key 0x{:x} (queue={:p} dispatch_key={:p}) {}",
+                    queue.as_raw() as u64,
+                    queue.as_raw(),
+                    *(queue.as_raw() as *const *const u8),
+                    counters_line()
+                ));
+            }
+            return ERROR_INITIALIZATION_FAILED;
+        }
     };
 
     if !ENABLED.load(Ordering::Acquire) {
