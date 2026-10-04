@@ -14,6 +14,7 @@ use crate::pages::{statistics, profiles, tuning, settings};
 use crate::keyboard_shortcuts::KeyboardShortcuts;
 use crate::polling_scheduler::{RefreshCoordinator, CoordinatorHandle};
 use crate::system_tray::{SystemTray, TrayEvent};
+use crate::tray_config;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Page {
@@ -1209,7 +1210,16 @@ pub fn get_crash_dir() -> String {
 }
 
 pub fn load_config_from_disk() -> anyhow::Result<AppConfig> {
-    let config_dir = get_config_dir();
+    load_config_from_dir(&get_config_dir())
+}
+
+/// Same as [`load_config_from_disk`] but against an explicit config directory.
+///
+/// Split out so the migration can be exercised end-to-end in tests without
+/// touching the real `~/.config/lapsphere` (or `HOME`, which is process-global
+/// and therefore racy across parallel tests).
+pub fn load_config_from_dir(config_dir: &str) -> anyhow::Result<AppConfig> {
+    let config_dir = config_dir.to_string();
     let settings_path = format!("{}/settings.json", config_dir);
     let profiles_path = format!("{}/profiles.json", config_dir);
     let legacy_path = format!("{}/config.json", config_dir);
@@ -1220,6 +1230,12 @@ pub fn load_config_from_disk() -> anyhow::Result<AppConfig> {
     } else {
         None
     };
+
+    // Tray settings: resolve runs load -> migrate -> legacy fallback in that
+    // order (see `resolve_tray_config`). The load first matters: it quarantines
+    // a corrupt tray.json, which then lets the migration recover the values
+    // from settings.json instead of falling back to defaults.
+    let tray = tray_config::resolve_tray_config(&config_dir, legacy_config.as_ref());
 
     let settings = if Path::new(&settings_path).exists() {
         Some(load_settings_from_disk(&settings_path)?)
@@ -1240,6 +1256,10 @@ pub fn load_config_from_disk() -> anyhow::Result<AppConfig> {
     if let Some(profiles) = profiles {
         profiles.apply_to(&mut config);
     }
+    // tray.json is authoritative: it is the file this build owns, and
+    // `resolve_tray_config` has already folded any settings.json values into
+    // it when that file did not exist.
+    tray.apply_to(&mut config);
 
     if config.start_minimized {
         config.tray_enabled = true;
@@ -1323,6 +1343,211 @@ fn save_profiles_to_disk(config: &AppConfig) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(&ProfilesConfig::from(config))?;
     std::fs::write(profiles_path, json)?;
     Ok(())
+}
+
+
+#[cfg(test)]
+mod tray_migration_e2e_tests {
+    use super::*;
+    use crate::tray_config::{SETTINGS_PRE_SPLIT_BACKUP, TRAY_CONFIG_CORRUPT, TRAY_CONFIG_FILE};
+    use std::path::PathBuf;
+
+    /// Per-test scratch config dir, removed on drop. `load_config_from_dir`
+    /// exists precisely so these can run against a real directory without
+    /// touching `HOME` (process-global, racy across parallel tests).
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "lapsphere-traye2e-{}-{}-{}",
+                std::process::id(),
+                name,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> String {
+            self.0.to_string_lossy().into_owned()
+        }
+
+        fn write(&self, name: &str, contents: &str) {
+            std::fs::write(self.0.join(name), contents).unwrap();
+        }
+
+        fn read(&self, name: &str) -> String {
+            std::fs::read_to_string(self.0.join(name)).unwrap()
+        }
+
+        fn exists(&self, name: &str) -> bool {
+            self.0.join(name).exists()
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A pre-split settings.json: panel settings plus the two tray fields.
+    const LEGACY_SETTINGS: &str = r#"{
+  "theme": "Dark",
+  "start_minimized": true,
+  "tray_enabled": true,
+  "autostart": false,
+  "font_size": "Large"
+}"#;
+
+    /// The shape `settings.json` had before this split — what a rolled-back
+    /// build deserializes. Declared here so the rollback claim is checked
+    /// against the old contract, not against the new struct.
+    #[derive(serde::Deserialize)]
+    #[serde(default)]
+    struct PreSplitSettings {
+        theme: Theme,
+        start_minimized: bool,
+        tray_enabled: bool,
+        autostart: bool,
+    }
+
+    impl Default for PreSplitSettings {
+        fn default() -> Self {
+            Self {
+                theme: Theme::Auto,
+                start_minimized: false,
+                tray_enabled: false,
+                autostart: false,
+            }
+        }
+    }
+
+    /// Check 1: a clean configuration directory.
+    #[test]
+    fn clean_config_dir_loads_without_touching_the_disk() {
+        let dir = TestDir::new("clean");
+
+        let config = load_config_from_dir(&dir.path()).unwrap();
+
+        assert!(!config.tray_enabled);
+        assert!(!config.start_minimized);
+        assert!(!dir.exists(TRAY_CONFIG_FILE));
+        assert!(!dir.exists(SETTINGS_PRE_SPLIT_BACKUP));
+    }
+
+    /// Check 2: a configuration that still has the old fields.
+    #[test]
+    fn legacy_config_dir_is_migrated_on_first_load() {
+        let dir = TestDir::new("legacy");
+        dir.write("settings.json", LEGACY_SETTINGS);
+
+        let config = load_config_from_dir(&dir.path()).unwrap();
+
+        assert!(config.start_minimized, "start minimized must survive the split");
+        assert!(config.tray_enabled);
+        // The start_minimized -> tray_enabled dependency still holds after load.
+        assert!(config.tray_enabled);
+
+        assert!(dir.exists(TRAY_CONFIG_FILE));
+        assert!(dir.exists(SETTINGS_PRE_SPLIT_BACKUP));
+        // Byte-for-byte: that is what makes the rollback below work.
+        assert_eq!(dir.read(SETTINGS_PRE_SPLIT_BACKUP), LEGACY_SETTINGS);
+
+        // The tray keys are gone from settings.json, panel settings are not.
+        let settings = dir.read("settings.json");
+        assert!(!settings.contains("tray_enabled"));
+        assert!(!settings.contains("start_minimized"));
+        assert!(settings.contains(r#""theme": "Dark"#));
+    }
+
+    /// Check 3: repeat runs change nothing.
+    #[test]
+    fn second_and_third_load_change_nothing() {
+        let dir = TestDir::new("repeat");
+        dir.write("settings.json", LEGACY_SETTINGS);
+
+        load_config_from_dir(&dir.path()).unwrap();
+        let tray = dir.read(TRAY_CONFIG_FILE);
+        let settings = dir.read("settings.json");
+        let backup = dir.read(SETTINGS_PRE_SPLIT_BACKUP);
+
+        for _ in 0..3 {
+            let config = load_config_from_dir(&dir.path()).unwrap();
+            assert!(config.tray_enabled);
+            assert!(config.start_minimized);
+        }
+
+        assert_eq!(dir.read(TRAY_CONFIG_FILE), tray, "tray.json rewritten");
+        assert_eq!(dir.read("settings.json"), settings, "settings.json rewritten");
+        assert_eq!(
+            dir.read(SETTINGS_PRE_SPLIT_BACKUP),
+            backup,
+            "backup overwritten"
+        );
+    }
+
+    /// Check 4: rolling back to a pre-split build.
+    #[test]
+    fn the_backup_still_satisfies_a_pre_split_reader() {
+        let dir = TestDir::new("rollback");
+        dir.write("settings.json", LEGACY_SETTINGS);
+        load_config_from_dir(&dir.path()).unwrap();
+
+        // What an older build reads after `cp settings.json.pre-tray-split settings.json`.
+        let legacy_view: PreSplitSettings =
+            serde_json::from_str(&dir.read(SETTINGS_PRE_SPLIT_BACKUP)).unwrap();
+
+        assert!(legacy_view.start_minimized);
+        assert!(legacy_view.tray_enabled);
+        assert_eq!(legacy_view.theme, Theme::Dark);
+    }
+
+    /// A corrupt tray.json on an already-migrated dir is the one case that
+    /// falls back to defaults, because settings.json no longer holds the values.
+    /// The guarantee there is recoverability, not silent loss.
+    #[test]
+    fn a_corrupt_tray_json_is_quarantined_and_the_values_stay_recoverable() {
+        let dir = TestDir::new("corrupt");
+        dir.write("settings.json", LEGACY_SETTINGS);
+        load_config_from_dir(&dir.path()).unwrap();
+        // User breaks the new file by hand afterwards.
+        dir.write(TRAY_CONFIG_FILE, "{ oops");
+
+        let config = load_config_from_dir(&dir.path()).unwrap();
+        assert!(!config.tray_enabled);
+        assert!(!config.start_minimized);
+
+        // Quarantined byte-for-byte, never deleted or overwritten in place.
+        assert_eq!(dir.read(TRAY_CONFIG_CORRUPT), "{ oops");
+        assert!(!dir.exists(TRAY_CONFIG_FILE));
+
+        // The backup still satisfies a rolled-back build.
+        let backup: PreSplitSettings =
+            serde_json::from_str(&dir.read(SETTINGS_PRE_SPLIT_BACKUP)).unwrap();
+        assert!(backup.tray_enabled);
+        assert!(backup.start_minimized);
+    }
+
+    /// A corrupt tray.json BEFORE any migration is fully recoverable: the
+    /// quarantine step leaves no tray.json, so the migration then recovers the
+    /// values from settings.json.
+    #[test]
+    fn a_corrupt_tray_json_before_any_migration_recovers_the_values() {
+        let dir = TestDir::new("corrupt-pre-migration");
+        dir.write("settings.json", LEGACY_SETTINGS);
+        dir.write(TRAY_CONFIG_FILE, "}}}");
+
+        let config = load_config_from_dir(&dir.path()).unwrap();
+
+        assert!(config.tray_enabled, "recovered from settings.json");
+        assert!(config.start_minimized);
+        assert!(dir.exists(TRAY_CONFIG_FILE), "and re-persisted");
+    }
 }
 
 #[cfg(test)]
