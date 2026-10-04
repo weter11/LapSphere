@@ -1,16 +1,21 @@
-//! The panel's own menu: the way back to the normal window, and the per-element
-//! controls.
+//! The panel's own menu: the right-click context menu, the settings window, and
+//! the rules that decide what the user is allowed to do from them.
 //!
-//! Two rules the owner's decision imposes:
+//! Three rules the owner's decision imposes:
 //!
-//! * **There is no return path except an explicit control.** The panel hides and
-//!   shows on a hotkey, but leaving panel mode is only ever done by pressing the
-//!   back button here (or the equivalent in the normal window's menu, added in a
-//!   later commit). Nothing else silently returns the user to the main window.
+//! * **There is no return path to the normal window except an explicit
+//!   control.** The panel hides and shows on a hotkey, but leaving panel mode is
+//!   only ever done by pressing the button in the context menu. Nothing else
+//!   silently returns the user to the main window.
 //! * **A panel with no way out is never created** — see `can_hide`. If the panel
 //!   could be hidden with no key grabbed, no tray and no CLI, then hiding it
 //!   would be a one-way trip, so the hide command falls back to returning to the
 //!   normal window instead.
+//! * **Click-through may only be switched on when there is a way to switch it
+//!   off** — see `can_enable_click_through`. With `MousePassthrough` set the
+//!   panel does not receive the mouse, so the context menu cannot be opened; if
+//!   neither the interactivity hotkey nor the CLI is available, turning
+//!   click-through on would leave a permanently unreachable panel.
 //!
 //! The element list follows the settings page's reorder pattern
 //! (`pages/settings.rs` Section Order: collect the move request inside the loop,
@@ -51,6 +56,37 @@ pub fn hide_outcome(hotkey_grabbed: bool, tray_enabled: bool, dbus_available: bo
     }
 }
 
+/// Is there a way to turn click-through back off once it is on?
+///
+/// The mirror image of [`can_hide`], and for the same reason. With
+/// `ViewportCommand::MousePassthrough(true)` the window stops taking mouse input,
+/// so the context menu — the only place click-through can be switched off from
+/// the panel — becomes unreachable. What is left is the interactivity hotkey
+/// (which is an X11 root grab, so it works precisely because the panel is not
+/// focused) and `lapsphere --toggle-interactive` over D-Bus.
+///
+/// The tray is deliberately **not** counted here: the tray is a separate window
+/// whose menu the panel cannot influence, and the owner's rule names the key and
+/// the CLI.
+pub fn can_enable_click_through(interactivity_grabbed: bool, cli_available: bool) -> bool {
+    interactivity_grabbed || cli_available
+}
+
+/// Why the click-through checkbox is unavailable, in the user's words.
+pub fn click_through_blocked_reason(
+    interactivity_grabbed: bool,
+    cli_available: bool,
+) -> &'static str {
+    if can_enable_click_through(interactivity_grabbed, cli_available) {
+        ""
+    } else {
+        "Click-through can only be enabled with a way back: capture the interactivity \
+         hotkey (see Interactivity key below) or make `lapsphere --toggle-interactive` \
+         available. With click-through on and no way back, this panel could not be \
+         clicked again."
+    }
+}
+
 /// A change the menu wants applied to the config, applied after the draw.
 pub enum MenuAction {
     /// Move an element up or down in display order.
@@ -63,55 +99,96 @@ pub enum MenuAction {
     SetItemScale { index: usize, scale: Option<f32> },
     /// Set the global font scale.
     SetFontScale(f32),
-    /// Set the hotkey string.
+    /// Set the show/hide hotkey string.
     SetHotkey(String),
+    /// Set the interactivity hotkey string.
+    SetInteractivityHotkey(String),
+    /// Set the stacking mode.
+    SetStacking(super::config::PanelStacking),
+    /// Set whether an always-on-top panel is hidden from the taskbar.
+    SetHideFromTaskbar(bool),
+    /// Turn click-through on or off.
+    SetClickThrough(bool),
     /// Toggle click-through.
     ToggleClickThrough,
     /// Reset the position to the default corner and offset.
     ResetPosition,
     /// Return to the normal window.
     BackToNormal,
+    /// Hide the panel (subject to the safety rule).
+    Hide,
 }
 
-/// Draw the panel: the element strip, the back button and the settings menu.
+/// What the context menu produced, for the caller to act on outside the UI pass.
+#[derive(Debug, Default)]
+pub struct MenuOutcome {
+    /// Return to the normal window.
+    pub back_to_normal: bool,
+    /// Hide the panel, if the safety rule allows it.
+    pub hide: bool,
+    /// Open the settings window.
+    pub open_settings: bool,
+    /// The left button started a window drag: the caller must re-read the
+    /// window's position afterwards and write it back as corner + offset.
+    pub dragged: bool,
+}
+
+/// Draw the panel surface: the element strip and its right-click menu.
 ///
 /// Actions are collected during the draw and applied afterwards, following the
-/// settings page's reorder pattern (`pages/settings.rs` Section Order: collect
-/// inside the loop, apply after). Two swaps requested in one frame would
-/// otherwise fight each other.
-///
-/// `pending_mode` is written rather than acted on here: viewport commands are not
-/// safe from inside a click handler, so the mode change happens at the top of the
-/// next frame.
+/// settings page's reorder pattern. `pending_mode` is written rather than acted on
+/// here: viewport commands are not safe from inside a click handler, so the mode
+/// change happens at the top of the next frame.
 pub fn draw(
     ui: &mut egui::Ui,
     state: &AppState,
     config: &mut PanelConfig,
     pending_mode: &mut Option<Mode>,
+    visibility: &super::visibility::Visibility,
     tray_enabled: bool,
-    hotkey_status: Option<&'static str>,
-    mut show_menu: bool,
-) {
+    interactivity_grabbed: bool,
+    cli_available: bool,
+) -> MenuOutcome {
     let mut actions: Vec<MenuAction> = Vec::new();
+    let mut outcome = MenuOutcome::default();
 
     ui.horizontal(|ui| {
         // The back button is at a fixed leading position so it does not move as
-        // elements are added or removed. It is the only in-panel route back to
-        // the normal window: there is no way back except an explicit control.
+        // elements are added or removed. It is the explicit route back to the
+        // normal window: there is no way back except an explicit control.
         if ui.button("⬅ Normal mode").clicked() {
             actions.push(MenuAction::BackToNormal);
         }
         ui.separator();
-        crate::panel::x11::draw_elements(ui, state, config);
 
-        if ui.button("⚙").on_hover_text("Panel settings").clicked() {
-            show_menu = !show_menu;
+        // The whole strip is the right-click target. `Sense::click` covers both
+        // buttons: secondary gives the context menu, primary starts the window
+        // drag below.
+        let response = super::x11::draw_strip(ui, state, config);
+
+        if response.clicked() {
+            // `StartDrag` hands the pointer to the window manager, so the panel
+            // keeps its decorations-free border-drag behaviour while the user
+            // repositions it with the left button. The new position is written
+            // back into `panel.json` by the caller from the viewport rect.
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            outcome.dragged = true;
         }
-    });
 
-    if show_menu {
-        draw_menu(ui, state, config, tray_enabled, hotkey_status, &mut actions);
-    }
+        response.context_menu(|ui| {
+            draw_context_menu(
+                ui,
+                state,
+                config,
+                visibility,
+                tray_enabled,
+                interactivity_grabbed,
+                cli_available,
+                &mut actions,
+                &mut outcome,
+            );
+        });
+    });
 
     for action in actions {
         match action {
@@ -121,6 +198,17 @@ pub fn draw(
                     config.items.swap(from, to);
                 }
             }
+            MenuAction::Hide => outcome.hide = true,
+            MenuAction::SetClickThrough(value) => {
+                // The gate is enforced here as well as in the checkbox's enabled
+                // state: a stale UI must not be able to write an unreachable
+                // panel into `panel.json`.
+                if !value || can_enable_click_through(interactivity_grabbed, cli_available) {
+                    config.click_through = value;
+                } else {
+                    log::warn!("panel: refused click-through: no interactivity hotkey and no CLI");
+                }
+            }
             other => apply(config, other),
         }
     }
@@ -128,177 +216,148 @@ pub fn draw(
     if let Err(err) = super::save_panel_config(config) {
         log::warn!("panel: could not write panel.json: {err}");
     }
+
+    outcome
 }
 
-/// The settings menu: elements, order, labels, scale, hotkey, click-through,
-/// position.
-fn draw_menu(
+/// The right-click menu: element visibility, stacking, click-through, the route
+/// back, and the way into the settings window.
+#[allow(clippy::too_many_arguments)]
+fn draw_context_menu(
     ui: &mut egui::Ui,
     state: &AppState,
     config: &mut PanelConfig,
+    visibility: &super::visibility::Visibility,
     tray_enabled: bool,
-    hotkey_status: Option<&'static str>,
+    interactivity_grabbed: bool,
+    cli_available: bool,
     actions: &mut Vec<MenuAction>,
+    outcome: &mut MenuOutcome,
 ) {
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        ui.heading("Panel");
-        ui.add_space(4.0);
-
-        // ---- Global scale ----
-        ui.horizontal(|ui| {
-            ui.label("Font scale");
-            let mut scale = config.font_scale;
-            if ui
-                .add(egui::Slider::new(&mut scale, 0.5..=4.0).step_by(0.05))
-                .changed()
-            {
-                actions.push(MenuAction::SetFontScale(scale));
-            }
-            if ui.button("Reset").clicked() {
-                actions.push(MenuAction::SetFontScale(1.0));
-            }
-        });
-
-        // ---- Click-through and position ----
-        ui.checkbox(
-            &mut config.click_through,
-            "Click-through (clicks pass to the window below)",
-        );
-        ui.horizontal(|ui| {
-            ui.label("Corner");
-            egui::ComboBox::from_id_salt("panel_corner")
-                .selected_text(corner_label(config.position.corner))
-                .show_ui(ui, |ui| {
-                    for corner in [
-                        super::config::PanelCorner::TopLeft,
-                        super::config::PanelCorner::TopRight,
-                        super::config::PanelCorner::BottomLeft,
-                        super::config::PanelCorner::BottomRight,
-                    ] {
-                        let label = corner_label(corner);
-                        ui.selectable_value(&mut config.position.corner, corner, label);
+    // ---- Elements: one visibility checkbox each, with the live value ----
+    egui::ScrollArea::vertical()
+        .max_height(320.0)
+        .show(ui, |ui| {
+            ui.label(egui::RichText::new("Elements").strong());
+            let total = config.items.len();
+            for index in 0..total {
+                let id = config.items[index].id.clone();
+                let label = items::find(&id)
+                    .map(|item| item.default_label)
+                    .unwrap_or(id.as_str());
+                let current = super::x11::menu_value(state, &id);
+                ui.horizontal(|ui| {
+                    if ui
+                        .checkbox(&mut config.items[index].visible, label)
+                        .changed()
+                    {
+                        actions.push(MenuAction::ToggleVisible { index });
                     }
+                    ui.label(egui::RichText::new(current).monospace().weak());
                 });
-            if ui.button("Reset position").clicked() {
-                actions.push(MenuAction::ResetPosition);
             }
         });
 
-        // ---- Hotkey, with the conflict message ----
-        ui.horizontal(|ui| {
-            ui.label("Hotkey");
-            let mut hotkey = config.hotkey.clone();
-            if ui.text_edit_singleline(&mut hotkey).changed() {
-                actions.push(MenuAction::SetHotkey(hotkey.clone()));
+    ui.separator();
+
+    // ---- Stacking and taskbar ----
+    ui.label(egui::RichText::new("Window").strong());
+    let mut stacking = config.stacking;
+    egui::ComboBox::from_id_salt("panel_stacking")
+        .selected_text(stacking.label())
+        .show_ui(ui, |ui| {
+            for option in super::config::PanelStacking::ALL {
+                ui.selectable_value(&mut stacking, option, option.label());
             }
         });
-        if let Some(status) = hotkey_status {
-            let conflict = matches!(status, "Hotkey is taken by another application");
-            ui.label(egui::RichText::new(status).color(if conflict {
-                egui::Color32::from_rgb(220, 160, 60)
-            } else {
-                ui.visuals().weak_text_color()
-            }));
-            if conflict {
-                ui.label(
-                    egui::RichText::new(
-                        "Another application already owns this key. Pick a different one, \
-                         or use the tray or `lapsphere --toggle-panel`.",
-                    )
-                    .small()
-                    .italics(),
-                );
-            }
+    if stacking != config.stacking {
+        actions.push(MenuAction::SetStacking(stacking));
+    }
+    if config.stacking.is_always_on_top() {
+        let mut hide = config.hide_from_taskbar;
+        if ui
+            .checkbox(&mut hide, "Hide from taskbar")
+            .on_hover_text("Only applies while the panel is always on top")
+            .changed()
+        {
+            actions.push(MenuAction::SetHideFromTaskbar(hide));
         }
-        if !tray_enabled {
-            ui.label(
-                egui::RichText::new(
-                    "The tray is off: hiding the panel is only possible via the hotkey or \
-                     `lapsphere --toggle-panel`.",
-                )
-                .small()
-                .italics(),
-            );
-        }
+    }
 
-        ui.separator();
-        ui.heading("Elements");
-        ui.add_space(4.0);
+    // ---- Click-through, gated on a way back ----
+    ui.separator();
+    let can_enable = can_enable_click_through(interactivity_grabbed, cli_available);
+    let mut click_through = config.click_through;
+    let response = ui
+        .add_enabled(
+            can_enable || click_through,
+            egui::Checkbox::new(&mut click_through, "Click-through"),
+        )
+        .on_hover_text("Clicks pass to the window below the panel");
+    if response.changed() {
+        actions.push(MenuAction::SetClickThrough(click_through));
+    }
+    if !can_enable && !config.click_through {
+        ui.label(
+            egui::RichText::new(click_through_blocked_reason(
+                interactivity_grabbed,
+                cli_available,
+            ))
+            .small()
+            .italics(),
+        );
+    }
+    if config.click_through {
+        ui.label(
+            egui::RichText::new(
+                "The panel ignores the mouse. Interactivity key or \
+                     `lapsphere --toggle-interactive` brings it back.",
+            )
+            .small()
+            .italics(),
+        );
+    }
 
-        let total = config.items.len();
-        for index in 0..total {
-            let id = config.items[index].id.clone();
-            let visible = config.items[index].visible;
-            let label = config.items[index].label.clone();
-            let current = crate::panel::x11::menu_value(state, &id);
+    ui.separator();
 
-            ui.horizontal(|ui| {
-                if ui
-                    .checkbox(&mut config.items[index].visible, default_label(&id))
-                    .changed()
-                {
-                    actions.push(MenuAction::ToggleVisible { index });
-                }
-                ui.label(egui::RichText::new(current).monospace().weak());
-            });
-
-            // The move buttons are collected, not applied inline.
-            let up = ui
-                .horizontal(|ui| {
-                    let mut moved = None;
-                    if ui
-                        .add_enabled(index > 0, egui::Button::new("⬆").small())
-                        .clicked()
-                    {
-                        moved = Some((index, index - 1));
-                    }
-                    if ui
-                        .add_enabled(index + 1 < total, egui::Button::new("⬇").small())
-                        .clicked()
-                    {
-                        moved = Some((index, index + 1));
-                    }
-                    moved
-                })
-                .inner;
-            if let Some((from, to)) = up {
-                actions.push(MenuAction::Move { from, to });
-            }
-
-            ui.horizontal(|ui| {
-                ui.label("Label");
-                let mut text = label.clone().unwrap_or_default();
-                if ui.text_edit_singleline(&mut text).changed() {
-                    actions.push(MenuAction::SetLabel { index, label: text });
-                }
-                // `None` means "inherit the global scale", so the slider edits
-                // a concrete value that is defaulted from the global one; the
-                // Inherit button puts it back to None.
-                let mut scale = config.items[index].font_scale.unwrap_or(config.font_scale);
-                if ui
-                    .add(egui::Slider::new(&mut scale, 0.5..=4.0).step_by(0.05))
-                    .changed()
-                {
-                    actions.push(MenuAction::SetItemScale {
-                        index,
-                        scale: Some(scale),
-                    });
-                }
-                if config.items[index].font_scale.is_some() && ui.button("Inherit").clicked() {
-                    actions.push(MenuAction::SetItemScale { index, scale: None });
-                }
-            });
-        }
-    });
+    // ---- Routes out ----
+    if ui.button("Panel settings…").clicked() {
+        outcome.open_settings = true;
+    }
+    if ui.button("⬅ Normal mode").clicked() {
+        actions.push(MenuAction::BackToNormal);
+    }
+    let hide_label = format!("Hide ({})", hotkey_label(&config.hotkey));
+    let can_hide_now = can_hide(visibility.hotkey_grabbed(), tray_enabled, cli_available);
+    if ui
+        .add_enabled(can_hide_now, egui::Button::new(hide_label))
+        .on_hover_text(if can_hide_now {
+            "Hide the panel; the hotkey or `lapsphere --toggle-panel` brings it back"
+        } else {
+            "Not available: no hotkey, no tray and no CLI to bring the panel back"
+        })
+        .clicked()
+    {
+        actions.push(MenuAction::Hide);
+    }
+    if !can_hide_now {
+        ui.label(
+            egui::RichText::new(
+                "Hiding is unavailable: no hotkey captured, tray off and no D-Bus CLI. \
+                     Leaving panel mode is still possible with Normal mode above.",
+            )
+            .small()
+            .italics(),
+        );
+    }
 }
 
-/// Human-readable corner name.
-fn corner_label(corner: super::config::PanelCorner) -> &'static str {
-    match corner {
-        super::config::PanelCorner::TopLeft => "Top left",
-        super::config::PanelCorner::TopRight => "Top right",
-        super::config::PanelCorner::BottomLeft => "Bottom left",
-        super::config::PanelCorner::BottomRight => "Bottom right",
+/// The hotkey as shown in the menu, or a fallback when none is configured.
+fn hotkey_label(hotkey: &str) -> String {
+    if hotkey.trim().is_empty() {
+        "no hotkey".to_string()
+    } else {
+        hotkey.trim().to_string()
     }
 }
 
@@ -332,9 +391,14 @@ pub fn apply(config: &mut PanelConfig, action: MenuAction) {
         }
         MenuAction::SetFontScale(scale) => config.font_scale = scale,
         MenuAction::SetHotkey(key) => config.hotkey = key,
+        MenuAction::SetInteractivityHotkey(key) => config.interactivity_hotkey = key,
+        MenuAction::SetStacking(stacking) => config.stacking = stacking,
+        MenuAction::SetHideFromTaskbar(hide) => config.hide_from_taskbar = hide,
+        MenuAction::SetClickThrough(value) => config.click_through = value,
         MenuAction::ToggleClickThrough => config.click_through = !config.click_through,
         MenuAction::ResetPosition => config.position = Default::default(),
         MenuAction::BackToNormal => {}
+        MenuAction::Hide => {}
     }
 }
 
@@ -392,7 +456,7 @@ pub fn new_item(id: &str) -> Option<PanelItemConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::panel::config::{self, PanelConfig};
+    use crate::panel::config::{self, PanelConfig, PanelStacking};
 
     #[test]
     fn hiding_is_safe_when_the_key_is_grabbed() {
@@ -419,6 +483,65 @@ mod tests {
             hide_outcome(false, false, false),
             HideOutcome::ReturnToNormal
         );
+    }
+
+    // ---- The click-through safety rule ----
+
+    #[test]
+    fn click_through_needs_a_way_back() {
+        // Neither the key nor the CLI: enabling it would leave a panel that
+        // cannot be clicked again.
+        assert!(!can_enable_click_through(false, false));
+        assert_eq!(
+            can_enable_click_through(false, false),
+            can_enable_click_through(false, false)
+        );
+    }
+
+    #[test]
+    fn click_through_is_allowed_with_either_way_back() {
+        assert!(can_enable_click_through(true, false), "the key is enough");
+        assert!(can_enable_click_through(false, true), "the CLI is enough");
+        assert!(can_enable_click_through(true, true));
+    }
+
+    #[test]
+    fn the_tray_does_not_count_as_a_way_back_out_of_click_through() {
+        // Deliberate, and asserted so a future change is a conscious one: the
+        // owner's rule names the interactivity key and the CLI. The tray is a
+        // separate window whose menu the panel cannot drive.
+        assert!(
+            can_hide(false, true, false),
+            "the tray is a way back from hidden"
+        );
+        assert!(
+            !can_enable_click_through(false, false),
+            "but it is not a way back from click-through"
+        );
+    }
+
+    #[test]
+    fn the_blocked_reason_is_empty_exactly_when_the_gate_is_open() {
+        for grabbed in [false, true] {
+            for cli in [false, true] {
+                let reason = click_through_blocked_reason(grabbed, cli);
+                assert_eq!(
+                    reason.is_empty(),
+                    can_enable_click_through(grabbed, cli),
+                    "grabbed={grabbed} cli={cli}"
+                );
+                if !reason.is_empty() {
+                    assert!(reason.contains("--toggle-interactive"));
+                    assert!(reason.contains("hotkey"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_hide_label_falls_back_when_no_hotkey_is_configured() {
+        assert_eq!(hotkey_label("Shift_R+F9"), "Shift_R+F9");
+        assert_eq!(hotkey_label("  "), "no hotkey");
     }
 
     #[test]
@@ -520,13 +643,21 @@ mod tests {
         );
         apply(&mut config, MenuAction::SetFontScale(1.5));
         apply(&mut config, MenuAction::SetHotkey("F9".into()));
+        apply(&mut config, MenuAction::SetInteractivityHotkey("F8".into()));
+        apply(&mut config, MenuAction::SetStacking(PanelStacking::Normal));
+        apply(&mut config, MenuAction::SetHideFromTaskbar(false));
+        apply(&mut config, MenuAction::SetClickThrough(true));
         apply(&mut config, MenuAction::ToggleClickThrough);
         apply(&mut config, MenuAction::ResetPosition);
         apply(&mut config, MenuAction::BackToNormal);
+        apply(&mut config, MenuAction::Hide);
 
         assert_eq!(config.font_scale, 1.5);
         assert_eq!(config.hotkey, "F9");
-        assert!(config.click_through);
+        assert_eq!(config.interactivity_hotkey, "F8");
+        assert_eq!(config.stacking, PanelStacking::Normal);
+        assert!(!config.hide_from_taskbar);
+        assert!(!config.click_through, "toggled on then off again");
         // The config still normalizes to a complete, usable panel afterwards.
         let normalized = config::normalize(config);
         assert_eq!(normalized.items.len(), config::PANEL_ITEMS.len());

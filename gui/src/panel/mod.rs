@@ -15,6 +15,7 @@ pub mod config;
 pub mod items;
 pub mod menu;
 pub mod render;
+pub mod settings_window;
 pub mod units;
 pub mod visibility;
 pub mod window;
@@ -134,6 +135,7 @@ mod tests {
             .map(normalize)
             .unwrap_or_else(|_| normalize(PanelConfig::default()));
         assert_eq!(recovered.items.len(), PANEL_ITEMS_LEN);
-        assert!(recovered.always_on_top);
+        assert_eq!(recovered.stacking, config::PanelStacking::AlwaysOnTop);
+        assert!(recovered.hide_from_taskbar);
     }
 }
