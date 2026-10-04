@@ -438,6 +438,8 @@ pub struct LapSphereApp {
     /// The panel is in panel mode but hidden: the window is unmapped and paints
     /// nothing, waiting for the hotkey, the tray or the CLI to bring it back.
     panel_hidden: bool,
+    /// Whether the panel's settings menu is open.
+    panel_menu_open: bool,
 }
 
 #[derive(Debug)]
@@ -792,6 +794,7 @@ impl LapSphereApp {
             pending_mode: None,
             visibility,
             panel_hidden: false,
+            panel_menu_open: false,
         }
     }
 
@@ -1070,6 +1073,8 @@ impl LapSphereApp {
             &mut self.panel_config,
             &mut self.pending_mode,
             Self::tray_enabled(&self.state),
+            Some(self.visibility.grab_status().message()),
+            self.panel_menu_open,
         );
     }
 
@@ -1277,6 +1282,13 @@ impl LapSphereApp {
                             ui.selectable_value(&mut self.state.current_page, Page::Profiles, "📋 Profiles");
                             ui.selectable_value(&mut self.state.current_page, Page::Tuning, "🔧 Tuning");
                             ui.selectable_value(&mut self.state.current_page, Page::Settings, "⚙ Settings");
+                            if ui
+                                .button("📊 Panel")
+                                .on_hover_text("Switch to the panel overlay")
+                                .clicked()
+                            {
+                                self.request_mode(Mode::Panel);
+                            }
                             if ui.button("❓ Help").clicked() {
                                 self.shortcuts.toggle_help();
                             }

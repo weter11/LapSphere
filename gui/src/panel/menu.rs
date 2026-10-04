@@ -73,30 +73,233 @@ pub enum MenuAction {
     BackToNormal,
 }
 
-/// Draw the panel: the element strip plus the back button.
+/// Draw the panel: the element strip, the back button and the settings menu.
 ///
-/// `pending_mode` is written rather than acted on here, so the actual viewport
-/// change happens at the top of the next frame instead of inside a click
-/// handler, where viewport commands are not safe.
+/// Actions are collected during the draw and applied afterwards, following the
+/// settings page's reorder pattern (`pages/settings.rs` Section Order: collect
+/// inside the loop, apply after). Two swaps requested in one frame would
+/// otherwise fight each other.
+///
+/// `pending_mode` is written rather than acted on here: viewport commands are not
+/// safe from inside a click handler, so the mode change happens at the top of the
+/// next frame.
 pub fn draw(
     ui: &mut egui::Ui,
     state: &AppState,
     config: &mut PanelConfig,
     pending_mode: &mut Option<Mode>,
     tray_enabled: bool,
+    hotkey_status: Option<&'static str>,
+    mut show_menu: bool,
 ) {
+    let mut actions: Vec<MenuAction> = Vec::new();
+
     ui.horizontal(|ui| {
         // The back button is at a fixed leading position so it does not move as
         // elements are added or removed. It is the only in-panel route back to
-        // the normal window.
+        // the normal window: there is no way back except an explicit control.
         if ui.button("⬅ Normal mode").clicked() {
-            *pending_mode = Some(Mode::Normal);
+            actions.push(MenuAction::BackToNormal);
         }
         ui.separator();
         crate::panel::x11::draw_elements(ui, state, config);
+
+        if ui.button("⚙").on_hover_text("Panel settings").clicked() {
+            show_menu = !show_menu;
+        }
     });
 
-    let _ = tray_enabled;
+    if show_menu {
+        draw_menu(ui, state, config, tray_enabled, hotkey_status, &mut actions);
+    }
+
+    for action in actions {
+        match action {
+            MenuAction::BackToNormal => *pending_mode = Some(Mode::Normal),
+            MenuAction::Move { from, to } => {
+                if from < config.items.len() && to < config.items.len() {
+                    config.items.swap(from, to);
+                }
+            }
+            other => apply(config, other),
+        }
+    }
+
+    if let Err(err) = super::save_panel_config(config) {
+        log::warn!("panel: could not write panel.json: {err}");
+    }
+}
+
+/// The settings menu: elements, order, labels, scale, hotkey, click-through,
+/// position.
+fn draw_menu(
+    ui: &mut egui::Ui,
+    state: &AppState,
+    config: &mut PanelConfig,
+    tray_enabled: bool,
+    hotkey_status: Option<&'static str>,
+    actions: &mut Vec<MenuAction>,
+) {
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        ui.heading("Panel");
+        ui.add_space(4.0);
+
+        // ---- Global scale ----
+        ui.horizontal(|ui| {
+            ui.label("Font scale");
+            let mut scale = config.font_scale;
+            if ui
+                .add(egui::Slider::new(&mut scale, 0.5..=4.0).step_by(0.05))
+                .changed()
+            {
+                actions.push(MenuAction::SetFontScale(scale));
+            }
+            if ui.button("Reset").clicked() {
+                actions.push(MenuAction::SetFontScale(1.0));
+            }
+        });
+
+        // ---- Click-through and position ----
+        ui.checkbox(
+            &mut config.click_through,
+            "Click-through (clicks pass to the window below)",
+        );
+        ui.horizontal(|ui| {
+            ui.label("Corner");
+            egui::ComboBox::from_id_salt("panel_corner")
+                .selected_text(corner_label(config.position.corner))
+                .show_ui(ui, |ui| {
+                    for corner in [
+                        super::config::PanelCorner::TopLeft,
+                        super::config::PanelCorner::TopRight,
+                        super::config::PanelCorner::BottomLeft,
+                        super::config::PanelCorner::BottomRight,
+                    ] {
+                        let label = corner_label(corner);
+                        ui.selectable_value(&mut config.position.corner, corner, label);
+                    }
+                });
+            if ui.button("Reset position").clicked() {
+                actions.push(MenuAction::ResetPosition);
+            }
+        });
+
+        // ---- Hotkey, with the conflict message ----
+        ui.horizontal(|ui| {
+            ui.label("Hotkey");
+            let mut hotkey = config.hotkey.clone();
+            if ui.text_edit_singleline(&mut hotkey).changed() {
+                actions.push(MenuAction::SetHotkey(hotkey.clone()));
+            }
+        });
+        if let Some(status) = hotkey_status {
+            let conflict = matches!(status, "Hotkey is taken by another application");
+            ui.label(egui::RichText::new(status).color(if conflict {
+                egui::Color32::from_rgb(220, 160, 60)
+            } else {
+                ui.visuals().weak_text_color()
+            }));
+            if conflict {
+                ui.label(
+                    egui::RichText::new(
+                        "Another application already owns this key. Pick a different one, \
+                         or use the tray or `lapsphere --toggle-panel`.",
+                    )
+                    .small()
+                    .italics(),
+                );
+            }
+        }
+        if !tray_enabled {
+            ui.label(
+                egui::RichText::new(
+                    "The tray is off: hiding the panel is only possible via the hotkey or \
+                     `lapsphere --toggle-panel`.",
+                )
+                .small()
+                .italics(),
+            );
+        }
+
+        ui.separator();
+        ui.heading("Elements");
+        ui.add_space(4.0);
+
+        let total = config.items.len();
+        for index in 0..total {
+            let id = config.items[index].id.clone();
+            let visible = config.items[index].visible;
+            let label = config.items[index].label.clone();
+            let current = crate::panel::x11::menu_value(state, &id);
+
+            ui.horizontal(|ui| {
+                if ui
+                    .checkbox(&mut config.items[index].visible, default_label(&id))
+                    .changed()
+                {
+                    actions.push(MenuAction::ToggleVisible { index });
+                }
+                ui.label(egui::RichText::new(current).monospace().weak());
+            });
+
+            // The move buttons are collected, not applied inline.
+            let up = ui
+                .horizontal(|ui| {
+                    let mut moved = None;
+                    if ui
+                        .add_enabled(index > 0, egui::Button::new("⬆").small())
+                        .clicked()
+                    {
+                        moved = Some((index, index - 1));
+                    }
+                    if ui
+                        .add_enabled(index + 1 < total, egui::Button::new("⬇").small())
+                        .clicked()
+                    {
+                        moved = Some((index, index + 1));
+                    }
+                    moved
+                })
+                .inner;
+            if let Some((from, to)) = up {
+                actions.push(MenuAction::Move { from, to });
+            }
+
+            ui.horizontal(|ui| {
+                ui.label("Label");
+                let mut text = label.clone().unwrap_or_default();
+                if ui.text_edit_singleline(&mut text).changed() {
+                    actions.push(MenuAction::SetLabel { index, label: text });
+                }
+                // `None` means "inherit the global scale", so the slider edits
+                // a concrete value that is defaulted from the global one; the
+                // Inherit button puts it back to None.
+                let mut scale = config.items[index].font_scale.unwrap_or(config.font_scale);
+                if ui
+                    .add(egui::Slider::new(&mut scale, 0.5..=4.0).step_by(0.05))
+                    .changed()
+                {
+                    actions.push(MenuAction::SetItemScale {
+                        index,
+                        scale: Some(scale),
+                    });
+                }
+                if config.items[index].font_scale.is_some() && ui.button("Inherit").clicked() {
+                    actions.push(MenuAction::SetItemScale { index, scale: None });
+                }
+            });
+        }
+    });
+}
+
+/// Human-readable corner name.
+fn corner_label(corner: super::config::PanelCorner) -> &'static str {
+    match corner {
+        super::config::PanelCorner::TopLeft => "Top left",
+        super::config::PanelCorner::TopRight => "Top right",
+        super::config::PanelCorner::BottomLeft => "Bottom left",
+        super::config::PanelCorner::BottomRight => "Bottom right",
+    }
 }
 
 /// Apply a menu action to the config.
