@@ -9,11 +9,13 @@ use tokio::sync::{mpsc, oneshot};
 use lapsphere_common::types::*;
 
 use crate::dbus_client::DbusClient;
-use crate::theme::LapSphereTheme;
-use crate::pages::{statistics, profiles, tuning, settings};
 use crate::keyboard_shortcuts::KeyboardShortcuts;
-use crate::polling_scheduler::{RefreshCoordinator, CoordinatorHandle};
+use crate::pages::{profiles, settings, statistics, tuning};
+use crate::panel::menu::{settings_viewport, SETTINGS_SIZE};
+use crate::panel::window::Mode;
+use crate::polling_scheduler::{CoordinatorHandle, RefreshCoordinator};
 use crate::system_tray::{SystemTray, TrayEvent};
+use crate::theme::LapSphereTheme;
 use crate::tray_config;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -390,6 +392,31 @@ pub struct LapSphereApp {
 
     last_tray_profile: String,
     last_tray_profiles_count: usize,
+
+    // ---- Panel mode ----
+    /// Which surface the one window is currently showing.
+    mode: Mode,
+    /// A mode change requested by a control, acted on at the top of the next
+    /// frame. Viewport commands are not safe from inside a click handler.
+    pending_mode: Option<Mode>,
+    /// Whether the window spec for the current mode has been sent. See
+    /// `panel::window::mode_to_apply` for why this cannot be inferred from
+    /// `pending_mode` alone.
+    panel_spec_applied: bool,
+    /// The normal window's inner size, captured before the first switch so
+    /// returning to it restores the user's own geometry.
+    normal_geometry: Option<[f32; 2]>,
+    /// The poll set last pushed to the coordinator, so a stable panel costs
+    /// nothing per frame.
+    last_poll_set: Vec<String>,
+    /// The two-entry context menu, open in the panel window.
+    panel_menu_open: bool,
+    /// Whether the separate settings window is open.
+    settings_open: bool,
+    /// What the settings window asked for, applied at the top of the next frame.
+    settings_outcome: crate::panel::menu::SettingsOutcome,
+    /// The panel's settings, from `panel.json`.
+    panel_config: crate::panel::PanelConfig,
 }
 
 #[derive(Debug)]
@@ -417,7 +444,14 @@ pub enum HardwareUpdate {
 }
 
 impl LapSphereApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    /// `start_in_panel` comes from the `--panel` command-line flag.
+    ///
+    /// It sets `mode` DIRECTLY rather than going through `pending_mode`: there
+    /// is no transition at startup, so there is nothing to pend. `apply_mode`
+    /// handles that case explicitly (see `panel::window::mode_to_apply`) — a
+    /// first-frame guard keyed only on `pending_mode` would skip the spec
+    /// forever and the panel would render in the normal window's geometry.
+    pub fn new(cc: &eframe::CreationContext<'_>, start_in_panel: bool) -> Self {
         let mut state = AppState::new();
         state.load_config();
         
@@ -677,7 +711,10 @@ impl LapSphereApp {
         state.coordinator_handle = coordinator_handle.clone();
         
         // Apply theme
-        let theme = LapSphereTheme::new(&state.config.theme, cc.egui_ctx.global_style().visuals.dark_mode);
+        let theme = LapSphereTheme::new(
+            &state.config.theme,
+            cc.egui_ctx.global_style().visuals.dark_mode,
+        );
         theme.apply_with_font_size(&cc.egui_ctx, &state.config.font_size);
 
         // Apply current profile to daemon on startup to ensure background jobs are active
@@ -698,7 +735,26 @@ impl LapSphereApp {
         let last_tray_profile = state.config.current_profile.clone();
         let last_tray_profiles_count = state.config.profiles.len();
 
+        // A missing or corrupt panel.json is not an error: the panel is an
+        // accessory surface and must not be able to keep the GUI from starting.
+        let panel_config = crate::panel::load_panel_config();
+
         Self {
+            mode: if start_in_panel {
+                Mode::Panel
+            } else {
+                Mode::Normal
+            },
+            // Nothing pending at startup, and the spec has not been sent: the
+            // first frame is where `apply_mode` sends it.
+            pending_mode: None,
+            panel_spec_applied: false,
+            normal_geometry: None,
+            panel_config,
+            last_poll_set: Vec::new(),
+            panel_menu_open: false,
+            settings_open: false,
+            settings_outcome: Default::default(),
             state,
             dbus_client,
             theme,
@@ -913,10 +969,29 @@ impl LapSphereApp {
                     Layout::left_to_right(Align::Center),
                     |ui| {
                         ui.horizontal_centered(|ui| {
-                            ui.selectable_value(&mut self.state.current_page, Page::Statistics, "📊 Statistics");
-                            ui.selectable_value(&mut self.state.current_page, Page::Profiles, "📋 Profiles");
-                            ui.selectable_value(&mut self.state.current_page, Page::Tuning, "🔧 Tuning");
-                            ui.selectable_value(&mut self.state.current_page, Page::Settings, "⚙ Settings");
+                            ui.selectable_value(
+                                &mut self.state.current_page,
+                                Page::Statistics,
+                                "📊 Statistics",
+                            );
+                            ui.selectable_value(
+                                &mut self.state.current_page,
+                                Page::Profiles,
+                                "📋 Profiles",
+                            );
+                            ui.selectable_value(
+                                &mut self.state.current_page,
+                                Page::Tuning,
+                                "🔧 Tuning",
+                            );
+                            ui.selectable_value(
+                                &mut self.state.current_page,
+                                Page::Settings,
+                                "⚙ Settings",
+                            );
+                            if ui.button("📈 Panel").clicked() {
+                                self.pending_mode = Some(Mode::Panel);
+                            }
                             if ui.button("❓ Help").clicked() {
                                 self.shortcuts.toggle_help();
                             }
@@ -958,6 +1033,218 @@ impl LapSphereApp {
                 self.state.status_message = None;
             }
         }
+    }
+
+    /// Draw the panel body and its right-click menu.
+    ///
+    /// The whole surface is the right-click target, so the menu opens wherever
+    /// the user clicks. `CentralPanel::frame` is left at its default here: the
+    /// opaque background and its transparency are PR 2's work, and adding a
+    /// `Frame` now would only make the later change harder to read.
+    fn draw_panel(&mut self, ui: &mut egui::Ui, ctx: &Context) {
+        // The interactive area is the whole panel surface, registered with the
+        // ordinary egui path so the menu opens from the Response.
+        //
+        // `Sense::click_and_drag()` rather than `click()`: dragging the panel
+        // around is PR 2's work, and the sense has to be declared before the
+        // code that uses it, not changed later underneath it. `click()` today
+        // would behave identically for a right click.
+        let mut menu_action = crate::panel::menu::ContextAction::None;
+
+        CentralPanel::default().show_inside(ui, |ui| {
+            crate::panel::render::draw(ui, &self.state, &self.panel_config);
+            let response = ui.interact(
+                ui.max_rect(),
+                ui.id().with("panel_surface"),
+                egui::Sense::click_and_drag(),
+            );
+
+            // The right click opens the menu through the ordinary egui path.
+            // A left click on the surface closes it rather than opening it.
+            response.context_menu(|ui| {
+                menu_action = crate::panel::menu::draw_context_menu(ui);
+            });
+            if response.clicked() {
+                self.panel_menu_open = false;
+            }
+        });
+
+        self.panel_menu_open = self.panel_menu_open || menu_action != crate::panel::menu::ContextAction::None;
+
+        match menu_action {
+            crate::panel::menu::ContextAction::OpenSettings => {
+                self.panel_menu_open = false;
+                self.settings_open = true;
+            }
+            crate::panel::menu::ContextAction::BackToNormal => {
+                self.panel_menu_open = false;
+                self.pending_mode = Some(Mode::Normal);
+            }
+            crate::panel::menu::ContextAction::None => {}
+        }
+
+        self.draw_settings_window(ctx);
+        self.apply_settings_outcome(ctx);
+    }
+
+    /// The settings window: a SEPARATE viewport, so it is a real OS window and is
+    /// never clipped by the 300x198 panel.
+    ///
+    /// An ordinary window on purpose -- no always-on-top, no skip-taskbar, not
+    /// tied to panel mode. A settings dialog floating over a game would be the
+    /// same mistake the panel itself is.
+    fn draw_settings_window(&mut self, ctx: &Context) {
+        if !self.settings_open {
+            return;
+        }
+
+        // The documented close protocol (egui 0.34 `show_viewport_immediate`):
+        // "You can check if the user wants to close the viewport by checking the
+        // `ViewportInfo::close_requested` flags". The caller must STOP showing it.
+        //
+        // The previous check here was `ctx.viewport_for(.., |_| true)`, which can
+        // never be false and so never closed anything: the WM close button left
+        // `settings_open` set and we went on asking for a viewport the user had
+        // already dismissed.
+        //
+        // Scoped to the settings viewport id on purpose: the root viewport's own
+        // `close_requested` is the window-close path and is handled elsewhere, so
+        // closing the settings window must not reach the panel.
+        let close_requested =
+            ctx.input_for(settings_viewport(), |input| input.viewport().close_requested());
+        if close_requested {
+            self.settings_open = false;
+            ctx.send_viewport_cmd_to(settings_viewport(), egui::ViewportCommand::Close);
+            return;
+        }
+
+        let mut outcome = crate::panel::menu::SettingsOutcome::default();
+        let mut config = std::mem::take(&mut self.panel_config);
+        ctx.show_viewport_immediate(
+            settings_viewport(),
+            egui::ViewportBuilder::default()
+                .with_inner_size(SETTINGS_SIZE)
+                .with_title("LapSphere \u{2014} Panel settings")
+                .with_resizable(true),
+            |ui, _class| {
+                crate::panel::menu::draw_settings_body(ui, &self.state, &mut config, &mut outcome);
+            },
+        );
+        self.panel_config = config;
+        self.settings_outcome = outcome;
+    }
+
+    /// Apply what the settings window asked for.
+    fn apply_settings_outcome(&mut self, ctx: &Context) {
+        let outcome = std::mem::take(&mut self.settings_outcome);
+        if outcome == Default::default() {
+            return;
+        }
+        if outcome.back_to_normal {
+            self.pending_mode = Some(Mode::Normal);
+        }
+        if outcome.config_changed {
+            if let Err(err) = crate::panel::save_panel_config(&self.panel_config) {
+                log::warn!("could not write {}: {err}", crate::panel::PANEL_CONFIG_FILE);
+            }
+        }
+        if outcome.width_changed {
+            // The width is read fresh from the config every frame, so
+            // re-sending the spec is all "applies immediately" needs -- and it
+            // happens while the settings window is still open.
+            self.panel_spec_applied = false;
+            ctx.request_repaint();
+        }
+        if outcome.close_requested {
+            // Same path as the WM close button: drop the flag so the next frame
+            // stops showing the viewport, then ask for the close.
+            self.settings_open = false;
+            ctx.send_viewport_cmd_to(settings_viewport(), egui::ViewportCommand::Close);
+        }
+    }
+
+    /// Narrow the coordinator's poll set to what the current surface draws.
+    ///
+    /// In panel mode only the components backing a VISIBLE row are polled; `logs`
+    /// alone is a ~470 kB reply every 5 s that no panel row reads. In normal mode
+    /// everything is polled, as before. Re-sent only when the set changes.
+    fn sync_poll_set(&mut self) {
+        let wanted: Vec<String> = if self.mode.is_panel() {
+            crate::panel::window::required_components(&self.panel_config)
+                .into_iter()
+                .map(|name| name.to_string())
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        if wanted == self.last_poll_set {
+            return;
+        }
+        let Some(handle) = self.state.coordinator_handle.clone() else {
+            return;
+        };
+
+        // An empty set in normal mode must NOT pause anything. `set_poll_set(vec![])`
+        // pauses everything, which is correct for a panel with no rows enabled but
+        // would freeze the main window for ever after one visit to the panel.
+        let result = if wanted.is_empty() {
+            handle.clear_poll_set()
+        } else {
+            handle.set_poll_set(wanted.clone())
+        };
+        if let Err(err) = result {
+            log::debug!("could not update the poll set: {err}");
+            return;
+        }
+        self.last_poll_set = wanted;
+    }
+
+    /// Push the panel window spec when the mode requires it.
+    ///
+    /// The decision is `panel::window::mode_to_apply`, a pure function, so the
+    /// first-frame case (a process started with `--panel`) is reachable and
+    /// covered by a test rather than being dead code behind a `take()?`.
+    fn apply_mode(&mut self, ctx: &Context) {
+        let target = crate::panel::window::mode_to_apply(
+            self.mode,
+            self.pending_mode.take(),
+            self.panel_spec_applied,
+        );
+        let Some(target) = target else {
+            return;
+        };
+
+        // Capture the normal geometry before the first switch away from it, so
+        // returning restores the user's own window size.
+        if self.mode == Mode::Normal {
+            self.normal_geometry = Some(crate::panel::window::NORMAL_INNER);
+        }
+
+        let spec = match target {
+            Mode::Panel => {
+                let font_row_height = self.panel_font_row_height(ctx);
+                crate::panel::window::panel_spec(&self.panel_config, font_row_height)
+            }
+            Mode::Normal => crate::panel::window::normal_spec(self.normal_geometry),
+        };
+
+        crate::panel::window::apply_spec(ctx, spec);
+        self.mode = target;
+        self.panel_spec_applied = true;
+    }
+
+    /// The font row height the panel layout is computed against.
+    ///
+    /// Read from egui's own metrics for the panel font, so the computed height
+    /// tracks the user's font-size setting. A fixed approximation would drift
+    /// from the painted text and the window would no longer fit its content.
+    fn panel_font_row_height(&self, ctx: &Context) -> f32 {
+        let font = egui::FontId::new(
+            egui::TextStyle::Body.resolve(&ctx.global_style()).size,
+            egui::FontFamily::Monospace,
+        );
+        ctx.fonts_mut(|fonts| fonts.row_height(&font))
     }
 
     fn handle_tray_events(&mut self, ctx: &Context) {
@@ -1029,6 +1316,12 @@ impl eframe::App for LapSphereApp {
         // Handle background hardware updates
         self.handle_hardware_updates();
 
+        // Act on a mode request from the top of the frame, before anything is
+        // drawn: viewport commands issued mid-click are not safe, and the panel
+        // body must be laid out in a window that already has the panel's size.
+        self.apply_mode(&ctx);
+        self.sync_poll_set();
+
         self.state.clamp_fan_selection();
 
         self.handle_tray_events(&ctx);
@@ -1039,6 +1332,12 @@ impl eframe::App for LapSphereApp {
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+
+        if self.mode.is_panel() {
+            self.draw_panel(ui, &ctx);
+            ctx.request_repaint_after(Duration::from_millis(500));
+            return;
         }
 
         // Draw top bar
@@ -1054,21 +1353,25 @@ impl eframe::App for LapSphereApp {
         }
 
         // Draw main content
-        CentralPanel::default().show_inside(ui, |ui| {
-            match self.state.current_page {
-                Page::Statistics => {
-                    statistics::draw(ui, &mut self.state);
-                }
-                Page::Profiles => {
-                    profiles::draw(ui, &mut self.state, self.dbus_client.as_ref());
-                }
-                Page::Tuning => {
-                    let hw_update_tx = self.hw_update_tx.clone();
-                    tuning::draw(ui, &mut self.state, self.dbus_client.as_ref(), hw_update_tx);
-                }
-                Page::Settings => {
-                    settings::draw(ui, &mut self.state, &mut self.theme, &ctx, self.dbus_client.as_ref());
-                }
+        CentralPanel::default().show_inside(ui, |ui| match self.state.current_page {
+            Page::Statistics => {
+                statistics::draw(ui, &mut self.state);
+            }
+            Page::Profiles => {
+                profiles::draw(ui, &mut self.state, self.dbus_client.as_ref());
+            }
+            Page::Tuning => {
+                let hw_update_tx = self.hw_update_tx.clone();
+                tuning::draw(ui, &mut self.state, self.dbus_client.as_ref(), hw_update_tx);
+            }
+            Page::Settings => {
+                settings::draw(
+                    ui,
+                    &mut self.state,
+                    &mut self.theme,
+                    &ctx,
+                    self.dbus_client.as_ref(),
+                );
             }
         });
         
@@ -1525,7 +1828,11 @@ mod tray_migration_e2e_tests {
         }
 
         assert_eq!(dir.read(TRAY_CONFIG_FILE), tray, "tray.json rewritten");
-        assert_eq!(dir.read("settings.json"), settings, "settings.json rewritten");
+        assert_eq!(
+            dir.read("settings.json"),
+            settings,
+            "settings.json rewritten"
+        );
         assert_eq!(
             dir.read(SETTINGS_PRE_SPLIT_BACKUP),
             backup,
