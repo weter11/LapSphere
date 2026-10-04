@@ -313,7 +313,11 @@ pub fn grab_from_spec(
     conn: &x11rb::rust_connection::RustConnection,
     spec: &str,
 ) -> (Option<Hotkey>, GrabStatus) {
-    let Some(hotkey) = Hotkey::parse(spec) else {
+    // Owned copy: the watcher thread outlives this function and logs it.
+    let spec = spec.to_string();
+    let spec_for_thread = spec.clone();
+
+    let Some(hotkey) = Hotkey::parse(&spec) else {
         return (None, GrabStatus::Failed);
     };
     let Some(keycode) = hotkey.resolve_keycode(conn) else {
@@ -326,77 +330,97 @@ pub fn grab_from_spec(
 
 /// Establish the grab and start the watcher thread.
 ///
-/// Returns the visibility state and the resolved keycode, if the key was
-/// captured. The watcher owns a SECOND connection on purpose: an X grab belongs
-/// to the connection that made it, so the connection that grabs must also be the
-/// one that watches, and the caller's connection is not available for that.
+/// **One connection does both.** An earlier version grabbed on one connection
+/// and then had the watcher thread re-grab on a second one. X11 delivers a
+/// `KeyPress` to the client connection that owns the grab, and with two
+/// connections of the same client competing the event went to the one nothing
+/// was polling: the log reported "captured" and every press was silently lost,
+/// which XTEST confirmed (geometry unchanged across repeated presses, no
+/// mode-change line).
+///
+/// So the watcher owns its connection outright: it connects, grabs all four lock
+/// variants, and polls — and the grab status is reported back through a channel
+/// rather than assumed.
 #[cfg(target_os = "linux")]
 pub fn start_hotkey(spec: &str, visibility: Arc<Visibility>) -> Option<Hotkey> {
-    let Ok((conn, _screen)) = x11rb::rust_connection::RustConnection::connect(None) else {
-        visibility.set_grab_status(GrabStatus::NoDisplay);
-        log::info!("panel: no X11 display, the hotkey is unavailable");
+    // Owned copy: the watcher thread outlives this function and logs it.
+    let spec = spec.to_string();
+    let spec_for_thread = spec.clone();
+
+    let Some(hotkey) = Hotkey::parse(&spec) else {
+        visibility.set_grab_status(GrabStatus::Failed);
+        log::warn!("panel: hotkey `{spec}` does not parse");
         return None;
     };
 
-    let (hotkey, status) = grab_from_spec(&conn, spec);
-    visibility.set_grab_status(status);
+    let (status_tx, status_rx) = std::sync::mpsc::channel::<(Hotkey, u8, GrabStatus)>();
 
-    match hotkey {
-        Some(hotkey) if status.is_usable() => {
-            // Both flags are clones of the ones inside `visibility`, so the
-            // thread's writes are seen by `take_toggle` in the UI.
-            let stop = visibility.stop_watcher();
-            let trigger = visibility.trigger_flag();
-            let ctx_flag = visibility.context_flag();
-            std::thread::spawn(move || watch_hotkey(hotkey, trigger, stop, ctx_flag));
-            log::info!("panel: hotkey `{spec}` captured");
-            Some(hotkey)
+    // The watcher thread owns the connection, the grab and the poll loop.
+    // A handle for the error branch, so `visibility` is not moved into the
+    // closure and is still available below.
+    let visibility_for_thread = Arc::clone(&visibility);
+
+    std::thread::spawn(move || {
+        let Ok((conn, _screen)) = x11rb::rust_connection::RustConnection::connect(None) else {
+            let _ = status_tx.send((hotkey, 0, GrabStatus::NoDisplay));
+            return;
+        };
+
+        let Some(keycode) = hotkey.resolve_keycode(&conn) else {
+            log::warn!("panel: the X server has no key for `{spec_for_thread}`");
+            let _ = status_tx.send((hotkey, 0, GrabStatus::Failed));
+            return;
+        };
+        let hotkey = Hotkey { keycode, ..hotkey };
+
+        // Grab on THIS connection, which is the one that will poll it.
+        let status = grab_hotkey(&conn, keycode);
+        let _ = status_tx.send((hotkey, keycode, status));
+        if !status.is_usable() {
+            return;
         }
-        _ => {
-            log::warn!("panel: hotkey `{spec}` not captured: {}", status.message());
+
+        let trigger = visibility_for_thread.trigger_flag();
+        let stop = visibility_for_thread.stop_watcher();
+        let ctx_flag = visibility_for_thread.context_flag();
+        watch_hotkey(&conn, hotkey, keycode, trigger, stop, ctx_flag);
+    });
+
+    // Report the grab result the caller asked about.
+    match status_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok((hotkey, _keycode, status)) => {
+            visibility.set_grab_status(status);
+            if status.is_usable() {
+                log::info!("panel: hotkey `{spec}` captured");
+                Some(hotkey)
+            } else {
+                log::warn!("panel: hotkey `{spec}` not captured: {}", status.message());
+                None
+            }
+        }
+        Err(err) => {
+            visibility.set_grab_status(GrabStatus::Failed);
+            log::warn!("panel: the hotkey thread did not report a status: {err}");
             None
         }
     }
 }
 
-/// Watch for the grabbed hotkey on a background thread.
+/// Watch for the grabbed hotkey on the connection that owns the grab.
 ///
-/// The thread owns its own X connection: a grab is per-connection, so the
-/// connection that grabbed the key is the one that must watch for it. It exits
-/// when `stop` is set, which is what happens when the hotkey config changes or
-/// the app quits.
+/// Exits when `stop` is set, which is what happens when the app quits.
 #[cfg(target_os = "linux")]
 fn watch_hotkey(
+    conn: &x11rb::rust_connection::RustConnection,
     hotkey: Hotkey,
+    keycode: u8,
     trigger: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     ctx_flag: Arc<std::sync::Mutex<Option<egui::Context>>>,
 ) {
     use x11rb::connection::Connection;
-    use x11rb::protocol::xproto::{ConnectionExt, GrabMode};
 
-    let Ok((conn, _screen)) = x11rb::rust_connection::RustConnection::connect(None) else {
-        log::warn!("panel: hotkey watcher has no X11 connection");
-        return;
-    };
-    let Some(screen) = conn.setup().roots.first().cloned() else {
-        return;
-    };
-    let root = screen.root;
-
-    // Re-grab on this connection: the grab belongs to the connection.
-    for (_, extra) in lock_variants() {
-        let _ = conn.grab_key(
-            false,
-            root,
-            extra,
-            hotkey.keycode,
-            GrabMode::ASYNC,
-            GrabMode::ASYNC,
-        );
-        let _ = extra;
-    }
-    let _ = conn.flush();
+    log::info!("panel: watching hotkey, keycode {keycode} on the connection that holds the grab");
 
     while !stop.load(Ordering::Relaxed) {
         match conn.poll_for_event() {
@@ -405,11 +429,12 @@ fn watch_hotkey(
                     // Compare the keycode: that is what was grabbed, and the
                     // keysym is only meaningful once the keyboard group is
                     // resolved, which is not guaranteed here.
-                    if key.detail == hotkey.keycode {
+                    if key.detail == keycode {
+                        log::info!("panel: hotkey pressed");
                         trigger.store(true, Ordering::SeqCst);
-                        // A hotkey press while the window is hidden must still
-                        // be processed, so wake the UI rather than waiting for
-                        // the next unrelated frame.
+                        // A press while the window is hidden must still be
+                        // processed, so wake the UI rather than waiting for the
+                        // next unrelated frame.
                         if let Some(ctx) =
                             ctx_flag.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
                         {
@@ -420,19 +445,23 @@ fn watch_hotkey(
             }
             Ok(None) => {
                 // No events pending: sleep rather than spin.
-                std::thread::sleep(std::time::Duration::from_millis(25));
+                std::thread::sleep(std::time::Duration::from_millis(20));
             }
-            Err(_) => break,
+            Err(err) => {
+                log::warn!("panel: hotkey watcher stopped: {err}");
+                break;
+            }
         }
     }
 
-    for (_, extra) in lock_variants() {
+    // Release every variant this thread grabbed.
+    if let Some(screen) = conn.setup().roots.first() {
         for (_, extra) in lock_variants() {
-            let _ = conn.ungrab_key(hotkey.keycode, root, extra);
+            let _ = conn.ungrab_key(keycode, screen.root, extra);
         }
-        let _ = extra;
+        let _ = conn.flush();
     }
-    let _ = conn.flush();
+    let _ = hotkey;
 }
 
 /// Live visibility state, shared between the hotkey thread, the D-Bus method and
