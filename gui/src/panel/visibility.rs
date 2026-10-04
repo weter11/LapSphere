@@ -315,7 +315,6 @@ pub fn grab_from_spec(
 ) -> (Option<Hotkey>, GrabStatus) {
     // Owned copy: the watcher thread outlives this function and logs it.
     let spec = spec.to_string();
-    let spec_for_thread = spec.clone();
 
     let Some(hotkey) = Hotkey::parse(&spec) else {
         return (None, GrabStatus::Failed);
@@ -326,6 +325,31 @@ pub fn grab_from_spec(
     };
     let status = grab_hotkey(conn, keycode);
     (Some(Hotkey { keycode, ..hotkey }), status)
+}
+
+/// Which of the two hotkeys a grab is for.
+///
+/// The panel has two independent global keys, and they are modelled as two slots
+/// rather than one parameterised watcher because they have different jobs, fail
+/// independently — either can be taken by another application while the other is
+/// free — and feed different flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HotkeySlot {
+    /// The show/hide key (`hotkey` in `panel.json`).
+    ShowHide,
+    /// The interactivity key (`interactivity_hotkey`), which turns click-through
+    /// off.
+    Interactivity,
+}
+
+impl HotkeySlot {
+    /// The human name used in log lines.
+    fn name(self) -> &'static str {
+        match self {
+            HotkeySlot::ShowHide => "show/hide",
+            HotkeySlot::Interactivity => "interactivity",
+        }
+    }
 }
 
 /// Establish the grab and start the watcher thread.
@@ -343,17 +367,47 @@ pub fn grab_from_spec(
 /// rather than assumed.
 #[cfg(target_os = "linux")]
 pub fn start_hotkey(spec: &str, visibility: Arc<Visibility>) -> Option<Hotkey> {
-    // Owned copy: the watcher thread outlives this function and logs it.
+    start_hotkey_for(spec, visibility, HotkeySlot::ShowHide)
+}
+
+/// The interactivity hotkey's grab, with its own status and its own thread.
+///
+/// Separate from [`start_hotkey`] because it is the only way back out of
+/// click-through when no D-Bus CLI is available, so its status is what the
+/// click-through safety rule reads. An empty spec is not an error: it means the
+/// user turned the key off, which the rule treats as "no key available".
+#[cfg(target_os = "linux")]
+pub fn start_interactivity_hotkey(spec: &str, visibility: Arc<Visibility>) -> Option<Hotkey> {
+    start_hotkey_for(spec, visibility, HotkeySlot::Interactivity)
+}
+
+/// Stop the watcher for `slot` and grab `spec` again.
+///
+/// The old thread must be stopped first: an X grab belongs to the connection
+/// that made it, and a live old thread would keep the previous key captured for
+/// the life of the process even after the user changed the setting.
+#[cfg(target_os = "linux")]
+pub fn regrab(spec: &str, visibility: Arc<Visibility>, slot: HotkeySlot) {
+    visibility.stop_slot(slot);
+    visibility.set_slot_status(slot, GrabStatus::Failed);
+    start_hotkey_for(spec, visibility, slot);
+}
+
+#[cfg(target_os = "linux")]
+fn start_hotkey_for(spec: &str, visibility: Arc<Visibility>, slot: HotkeySlot) -> Option<Hotkey> {
+    // Two owned copies: the watcher thread outlives this function and logs its
+    // own, while the code below reports with the other. `spec` itself is moved
+    // into the thread.
     let spec = spec.to_string();
     let spec_for_thread = spec.clone();
 
     let Some(hotkey) = Hotkey::parse(&spec) else {
-        visibility.set_grab_status(GrabStatus::Failed);
-        log::warn!("panel: hotkey `{spec}` does not parse");
+        visibility.set_slot_status(slot, GrabStatus::Failed);
+        log::warn!("panel: {} hotkey `{spec}` does not parse", slot.name());
         return None;
     };
 
-    let (status_tx, status_rx) = std::sync::mpsc::channel::<(Hotkey, u8, GrabStatus)>();
+    let (status_tx, status_rx) = std::sync::mpsc::channel::<(Hotkey, GrabStatus)>();
 
     // The watcher thread owns the connection, the grab and the poll loop.
     // A handle for the error branch, so `visibility` is not moved into the
@@ -362,45 +416,52 @@ pub fn start_hotkey(spec: &str, visibility: Arc<Visibility>) -> Option<Hotkey> {
 
     std::thread::spawn(move || {
         let Ok((conn, _screen)) = x11rb::rust_connection::RustConnection::connect(None) else {
-            let _ = status_tx.send((hotkey, 0, GrabStatus::NoDisplay));
+            let _ = status_tx.send((hotkey, GrabStatus::NoDisplay));
             return;
         };
 
         let Some(keycode) = hotkey.resolve_keycode(&conn) else {
             log::warn!("panel: the X server has no key for `{spec_for_thread}`");
-            let _ = status_tx.send((hotkey, 0, GrabStatus::Failed));
+            let _ = status_tx.send((hotkey, GrabStatus::Failed));
             return;
         };
         let hotkey = Hotkey { keycode, ..hotkey };
 
         // Grab on THIS connection, which is the one that will poll it.
         let status = grab_hotkey(&conn, keycode);
-        let _ = status_tx.send((hotkey, keycode, status));
+        let _ = status_tx.send((hotkey, status));
         if !status.is_usable() {
             return;
         }
 
-        let trigger = visibility_for_thread.trigger_flag();
-        let stop = visibility_for_thread.stop_watcher();
+        let trigger = visibility_for_thread.trigger_flag_for(slot);
+        let stop = visibility_for_thread.stop_watcher_for(slot);
         let ctx_flag = visibility_for_thread.context_flag();
         watch_hotkey(&conn, hotkey, keycode, trigger, stop, ctx_flag);
     });
 
     // Report the grab result the caller asked about.
     match status_rx.recv_timeout(std::time::Duration::from_secs(5)) {
-        Ok((hotkey, _keycode, status)) => {
-            visibility.set_grab_status(status);
+        Ok((hotkey, status)) => {
+            visibility.set_slot_status(slot, status);
             if status.is_usable() {
-                log::info!("panel: hotkey `{spec}` captured");
+                log::info!("panel: {} hotkey `{spec}` captured", slot.name());
                 Some(hotkey)
             } else {
-                log::warn!("panel: hotkey `{spec}` not captured: {}", status.message());
+                log::warn!(
+                    "panel: {} hotkey `{spec}` not captured: {}",
+                    slot.name(),
+                    status.message()
+                );
                 None
             }
         }
         Err(err) => {
-            visibility.set_grab_status(GrabStatus::Failed);
-            log::warn!("panel: the hotkey thread did not report a status: {err}");
+            visibility.set_slot_status(slot, GrabStatus::Failed);
+            log::warn!(
+                "panel: the {} hotkey thread did not report a status: {err}",
+                slot.name()
+            );
             None
         }
     }
@@ -464,11 +525,18 @@ fn watch_hotkey(
     let _ = hotkey;
 }
 
-/// Live visibility state, shared between the hotkey thread, the D-Bus method and
-/// the UI.
+/// Live visibility state, shared between the hotkey threads, the D-Bus methods
+/// and the UI.
+///
+/// Two hotkey slots (show/hide and interactivity) and two pending-request flags.
+/// The interactivity request is a *separate* flag from the show/hide one on
+/// purpose: they mean opposite things (hide the panel vs. give the panel the
+/// mouse back) and must not be consumed by the same call.
 pub struct Visibility {
-    /// Set by the hotkey thread or the D-Bus method; consumed by `ui()`.
+    /// Set by the show/hide hotkey thread or the D-Bus method; consumed by `ui()`.
     toggle_requested: AtomicBool,
+    /// Set by the interactivity hotkey thread or `--toggle-interactive`.
+    interactivity_requested: AtomicBool,
     /// The UI context, published once the first frame has run.
     ///
     /// Needed because a toggle can arrive while the window is hidden or
@@ -476,13 +544,21 @@ pub struct Visibility {
     /// this the command would sit unprocessed until some unrelated repaint
     /// happened to occur.
     ctx: Arc<std::sync::Mutex<Option<egui::Context>>>,
-    /// Set by the hotkey thread. Owned here so the watcher and the UI share the
-    /// same flag — the thread only ever gets a clone of this Arc.
+    /// Set by the show/hide hotkey thread. Owned here so the watcher and the UI
+    /// share the same flag — the thread only ever gets a clone of this Arc.
     hotkey_fired: Arc<AtomicBool>,
-    /// Whether the hotkey was actually grabbed.
+    /// Set by the interactivity hotkey thread.
+    interactivity_fired: Arc<AtomicBool>,
+    /// Whether each hotkey was actually grabbed.
     grab_status: AtomicU8,
-    /// Set to tell the watcher thread to exit.
+    interactivity_grab_status: AtomicU8,
+    /// Set to tell a watcher thread to exit.
     stop: Arc<AtomicBool>,
+    /// The same, for the interactivity watcher.
+    interactivity_stop: Arc<AtomicBool>,
+    /// Whether the D-Bus control object was exported, which is what makes the
+    /// CLI a way back.
+    dbus_available: AtomicBool,
 }
 
 impl Default for Visibility {
@@ -497,14 +573,38 @@ const STATUS_BUSY: u8 = 2;
 const STATUS_NO_DISPLAY: u8 = 3;
 const STATUS_FAILED: u8 = 4;
 
+/// Decode the stored status byte.
+fn status_from_byte(byte: u8) -> GrabStatus {
+    match byte {
+        STATUS_GRABBED => GrabStatus::Grabbed(0),
+        STATUS_BUSY => GrabStatus::Busy,
+        STATUS_NO_DISPLAY => GrabStatus::NoDisplay,
+        _ => GrabStatus::Failed,
+    }
+}
+
+fn byte_from_status(status: GrabStatus) -> u8 {
+    match status {
+        GrabStatus::Grabbed(_) => STATUS_GRABBED,
+        GrabStatus::Busy => STATUS_BUSY,
+        GrabStatus::NoDisplay => STATUS_NO_DISPLAY,
+        GrabStatus::Failed => STATUS_FAILED,
+    }
+}
+
 impl Visibility {
     pub fn new() -> Self {
         Self {
             toggle_requested: AtomicBool::new(false),
+            interactivity_requested: AtomicBool::new(false),
             hotkey_fired: Arc::new(AtomicBool::new(false)),
+            interactivity_fired: Arc::new(AtomicBool::new(false)),
             ctx: Arc::new(std::sync::Mutex::new(None)),
             grab_status: AtomicU8::new(STATUS_UNKNOWN),
+            interactivity_grab_status: AtomicU8::new(STATUS_UNKNOWN),
             stop: Arc::new(AtomicBool::new(false)),
+            interactivity_stop: Arc::new(AtomicBool::new(false)),
+            dbus_available: AtomicBool::new(false),
         }
     }
 
@@ -513,19 +613,33 @@ impl Visibility {
         *self.ctx.lock().unwrap_or_else(|e| e.into_inner()) = Some(ctx);
     }
 
-    /// Ask for a toggle. Safe from any thread.
+    /// Ask for a show/hide toggle. Safe from any thread.
     ///
-    /// Requests a repaint as well: if the window is hidden or minimized egui is
+    /// Requests a repaint as well: when the window is hidden or minimized egui is
     /// not painting, and the command would otherwise wait for an unrelated frame
     /// that may never come.
     pub fn request_toggle(&self) {
         self.toggle_requested.store(true, Ordering::SeqCst);
+        self.request_repaint();
+    }
+
+    /// Ask for a click-through toggle. Safe from any thread.
+    ///
+    /// The same repaint request as [`Visibility::request_toggle`], and for the
+    /// same reason: with `MousePassthrough` set the panel gets no mouse input, so
+    /// nothing else could ever wake the UI to react.
+    pub fn request_interactivity_toggle(&self) {
+        self.interactivity_requested.store(true, Ordering::SeqCst);
+        self.request_repaint();
+    }
+
+    fn request_repaint(&self) {
         if let Some(ctx) = self.ctx.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             ctx.request_repaint();
         }
     }
 
-    /// Take a pending toggle request, from either source.
+    /// Take a pending show/hide request, from either source.
     ///
     /// Both flags are consumed, so a hotkey press and a D-Bus call that land in
     /// the same frame produce one toggle rather than two.
@@ -535,52 +649,66 @@ impl Visibility {
         requested || hotkey
     }
 
-    pub fn set_grab_status(&self, status: GrabStatus) {
-        let value = match status {
-            GrabStatus::Grabbed(_) => STATUS_GRABBED,
-            GrabStatus::Busy => STATUS_BUSY,
-            GrabStatus::NoDisplay => STATUS_NO_DISPLAY,
-            GrabStatus::Failed => STATUS_FAILED,
-        };
-        self.grab_status.store(value, Ordering::Relaxed);
+    /// Take a pending interactivity request, from either source.
+    pub fn take_interactivity_toggle(&self) -> bool {
+        let requested = self.interactivity_requested.swap(false, Ordering::SeqCst);
+        let hotkey = self.interactivity_fired.swap(false, Ordering::SeqCst);
+        requested || hotkey
     }
 
-    pub fn grab_status(&self) -> GrabStatus {
-        match self.grab_status.load(Ordering::Relaxed) {
-            STATUS_GRABBED => GrabStatus::Grabbed(0),
-            STATUS_BUSY => GrabStatus::Busy,
-            STATUS_NO_DISPLAY => GrabStatus::NoDisplay,
-            STATUS_FAILED => GrabStatus::Failed,
-            _ => GrabStatus::Failed,
+    pub fn set_grab_status(&self, status: GrabStatus) {
+        self.grab_status
+            .store(byte_from_status(status), Ordering::Relaxed);
+    }
+
+    /// Record the interactivity hotkey's grab status.
+    pub fn set_interactivity_grab_status(&self, status: GrabStatus) {
+        self.interactivity_grab_status
+            .store(byte_from_status(status), Ordering::Relaxed);
+    }
+
+    /// Record the status for one of the two slots.
+    #[cfg(target_os = "linux")]
+    pub fn set_slot_status(&self, slot: HotkeySlot, status: GrabStatus) {
+        match slot {
+            HotkeySlot::ShowHide => self.set_grab_status(status),
+            HotkeySlot::Interactivity => self.set_interactivity_grab_status(status),
         }
     }
 
-    /// Was the hotkey captured?
+    pub fn grab_status(&self) -> GrabStatus {
+        status_from_byte(self.grab_status.load(Ordering::Relaxed))
+    }
+
+    /// The interactivity hotkey's grab status.
+    pub fn interactivity_grab_status(&self) -> GrabStatus {
+        status_from_byte(self.interactivity_grab_status.load(Ordering::Relaxed))
+    }
+
+    /// Was the show/hide hotkey captured?
     pub fn hotkey_grabbed(&self) -> bool {
         self.grab_status().is_usable()
     }
 
-    /// Stop the watcher thread.
-    pub fn stop(&self) {
-        self.stop.store(true, Ordering::Relaxed);
-    }
-
-    /// The flag the watcher thread sets when the hotkey fires.
-    pub fn trigger_flag(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.hotkey_fired)
-    }
-
-    /// The flag that stops the watcher thread.
-    pub fn stop_watcher(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.stop)
-    }
-
-    /// The context slot, shared with the watcher thread.
+    /// Was the interactivity hotkey captured?
     ///
-    /// A clone of the SAME Arc the UI publishes into: handing the thread a fresh
-    /// mutex would give it a slot nothing ever writes to.
-    pub fn context_flag(&self) -> Arc<std::sync::Mutex<Option<egui::Context>>> {
-        Arc::clone(&self.ctx)
+    /// This is the value the click-through safety rule reads: with it true, a
+    /// click-through panel can always be given the mouse back.
+    pub fn interactivity_grabbed(&self) -> bool {
+        self.interactivity_grab_status().is_usable()
+    }
+
+    /// Was the D-Bus control object exported?
+    ///
+    /// Recorded rather than assumed: the export is fallible, and a rule that
+    /// counted the CLI as always available would offer click-through on a build
+    /// where the CLI could not reach the panel.
+    pub fn set_dbus_available(&self, available: bool) {
+        self.dbus_available.store(available, Ordering::Relaxed);
+    }
+
+    pub fn dbus_available(&self) -> bool {
+        self.dbus_available.load(Ordering::Relaxed)
     }
 
     /// Is there any way back to the panel after it is hidden?
@@ -591,6 +719,65 @@ impl Visibility {
     /// for.
     pub fn has_return_path(&self, tray_enabled: bool, dbus_available: bool) -> bool {
         super::menu::can_hide(self.hotkey_grabbed(), tray_enabled, dbus_available)
+    }
+
+    /// Can click-through be switched on right now?
+    ///
+    /// The rule, in one place so the menu and the settings window cannot
+    /// disagree: the key must be captured or the CLI must be reachable.
+    pub fn can_enable_click_through(&self) -> bool {
+        super::menu::can_enable_click_through(self.interactivity_grabbed(), self.dbus_available())
+    }
+
+    /// Tell the watcher thread to exit.
+    pub fn stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+        self.interactivity_stop.store(true, Ordering::Relaxed);
+    }
+
+    /// Tell the watcher for one slot to exit.
+    #[cfg(target_os = "linux")]
+    pub fn stop_slot(&self, slot: HotkeySlot) {
+        match slot {
+            HotkeySlot::ShowHide => self.stop.store(true, Ordering::Relaxed),
+            HotkeySlot::Interactivity => self.interactivity_stop.store(true, Ordering::Relaxed),
+        }
+    }
+
+    /// The flag that stops the show/hide watcher thread.
+    pub fn stop_watcher(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.stop)
+    }
+
+    /// The flag that stops one slot's watcher thread.
+    #[cfg(target_os = "linux")]
+    pub fn stop_watcher_for(&self, slot: HotkeySlot) -> Arc<AtomicBool> {
+        match slot {
+            HotkeySlot::ShowHide => Arc::clone(&self.stop),
+            HotkeySlot::Interactivity => Arc::clone(&self.interactivity_stop),
+        }
+    }
+
+    /// The flag the show/hide watcher thread sets when the hotkey fires.
+    pub fn trigger_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.hotkey_fired)
+    }
+
+    /// The trigger flag for one slot.
+    #[cfg(target_os = "linux")]
+    pub fn trigger_flag_for(&self, slot: HotkeySlot) -> Arc<AtomicBool> {
+        match slot {
+            HotkeySlot::ShowHide => Arc::clone(&self.hotkey_fired),
+            HotkeySlot::Interactivity => Arc::clone(&self.interactivity_fired),
+        }
+    }
+
+    /// The context slot, shared with the watcher thread.
+    ///
+    /// A clone of the SAME Arc the UI publishes into: handing the thread a fresh
+    /// mutex would give it a slot nothing ever writes to.
+    pub fn context_flag(&self) -> Arc<std::sync::Mutex<Option<egui::Context>>> {
+        Arc::clone(&self.ctx)
     }
 }
 
@@ -637,6 +824,25 @@ impl PanelControl {
     fn hotkey_status(&self) -> String {
         self.visibility.grab_status().message().to_string()
     }
+
+    /// Turn click-through on or off.
+    ///
+    /// What `lapsphere --toggle-interactive` calls. It exists because click-through
+    /// is the one panel state the panel itself cannot undo: with
+    /// `MousePassthrough` set the window takes no mouse input, so neither the
+    /// context menu nor the settings window can be reached to switch it off.
+    fn toggle_interactive(&self) {
+        log::info!("panel: ToggleInteractive requested over D-Bus");
+        self.visibility.request_interactivity_toggle();
+    }
+
+    /// Is the interactivity hotkey currently captured?
+    fn interactivity_hotkey_status(&self) -> String {
+        self.visibility
+            .interactivity_grab_status()
+            .message()
+            .to_string()
+    }
 }
 
 /// Does this error mean "the name is not owned"?
@@ -666,6 +872,19 @@ pub const CLI_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 ///   GUI starts.
 #[cfg(target_os = "linux")]
 pub async fn run_toggle_cli() -> anyhow::Result<bool> {
+    call_panel_method("TogglePanel").await
+}
+
+/// Handle `--toggle-interactive`: flip click-through on a running GUI.
+#[cfg(target_os = "linux")]
+pub async fn run_toggle_interactive_cli() -> anyhow::Result<bool> {
+    call_panel_method("ToggleInteractive").await
+}
+
+/// Call one no-argument method on the GUI's panel object, with the timeout, the
+/// clear messages and the no-blocking-in-a-runtime rules the toggle CLI needs.
+#[cfg(target_os = "linux")]
+async fn call_panel_method(method: &str) -> anyhow::Result<bool> {
     let conn = zbus::Connection::session().await?;
     let proxy = zbus::Proxy::new(
         &conn,
@@ -675,7 +894,7 @@ pub async fn run_toggle_cli() -> anyhow::Result<bool> {
     )
     .await?;
 
-    match tokio::time::timeout(CLI_TIMEOUT, proxy.call_method("TogglePanel", &())).await {
+    match tokio::time::timeout(CLI_TIMEOUT, proxy.call_method(method, &())).await {
         Ok(Ok(_)) => Ok(true),
         Ok(Err(zbus::Error::MethodError(_, _, message))) => {
             // No object exported at that path: the GUI is running but predates
@@ -866,5 +1085,125 @@ mod tests {
     #[test]
     fn the_default_hotkey_is_exposed_for_the_config() {
         assert_eq!(default_hotkey(), "Shift_R+F9");
+    }
+
+    // ---- The interactivity slot ----
+
+    #[test]
+    fn the_two_hotkey_slots_have_independent_statuses() {
+        // Either key can be taken by another application while the other is
+        // free, so one status field for both would make the safety rule read a
+        // stale answer.
+        let visibility = Visibility::new();
+
+        visibility.set_grab_status(GrabStatus::Grabbed(0));
+        visibility.set_interactivity_grab_status(GrabStatus::Busy);
+        assert!(visibility.hotkey_grabbed());
+        assert!(
+            !visibility.interactivity_grabbed(),
+            "a busy interactivity key must not read as grabbed"
+        );
+
+        visibility.set_interactivity_grab_status(GrabStatus::Grabbed(0));
+        assert!(visibility.interactivity_grabbed());
+        assert_eq!(
+            visibility.grab_status(),
+            GrabStatus::Grabbed(0),
+            "the show/hide status is untouched"
+        );
+
+        visibility.set_grab_status(GrabStatus::Failed);
+        assert!(
+            visibility.interactivity_grabbed(),
+            "losing the show/hide key must not lose the interactivity key"
+        );
+    }
+
+    #[test]
+    fn an_unset_slot_reads_as_failed_not_as_grabbed() {
+        // The initial byte is UNKNOWN; mapping it to `Grabbed` would let
+        // click-through be enabled before the grab was ever attempted.
+        let visibility = Visibility::new();
+        assert!(!visibility.interactivity_grabbed());
+        assert!(!visibility.hotkey_grabbed());
+    }
+
+    #[test]
+    fn the_click_through_gate_follows_the_key_and_the_cli() {
+        let visibility = Visibility::new();
+        visibility.set_interactivity_grab_status(GrabStatus::Grabbed(0));
+        assert!(visibility.can_enable_click_through());
+
+        let no_key = Visibility::new();
+        no_key.set_interactivity_grab_status(GrabStatus::Busy);
+        assert!(!no_key.can_enable_click_through());
+        no_key.set_dbus_available(true);
+        assert!(no_key.can_enable_click_through());
+    }
+
+    #[test]
+    fn an_interactivity_toggle_is_a_separate_request_from_show_hide() {
+        // They mean opposite things: one hides the panel, the other gives it the
+        // mouse back. Sharing a flag would make one keypress do both.
+        let visibility = Visibility::new();
+
+        visibility.request_interactivity_toggle();
+        assert!(
+            visibility.take_interactivity_toggle(),
+            "the interactivity request is delivered"
+        );
+        assert!(!visibility.take_interactivity_toggle(), "and only once");
+        assert!(
+            !visibility.take_toggle(),
+            "an interactivity request must not be read as a show/hide request"
+        );
+
+        visibility.request_toggle();
+        assert!(visibility.take_toggle());
+        assert!(
+            !visibility.take_interactivity_toggle(),
+            "a show/hide request must not be read as an interactivity request"
+        );
+    }
+
+    #[test]
+    fn the_dbus_availability_is_recorded_not_assumed() {
+        let visibility = Visibility::new();
+        assert!(!visibility.dbus_available(), "unknown means unavailable");
+        visibility.set_dbus_available(true);
+        assert!(visibility.dbus_available());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stopping_one_slot_leaves_the_other_running() {
+        // The watchers are separate threads with separate grabs: stopping the
+        // show/hide watcher must not take the interactivity key with it, or
+        // re-grabbing one key would silently drop the other.
+        let visibility = Visibility::new();
+        visibility.stop_slot(HotkeySlot::ShowHide);
+        assert!(visibility
+            .stop_watcher_for(HotkeySlot::ShowHide)
+            .load(Ordering::Relaxed));
+        assert!(
+            !visibility
+                .stop_watcher_for(HotkeySlot::Interactivity)
+                .load(Ordering::Relaxed),
+            "the other watcher is untouched"
+        );
+        visibility.stop();
+        assert!(visibility
+            .stop_watcher_for(HotkeySlot::Interactivity)
+            .load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn the_slot_names_are_distinct() {
+        // A log line saying "hotkey captured" without saying WHICH hotkey is
+        // exactly the ambiguity that made the earlier bug hard to see.
+        assert_ne!(
+            HotkeySlot::ShowHide.name(),
+            HotkeySlot::Interactivity.name()
+        );
     }
 }

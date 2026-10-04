@@ -252,6 +252,12 @@ fn main() -> Result<(), eframe::Error> {
     if args.contains(&"--toggle-panel".to_string()) {
         return toggle_running_panel(&rt);
     }
+    // `--toggle-interactive` is the CLI half of the click-through return path:
+    // with MousePassthrough set the panel takes no mouse input, so this (or the
+    // interactivity hotkey) is the only way to give it the mouse back.
+    if args.contains(&"--toggle-interactive".to_string()) {
+        return toggle_running_interactivity(&rt);
+    }
 
     #[cfg(target_os = "linux")]
     // Park the connection that owns `io.lapsphere.Gui` so the panel's D-Bus
@@ -308,6 +314,30 @@ fn toggle_running_panel(rt: &tokio::runtime::Runtime) -> Result<(), eframe::Erro
 #[cfg(not(target_os = "linux"))]
 fn toggle_running_panel(_rt: &tokio::runtime::Runtime) -> Result<(), eframe::Error> {
     eprintln!("LapSphere: --toggle-panel is not supported on this platform");
+    std::process::exit(1);
+}
+
+/// Send `ToggleInteractive` to a running gui and report whether one was there.
+#[cfg(target_os = "linux")]
+fn toggle_running_interactivity(rt: &tokio::runtime::Runtime) -> Result<(), eframe::Error> {
+    match rt.block_on(panel::visibility::run_toggle_interactive_cli()) {
+        Ok(true) => {
+            println!("LapSphere: panel interactivity toggled");
+            Ok(())
+        }
+        Ok(false) | Err(_) => {
+            eprintln!(
+                "LapSphere: no running gui to toggle. Is LapSphere running, and is \
+                 DBUS_SESSION_BUS_ADDRESS set?"
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn toggle_running_interactivity(_rt: &tokio::runtime::Runtime) -> Result<(), eframe::Error> {
+    eprintln!("LapSphere: --toggle-interactive is not supported on this platform");
     std::process::exit(1);
 }
 

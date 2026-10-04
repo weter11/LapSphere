@@ -117,6 +117,61 @@ fn current_inner_size(ctx: &egui::Context) -> Option<[f32; 2]> {
         .map(|rect| [rect.width(), rect.height()])
 }
 
+/// Convert a window's top-left position back into a corner plus offset.
+///
+/// The inverse of `panel::render::resolve_position`, and needed because a
+/// left-button drag hands the position to the window manager: what comes back is
+/// an absolute point, and `panel.json` stores a corner plus an offset so the panel
+/// survives a change of resolution. The nearest corner in each axis is chosen,
+/// which is what "the user dropped it near that corner" means.
+fn position_from_outer(
+    outer: [f32; 2],
+    panel: [f32; 2],
+    work_area: (f32, f32, f32, f32),
+) -> panel::config::PanelPosition {
+    use panel::config::PanelCorner;
+
+    let (area_x, area_y, area_w, area_h) = work_area;
+    let (x, y) = (outer[0], outer[1]);
+
+    // Compare the panel's middle against the work area's middle: that is the
+    // "which half is it in" test, and it is independent of the panel's size.
+    let panel_mid_x = x + panel[0] * 0.5;
+    let panel_mid_y = y + panel[1] * 0.5;
+    let area_mid_x = area_x + area_w * 0.5;
+    let area_mid_y = area_y + area_h * 0.5;
+
+    let right = panel_mid_x >= area_mid_x;
+    let bottom = panel_mid_y >= area_mid_y;
+
+    let corner = match (right, bottom) {
+        (false, false) => PanelCorner::TopLeft,
+        (true, false) => PanelCorner::TopRight,
+        (false, true) => PanelCorner::BottomLeft,
+        (true, true) => PanelCorner::BottomRight,
+    };
+
+    // Offsets are measured inward from the chosen corner, so a negative value
+    // means the user dragged the panel past the edge — allowed, and clamped into
+    // the work area when the position is resolved again.
+    let offset_x = if right {
+        (area_x + area_w) - (x + panel[0])
+    } else {
+        x - area_x
+    };
+    let offset_y = if bottom {
+        (area_y + area_h) - (y + panel[1])
+    } else {
+        y - area_y
+    };
+
+    panel::config::PanelPosition {
+        corner,
+        offset_x,
+        offset_y,
+    }
+}
+
 /// Record that a frame has been painted (called once per frame from the UI loop).
 pub fn note_ui_frame(page: Page, tab: SettingsTab) {
     LOGS_TAB_ON_SCREEN.store(logs_fetch_needed(page, tab, 0), Ordering::Relaxed);
@@ -428,9 +483,13 @@ pub struct LapSphereApp {
     /// The normal window's geometry, captured before the first switch so
     /// returning to normal mode restores what the user had.
     normal_geometry: Option<NormalGeometry>,
-    /// Set once the X11 atom request has been confirmed, so it is not resent
-    /// every frame.
-    panel_atoms_applied: bool,
+    /// The atom set currently confirmed on the window, so it is not resent every
+    /// frame — and so a stacking change can be applied the moment it differs.
+    panel_atoms_applied: Option<crate::panel::window::AtomSet>,
+    /// The stacking/atom target the window should be in, as computed from the
+    /// config. Compared against `panel_atoms_applied` each panel frame; a
+    /// mismatch re-applies the level and the atoms WITHOUT recreating the window.
+    panel_atoms_wanted: crate::panel::window::AtomSet,
     /// Pending mode change, applied on the next frame.
     pending_mode: Option<Mode>,
     /// Hotkey / D-Bus toggle state, shared with the watcher thread.
@@ -438,8 +497,19 @@ pub struct LapSphereApp {
     /// The panel is in panel mode but hidden: the window is unmapped and paints
     /// nothing, waiting for the hotkey, the tray or the CLI to bring it back.
     panel_hidden: bool,
-    /// Whether the panel's settings menu is open.
-    panel_menu_open: bool,
+    /// Whether the panel's settings window is open.
+    panel_settings_open: bool,
+    /// The panel was dragged with the left button and its new position has not
+    /// been written back to `panel.json` yet.
+    panel_position_dirty: bool,
+    /// The window spec for the current mode has been sent at least once. False
+    /// for a process that started directly in panel mode, where there is no mode
+    /// transition to carry the spec.
+    panel_spec_applied: bool,
+    /// The process started in panel mode (`--panel`, or `active: true`). There
+    /// was never a normal-window geometry to remember, so leaving panel mode
+    /// falls back to the built-in normal size rather than to the panel's rect.
+    started_in_panel: bool,
 }
 
 #[derive(Debug)]
@@ -757,7 +827,17 @@ impl LapSphereApp {
         // `lapsphere --toggle-panel` calls. Both are "ways back" that the hide
         // safety rule counts, so they are established before the panel is shown.
         #[cfg(target_os = "linux")]
-        crate::panel::visibility::start_hotkey(&panel_config.hotkey, Arc::clone(&visibility));
+        {
+            crate::panel::visibility::start_hotkey(&panel_config.hotkey, Arc::clone(&visibility));
+            // The interactivity key is the only way back out of click-through when
+            // no D-Bus CLI exists, so it is grabbed at startup, not when the user
+            // first needs it: a grab attempted later could lose the race to
+            // another application.
+            crate::panel::visibility::start_interactivity_hotkey(
+                &panel_config.interactivity_hotkey,
+                Arc::clone(&visibility),
+            );
+        }
 
         // The D-Bus export is async and `new()` is not.
         let visibility_for_dbus = Arc::clone(&visibility);
@@ -770,6 +850,7 @@ impl LapSphereApp {
         if start_in_panel {
             panel_config.active = true;
         }
+        let started_in_panel = panel_config.active;
 
         Self {
             state,
@@ -790,11 +871,15 @@ impl LapSphereApp {
             },
             panel_config,
             normal_geometry: None,
-            panel_atoms_applied: false,
+            panel_atoms_applied: None,
+            panel_atoms_wanted: crate::panel::window::AtomSet::default(),
             pending_mode: None,
             visibility,
             panel_hidden: false,
-            panel_menu_open: false,
+            panel_settings_open: false,
+            panel_position_dirty: false,
+            panel_spec_applied: false,
+            started_in_panel,
         }
     }
 
@@ -828,7 +913,8 @@ impl LapSphereApp {
     /// panel mode, and routing a GUI-local action through the privileged daemon
     /// would be the wrong dependency direction.
     pub async fn export_panel_control(visibility: Arc<crate::panel::visibility::Visibility>) {
-        let control = crate::panel::visibility::PanelControl::new(visibility);
+        let control =
+            crate::panel::visibility::PanelControl::new(Arc::clone(&visibility));
 
         // Must be the connection that owns `io.lapsphere.Gui`, not a fresh one:
         // an object exported on another connection is only reachable through
@@ -838,6 +924,7 @@ impl LapSphereApp {
                 "panel: no session-bus connection parked, the D-Bus control method is \
                  unavailable (lapsphere --toggle-panel will not work)"
             );
+            visibility.set_dbus_available(false);
             return;
         };
 
@@ -849,8 +936,10 @@ impl LapSphereApp {
             // Not fatal: the hotkey and the tray still work, and the menu reports
             // the missing path rather than pretending the CLI is available.
             log::warn!("panel: could not export the D-Bus control object: {err}");
+            visibility.set_dbus_available(false);
         } else {
             log::info!("panel: D-Bus control object exported at /io/lapsphere/Gui/Panel");
+            visibility.set_dbus_available(true);
         }
     }
 
@@ -948,19 +1037,27 @@ impl LapSphereApp {
     /// One window throughout: the same `ViewportCommand`s reshape it, and the
     /// window type is never changed. `WindowLevel(AlwaysOnTop)` is issued at
     /// runtime here because the `ViewportBuilder` hint is ignored by xfwm4.
-    fn apply_mode(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    fn apply_mode(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let Some(target) = self.pending_mode.take() else {
             return;
         };
-        if target == self.mode {
+        // The same mode still needs its window spec once: starting the process in
+        // panel mode (`--panel`, or `active: true` in panel.json) sets `mode`
+        // directly, so there is no transition to apply the spec on. Without this
+        // the panel would be drawn in the normal window's geometry.
+        if target == self.mode && self.panel_spec_applied {
             return;
         }
 
         let work_area = work_area_of(ctx);
 
         if target.is_panel() {
-            // Remember where the normal window was before shrinking it.
-            if self.normal_geometry.is_none() {
+            // Remember where the normal window was before shrinking it. Skipped
+            // when the process STARTED in panel mode: there was never a normal
+            // geometry to remember, and capturing the panel's own rect would
+            // restore a strip-sized window when leaving panel mode — which then
+            // falls back to `normal_spec(None)`'s built-in size.
+            if self.normal_geometry.is_none() && !self.started_in_panel {
                 self.normal_geometry = Some(NormalGeometry {
                     inner: current_inner_size(ctx).unwrap_or(window::NORMAL_INNER),
                     min_inner: window::NORMAL_MIN_INNER,
@@ -969,24 +1066,59 @@ impl LapSphereApp {
 
             let spec = window::panel_spec(&self.panel_config, work_area);
             self.apply_spec(ctx, &spec);
-
-            // The X11 atoms are applied once, on the first panel frame, and
-            // confirmed by reading the property back (see `panel::x11`).
-            if !self.panel_atoms_applied {
-                self.panel_atoms_applied = self.apply_panel_window_state(frame, true);
-            }
         } else {
             let spec = window::normal_spec(self.normal_geometry);
             self.apply_spec(ctx, &spec);
-            if self.panel_atoms_applied {
-                self.apply_panel_window_state(frame, false);
-                self.panel_atoms_applied = false;
-            }
         }
 
+        self.panel_spec_applied = true;
         self.mode = target;
         self.apply_poll_set_for_mode();
         log::info!("window mode is now {:?}", self.mode);
+    }
+
+    /// Keep the window's stacking in step with the config, without ever
+    /// recreating the window.
+    ///
+    /// Called every panel frame. `WindowLevel` is a viewport command, so it is
+    /// re-sent whenever the wanted mode differs from what was last confirmed; the
+    /// EWMH atoms are diffed against a read-back on a background thread. Both
+    /// paths act on the SAME window — that is what makes the switch instant and
+    /// what makes 20 consecutive switches not accumulate anything.
+    fn sync_panel_window_state(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if !self.mode.is_panel() {
+            // Leaving panel mode must clear the atoms, whether or not they were
+            // ever applied.
+            if self.panel_atoms_applied.is_some() {
+                let wanted = window::AtomSet::default();
+                self.apply_panel_window_state(frame, wanted);
+                self.panel_atoms_applied = Some(wanted);
+            }
+            return;
+        }
+
+        let wanted = window::AtomSet::for_stacking(
+            self.panel_config.stacking,
+            self.panel_config.hide_from_taskbar,
+        );
+
+        // The level is cheap and idempotent, so it is re-sent on every change of
+        // the wanted state rather than tracked separately.
+        if self.panel_atoms_wanted != wanted {
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+                if wanted.above {
+                    egui::WindowLevel::AlwaysOnTop
+                } else {
+                    egui::WindowLevel::Normal
+                },
+            ));
+            self.panel_atoms_wanted = wanted;
+        }
+
+        if self.panel_atoms_applied != Some(wanted) {
+            self.apply_panel_window_state(frame, wanted);
+            self.panel_atoms_applied = Some(wanted);
+        }
     }
 
     fn apply_spec(&self, ctx: &egui::Context, spec: &window::PanelWindowSpec) {
@@ -994,35 +1126,46 @@ impl LapSphereApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(spec.min_inner.into()));
         ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(spec.resizable));
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(spec.decorations));
-        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(if spec.always_on_top {
-            egui::WindowLevel::AlwaysOnTop
-        } else {
-            egui::WindowLevel::Normal
-        }));
+        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+            if spec.stacking.is_always_on_top() {
+                egui::WindowLevel::AlwaysOnTop
+            } else {
+                egui::WindowLevel::Normal
+            },
+        ));
         ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(spec.click_through));
         if let Some([x, y]) = spec.outer_pos {
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
         }
     }
 
-    /// Send (or remove) the EWMH atoms, on a background thread.
+    /// Drive the window's `_NET_WM_STATE` atoms to `wanted`, on a background thread.
     ///
-    /// Off the UI thread because `apply_panel_atoms` retries with sleeps and the
-    /// retry budget is about a second; blocking the UI thread for that would
-    /// stall the first panel frame.
+    /// Off the UI thread because the apply loop retries with sleeps and its budget
+    /// is about a second; blocking the UI thread for that would stall the panel —
+    /// and a stacking switch happens while the user is looking at the panel.
+    ///
+    /// Reports the intent optimistically: the confirmation happens on the
+    /// background thread and a failure there is logged, not surfaced as a mode
+    /// failure, because the panel still works with the wrong atoms (it is just in
+    /// the taskbar, or it stacks normally).
     #[cfg(target_os = "linux")]
-    fn apply_panel_window_state(&self, frame: &mut eframe::Frame, add: bool) -> bool {
+    fn apply_panel_window_state(
+        &self,
+        frame: &mut eframe::Frame,
+        wanted: window::AtomSet,
+    ) {
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
         let Ok(handle) = frame.window_handle() else {
             log::warn!("panel: no window handle, skipping the EWMH atoms");
-            return false;
+            return;
         };
         let RawWindowHandle::Xlib(xlib) = handle.as_raw() else {
             // Wayland (and anything else): the atom protocol does not exist for
             // a client to use, so this is a no-op rather than an error (ADR-3).
             log::info!("panel: not an Xlib window, skipping the EWMH atoms");
-            return false;
+            return;
         };
         // Xlib's window id is a `c_ulong`; X11 protocol ids are u32.
         let window_id = xlib.window as u32;
@@ -1043,46 +1186,169 @@ impl LapSphereApp {
                 log::warn!("panel: no X11 root window for the EWMH atoms");
                 return;
             };
-            let action = if add {
-                panel::window::AtomAction::Add
-            } else {
-                panel::window::AtomAction::Remove
-            };
-            let applied =
-                panel::x11::apply_panel_atoms(&conn, root, window_id, &atoms, action);
-            if add && !applied {
+            let applied = panel::x11::apply_panel_atoms(&conn, root, window_id, &atoms, wanted);
+            if !applied {
                 log::warn!(
-                    "panel: the window manager did not accept SKIP_TASKBAR/SKIP_PAGER; \
-                     the panel works but will appear in the taskbar"
+                    "panel: the window manager did not accept the requested _NET_WM_STATE \
+                     ({wanted:?}); the panel works but its stacking or taskbar entry may differ"
                 );
+            } else {
+                log::info!("panel: _NET_WM_STATE confirmed as {wanted:?}");
             }
         });
-
-        // Reported optimistically: the confirmation happens on the background
-        // thread and a failure there is logged, not surfaced as a mode failure.
-        true
     }
 
     #[cfg(not(target_os = "linux"))]
-    fn apply_panel_window_state(&self, _frame: &mut eframe::Frame, _add: bool) -> bool {
-        false
+    fn apply_panel_window_state(&self, _frame: &mut eframe::Frame, _wanted: window::AtomSet) {}
+
+    /// Record where the window manager left the window after a left-button drag,
+    /// as a corner plus offset.
+    ///
+    /// The drag is `ViewportCommand::StartDrag`, so the position is whatever the WM
+    /// decided; writing an absolute point would make the panel unplaceable on a
+    /// different resolution. Converting back to corner+offset keeps the panel
+    /// anchored the way `render::resolve_position` expects, so a resolution change
+    /// still lands it in the same corner.
+    fn capture_dragged_position(&mut self, ctx: &egui::Context) {
+        if !self.panel_position_dirty {
+            return;
+        }
+        let Some(outer) = ctx.input(|i| i.viewport().outer_rect) else {
+            return;
+        };
+        let panel = window::panel_spec(&self.panel_config, work_area_of(ctx));
+        let area = work_area_of(ctx);
+        self.panel_config.position = position_from_outer(
+            [outer.min.x, outer.min.y],
+            [panel.inner[0], panel.inner[1]],
+            area,
+        );
+        self.panel_position_dirty = false;
+        if let Err(err) = self.save_panel_config() {
+            log::warn!("panel: could not save the dragged position: {err}");
+        }
     }
-    
+
     /// Draw the panel surface: elements only, no page chrome, no top bar.
     ///
-    /// The layout comes from `render::layout`, which depends on the element set
+    /// The layout comes from `render::layout`, which depends only on the element set
     /// and the font scale only, so the panel is the same size whether or not any
     /// data has arrived.
-    fn draw_panel(&mut self, ui: &mut egui::Ui) {
-        crate::panel::menu::draw(
+    fn draw_panel(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let cli_available = self.visibility.dbus_available();
+        let interactivity_grabbed = self.visibility.interactivity_grabbed();
+        let tray_enabled = Self::tray_enabled(&self.state);
+
+        let outcome = crate::panel::menu::draw(
             ui,
             &self.state,
             &mut self.panel_config,
             &mut self.pending_mode,
-            Self::tray_enabled(&self.state),
-            Some(self.visibility.grab_status().message()),
-            self.panel_menu_open,
+            &self.visibility,
+            tray_enabled,
+            interactivity_grabbed,
+            cli_available,
         );
+
+        if outcome.dragged {
+            // The position is written back after the drag finishes, from the
+            // viewport rect the WM settled on.
+            self.panel_position_dirty = true;
+        }
+        if outcome.hide {
+            self.request_hide();
+        }
+        if outcome.open_settings {
+            self.panel_settings_open = true;
+        }
+
+        // The settings window is a child viewport, so it is drawn whether or not
+        // the panel is: closing the panel must not silently discard a settings
+        // window the user left open behind.
+        if self.panel_settings_open {
+            if let Some(settings) = crate::panel::settings_window::draw(
+                ui.ctx(),
+                &self.state,
+                &mut self.panel_config,
+                &self.visibility,
+                &mut self.panel_settings_open,
+                interactivity_grabbed,
+                cli_available,
+            ) {
+                #[cfg(target_os = "linux")]
+                {
+                    if settings.hotkey_changed {
+                        crate::panel::visibility::regrab(
+                            &self.panel_config.hotkey,
+                            Arc::clone(&self.visibility),
+                            crate::panel::visibility::HotkeySlot::ShowHide,
+                        );
+                    }
+                    if settings.interactivity_hotkey_changed {
+                        crate::panel::visibility::regrab(
+                            &self.panel_config.interactivity_hotkey,
+                            Arc::clone(&self.visibility),
+                            crate::panel::visibility::HotkeySlot::Interactivity,
+                        );
+                    }
+                }
+                let _ = settings.stacking_changed;
+            }
+        }
+
+        let _ = frame;
+    }
+
+    /// Hide the panel, subject to the hide-safety rule.
+    fn request_hide(&mut self) {
+        if self.panel_hidden {
+            return;
+        }
+        let tray = Self::tray_enabled(&self.state);
+        let dbus = self.visibility.dbus_available();
+        match crate::panel::menu::hide_outcome(self.visibility.hotkey_grabbed(), tray, dbus) {
+            crate::panel::menu::HideOutcome::Hide => {
+                log::info!("panel: hidden; it can be brought back");
+                self.panel_hidden = true;
+            }
+            crate::panel::menu::HideOutcome::ReturnToNormal => {
+                log::warn!(
+                    "panel: hiding refused, no way back exists (hotkey: {}); returning to \
+                     normal mode instead",
+                    self.visibility.grab_status().message()
+                );
+                self.pending_mode = Some(Mode::Normal);
+            }
+        }
+    }
+
+    /// Flip click-through, from the interactivity hotkey or the D-Bus method.
+    ///
+    /// The write goes straight to `panel.json` as well as the in-memory config,
+    /// because the panel may not be drawn at all when this arrives: with
+    /// `MousePassthrough` set the window takes no mouse input, and it may be
+    /// hidden, so there is no guarantee of another menu pass to persist it.
+    fn apply_interactivity_toggle(&mut self, ctx: &egui::Context) {
+        let cli = self.visibility.dbus_available();
+        if self.panel_config.click_through {
+            // Turning it OFF always has a way back: the request itself is one.
+            self.panel_config.click_through = false;
+        } else if self.visibility.can_enable_click_through() {
+            self.panel_config.click_through = true;
+        } else {
+            log::warn!(
+                "panel: refused to enable click-through: neither the interactivity hotkey \
+                 nor `lapsphere --toggle-interactive` is available"
+            );
+            return;
+        }
+        let _ = cli;
+        let enabled = self.panel_config.click_through;
+        ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(enabled));
+        if let Err(err) = self.save_panel_config() {
+            log::warn!("panel: could not persist click-through={enabled}: {err}");
+        }
+        log::info!("panel: click-through is now {enabled}");
     }
 
     fn handle_hardware_updates(&mut self) {
@@ -1398,10 +1664,17 @@ impl eframe::App for LapSphereApp {
         if self.visibility.take_toggle() {
             self.request_toggle_from_outside();
         }
+        // A separate flag for a separate meaning: this gives the panel the mouse
+        // back, it does not hide it.
+        if self.visibility.take_interactivity_toggle() {
+            self.apply_interactivity_toggle(&ctx);
+        }
 
         // A mode change is applied here rather than in the click handler that
         // requested it: viewport commands must not be issued during layout.
         self.apply_mode(&ctx, frame);
+        self.sync_panel_window_state(&ctx, frame);
+        self.capture_dragged_position(&ctx);
 
         if self.mode.is_panel() {
             // A hidden panel unmaps its window and paints nothing; the hotkey,
@@ -1410,7 +1683,7 @@ impl eframe::App for LapSphereApp {
             if self.panel_hidden {
                 return;
             }
-            self.draw_panel(ui);
+            self.draw_panel(ui, frame);
             return;
         }
 
