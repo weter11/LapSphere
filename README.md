@@ -201,7 +201,7 @@ The window starts hidden and the tray icon is used to show it.
 
 ## Configuration
 
-Settings are split into two files under `~/.config/lapsphere/`:
+Settings are split into files under `~/.config/lapsphere/`, one per subsystem:
 
 | File | Contents |
 |---|---|
@@ -213,6 +213,20 @@ Crash reports (`crash_<timestamp>.log`) are also written to this directory.
 A legacy single-file format (`config.json`) is read on startup and used to fill in whichever of `settings.json` / `profiles.json` is missing; the new files are then written and `config.json` is left in place. If both new files exist, `config.json` is ignored.
 
 The daemon reads its polling rates from `$HOME/.config/lapsphere/settings.json` (under `sudo` this is root's `$HOME`) and receives updates from the GUI over DBus.
+
+### Tray settings
+
+`tray.json` is created on first run. Upgrading from a build that kept the tray
+fields in `settings.json` copies those values into `tray.json` once, backs the
+original file up to `settings.json.pre-tray-split`, and removes the tray keys
+from it. To go back to an older build, restore the backup:
+
+```bash
+cp ~/.config/lapsphere/settings.json.pre-tray-split ~/.config/lapsphere/settings.json
+```
+
+See [`docs/development/config-files.md`](docs/development/config-files.md) for
+the full file layout, the migration order, and the corruption-handling rules.
 
 ---
 

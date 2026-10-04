@@ -7,6 +7,7 @@ mod keyboard_shortcuts;
 mod widgets;
 mod polling_scheduler;
 mod system_tray;
+mod tray_config;
 
 use app::LapSphereApp;
 use chrono::Local;
