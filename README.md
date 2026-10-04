@@ -180,14 +180,29 @@ lapsphere --tray
 
 ## Configuration
 
-Settings are split into two files under `~/.config/lapsphere/`:
+Settings are split into files under `~/.config/lapsphere/`, one per subsystem:
 
 | File | Contents |
 |---|---|
 | `settings.json` | Theme, font size, polling rates, battery settings, autostart |
+| `tray.json` | System tray: enable the tray icon, start minimized |
 | `profiles.json` | All tuning profiles and the active profile name |
 
 A legacy single-file format (`config.json`) is automatically migrated on first run.
+
+### Tray settings
+
+`tray.json` is created on first run. Upgrading from a build that kept the tray
+fields in `settings.json` copies those values into `tray.json` once, backs the
+original file up to `settings.json.pre-tray-split`, and removes the tray keys
+from it. To go back to an older build, restore the backup:
+
+```bash
+cp ~/.config/lapsphere/settings.json.pre-tray-split ~/.config/lapsphere/settings.json
+```
+
+See [`docs/development/config-files.md`](docs/development/config-files.md) for
+the full file layout, the migration order, and the corruption-handling rules.
 
 ---
 
