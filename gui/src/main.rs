@@ -3,6 +3,7 @@ mod dbus_client;
 mod gamepad_registry;
 mod theme;
 mod pages;
+mod stat_format;
 mod keyboard_shortcuts;
 mod widgets;
 mod polling_scheduler;
