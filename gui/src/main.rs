@@ -1,6 +1,7 @@
 mod app;
 mod dbus_client;
 mod gamepad_registry;
+mod bus_connection;
 mod keyboard_shortcuts;
 mod pages;
 mod panel;
@@ -253,10 +254,16 @@ fn main() -> Result<(), eframe::Error> {
     }
 
     #[cfg(target_os = "linux")]
+    // Park the connection that owns `io.lapsphere.Gui` so the panel's D-Bus
+    // object is exported on THAT connection: an object exported on any other
+    // connection is unreachable through the well-known name.
     let _instance_guard = match check_single_instance_linux(&rt) {
         Some(conn) => conn,
         None => return Ok(()),
     };
+    // Park it so the panel's D-Bus object lands on the connection that owns the
+    // well-known name (see `bus_connection`).
+    bus_connection::set_connection(Some(_instance_guard.clone()));
 
     #[cfg(target_os = "windows")]
     let _instance_guard = match check_single_instance_windows() {

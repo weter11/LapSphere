@@ -347,7 +347,8 @@ pub fn start_hotkey(spec: &str, visibility: Arc<Visibility>) -> Option<Hotkey> {
             // thread's writes are seen by `take_toggle` in the UI.
             let stop = visibility.stop_watcher();
             let trigger = visibility.trigger_flag();
-            std::thread::spawn(move || watch_hotkey(hotkey, trigger, stop));
+            let ctx_flag = visibility.context_flag();
+            std::thread::spawn(move || watch_hotkey(hotkey, trigger, stop, ctx_flag));
             log::info!("panel: hotkey `{spec}` captured");
             Some(hotkey)
         }
@@ -365,7 +366,12 @@ pub fn start_hotkey(spec: &str, visibility: Arc<Visibility>) -> Option<Hotkey> {
 /// when `stop` is set, which is what happens when the hotkey config changes or
 /// the app quits.
 #[cfg(target_os = "linux")]
-fn watch_hotkey(hotkey: Hotkey, trigger: Arc<AtomicBool>, stop: Arc<AtomicBool>) {
+fn watch_hotkey(
+    hotkey: Hotkey,
+    trigger: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+    ctx_flag: Arc<std::sync::Mutex<Option<egui::Context>>>,
+) {
     use x11rb::connection::Connection;
     use x11rb::protocol::xproto::{ConnectionExt, GrabMode};
 
@@ -401,6 +407,14 @@ fn watch_hotkey(hotkey: Hotkey, trigger: Arc<AtomicBool>, stop: Arc<AtomicBool>)
                     // resolved, which is not guaranteed here.
                     if key.detail == hotkey.keycode {
                         trigger.store(true, Ordering::SeqCst);
+                        // A hotkey press while the window is hidden must still
+                        // be processed, so wake the UI rather than waiting for
+                        // the next unrelated frame.
+                        if let Some(ctx) =
+                            ctx_flag.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+                        {
+                            ctx.request_repaint();
+                        }
                     }
                 }
             }
@@ -426,6 +440,13 @@ fn watch_hotkey(hotkey: Hotkey, trigger: Arc<AtomicBool>, stop: Arc<AtomicBool>)
 pub struct Visibility {
     /// Set by the hotkey thread or the D-Bus method; consumed by `ui()`.
     toggle_requested: AtomicBool,
+    /// The UI context, published once the first frame has run.
+    ///
+    /// Needed because a toggle can arrive while the window is hidden or
+    /// minimized: egui does not repaint when nothing asks it to, so without
+    /// this the command would sit unprocessed until some unrelated repaint
+    /// happened to occur.
+    ctx: Arc<std::sync::Mutex<Option<egui::Context>>>,
     /// Set by the hotkey thread. Owned here so the watcher and the UI share the
     /// same flag — the thread only ever gets a clone of this Arc.
     hotkey_fired: Arc<AtomicBool>,
@@ -452,14 +473,27 @@ impl Visibility {
         Self {
             toggle_requested: AtomicBool::new(false),
             hotkey_fired: Arc::new(AtomicBool::new(false)),
+            ctx: Arc::new(std::sync::Mutex::new(None)),
             grab_status: AtomicU8::new(STATUS_UNKNOWN),
             stop: Arc::new(AtomicBool::new(false)),
         }
     }
 
+    /// Publish the UI context so a background toggle can wake the UI.
+    pub fn set_context(&self, ctx: egui::Context) {
+        *self.ctx.lock().unwrap_or_else(|e| e.into_inner()) = Some(ctx);
+    }
+
     /// Ask for a toggle. Safe from any thread.
+    ///
+    /// Requests a repaint as well: if the window is hidden or minimized egui is
+    /// not painting, and the command would otherwise wait for an unrelated frame
+    /// that may never come.
     pub fn request_toggle(&self) {
         self.toggle_requested.store(true, Ordering::SeqCst);
+        if let Some(ctx) = self.ctx.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            ctx.request_repaint();
+        }
     }
 
     /// Take a pending toggle request, from either source.
@@ -510,6 +544,14 @@ impl Visibility {
     /// The flag that stops the watcher thread.
     pub fn stop_watcher(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.stop)
+    }
+
+    /// The context slot, shared with the watcher thread.
+    ///
+    /// A clone of the SAME Arc the UI publishes into: handing the thread a fresh
+    /// mutex would give it a slot nothing ever writes to.
+    pub fn context_flag(&self) -> Arc<std::sync::Mutex<Option<egui::Context>>> {
+        Arc::clone(&self.ctx)
     }
 
     /// Is there any way back to the panel after it is hidden?
@@ -568,12 +610,33 @@ impl PanelControl {
     }
 }
 
+/// Does this error mean "the name is not owned"?
+///
+/// Matched on the message rather than a variant, because zbus 5 has no
+/// `NameError`-style variant that covers every "no such name" path and the
+/// point is only the message the user sees.
+fn is_no_such_name(err: &zbus::Error) -> bool {
+    let text = err.to_string().to_lowercase();
+    text.contains("no such name") || text.contains("name has no owner")
+}
+
+/// How long the CLI waits for a reply before giving up.
+pub const CLI_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Handle `--toggle-panel`: ask a running GUI to toggle, and report whether one
 /// was there.
+///
+/// Three properties this must have, each of which was missing when the command
+/// hung indefinitely:
+///
+/// * **A timeout on the call.** Without one, any misconfiguration is an
+///   indefinite hang rather than an error.
+/// * **No GUI is a clear message with a non-zero exit**, not silence.
+/// * **It does not block inside a running tokio runtime.** `block_on` inside a
+///   runtime context panics; the caller runs this on its own runtime before the
+///   GUI starts.
 #[cfg(target_os = "linux")]
 pub async fn run_toggle_cli() -> anyhow::Result<bool> {
-    use zbus::fdo::DBusProxy;
-
     let conn = zbus::Connection::session().await?;
     let proxy = zbus::Proxy::new(
         &conn,
@@ -583,12 +646,21 @@ pub async fn run_toggle_cli() -> anyhow::Result<bool> {
     )
     .await?;
 
-    match proxy.call_method("TogglePanel", &()).await {
-        Ok(_) => Ok(true),
-        Err(err) => {
-            let _ = DBusProxy::new(&conn).await; // keep the type in scope for docs
-            Err(anyhow::anyhow!("{err}"))
+    match tokio::time::timeout(CLI_TIMEOUT, proxy.call_method("TogglePanel", &())).await {
+        Ok(Ok(_)) => Ok(true),
+        Ok(Err(zbus::Error::MethodError(_, _, message))) => {
+            // No object exported at that path: the GUI is running but predates
+            // this build, or the export failed.
+            anyhow::bail!("the running LapSphere GUI has no panel control object ({message})")
         }
+        Ok(Err(err)) if is_no_such_name(&err) => {
+            anyhow::bail!("no running LapSphere GUI owns the name io.lapsphere.Gui")
+        }
+        Ok(Err(err)) => Err(anyhow::anyhow!("{err}")),
+        Err(_) => anyhow::bail!(
+            "the running LapSphere GUI did not answer within {} s — it may be stuck",
+            CLI_TIMEOUT.as_secs()
+        ),
     }
 }
 
@@ -749,6 +821,16 @@ mod tests {
         assert!(
             visibility.has_return_path(false, true),
             "with no X11 display the D-Bus method is the only way back"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_cli_gives_up_in_bounded_time() {
+        assert_eq!(
+            CLI_TIMEOUT.as_secs(),
+            2,
+            "the CLI must not wait indefinitely"
         );
     }
 

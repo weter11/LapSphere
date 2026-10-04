@@ -829,13 +829,18 @@ impl LapSphereApp {
     /// would be the wrong dependency direction.
     pub async fn export_panel_control(visibility: Arc<crate::panel::visibility::Visibility>) {
         let control = crate::panel::visibility::PanelControl::new(visibility);
-        let conn = match zbus::Connection::session().await {
-            Ok(conn) => conn,
-            Err(err) => {
-                log::warn!("panel: no session bus, the D-Bus control method is unavailable: {err}");
-                return;
-            }
+
+        // Must be the connection that owns `io.lapsphere.Gui`, not a fresh one:
+        // an object exported on another connection is only reachable through
+        // that connection's unique name.
+        let Some(conn) = crate::bus_connection::connection() else {
+            log::warn!(
+                "panel: no session-bus connection parked, the D-Bus control method is \
+                 unavailable (lapsphere --toggle-panel will not work)"
+            );
+            return;
         };
+
         if let Err(err) = conn
             .object_server()
             .at("/io/lapsphere/Gui/Panel", control)
@@ -844,6 +849,8 @@ impl LapSphereApp {
             // Not fatal: the hotkey and the tray still work, and the menu reports
             // the missing path rather than pretending the CLI is available.
             log::warn!("panel: could not export the D-Bus control object: {err}");
+        } else {
+            log::info!("panel: D-Bus control object exported at /io/lapsphere/Gui/Panel");
         }
     }
 
@@ -1381,6 +1388,10 @@ impl LapSphereApp {
 impl eframe::App for LapSphereApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+
+        // Publish the UI context so a hotkey or D-Bus toggle can wake the UI
+        // even while the window is hidden or minimized.
+        self.visibility.set_context(ctx.clone());
 
         // Hotkey and D-Bus both set one flag, consumed here so the toggle
         // happens on the UI thread regardless of which source fired.
