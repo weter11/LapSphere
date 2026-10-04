@@ -33,7 +33,10 @@ use x11rb::protocol::xproto::ConnectionExt as _;
 /// `XK_F1` and the two lock masks used by `LOCK_VARIANTS`.
 #[cfg(target_os = "linux")]
 mod x11consts {
-    /// `XK_F1`. The function keys are contiguous in steps of 32.
+    /// `XK_F1` = 0xFFBE. The function keys are CONTIGUOUS IN STEPS OF 1
+    /// (F1=0xFFBE, F2=0xFFBF, ... F9=0xFFC6), not in steps of 32 — verified
+    /// against `xmodmap -pke` on this host, where F9 is keycode 75 / keysym
+    /// 0xffc6.
     pub const KEYSYM_F1: u32 = 0xFFBE;
     /// Lowest keycode a server may report.
     pub const MIN_KEYCODE: u8 = 8;
@@ -170,43 +173,46 @@ impl Hotkey {
         })
     }
 
-    /// The X11 keycode for this hotkey, or 0 if the server has no such key.
+    /// The X11 keycode for this hotkey, or `None` if the server has no such key.
+    ///
+    /// The whole `MIN_KEYCODE..=max_keycode` range is mapped, not a slice of it:
+    /// F-keys live well above the minimum keycode, so mapping only the first few
+    /// finds letters and misses every function key.
     #[cfg(target_os = "linux")]
     pub fn resolve_keycode(&self, conn: &x11rb::rust_connection::RustConnection) -> Option<u8> {
         use x11rb::connection::Connection;
-        use x11rb::protocol::xproto::{ConnectionExt, GrabMode};
+        use x11rb::protocol::xproto::ConnectionExt;
 
-        let count = conn
-            .get_keyboard_mapping(x11consts::MIN_KEYCODE, u8::from(conn.setup().min_keycode))
-            .ok()?
-            .reply()
-            .ok()?
-            .keysyms_per_keycode;
-        if count == 0 {
+        let min = x11consts::MIN_KEYCODE;
+        let max = conn.setup().max_keycode;
+        if max < min {
+            return None;
+        }
+        let count = max - min + 1;
+
+        let mapping = conn.get_keyboard_mapping(min, count).ok()?.reply().ok()?;
+        let per_keycode = usize::from(mapping.keysyms_per_keycode);
+        if per_keycode == 0 {
             return None;
         }
 
-        // The keysym list is flat, with `keysyms_per_keycode` entries per
-        // keycode, so the keycode is the index divided by that count.
-        let per_keycode = usize::from(count);
-        conn.get_keyboard_mapping(x11consts::MIN_KEYCODE, count)
-            .ok()?
-            .reply()
-            .ok()?
+        // The keysym list is flat: `per_keycode` entries per keycode, starting at
+        // `min`.
+        mapping
             .keysyms
             .iter()
             .position(|sym| *sym == self.keysym)
-            .map(|index| x11consts::MIN_KEYCODE + (index / per_keycode) as u8)
+            .map(|index| min + (index / per_keycode) as u8)
     }
 }
 
 /// X11 keysym for a key name.
 fn keysym_for(key: &str) -> Option<u32> {
-    // Function keys: XK_F1 .. XK_F35 are contiguous in steps of 0x20 (32).
+    // Function keys: XK_F1 .. XK_F35 are contiguous in steps of ONE.
     if let Some(number) = key.strip_prefix('F').or_else(|| key.strip_prefix('f')) {
         if let Ok(n) = number.parse::<u32>() {
             if (1..=35).contains(&n) {
-                return Some(x11consts::KEYSYM_F1 + (n - 1) * 32);
+                return Some(x11consts::KEYSYM_F1 + (n - 1));
             }
         }
     }
@@ -606,10 +612,11 @@ mod tests {
 
     #[test]
     fn function_keys_parse_to_their_keysyms() {
-        // XK_F1 .. XK_F35 are contiguous in steps of 32.
-        assert_eq!(keysym_for("F1"), Some(x11consts::KEYSYM_F1));
-        assert_eq!(keysym_for("F9"), Some(x11consts::KEYSYM_F1 + 8 * 32));
-        assert_eq!(keysym_for("F10"), Some(x11consts::KEYSYM_F1 + 9 * 32));
+        // The real values, cross-checked against `xmodmap -pke` on this host,
+        // where F9 is keycode 75 with keysym 0xffc6.
+        assert_eq!(keysym_for("F1"), Some(0xFFBE));
+        assert_eq!(keysym_for("F9"), Some(0xFFC6));
+        assert_eq!(keysym_for("F10"), Some(0xFFC7));
     }
 
     #[test]
