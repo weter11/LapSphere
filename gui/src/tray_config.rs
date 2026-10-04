@@ -128,6 +128,13 @@ pub(crate) fn write_atomic(path: &str, contents: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Persist the tray fields of `config` to `tray.json`.
+pub fn save_tray_config(config_dir: &str, config: &AppConfig) -> anyhow::Result<()> {
+    std::fs::create_dir_all(config_dir)?;
+    let json = serde_json::to_string_pretty(&TrayConfig::from(config))?;
+    write_atomic(&tray_config_path(config_dir), &json)
+}
+
 /// Resolve the effective tray settings for one run.
 ///
 /// Order matters and is the whole point of this function:
@@ -596,6 +603,50 @@ mod tests {
         assert_eq!(cfg.version, 99);
         assert!(cfg.start_minimized);
         assert!(cfg.tray_enabled);
+    }
+
+    #[test]
+    fn save_and_load_round_trip_through_app_config() {
+        let dir = TestDir::new("roundtrip");
+        let mut config = AppConfig::default();
+        config.start_minimized = true;
+        config.tray_enabled = true;
+
+        save_tray_config(&dir.path(), &config).unwrap();
+
+        let mut restored = AppConfig::default();
+        restored.start_minimized = false;
+        restored.tray_enabled = false;
+        TrayConfig::apply_to(&load_tray_config(&dir.path()), &mut restored);
+
+        assert!(restored.start_minimized);
+        assert!(restored.tray_enabled);
+    }
+
+    #[test]
+    fn the_saved_file_contains_only_tray_fields() {
+        let dir = TestDir::new("only-tray");
+        let mut config = AppConfig::default();
+        config.tray_enabled = true;
+        config.theme = lapsphere_common::types::Theme::Dark;
+        config.log_limit = 4242;
+
+        save_tray_config(&dir.path(), &config).unwrap();
+
+        let value: serde_json::Value =
+            serde_json::from_str(&read(&dir.path(), TRAY_CONFIG_FILE)).unwrap();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec!["start_minimized", "tray_enabled", "version"],
+            "tray.json must not carry panel settings"
+        );
     }
 
     #[test]

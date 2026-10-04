@@ -354,15 +354,20 @@ fn draw_main_settings(ui: &mut Ui, state: &mut AppState, theme: &mut LapSphereTh
     ui.label(RichText::new("Startup").strong().heading());
     ui.add_space(6.0);
     
+    // These two checkboxes are persisted to tray.json, not settings.json, so
+    // they save through `save_tray_settings`. Behaviour is unchanged: the
+    // dependency between them is still applied here, and the running tray is
+    // still driven from config.tray_enabled / config.start_minimized in
+    // app.rs — TrayConfig is only the on-disk projection of those fields.
     if ui.checkbox(&mut state.config.start_minimized, "Start minimized").changed() {
         if state.config.start_minimized {
             state.config.tray_enabled = true;
         }
-        let _ = state.save_settings();
+        let _ = state.save_tray_settings();
     }
 
     if ui.checkbox(&mut state.config.tray_enabled, "Tray (minimize on close)").changed() {
-        let _ = state.save_settings();
+        let _ = state.save_tray_settings();
     }
     
     if ui.checkbox(&mut state.config.autostart, "Enable autostart").changed() {

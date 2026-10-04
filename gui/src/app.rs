@@ -230,6 +230,18 @@ pub fn load_config(&mut self) {
         Ok(())
     }
 
+    /// Persist only the tray fields, to `tray.json`.
+    ///
+    /// Used by the tray checkboxes in Settings so toggling the tray does not
+    /// rewrite `settings.json`, whose content did not change. `autostart`
+    /// stays on `save_settings`: it lives in `settings.json` and is applied by
+    /// writing the desktop entry there.
+    pub fn save_tray_settings(&mut self) -> anyhow::Result<()> {
+        tray_config::save_tray_config(&get_config_dir(), &self.config)?;
+        self.show_message("Tray settings saved", false);
+        Ok(())
+    }
+
     pub fn save_profiles(&mut self) -> anyhow::Result<()> {
         save_profiles_to_disk(&self.config)?;
         self.show_message("Profiles saved", false);
@@ -1079,12 +1091,16 @@ impl eframe::App for LapSphereApp {
     }
 }
 
+/// Panel/window-level settings persisted to `settings.json`.
+///
+/// The two tray fields (`start_minimized`, `tray_enabled`) are no longer part
+/// of this file — they are persisted to `tray.json` by `TrayConfig` (see
+/// `gui/src/tray_config.rs`). `AppConfig` still carries them at runtime; this
+/// struct is only the on-disk projection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct SettingsConfig {
     theme: Theme,
-    start_minimized: bool,
-    tray_enabled: bool,
     autostart: bool,
     cpu_scheduler: String,
     font_size: FontSize,
@@ -1101,8 +1117,6 @@ impl Default for SettingsConfig {
         let config = AppConfig::default();
         Self {
             theme: config.theme,
-            start_minimized: config.start_minimized,
-            tray_enabled: config.tray_enabled,
             autostart: config.autostart,
             cpu_scheduler: config.cpu_scheduler,
             font_size: config.font_size,
@@ -1120,8 +1134,6 @@ impl From<&AppConfig> for SettingsConfig {
     fn from(config: &AppConfig) -> Self {
         Self {
             theme: config.theme.clone(),
-            start_minimized: config.start_minimized,
-            tray_enabled: config.tray_enabled,
             autostart: config.autostart,
             cpu_scheduler: config.cpu_scheduler.clone(),
             font_size: config.font_size.clone(),
@@ -1138,8 +1150,6 @@ impl From<&AppConfig> for SettingsConfig {
 impl SettingsConfig {
     fn apply_to(&self, config: &mut AppConfig) {
         config.theme = self.theme.clone();
-        config.start_minimized = self.start_minimized;
-        config.tray_enabled = self.tray_enabled;
         config.autostart = self.autostart;
         config.cpu_scheduler = self.cpu_scheduler.clone();
         config.font_size = self.font_size.clone();
@@ -1283,11 +1293,20 @@ pub fn load_config_from_dir(config_dir: &str) -> anyhow::Result<AppConfig> {
 }
 
 fn save_settings_to_disk(config: &AppConfig) -> anyhow::Result<()> {
-    let config_dir = get_config_dir();
+    save_settings_to_dir(&get_config_dir(), config)
+}
+
+/// Same as [`save_settings_to_disk`] but against an explicit config directory.
+fn save_settings_to_dir(config_dir: &str, config: &AppConfig) -> anyhow::Result<()> {
+    let config_dir = config_dir.to_string();
     std::fs::create_dir_all(&config_dir)?;
     let settings_path = format!("{}/settings.json", config_dir);
     let json = serde_json::to_string_pretty(&SettingsConfig::from(config))?;
-    std::fs::write(settings_path, json)?;
+    tray_config::write_atomic(&settings_path, &json)?;
+
+    // Tray settings live in their own file. Both writes are atomic, so a reader
+    // (including our own next start) never sees a half-written document.
+    tray_config::save_tray_config(&config_dir, config)?;
 
     // Push the new poll rates to the daemon so job intervals update live
     // (fire-and-forget; the daemon keeps its own defaults when this fails
@@ -1438,6 +1457,29 @@ mod tray_migration_e2e_tests {
         assert!(!config.start_minimized);
         assert!(!dir.exists(TRAY_CONFIG_FILE));
         assert!(!dir.exists(SETTINGS_PRE_SPLIT_BACKUP));
+    }
+
+    /// The write path, against a real directory: enabling the tray must land in
+    /// tray.json and leave settings.json free of tray keys — the split the
+    /// separate panel.json change depends on.
+    #[test]
+    fn saving_writes_tray_json_and_keeps_settings_json_free_of_tray_keys() {
+        let dir = TestDir::new("save-split");
+        let mut config = load_config_from_dir(&dir.path()).unwrap();
+        config.tray_enabled = true;
+
+        save_settings_to_dir(&dir.path(), &config).unwrap();
+
+        assert!(dir.exists(TRAY_CONFIG_FILE));
+        assert!(dir.read(TRAY_CONFIG_FILE).contains(r#""tray_enabled": true"#));
+        let settings = dir.read("settings.json");
+        assert!(!settings.contains("tray_enabled"));
+        assert!(!settings.contains("start_minimized"));
+
+        // And it round-trips through the real load path.
+        let reloaded = load_config_from_dir(&dir.path()).unwrap();
+        assert!(reloaded.tray_enabled);
+        assert!(!reloaded.start_minimized);
     }
 
     /// Check 2: a configuration that still has the old fields.
