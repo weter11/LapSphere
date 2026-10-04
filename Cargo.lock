@@ -1704,6 +1704,7 @@ dependencies = [
  "lapsphere-common",
  "log",
  "mimalloc",
+ "raw-window-handle",
  "rustls",
  "serde",
  "serde_json",
@@ -1712,6 +1713,8 @@ dependencies = [
  "ureq",
  "webbrowser",
  "windows-sys 0.59.0",
+ "x11rb",
+ "x11rb-protocol",
  "zbus",
 ]
 

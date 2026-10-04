@@ -1,12 +1,14 @@
 mod app;
 mod dbus_client;
 mod gamepad_registry;
-mod theme;
-mod pages;
+mod bus_connection;
 mod keyboard_shortcuts;
-mod widgets;
+mod pages;
+mod panel;
 mod polling_scheduler;
 mod system_tray;
+mod theme;
+mod widgets;
 
 use app::LapSphereApp;
 use chrono::Local;
@@ -28,7 +30,8 @@ fn setup_panic_hook() {
             message = s.clone();
         }
 
-        let location = panic_info.location()
+        let location = panic_info
+            .location()
             .map(|l| format!(" at {}:{}", l.file(), l.line()))
             .unwrap_or_default();
 
@@ -70,10 +73,12 @@ fn check_single_instance_linux(rt: &tokio::runtime::Runtime) -> Option<zbus::Con
                     }
                 };
 
-                let reply = dbus.request_name(
-                    "io.lapsphere.Gui".try_into().unwrap(),
-                    zbus::fdo::RequestNameFlags::DoNotQueue.into()
-                ).await;
+                let reply = dbus
+                    .request_name(
+                        "io.lapsphere.Gui".try_into().unwrap(),
+                        zbus::fdo::RequestNameFlags::DoNotQueue.into(),
+                    )
+                    .await;
 
                 match reply {
                     Ok(zbus::fdo::RequestNameReply::PrimaryOwner) => Some(conn),
@@ -88,7 +93,10 @@ fn check_single_instance_linux(rt: &tokio::runtime::Runtime) -> Option<zbus::Con
                 }
             }
             Err(e) => {
-                log::error!("Failed to connect to session bus for single instance check: {}", e);
+                log::error!(
+                    "Failed to connect to session bus for single instance check: {}",
+                    e
+                );
                 None
             }
         }
@@ -97,9 +105,9 @@ fn check_single_instance_linux(rt: &tokio::runtime::Runtime) -> Option<zbus::Con
 
 #[cfg(target_os = "windows")]
 fn check_single_instance_windows() -> Option<isize> {
+    use std::ptr::null;
     use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, HANDLE};
     use windows_sys::Win32::System::Threading::CreateMutexA;
-    use std::ptr::null;
 
     let name = b"Global\\io.lapsphere.Gui\0";
     unsafe {
@@ -221,27 +229,48 @@ fn main() -> Result<(), eframe::Error> {
 
     let args: Vec<String> = std::env::args().collect();
     let start_in_tray_arg = args.contains(&"--tray".to_string());
+    // `--panel` starts directly in panel mode. The window is still created with
+    // the normal viewport builder — a panel-shaped builder hint is ignored for
+    // `WindowLevel` by xfwm4 (B9), and the first frame issues the runtime
+    // commands instead. Building it panel-shaped here would be a second code
+    // path for the same window.
+    let start_in_panel = args.contains(&"--panel".to_string());
 
     let config = app::load_config_from_disk().unwrap_or_default();
-    let start_minimized = start_in_tray_arg || config.start_minimized;
+    let start_minimized = (start_in_tray_arg || config.start_minimized) && !start_in_panel;
 
     // Create and enter a Tokio runtime context.
     // This is required for `tokio::spawn` to work in the `DbusClient`.
     let rt = tokio::runtime::Runtime::new().expect("Unable to create a Tokio runtime");
     let _enter = rt.enter();
 
+
+    // `--toggle-panel` asks a RUNNING gui to toggle, which is how the panel is
+    // reached where no global hotkey can exist (Wayland). Handled before the
+    // single-instance guard on purpose: a second gui must refuse to start, but
+    // the CLI still has to reach the first one.
+    if args.contains(&"--toggle-panel".to_string()) {
+        return toggle_running_panel(&rt);
+    }
+
     #[cfg(target_os = "linux")]
+    // Park the connection that owns `io.lapsphere.Gui` so the panel's D-Bus
+    // object is exported on THAT connection: an object exported on any other
+    // connection is unreachable through the well-known name.
     let _instance_guard = match check_single_instance_linux(&rt) {
         Some(conn) => conn,
         None => return Ok(()),
     };
+    // Park it so the panel's D-Bus object lands on the connection that owns the
+    // well-known name (see `bus_connection`).
+    bus_connection::set_connection(Some(_instance_guard.clone()));
 
     #[cfg(target_os = "windows")]
     let _instance_guard = match check_single_instance_windows() {
         Some(mutex) => mutex,
         None => return Ok(()),
     };
-    
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([570.0, 620.0])
@@ -250,12 +279,36 @@ fn main() -> Result<(), eframe::Error> {
             .with_visible(!start_minimized),
         ..Default::default()
     };
-    
+
     eframe::run_native(
         "LapSphere",
         options,
         Box::new(move |cc| Ok(Box::new(LapSphereApp::new(cc)))),
     )
+}
+
+/// Send `TogglePanel` to a running gui and report whether one was there.
+#[cfg(target_os = "linux")]
+fn toggle_running_panel(rt: &tokio::runtime::Runtime) -> Result<(), eframe::Error> {
+    match rt.block_on(panel::visibility::run_toggle_cli()) {
+        Ok(true) => {
+            println!("LapSphere: panel toggled");
+            Ok(())
+        }
+        Ok(false) | Err(_) => {
+            eprintln!(
+                "LapSphere: no running gui to toggle. Is LapSphere running, and is \
+                 DBUS_SESSION_BUS_ADDRESS set?"
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn toggle_running_panel(_rt: &tokio::runtime::Runtime) -> Result<(), eframe::Error> {
+    eprintln!("LapSphere: --toggle-panel is not supported on this platform");
+    std::process::exit(1);
 }
 
 fn load_icon() -> egui::IconData {
@@ -272,9 +325,9 @@ fn load_icon() -> egui::IconData {
             let is_l_horizontal = x >= 10 && x <= 22 && y >= 22 && y <= 26;
 
             if is_l_vertical || is_l_horizontal {
-                rgba[idx] = 0;     // R
+                rgba[idx] = 0; // R
                 rgba[idx + 1] = 255; // G
-                rgba[idx + 2] = 0;   // B
+                rgba[idx + 2] = 0; // B
                 rgba[idx + 3] = 255; // A
             } else {
                 rgba[idx] = 26;
