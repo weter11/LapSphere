@@ -12,6 +12,8 @@ use crate::dbus_client::DbusClient;
 use crate::theme::LapSphereTheme;
 use crate::pages::{statistics, profiles, tuning, settings};
 use crate::keyboard_shortcuts::KeyboardShortcuts;
+use crate::panel::window::{self, Mode, NormalGeometry};
+use crate::panel::{self, PanelConfig};
 use crate::polling_scheduler::{RefreshCoordinator, CoordinatorHandle};
 use crate::system_tray::{SystemTray, TrayEvent};
 
@@ -72,6 +74,46 @@ fn now_ms() -> u64 {
 /// `frame_age_ms` is the age of the last painted frame (0 while painting).
 pub fn logs_fetch_needed(page: Page, tab: SettingsTab, frame_age_ms: u64) -> bool {
     page == Page::Settings && tab == SettingsTab::Logs && frame_age_ms <= UI_FRAME_FRESH_MS
+}
+
+/// Every component the GUI registers, in the order `new()` registers them.
+///
+/// Used to restore the full poll set when leaving panel mode. Kept beside the
+/// registration list rather than derived from it, so a mismatch is a visible
+/// difference rather than a silent behaviour change.
+const NORMAL_POLL_SET: &[&str] = &[
+    "cpu",
+    "gpu",
+    "memory",
+    "fans",
+    "battery",
+    "wifi",
+    "gamepads",
+    "storage",
+    "mount",
+    "gpu_overclock",
+    "webcam",
+    "logs",
+];
+
+/// The work area of the monitor the window is on, as (x, y, w, h).
+///
+/// egui 0.34 exposes the monitor SIZE, not a rect: there is no monitor origin to
+/// offset by, so the work area is taken to start at (0, 0). Stated rather than
+/// implied — a panel on a second monitor with a negative origin will be placed
+/// relative to the primary, which is a documented limitation, not a measured one.
+fn work_area_of(ctx: &egui::Context) -> (f32, f32, f32, f32) {
+    let size = ctx.input(|i| i.viewport().monitor_size);
+    match size {
+        Some(size) if size.x > 0.0 && size.y > 0.0 => (0.0, 0.0, size.x, size.y),
+        _ => (0.0, 0.0, 1920.0, 1080.0),
+    }
+}
+
+/// The window's current inner size, captured before the first panel switch.
+fn current_inner_size(ctx: &egui::Context) -> Option<[f32; 2]> {
+    ctx.input(|i| i.viewport().inner_rect)
+        .map(|rect| [rect.width(), rect.height()])
 }
 
 /// Record that a frame has been painted (called once per frame from the UI loop).
@@ -377,6 +419,19 @@ pub struct LapSphereApp {
 
     last_tray_profile: String,
     last_tray_profiles_count: usize,
+
+    // ---- Panel mode (see `crate::panel`) ----
+    /// Which surface is showing. One window, two states (ADR-1).
+    mode: Mode,
+    panel_config: PanelConfig,
+    /// The normal window's geometry, captured before the first switch so
+    /// returning to normal mode restores what the user had.
+    normal_geometry: Option<NormalGeometry>,
+    /// Set once the X11 atom request has been confirmed, so it is not resent
+    /// every frame.
+    panel_atoms_applied: bool,
+    /// Pending mode change, applied on the next frame.
+    pending_mode: Option<Mode>,
 }
 
 #[derive(Debug)]
@@ -685,6 +740,16 @@ impl LapSphereApp {
         let last_tray_profile = state.config.current_profile.clone();
         let last_tray_profiles_count = state.config.profiles.len();
 
+        // Panel config is loaded from its own file; `settings.json` and the
+        // tray's settings are not read or written here.
+        let mut panel_config = panel::load_panel_config();
+        // `--panel` wins over the saved `active` flag, so a launch argument can
+        // always reach the panel without editing the file.
+        let start_in_panel = std::env::args().any(|arg| arg == "--panel");
+        if start_in_panel {
+            panel_config.active = true;
+        }
+
         Self {
             state,
             dbus_client,
@@ -697,9 +762,220 @@ impl LapSphereApp {
             startup_frames: 10,
             last_tray_profile,
             last_tray_profiles_count,
+            mode: if panel_config.active {
+                Mode::Panel
+            } else {
+                Mode::Normal
+            },
+            panel_config,
+            normal_geometry: None,
+            panel_atoms_applied: false,
+            pending_mode: None,
         }
     }
+
+    /// Is the tray enabled?
+    ///
+    /// A named accessor rather than reading `state.config.tray_enabled` at the
+    /// call site: PR F moves the tray's settings into their own `tray.json`, and
+    /// every panel call site should keep compiling when it does. The panel needs
+    /// this for the hide-safety rule — one of the three ways back.
+    pub fn tray_enabled(state: &AppState) -> bool {
+        state.config.tray_enabled
+    }
+
+    /// Request a mode switch. Applied on the next frame, because the window
+    /// commands must not be issued from inside a click handler's layout pass.
+    pub fn request_mode(&mut self, mode: Mode) {
+        if self.pending_mode != Some(mode) {
+            self.pending_mode = Some(mode);
+        }
+    }
+
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    pub fn panel_config(&self) -> &PanelConfig {
+        &self.panel_config
+    }
+
+    pub fn panel_config_mut(&mut self) -> &mut PanelConfig {
+        &mut self.panel_config
+    }
+
+    /// Persist the panel config to `panel.json`.
+    pub fn save_panel_config(&self) -> anyhow::Result<()> {
+        panel::save_panel_config(&self.panel_config)
+    }
+
+    /// Narrow or widen the coordinator poll set to match the current mode.
+    ///
+    /// In panel mode only the components the visible elements need are polled;
+    /// in normal mode everything registered resumes. `logs` is never part of a
+    /// panel poll set.
+    fn apply_poll_set_for_mode(&mut self) {
+        let Some(handle) = self.state.coordinator_handle.clone() else {
+            return;
+        };
+
+        let components: Vec<String> = if self.mode.is_panel() {
+            let visible = panel::config::visible_item_ids(&self.panel_config);
+            crate::panel::items::required_components(visible.into_iter())
+                .into_iter()
+                .map(|name| name.to_string())
+                .collect()
+        } else {
+            NORMAL_POLL_SET.iter().map(|name| name.to_string()).collect()
+        };
+
+        if let Err(err) = handle.set_poll_set(components.clone()) {
+            log::warn!("could not update the poll set: {err}");
+        } else {
+            log::info!("poll set for {:?}: {:?}", self.mode, components);
+        }
+    }
+
+    /// Apply a mode switch to the window.
+    ///
+    /// One window throughout: the same `ViewportCommand`s reshape it, and the
+    /// window type is never changed. `WindowLevel(AlwaysOnTop)` is issued at
+    /// runtime here because the `ViewportBuilder` hint is ignored by xfwm4.
+    fn apply_mode(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        let Some(target) = self.pending_mode.take() else {
+            return;
+        };
+        if target == self.mode {
+            return;
+        }
+
+        let work_area = work_area_of(ctx);
+
+        if target.is_panel() {
+            // Remember where the normal window was before shrinking it.
+            if self.normal_geometry.is_none() {
+                self.normal_geometry = Some(NormalGeometry {
+                    inner: current_inner_size(ctx).unwrap_or(window::NORMAL_INNER),
+                    min_inner: window::NORMAL_MIN_INNER,
+                });
+            }
+
+            let spec = window::panel_spec(&self.panel_config, work_area);
+            self.apply_spec(ctx, &spec);
+
+            // The X11 atoms are applied once, on the first panel frame, and
+            // confirmed by reading the property back (see `panel::x11`).
+            if !self.panel_atoms_applied {
+                self.panel_atoms_applied = self.apply_panel_window_state(frame, true);
+            }
+        } else {
+            let spec = window::normal_spec(self.normal_geometry);
+            self.apply_spec(ctx, &spec);
+            if self.panel_atoms_applied {
+                self.apply_panel_window_state(frame, false);
+                self.panel_atoms_applied = false;
+            }
+        }
+
+        self.mode = target;
+        self.apply_poll_set_for_mode();
+        log::info!("window mode is now {:?}", self.mode);
+    }
+
+    fn apply_spec(&self, ctx: &egui::Context, spec: &window::PanelWindowSpec) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(spec.inner.into()));
+        ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(spec.min_inner.into()));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(spec.resizable));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(spec.decorations));
+        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(if spec.always_on_top {
+            egui::WindowLevel::AlwaysOnTop
+        } else {
+            egui::WindowLevel::Normal
+        }));
+        ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(spec.click_through));
+        if let Some([x, y]) = spec.outer_pos {
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
+        }
+    }
+
+    /// Send (or remove) the EWMH atoms, on a background thread.
+    ///
+    /// Off the UI thread because `apply_panel_atoms` retries with sleeps and the
+    /// retry budget is about a second; blocking the UI thread for that would
+    /// stall the first panel frame.
+    #[cfg(target_os = "linux")]
+    fn apply_panel_window_state(&self, frame: &mut eframe::Frame, add: bool) -> bool {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+        let Ok(handle) = frame.window_handle() else {
+            log::warn!("panel: no window handle, skipping the EWMH atoms");
+            return false;
+        };
+        let RawWindowHandle::Xlib(xlib) = handle.as_raw() else {
+            // Wayland (and anything else): the atom protocol does not exist for
+            // a client to use, so this is a no-op rather than an error (ADR-3).
+            log::info!("panel: not an Xlib window, skipping the EWMH atoms");
+            return false;
+        };
+        // Xlib's window id is a `c_ulong`; X11 protocol ids are u32.
+        let window_id = xlib.window as u32;
+        let _ = frame;
+
+        std::thread::spawn(move || {
+            let Ok((conn, screen_num)) =
+                x11rb::rust_connection::RustConnection::connect(None)
+            else {
+                log::warn!("panel: no X11 connection for the EWMH atoms");
+                return;
+            };
+            let Ok(atoms) = panel::x11::resolve_atoms(&conn) else {
+                log::warn!("panel: could not intern the EWMH atoms");
+                return;
+            };
+            let Ok(root) = panel::x11::root_window(&conn, screen_num) else {
+                log::warn!("panel: no X11 root window for the EWMH atoms");
+                return;
+            };
+            let action = if add {
+                panel::window::AtomAction::Add
+            } else {
+                panel::window::AtomAction::Remove
+            };
+            let applied =
+                panel::x11::apply_panel_atoms(&conn, root, window_id, &atoms, action);
+            if add && !applied {
+                log::warn!(
+                    "panel: the window manager did not accept SKIP_TASKBAR/SKIP_PAGER; \
+                     the panel works but will appear in the taskbar"
+                );
+            }
+        });
+
+        // Reported optimistically: the confirmation happens on the background
+        // thread and a failure there is logged, not surfaced as a mode failure.
+        true
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn apply_panel_window_state(&self, _frame: &mut eframe::Frame, _add: bool) -> bool {
+        false
+    }
     
+    /// Draw the panel surface: elements only, no page chrome, no top bar.
+    ///
+    /// The layout comes from `render::layout`, which depends on the element set
+    /// and the font scale only, so the panel is the same size whether or not any
+    /// data has arrived.
+    fn draw_panel(&mut self, ui: &mut egui::Ui) {
+        crate::panel::menu::draw(
+            ui,
+            &self.state,
+            &mut self.panel_config,
+            &mut self.pending_mode,
+            Self::tray_enabled(&self.state),
+        );
+    }
+
     fn handle_hardware_updates(&mut self) {
         // Re-arm the repaint latch: every update consumed here is now on screen,
         // so the next arrival is allowed to request its own frame. Clearing it
@@ -994,8 +1270,17 @@ impl LapSphereApp {
 }
 
 impl eframe::App for LapSphereApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+
+        // A mode change is applied here rather than in the click handler that
+        // requested it: viewport commands must not be issued during layout.
+        self.apply_mode(&ctx, frame);
+
+        if self.mode.is_panel() {
+            self.draw_panel(ui);
+            return;
+        }
 
         // Tell the log-ring poll gate what is actually on screen (see
         // `should_fetch_logs`): a hidden/minimized window stops painting, so the

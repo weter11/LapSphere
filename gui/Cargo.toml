@@ -24,6 +24,15 @@ webbrowser.workspace = true
 
 # Async for DBus
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros"] }
+
+# X11 EWMH access for panel mode. Already in Cargo.lock at 0.13.2 (via winit and
+# arboard), so adding it as a direct dependency does not re-resolve the graph.
+# Used for: the `_NET_WM_STATE` ClientMessage that keeps the panel out of the
+# taskbar, reading that property back to confirm the WM accepted it, and the
+# global hotkey grab in panel::visibility.
+raw-window-handle = "0.6"
+x11rb = "0.13"
+x11rb-protocol = "0.13"
 zbus.workspace = true
 
 # Replace glibc malloc with mimalloc: glibc's per-thread arena pool retains

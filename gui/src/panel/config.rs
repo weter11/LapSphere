@@ -34,8 +34,8 @@ pub const PANEL_ITEMS: &[(&str, &str)] = &[
     ("gpu_name", "GPU"),
     ("gpu_clock", "GPU"),
     ("gpu_load", "GPU"),
-    ("gpu_mem_clock", "GPU"),
-    ("gpu_mem_usage", "GPU"),
+    ("gpu_mem_clock", "VRAM"),
+    ("gpu_mem_usage", "VRAM"),
     ("ram_usage", "RAM"),
     ("ram_type", "RAM"),
     ("ram_freq", "RAM"),
@@ -45,8 +45,12 @@ pub const PANEL_ITEMS: &[(&str, &str)] = &[
     ("frametime_graph", "FRAME"),
 ];
 
-/// Default global hotkey. `Shift_R` = right shift, `F10` = F10.
-pub const DEFAULT_HOTKEY: &str = "Shift_R+F10";
+/// Default global hotkey. `Shift_R` = right shift, `F9` = F9.
+///
+/// F9, not F10: F10 is the "activate the menu bar" key in the X11 default
+/// keymap, so grabbing it would fight the toolkit's own binding on some
+/// desktops. F9 has no default binding in the base keymap.
+pub const DEFAULT_HOTKEY: &str = "Shift_R+F9";
 
 /// One element's configuration: display order is array order in `items`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -133,7 +137,7 @@ pub struct PanelConfig {
     pub always_on_top: bool,
     pub click_through: bool,
     pub position: PanelPosition,
-    /// Hotkey string, e.g. `Shift_R+F10`. Empty means "no hotkey".
+    /// Hotkey string, e.g. `Shift_R+F9`. Empty means "no hotkey".
     pub hotkey: String,
     pub items: Vec<PanelItemConfig>,
 }
@@ -258,7 +262,7 @@ mod tests {
         let config = PanelConfig::default();
         assert_eq!(config.items.len(), PANEL_ITEMS.len());
         assert_eq!(visible_item_ids(&config).len(), PANEL_ITEMS.len());
-        assert_eq!(config.hotkey, "Shift_R+F10");
+        assert_eq!(config.hotkey, "Shift_R+F9");
         assert!(config.always_on_top);
         assert!(!config.click_through);
         assert!(!config.active, "the panel must not start itself");

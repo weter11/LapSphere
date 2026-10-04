@@ -222,9 +222,15 @@ fn main() -> Result<(), eframe::Error> {
 
     let args: Vec<String> = std::env::args().collect();
     let start_in_tray_arg = args.contains(&"--tray".to_string());
+    // `--panel` starts directly in panel mode. The window is still created with
+    // the normal viewport builder — a panel-shaped builder hint is ignored for
+    // `WindowLevel` by xfwm4 (B9), and the first frame issues the runtime
+    // commands instead. Building it panel-shaped here would be a second code
+    // path for the same window.
+    let start_in_panel = args.contains(&"--panel".to_string());
 
     let config = app::load_config_from_disk().unwrap_or_default();
-    let start_minimized = start_in_tray_arg || config.start_minimized;
+    let start_minimized = (start_in_tray_arg || config.start_minimized) && !start_in_panel;
 
     // Create and enter a Tokio runtime context.
     // This is required for `tokio::spawn` to work in the `DbusClient`.
