@@ -29,7 +29,7 @@
 //! elsewhere; `WindowLevel` is the only window primitive the panel depends on,
 //! and ADR-3 accepts that it may not stick.
 
-use super::config::{PanelConfig, PanelCorner};
+use super::config::{PanelConfig, PanelCorner, PanelStacking};
 use super::render::{self, Anchor};
 
 /// Which surface the app is showing.
@@ -76,7 +76,10 @@ pub struct PanelWindowSpec {
     pub min_inner: [f32; 2],
     pub resizable: bool,
     pub decorations: bool,
-    pub always_on_top: bool,
+    /// The stacking mode, kept as the enum rather than a bool: `always_on_top`
+    /// and `normal` are not opposites of one flag but two named states, and the
+    /// atom set follows from which one it is.
+    pub stacking: PanelStacking,
     pub click_through: bool,
     pub outer_pos: Option<[f32; 2]>,
 }
@@ -104,7 +107,7 @@ pub fn panel_spec(config: &PanelConfig, work_area: (f32, f32, f32, f32)) -> Pane
         min_inner: [layout.width, layout.height],
         resizable: false,
         decorations: false,
-        always_on_top: config.always_on_top,
+        stacking: config.stacking,
         click_through: config.click_through,
         outer_pos: Some([x, y]),
     }
@@ -122,13 +125,14 @@ pub fn normal_spec(previous: Option<NormalGeometry>) -> PanelWindowSpec {
         min_inner: geometry.min_inner,
         resizable: true,
         decorations: true,
-        always_on_top: false,
+        stacking: PanelStacking::Normal,
         click_through: false,
         outer_pos: None,
     }
 }
 
-/// The EWMH atoms the panel needs, and the retry policy for them.
+/// The EWMH `_NET_WM_STATE` atoms the panel sets or clears, and the retry policy
+/// for them.
 ///
 /// Kept separate from the X connection so the sequencing is testable without a
 /// display: `attempts_remaining` counts down, and `is_satisfied` reports what the
@@ -160,9 +164,14 @@ impl AtomRetry {
         self.attempts_remaining == 0
     }
 
-    /// Did the read-back show both atoms present?
-    pub fn is_satisfied(&self, skip_taskbar: bool, skip_pager: bool) -> bool {
-        skip_taskbar && skip_pager
+    /// Did the read-back show every atom in the wanted state?
+    ///
+    /// `wanted` is the full target state, not just "the atoms I asked for": an
+    /// atom that must be *absent* counts as satisfied only when it is absent, so
+    /// switching to `normal` stacking cannot report success while `ABOVE` is
+    /// still set.
+    pub fn is_satisfied(&self, wanted: AtomSet, actual: AtomSet) -> bool {
+        wanted == actual
     }
 }
 
@@ -172,12 +181,100 @@ impl Default for AtomRetry {
     }
 }
 
+/// Which `_NET_WM_STATE` atoms are set on the window.
+///
+/// One bit per atom, so "what should be set" and "what is set" are both values of
+/// the same type and the read-back is a single equality — which is the property
+/// that makes a half-applied switch impossible to mistake for a complete one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AtomSet {
+    pub above: bool,
+    pub sticky: bool,
+    pub skip_taskbar: bool,
+    pub skip_pager: bool,
+}
+
+impl AtomSet {
+    /// The atom set `stacking` implies.
+    ///
+    /// `always_on_top` sets ABOVE and STICKY so the panel keeps its place over
+    /// other windows, plus SKIP_PAGER (the pager/workspace list) always and
+    /// SKIP_TASKBAR only when the user asked for it. `normal` sets **nothing**,
+    /// including clearing the four atoms if a previous always-on-top session left
+    /// them on the same window.
+    pub fn for_stacking(stacking: PanelStacking, hide_from_taskbar: bool) -> Self {
+        match stacking {
+            PanelStacking::AlwaysOnTop => Self {
+                above: true,
+                sticky: true,
+                skip_taskbar: hide_from_taskbar,
+                skip_pager: true,
+            },
+            PanelStacking::Normal => Self::default(),
+        }
+    }
+
+    /// Is anything at all wanted?
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The atoms that still have to be added, as `(atom index, value)` pairs.
+    ///
+    /// An index into the intern order used by `x11::resolve_atoms`, so the
+    /// policy stays free of any X11 type.
+    pub fn additions(&self, actual: AtomSet) -> Vec<usize> {
+        let wanted = [self.above, self.sticky, self.skip_taskbar, self.skip_pager];
+        let have = [
+            actual.above,
+            actual.sticky,
+            actual.skip_taskbar,
+            actual.skip_pager,
+        ];
+        (0..4).filter(|i| wanted[*i] && !have[*i]).collect()
+    }
+
+    /// Set one atom by its index, as used by [`AtomSet::additions`] /
+    /// [`AtomSet::removals`].
+    ///
+    /// Used by the convergence test that replays 20 stacking switches; the live
+    /// path applies the indices straight onto the window instead of onto a local
+    /// copy, which is why it lives under `cfg(test)`.
+    ///
+    /// Panics on an out-of-range index, which is a programming error rather than
+    /// a runtime condition: the indices come from `0..4` in this module.
+    #[cfg(test)]
+    pub fn set(&mut self, index: usize, value: bool) {
+        let slot = match index {
+            0 => &mut self.above,
+            1 => &mut self.sticky,
+            2 => &mut self.skip_taskbar,
+            3 => &mut self.skip_pager,
+            other => panic!("atom index {other} is out of range"),
+        };
+        *slot = value;
+    }
+
+    /// The atoms that still have to be removed.
+    pub fn removals(&self, actual: AtomSet) -> Vec<usize> {
+        let wanted = [self.above, self.sticky, self.skip_taskbar, self.skip_pager];
+        let have = [
+            actual.above,
+            actual.sticky,
+            actual.skip_taskbar,
+            actual.skip_pager,
+        ];
+        (0..4).filter(|i| !wanted[*i] && have[*i]).collect()
+    }
+}
+
 /// Which `_NET_WM_STATE` action to send.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AtomAction {
-    /// Add the atoms (panel mode).
+    /// Add the atom (panel mode).
     Add,
-    /// Remove them (normal mode).
+    /// Remove it (normal mode, or turning off always-on-top).
     Remove,
 }
 
@@ -191,17 +288,21 @@ impl AtomAction {
     }
 }
 
-/// Build the `ClientMessageData` for a `_NET_WM_STATE` request.
+/// Build the `ClientMessageData` for a `_NET_WM_STATE` request about ONE atom.
 ///
 /// `data.l[3]` is the source indication: 1 means "application", and the owner's
 /// instruction for this build is 0. Recorded explicitly because the design doc
 /// notes both values are accepted by xfwm4 and an earlier "must be 1" claim came
 /// from a confounded experiment — so this is a decision, not a derivation.
-pub fn state_client_message(action: AtomAction, skip_taskbar: u32, skip_pager: u32) -> [u32; 5] {
+///
+/// One atom per message rather than the two EWMH allows in `l[1]`/`l[2]`: the
+/// additions and the removals of a stacking switch are usually different sets, and
+/// a single-atom message keeps the read-back unambiguous per atom.
+pub fn state_client_message(action: AtomAction, atom: u32) -> [u32; 5] {
     [
         action.data_l0(),
-        skip_taskbar,
-        skip_pager,
+        atom,
+        0, // second atom slot: unused, one atom per message
         0, // source indication
         0, // reserved
     ]
@@ -244,7 +345,7 @@ mod tests {
         let spec = normal_spec(None);
         assert!(spec.resizable);
         assert!(spec.decorations);
-        assert!(!spec.always_on_top);
+        assert_eq!(spec.stacking, PanelStacking::Normal);
         assert!(!spec.click_through);
         assert_eq!(spec.inner, NORMAL_INNER);
         assert_eq!(spec.min_inner, NORMAL_MIN_INNER);
@@ -262,12 +363,12 @@ mod tests {
     }
 
     #[test]
-    fn always_on_top_and_click_through_come_from_the_config() {
+    fn stacking_and_click_through_come_from_the_config() {
         let mut config = PanelConfig::default();
-        config.always_on_top = false;
+        config.stacking = PanelStacking::Normal;
         config.click_through = true;
         let spec = panel_spec(&config, work_area());
-        assert!(!spec.always_on_top);
+        assert_eq!(spec.stacking, PanelStacking::Normal);
         assert!(spec.click_through);
     }
 
@@ -346,11 +447,11 @@ mod tests {
         // Asserted by the shape of the API: the only window-ish booleans the
         // spec exposes are the level and click-through.
         let spec = panel_spec(&PanelConfig::default(), work_area());
-        assert!(spec.always_on_top);
+        assert_eq!(spec.stacking, PanelStacking::AlwaysOnTop);
         // The panel spec and the normal spec differ in exactly these four fields
         // plus the position, and never in any notion of a type.
         let normal = normal_spec(None);
-        assert_ne!(spec.always_on_top, normal.always_on_top);
+        assert_ne!(spec.stacking, normal.stacking);
         assert_ne!(spec.decorations, normal.decorations);
         assert_ne!(spec.resizable, normal.resizable);
         assert_eq!(normal.outer_pos, None, "normal mode never moves the window");
@@ -374,28 +475,135 @@ mod tests {
     }
 
     #[test]
-    fn the_atoms_are_only_satisfied_when_both_are_present() {
+    fn a_state_is_only_satisfied_when_every_atom_matches() {
         let retry = AtomRetry::new();
-        assert!(retry.is_satisfied(true, true));
-        assert!(
-            !retry.is_satisfied(true, false),
-            "half-applied is not applied"
+        let wanted = AtomSet {
+            above: true,
+            sticky: true,
+            skip_taskbar: true,
+            skip_pager: true,
+        };
+        assert!(retry.is_satisfied(wanted, wanted));
+
+        // Half-applied is not applied: this is the case that used to pass with
+        // the old two-boolean check when one atom happened to match.
+        for missing in [
+            AtomSet {
+                sticky: false,
+                ..wanted
+            },
+            AtomSet {
+                above: false,
+                ..wanted
+            },
+            AtomSet {
+                skip_pager: false,
+                ..wanted
+            },
+            AtomSet {
+                skip_taskbar: false,
+                ..wanted
+            },
+            AtomSet::default(),
+        ] {
+            assert!(
+                !retry.is_satisfied(wanted, missing),
+                "{missing:?} must not satisfy {wanted:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn always_on_top_wants_the_four_atoms_and_normal_wants_none() {
+        let on_top = AtomSet::for_stacking(PanelStacking::AlwaysOnTop, true);
+        assert!(on_top.above && on_top.sticky && on_top.skip_taskbar && on_top.skip_pager);
+
+        // SKIP_TASKBAR is its own flag, so it can be turned off while staying
+        // always-on-top: the panel is above everything but still listed.
+        let listed = AtomSet::for_stacking(PanelStacking::AlwaysOnTop, false);
+        assert!(!listed.skip_taskbar, "the taskbar flag is honoured");
+        assert!(listed.above && listed.sticky && listed.skip_pager);
+
+        // In normal stacking the window is an ordinary window: no atoms wanted,
+        // so the read-back can only succeed once the old ones are gone.
+        assert!(AtomSet::for_stacking(PanelStacking::Normal, true).is_empty());
+        assert!(AtomSet::for_stacking(PanelStacking::Normal, false).is_empty());
+    }
+
+    #[test]
+    fn switching_to_normal_removes_every_atom_that_was_set() {
+        let target = AtomSet::for_stacking(PanelStacking::Normal, false);
+        let current = AtomSet::for_stacking(PanelStacking::AlwaysOnTop, true);
+        assert_eq!(
+            target.removals(current),
+            vec![0, 1, 2, 3],
+            "ABOVE, STICKY, SKIP_TASKBAR and SKIP_PAGER all go"
         );
-        assert!(!retry.is_satisfied(false, true));
-        assert!(!retry.is_satisfied(false, false));
+        assert!(target.additions(current).is_empty());
+    }
+
+    #[test]
+    fn switching_back_to_always_on_top_adds_only_what_is_missing() {
+        let target = AtomSet::for_stacking(PanelStacking::AlwaysOnTop, true);
+        assert_eq!(
+            target.additions(AtomSet::default()),
+            vec![0, 1, 2, 3],
+            "four additions from a clean window"
+        );
+        assert!(target.removals(AtomSet::default()).is_empty());
+
+        // A window that was always-on-top with the taskbar flag off needs three
+        // additions, not four: adding SKIP_TASKBAR again would be a no-op but
+        // the count is what the retry loop budgets on.
+        let partial = AtomSet {
+            above: true,
+            sticky: true,
+            skip_taskbar: false,
+            skip_pager: true,
+        };
+        assert_eq!(target.additions(partial), vec![2]);
+        assert!(target.removals(partial).is_empty());
+    }
+
+    #[test]
+    fn toggling_the_stacking_twenty_times_adds_and_removes_the_same_atoms() {
+        // The live-switch case: no window is recreated, so the atom set is
+        // applied and un-applied repeatedly on the SAME window. Whatever the
+        // sequence, each transition must be expressible as adds + removals and
+        // must converge.
+        let mut actual = AtomSet::default();
+        for round in 0..20 {
+            let target = if round % 2 == 0 {
+                AtomSet::for_stacking(PanelStacking::AlwaysOnTop, true)
+            } else {
+                AtomSet::for_stacking(PanelStacking::Normal, false)
+            };
+            for index in target.additions(actual) {
+                actual.set(index, true);
+            }
+            for index in target.removals(actual) {
+                actual.set(index, false);
+            }
+            assert_eq!(
+                actual, target,
+                "round {round} did not converge to the wanted atom set"
+            );
+            assert!(AtomRetry::new().is_satisfied(target, actual));
+        }
     }
 
     #[test]
     fn the_client_message_uses_l3_zero_and_the_right_action() {
-        let add = state_client_message(AtomAction::Add, 1, 2);
+        let add = state_client_message(AtomAction::Add, 42);
         assert_eq!(add[0], 1, "ADD");
-        assert_eq!(add[1], 1, "first atom");
-        assert_eq!(add[2], 2, "second atom");
+        assert_eq!(add[1], 42, "the atom");
+        assert_eq!(add[2], 0, "one atom per message");
         assert_eq!(add[3], 0, "source indication is 0 by decision");
         assert_eq!(add[4], 0);
 
-        let remove = state_client_message(AtomAction::Remove, 1, 2);
+        let remove = state_client_message(AtomAction::Remove, 42);
         assert_eq!(remove[0], 0, "REMOVE");
+        assert_eq!(remove[1], 42);
         assert_eq!(remove[3], 0);
     }
 

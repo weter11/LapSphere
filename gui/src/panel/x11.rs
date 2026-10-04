@@ -26,7 +26,7 @@ use x11rb::connection::Connection;
 use x11rb::protocol::xproto::ConnectionExt;
 
 use super::units::NO_DATA;
-use super::window::{AtomAction, AtomRetry};
+use super::window::{state_client_message, AtomAction, AtomRetry, AtomSet};
 use crate::app::AppState;
 use crate::panel::config::PanelConfig;
 use crate::panel::items;
@@ -37,10 +37,36 @@ use crate::panel::units::Value;
 pub const RETRY_INTERVAL_MS: u64 = 50;
 
 /// The EWMH atoms the panel sets, resolved once per connection.
+///
+/// Four atoms, because "always on top" on xfwm4 is two mechanisms and they do
+/// different jobs: `ABOVE` is the stacking level, `STICKY` keeps the window on
+/// every workspace, `SKIP_TASKBAR` and `SKIP_PAGER` remove it from the two lists
+/// an overlay has no business appearing in.
+#[cfg(target_os = "linux")]
 pub struct PanelAtoms {
     pub net_wm_state: u32,
+    pub above: u32,
+    pub sticky: u32,
     pub skip_taskbar: u32,
     pub skip_pager: u32,
+}
+
+#[cfg(target_os = "linux")]
+impl PanelAtoms {
+    /// The atom value for an index as used by `window::AtomSet`.
+    ///
+    /// The index order is the one `AtomSet::additions` / `removals` produce, so
+    /// the two halves cannot drift apart silently: a wrong index shows up as a
+    /// read-back that never matches, not as a plausible-looking no-op.
+    pub fn by_index(&self, index: usize) -> u32 {
+        match index {
+            0 => self.above,
+            1 => self.sticky,
+            2 => self.skip_taskbar,
+            3 => self.skip_pager,
+            other => panic!("atom index {other} is out of range"),
+        }
+    }
 }
 
 /// The root window id of the given screen.
@@ -60,6 +86,14 @@ pub fn root_window(
 /// Resolve the atoms, interning them on the server.
 pub fn resolve_atoms(conn: &x11rb::rust_connection::RustConnection) -> anyhow::Result<PanelAtoms> {
     let net_wm_state = conn.intern_atom(false, b"_NET_WM_STATE")?.reply()?.atom;
+    let above = conn
+        .intern_atom(false, b"_NET_WM_STATE_ABOVE")?
+        .reply()?
+        .atom;
+    let sticky = conn
+        .intern_atom(false, b"_NET_WM_STATE_STICKY")?
+        .reply()?
+        .atom;
     let skip_taskbar = conn
         .intern_atom(false, b"_NET_WM_STATE_SKIP_TASKBAR")?
         .reply()?
@@ -70,12 +104,14 @@ pub fn resolve_atoms(conn: &x11rb::rust_connection::RustConnection) -> anyhow::R
         .atom;
     Ok(PanelAtoms {
         net_wm_state,
+        above,
+        sticky,
         skip_taskbar,
         skip_pager,
     })
 }
 
-/// Send the `_NET_WM_STATE` ClientMessage for `action`.
+/// Send the `_NET_WM_STATE` ClientMessage for `action` on one atom.
 ///
 /// `data.l[3] = 0` per the owner's instruction; the design doc records that
 /// xfwm4 also accepts 1 and that the earlier "must be 1" claim came from a
@@ -84,17 +120,14 @@ pub fn send_state_message(
     conn: &x11rb::rust_connection::RustConnection,
     root: u32,
     window: u32,
-    atoms: &PanelAtoms,
+    net_wm_state: u32,
+    atom: u32,
     action: AtomAction,
 ) -> anyhow::Result<()> {
     use x11rb::protocol::xproto::*;
 
-    let event = ClientMessageEvent::new(
-        32,
-        window,
-        atoms.net_wm_state,
-        [action.data_l0(), atoms.skip_taskbar, atoms.skip_pager, 0, 0],
-    );
+    let event =
+        ClientMessageEvent::new(32, window, net_wm_state, state_client_message(action, atom));
 
     conn.send_event(
         false,
@@ -106,17 +139,18 @@ pub fn send_state_message(
     Ok(())
 }
 
-/// Read `_NET_WM_STATE` back and report whether both atoms are set.
+/// Read `_NET_WM_STATE` back and report which of the panel's atoms are set.
 ///
 /// This read-back is what makes the send self-confirming: a WM that ignores the
 /// request shows up as "atoms absent after N attempts" rather than as a silent
 /// failure, which is the failure mode the design doc says this design is built to
-/// detect.
+/// detect. It is also how a switch to normal stacking is verified — the removal
+/// counts as done only when the atoms are actually gone.
 pub fn atoms_present(
     conn: &x11rb::rust_connection::RustConnection,
     window: u32,
     atoms: &PanelAtoms,
-) -> anyhow::Result<(bool, bool)> {
+) -> anyhow::Result<AtomSet> {
     use x11rb::protocol::xproto::*;
 
     let reply = conn
@@ -130,45 +164,76 @@ pub fn atoms_present(
         .chunks_exact(4)
         .map(|chunk| u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect();
-    let has_taskbar = value_slice.contains(&atoms.skip_taskbar);
-    let has_pager = value_slice.contains(&atoms.skip_pager);
-    Ok((has_taskbar, has_pager))
+
+    let has = |atom: u32| value_slice.contains(&atom);
+    Ok(AtomSet {
+        above: has(atoms.above),
+        sticky: has(atoms.sticky),
+        skip_taskbar: has(atoms.skip_taskbar),
+        skip_pager: has(atoms.skip_pager),
+    })
 }
 
-/// Apply or remove the panel atoms, confirming by read-back and retrying.
+/// Drive the window's atoms to `wanted`, confirming by read-back and retrying.
 ///
-/// Returns true once both atoms are in the requested state. Returns false if the
-/// attempts ran out — which is a legitimate outcome on a WM that does not
-/// implement the request, and is logged rather than treated as an error: the
-/// panel still works, it just appears in the taskbar.
+/// Works by diff rather than by a blind Add or Remove: a stacking switch on a
+/// live window has to both add and remove, and sending a blanket "remove all four"
+/// to a window that never had them is a wasted round trip per atom per frame.
+///
+/// Returns true once the read-back equals `wanted`. Returns false if the attempts
+/// ran out — a legitimate outcome on a WM that does not implement the request,
+/// logged rather than treated as an error.
+#[cfg(target_os = "linux")]
 pub fn apply_panel_atoms(
     conn: &x11rb::rust_connection::RustConnection,
     root: u32,
     window: u32,
     atoms: &PanelAtoms,
-    action: AtomAction,
+    wanted: AtomSet,
 ) -> bool {
     let mut retry = AtomRetry::new();
 
     while retry.next_attempt() {
-        if let Err(err) = send_state_message(conn, root, window, atoms, action) {
-            log::warn!("panel: could not send _NET_WM_STATE: {err}");
-            return false;
-        }
-
-        let present = match atoms_present(conn, window, atoms) {
-            Ok((taskbar, pager)) => retry.is_satisfied(taskbar, pager),
+        let actual = match atoms_present(conn, window, atoms) {
+            Ok(actual) => actual,
             Err(err) => {
                 log::warn!("panel: could not read _NET_WM_STATE back: {err}");
                 return false;
             }
         };
-
-        match action {
-            AtomAction::Add if present => return true,
-            AtomAction::Remove if !present => return true,
-            _ => std::thread::sleep(std::time::Duration::from_millis(RETRY_INTERVAL_MS)),
+        if retry.is_satisfied(wanted, actual) {
+            return true;
         }
+
+        let additions = wanted.additions(actual);
+        let removals = wanted.removals(actual);
+
+        for (index, action) in additions
+            .into_iter()
+            .map(|index| (index, AtomAction::Add))
+            .chain(
+                removals
+                    .into_iter()
+                    .map(|index| (index, AtomAction::Remove)),
+            )
+        {
+            if let Err(err) = send_state_message(
+                conn,
+                root,
+                window,
+                atoms.net_wm_state,
+                atoms.by_index(index),
+                action,
+            ) {
+                log::warn!("panel: could not send _NET_WM_STATE: {err}");
+                return false;
+            }
+        }
+
+        // Nothing to change and the state still does not match means the WM is
+        // holding an atom we did not ask about, or refusing; sleeping is the
+        // only thing left to try.
+        std::thread::sleep(std::time::Duration::from_millis(RETRY_INTERVAL_MS));
     }
 
     log::warn!(
@@ -178,12 +243,18 @@ pub fn apply_panel_atoms(
     false
 }
 
-/// Draw the panel into the given rect.
+/// Draw the panel strip into the given `ui` and return its response.
 ///
-/// Each element is drawn into its **declared slot**, not into whatever space its
-/// text happens to need, so a `—` occupies exactly as much room as a full value
-/// and the window never resizes under the user (ADR-2).
-pub fn draw_elements(ui: &mut egui::Ui, state: &AppState, config: &PanelConfig) {
+/// The response is returned rather than dropped because it is the panel's ONLY
+/// interactive surface: the secondary click opens the context menu and the
+/// primary click starts the window drag. The rect is allocated with
+/// `Sense::click`, which covers both buttons — the previous `Sense::hover` made
+/// the panel a picture.
+///
+/// Sense::click also stops the strip from swallowing drags aimed at the window
+/// frame, which matters now that the panel is borderless: without a click sense
+/// the WM drag would only start from a few pixels of edge.
+pub fn draw_strip(ui: &mut egui::Ui, state: &AppState, config: &PanelConfig) -> egui::Response {
     let rows = render::rows(config);
     let layout = render::layout(config);
 
@@ -196,7 +267,7 @@ pub fn draw_elements(ui: &mut egui::Ui, state: &AppState, config: &PanelConfig) 
             // size regardless of what the values turned out to be.
             let (rect, response) = ui.allocate_exact_size(
                 egui::vec2(layout.width, layout.height),
-                egui::Sense::hover(),
+                egui::Sense::click(),
             );
             let painter = ui.painter();
             painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(140));
@@ -207,7 +278,8 @@ pub fn draw_elements(ui: &mut egui::Ui, state: &AppState, config: &PanelConfig) 
             );
             draw_contents(&mut child, state, config, &rows);
             response
-        });
+        })
+        .inner
 }
 
 fn draw_contents(
