@@ -176,16 +176,57 @@ lapsphere
 lapsphere --tray
 ```
 
+### Panel mode (overlay HUD)
+
+A compact always-on-top strip, in the spirit of MangoHud, drawn on the same
+window as the main UI:
+
+```bash
+lapsphere --panel             # start directly in panel mode
+lapsphere --toggle-panel      # toggle a running GUI
+```
+
+- **Enter panel mode** from the "📊 Panel" button in the main window's top bar,
+  or by starting with `--panel`.
+- **Leave panel mode** with the "⬅ Normal mode" button inside the panel. There
+  is no other route back: the panel hides and shows on a hotkey, but leaving it
+  is always an explicit control.
+- **Show/hide the panel** with the global hotkey (default `Shift_R+F9`,
+  configurable in the panel menu) or with `lapsphere --toggle-panel`.
+- **Hiding is only allowed when there is a way back** — the hotkey was captured,
+  the tray is on, or the CLI works. With none of those, a hide request returns to
+  the normal window instead, rather than leaving you with an overlay you cannot
+  remove.
+- The `⚙` button in the panel opens its settings: elements and their order,
+  labels, font scale, hotkey, click-through and the anchored position.
+
+Frame elements (`fps`, `fps_graph`, `frametime_graph`) are present as reserved
+slots showing `—`. They receive data once the Vulkan layer and the fps source
+land in their own PRs; enabling them will not resize the panel.
+
+On X11 the panel sets `SKIP_TASKBAR`/`SKIP_PAGER` and confirms them by reading
+`_NET_WM_STATE` back, retrying if the window manager ignored the request. On
+Wayland none of that protocol exists, so the panel is best-effort there and
+`lapsphere --toggle-panel` is the way to reach it.
+
 ---
 
 ## Configuration
 
-Settings are split into two files under `~/.config/lapsphere/`:
+Settings are split into files under `~/.config/lapsphere/`:
 
 | File | Contents |
 |---|---|
 | `settings.json` | Theme, font size, polling rates, battery settings, autostart |
 | `profiles.json` | All tuning profiles and the active profile name |
+| `panel.json` | Panel mode only: elements, order, labels, scale, hotkey, position |
+
+`panel.json` is deliberately separate from `settings.json`: the panel is its own
+surface, so a corrupt or hand-edited panel file cannot take the rest of the
+configuration with it, and the panel can be reverted without touching anything
+else. Unknown or duplicated element ids in it are skipped, and any element the
+file omits is appended, so a file written by an older build still produces a
+complete panel.
 
 A legacy single-file format (`config.json`) is automatically migrated on first run.
 
