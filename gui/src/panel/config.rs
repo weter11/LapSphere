@@ -52,6 +52,98 @@ pub const PANEL_ITEMS: &[(&str, &str)] = &[
 /// desktops. F9 has no default binding in the base keymap.
 pub const DEFAULT_HOTKEY: &str = "Shift_R+F9";
 
+/// Default hotkey that turns click-through back off.
+///
+/// Separate from [`DEFAULT_HOTKEY`], because the two solve opposite problems:
+/// the show/hide key is needed when the panel is *hidden*, the interactivity key
+/// when it is *transparent to the mouse*. F8, and again right shift, so the two
+/// are distinguishable by feel. F8 has no default binding in the base keymap.
+pub const DEFAULT_INTERACTIVITY_HOTKEY: &str = "Shift_R+F8";
+
+/// How the panel window stacks against other windows.
+///
+/// `always_on_top` is the default because that is what a HUD panel is for. The
+/// `normal` value exists because an overlay that covers a fullscreen game is not
+/// always what the user wants — sometimes the panel is an ordinary window that
+/// can be covered, minimized and found in the taskbar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PanelStacking {
+    /// `WindowLevel(AlwaysOnTop)` plus the EWMH atoms.
+    AlwaysOnTop,
+    /// `WindowLevel(Normal)`, no atoms, ordinary stacking.
+    Normal,
+}
+
+impl Default for PanelStacking {
+    fn default() -> Self {
+        PanelStacking::AlwaysOnTop
+    }
+}
+
+impl PanelStacking {
+    /// Every value, in menu order.
+    pub const ALL: [PanelStacking; 2] = [PanelStacking::AlwaysOnTop, PanelStacking::Normal];
+
+    /// The label the menus show.
+    pub fn label(self) -> &'static str {
+        match self {
+            PanelStacking::AlwaysOnTop => "Always on top",
+            PanelStacking::Normal => "Normal window",
+        }
+    }
+
+    /// The exact string written to `panel.json`.
+    ///
+    /// Spelled out rather than derived from `label()`, because the label is UI
+    /// text and the stored value is a wire format that must not drift with it.
+    pub fn stored_value(self) -> &'static str {
+        match self {
+            PanelStacking::AlwaysOnTop => "always_on_top",
+            PanelStacking::Normal => "normal",
+        }
+    }
+
+    pub fn is_always_on_top(self) -> bool {
+        matches!(self, PanelStacking::AlwaysOnTop)
+    }
+
+    /// Parse a stored value.
+    ///
+    /// An **unknown** value yields `AlwaysOnTop` rather than an error, and that is
+    /// deliberate: a build that does not know a newer mode must not fall back to
+    /// the *whole* default panel, which would silently discard the user's element
+    /// order, labels and position. Only this one field degrades.
+    pub fn from_stored(raw: &str) -> Self {
+        match raw.trim() {
+            "normal" => PanelStacking::Normal,
+            // `always_on_top`, and every unrecognised string.
+            _ => PanelStacking::AlwaysOnTop,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PanelStacking {
+    /// Degrade an unusable value to `always_on_top` — see [`PanelStacking::from_stored`].
+    ///
+    /// Hand-written rather than derived, so an unknown string is not an error: a
+    /// failing parse would make the whole `panel.json` load fail and discard the
+    /// user's element order, labels and position, which is a far larger loss than
+    /// choosing the safe default for one field.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = serde_json::Value::deserialize(deserializer).map_err(serde::de::Error::custom)?;
+        let text = match raw {
+            serde_json::Value::String(text) => text,
+            serde_json::Value::Null => return Ok(PanelStacking::default()),
+            other => other.to_string(),
+        };
+        Ok(PanelStacking::from_stored(&text))
+    }
+}
+
 /// One element's configuration: display order is array order in `items`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -134,11 +226,30 @@ pub struct PanelConfig {
     pub active: bool,
     /// Global font scale for every element.
     pub font_scale: f32,
-    pub always_on_top: bool,
+    /// How the panel window stacks against other windows.
+    ///
+    /// An unknown `stacking` string becomes `always_on_top` rather than failing
+    /// the file — see `PanelStacking`'s `Deserialize`.
+    pub stacking: PanelStacking,
+    /// In `always_on_top` stacking: keep the panel out of the taskbar.
+    ///
+    /// Only meaningful for `always_on_top`. In `normal` stacking the window is an
+    /// ordinary window and IS in the taskbar, which is the point of that mode.
+    pub hide_from_taskbar: bool,
+    /// The panel does not receive the mouse; clicks go to the window below.
+    ///
+    /// Off by default. With it on and no way back the panel becomes unreachable,
+    /// which is why enabling it is gated on
+    /// `crate::panel::menu::can_enable_click_through`.
     pub click_through: bool,
     pub position: PanelPosition,
     /// Hotkey string, e.g. `Shift_R+F9`. Empty means "no hotkey".
     pub hotkey: String,
+    /// Hotkey that turns click-through back off, e.g. `Shift_R+F8`.
+    ///
+    /// Empty means "no interactivity hotkey": allowed, but then
+    /// `lapsphere --toggle-interactive` is the only way out of click-through.
+    pub interactivity_hotkey: String,
     pub items: Vec<PanelItemConfig>,
 }
 
@@ -148,10 +259,12 @@ impl Default for PanelConfig {
             version: PANEL_CONFIG_VERSION,
             active: false,
             font_scale: 1.0,
-            always_on_top: true,
+            stacking: PanelStacking::default(),
+            hide_from_taskbar: true,
             click_through: false,
             position: PanelPosition::default(),
             hotkey: DEFAULT_HOTKEY.to_string(),
+            interactivity_hotkey: DEFAULT_INTERACTIVITY_HOTKEY.to_string(),
             items: PANEL_ITEMS
                 .iter()
                 .map(|(id, _)| PanelItemConfig::new(id))
@@ -214,6 +327,7 @@ pub fn normalize(mut config: PanelConfig) -> PanelConfig {
     config.position.offset_y = config.position.offset_y.clamp(-4096.0, 4096.0);
 
     config.hotkey = config.hotkey.trim().to_string();
+    config.interactivity_hotkey = config.interactivity_hotkey.trim().to_string();
 
     for item in &mut config.items {
         if let Some(scale) = item.font_scale {
@@ -263,8 +377,10 @@ mod tests {
         assert_eq!(config.items.len(), PANEL_ITEMS.len());
         assert_eq!(visible_item_ids(&config).len(), PANEL_ITEMS.len());
         assert_eq!(config.hotkey, "Shift_R+F9");
-        assert!(config.always_on_top);
+        assert_eq!(config.stacking, PanelStacking::AlwaysOnTop);
+        assert!(config.hide_from_taskbar);
         assert!(!config.click_through);
+        assert_eq!(config.interactivity_hotkey, "Shift_R+F8");
         assert!(!config.active, "the panel must not start itself");
     }
 
@@ -475,5 +591,120 @@ mod tests {
                 "panel.json must not carry `{forbidden}`"
             );
         }
+    }
+
+    // ---- stacking / hide_from_taskbar / click_through / interactivity_hotkey ----
+
+    #[test]
+    fn an_unknown_stacking_value_becomes_always_on_top() {
+        // The owner's rule: an unrecognised `stacking` degrades to
+        // `always_on_top` rather than failing the file. A failing file would
+        // fall back to the WHOLE default panel and silently discard the user's
+        // element order, labels and position — far more destructive than
+        // choosing the safe default for one field.
+        for raw in [
+            "\"floating\"",
+            "\"Always_On_Top\"",
+            "\"\"",
+            "17",
+            "true",
+            "null",
+            "[]",
+        ] {
+            let json = format!("{{\"stacking\": {raw}}}");
+            let parsed: PanelConfig =
+                serde_json::from_str(&json).unwrap_or_else(|_| panic!("{json} must decode"));
+            assert_eq!(
+                parsed.stacking,
+                PanelStacking::AlwaysOnTop,
+                "{raw} must not silently become normal"
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_known_stacking_values_round_trip() {
+        for stacking in PanelStacking::ALL {
+            let json = serde_json::to_string(&stacking).expect("serialize");
+            assert_eq!(json, format!("\"{}\"", stacking.stored_value()));
+            let parsed: PanelStacking = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(parsed, stacking);
+        }
+    }
+
+    #[test]
+    fn normal_stacking_is_read_from_the_file() {
+        let parsed: PanelConfig =
+            serde_json::from_str(r#"{"stacking": "normal"}"#).expect("decodes");
+        assert_eq!(parsed.stacking, PanelStacking::Normal);
+        assert_eq!(PanelStacking::Normal.stored_value(), "normal");
+        assert_eq!(PanelStacking::AlwaysOnTop.stored_value(), "always_on_top");
+    }
+
+    #[test]
+    fn the_new_fields_round_trip_through_json() {
+        let config = PanelConfig {
+            stacking: PanelStacking::Normal,
+            hide_from_taskbar: false,
+            click_through: true,
+            interactivity_hotkey: "Shift_L+F8".into(),
+            ..Default::default()
+        };
+        let json = serde_json::to_string_pretty(&config).expect("serialize");
+        for key in [
+            "\"stacking\"",
+            "\"hide_from_taskbar\"",
+            "\"click_through\"",
+            "\"interactivity_hotkey\"",
+        ] {
+            assert!(json.contains(key), "panel.json must carry {key}");
+        }
+        let back: PanelConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.stacking, PanelStacking::Normal);
+        assert!(!back.hide_from_taskbar);
+        assert!(back.click_through);
+        assert_eq!(back.interactivity_hotkey, "Shift_L+F8");
+        assert_eq!(normalize(back), normalize(config));
+    }
+
+    #[test]
+    fn an_older_file_without_the_new_fields_loads_with_the_documented_defaults() {
+        // A panel.json written before this change has none of the four keys.
+        let json = r#"{"version": 1, "active": true, "font_scale": 1.0, "hotkey": "Shift_R+F9",
+                        "position": {"corner": "bottom_right", "offset_x": 10.0, "offset_y": 10.0},
+                        "items": [{"id": "cpu_load", "visible": true, "label": null, "font_scale": null}]}"#;
+        let config = normalize(serde_json::from_str::<PanelConfig>(json).expect("decodes"));
+        assert_eq!(config.stacking, PanelStacking::AlwaysOnTop);
+        assert!(config.hide_from_taskbar);
+        assert!(!config.click_through);
+        assert_eq!(config.interactivity_hotkey, DEFAULT_INTERACTIVITY_HOTKEY);
+        // The user's own data survived, which is the reason the field-level
+        // deserializer exists.
+        assert_eq!(config.items[0].id, "cpu_load");
+        assert_eq!(config.position.corner, PanelCorner::BottomRight);
+    }
+
+    #[test]
+    fn a_partial_file_never_invents_the_unsafe_click_through_state() {
+        // `click_through` defaults to false and normalize does not touch it: the
+        // file records the user's last choice, but a file that says nothing must
+        // land on the safe side.
+        let parsed: PanelConfig = serde_json::from_str(r#"{"font_scale": 1.2}"#).expect("decodes");
+        let config = normalize(parsed);
+        assert!(!config.click_through);
+        assert_eq!(config.font_scale, 1.2);
+    }
+
+    #[test]
+    fn the_interactivity_hotkey_is_trimmed_and_may_be_emptied() {
+        let mut padded = PanelConfig::default();
+        padded.interactivity_hotkey = "  Shift_R+F8  ".into();
+        assert_eq!(normalize(padded).interactivity_hotkey, "Shift_R+F8");
+
+        // Empty means "no interactivity key". The safety rule accounts for that,
+        // so normalize must not silently refill it with the default.
+        let mut cleared = PanelConfig::default();
+        cleared.interactivity_hotkey = "   ".into();
+        assert_eq!(normalize(cleared).interactivity_hotkey, "");
     }
 }
