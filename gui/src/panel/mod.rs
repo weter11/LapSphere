@@ -4,14 +4,16 @@
 //!
 //! * `config` — `~/.config/lapsphere/panel.json`, its own file, never touching
 //!   `settings.json` or the tray's settings.
-//! The later commits of this branch add `items`/`units`, `render`, `window` and
-//! `visibility` as siblings of `config`.
+//! The later commits of this branch add `render`, `window` and `visibility` as
+//! siblings of `config`.
 //!
 //! Explicitly NOT in this release: the Vulkan layer that supplies fps, and the
 //! fps data source itself. `fps`, `fps_graph` and `frametime_graph` get
 //! reserved slots so PR E only has to fill in the data.
 
 pub mod config;
+pub mod items;
+pub mod units;
 
 use std::path::PathBuf;
 
