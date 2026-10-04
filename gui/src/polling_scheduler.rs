@@ -169,6 +169,165 @@ mod in_flight_tests {
     }
 }
 
+#[cfg(test)]
+mod poll_set_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const COMPONENTS: [&str; 4] = ["cpu", "gpu", "memory", "logs"];
+
+    /// Per-component tick counts.
+    type Counts = Arc<Mutex<BTreeMap<String, usize>>>;
+
+    fn count(counts: &Counts, id: &str) -> usize {
+        counts.lock().unwrap().get(id).copied().unwrap_or(0)
+    }
+
+    /// Run a real coordinator for `settle_ms`, apply `poll_set`, and count the
+    /// ticks per component in a SECOND window.
+    ///
+    /// Counting rather than indexing the sample order: the coordinator hands
+    /// components out in `HashMap` iteration order, so "the samples after the Nth
+    /// cpu" is not a meaningful window. Two counting windows are.
+    ///
+    /// Deliberately not an `#[tokio::test]`: it owns a runtime with timers
+    /// enabled, so blocking on one from inside another would deadlock.
+    fn counts_after(poll_set: Option<&[&str]>, settle_ms: u64) -> (Counts, Counts) {
+        let before: Counts = Arc::new(Mutex::new(BTreeMap::new()));
+        let after: Counts = Arc::new(Mutex::new(BTreeMap::new()));
+        let before_out = Arc::clone(&before);
+        let after_out = Arc::clone(&after);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime");
+
+        runtime.block_on(async move {
+            let coordinator = RefreshCoordinator::new();
+            let handle = coordinator.get_handle();
+            for id in COMPONENTS {
+                handle
+                    .register(id.to_string(), Duration::from_millis(10))
+                    .expect("register");
+            }
+
+            let switched = Arc::new(AtomicUsize::new(0));
+            let switched_for_cb = Arc::clone(&switched);
+            let before_for_cb = Arc::clone(&before);
+            let after_for_cb = Arc::clone(&after);
+
+            let runner = tokio::spawn(coordinator.run(move |id| {
+                let target = if switched_for_cb.load(Ordering::SeqCst) == 0 {
+                    Arc::clone(&before_for_cb)
+                } else {
+                    Arc::clone(&after_for_cb)
+                };
+                *target.lock().unwrap().entry(id.to_string()).or_insert(0) += 1;
+            }));
+
+            tokio::time::sleep(Duration::from_millis(settle_ms)).await;
+
+            match poll_set {
+                Some(set) => handle
+                    .set_poll_set(set.iter().map(|s| s.to_string()).collect())
+                    .expect("set poll set"),
+                None => handle.clear_poll_set().expect("clear poll set"),
+            }
+            switched.store(1, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(settle_ms)).await;
+
+            runner.abort();
+        });
+
+        (before_out, after_out)
+    }
+
+    #[test]
+    fn a_paused_component_never_ticks() {
+        let mut component = ComponentRefresh::new(Duration::from_millis(10));
+        assert!(component.should_refresh(), "the first tick is immediate");
+        component.paused = true;
+        assert!(
+            !component.should_refresh(),
+            "a paused component never fires"
+        );
+    }
+
+    #[test]
+    fn a_paused_component_does_not_drag_the_coordinator_sleep_to_zero() {
+        // The coordinator's sleep is the MINIMUM over all components. A paused
+        // one reporting "due now" would spin the loop at full speed with the
+        // panel showing nothing but dashes.
+        let mut component = ComponentRefresh::new(Duration::from_millis(1));
+        component.paused = true;
+        assert!(
+            component.time_until_refresh() > Duration::from_secs(60),
+            "a paused component must not report an imminent refresh"
+        );
+    }
+
+    #[test]
+    fn resuming_does_not_fire_a_burst() {
+        // `last_refresh` is kept while paused, so a component refreshed before
+        // the pause does not become "never refreshed" and fire immediately.
+        let mut component = ComponentRefresh::new(Duration::from_secs(3600));
+        component.mark_refreshed();
+        component.paused = true;
+        component.paused = false;
+        assert!(
+            !component.should_refresh(),
+            "resuming must wait out the interval, not refresh at once"
+        );
+    }
+
+    #[test]
+    fn only_the_named_components_keep_ticking() {
+        let (before, after) = counts_after(Some(&["cpu", "gpu"]), 150);
+
+        for id in ["cpu", "gpu"] {
+            assert!(count(&after, id) > 0, "{id} is in the set and must tick");
+            assert!(
+                count(&before, id) > 0,
+                "{id} must have ticked before the switch too, or this proves nothing"
+            );
+        }
+        for id in ["memory", "logs"] {
+            assert_eq!(
+                count(&after, id),
+                0,
+                "{id} is not in the set and must not tick"
+            );
+            assert!(count(&before, id) > 0, "{id} must have ticked before");
+        }
+    }
+
+    #[test]
+    fn clearing_the_set_resumes_everything() {
+        // The asymmetry that matters: an EMPTY set pauses everything, which is
+        // right for a panel with no rows enabled, but returning to the normal
+        // window must UN-pause. Getting this backwards would leave the main
+        // window permanently frozen after one visit to the panel.
+        let (before, after) = counts_after(None, 150);
+        for id in COMPONENTS {
+            assert!(count(&before, id) > 0, "{id} must tick before the clear");
+            assert!(
+                count(&after, id) > 0,
+                "{id} must resume after clear_poll_set"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_set_pauses_everything() {
+        let (_, after) = counts_after(Some(&[]), 150);
+        for id in COMPONENTS {
+            assert_eq!(count(&after, id), 0, "{id} must be paused");
+        }
+    }
+}
+
 /// Lightweight UI refresh coordinator - manages when to trigger UI updates
 /// Unlike a full scheduler, this just tracks intervals and notifies when refresh is needed
 pub struct RefreshCoordinator {
@@ -181,6 +340,13 @@ pub struct RefreshCoordinator {
 struct ComponentRefresh {
     interval: Duration,
     last_refresh: Option<Instant>,
+    /// Excluded from the current poll set: registered, but not ticked.
+    ///
+    /// A hidden window still ticks its components today, which is what the
+    /// in-flight guard bounds rather than prevents. Narrowing the set outright is
+    /// cheaper: a panel draws ten rows and needs three of the registered
+    /// components, so the rest should not cost a D-Bus round trip at all.
+    paused: bool,
 }
 
 impl ComponentRefresh {
@@ -188,10 +354,14 @@ impl ComponentRefresh {
         Self {
             interval,
             last_refresh: None, // None = never refreshed, needs immediate refresh
+            paused: false,
         }
     }
 
     fn should_refresh(&self) -> bool {
+        if self.paused {
+            return false;
+        }
         match self.last_refresh {
             None => true, // First refresh is immediate
             Some(last) => last.elapsed() >= self.interval,
@@ -203,6 +373,12 @@ impl ComponentRefresh {
     }
 
     fn time_until_refresh(&self) -> Duration {
+        if self.paused {
+            // A paused component must not report "due now": the coordinator's
+            // sleep is the MINIMUM over all components, so returning zero here
+            // would spin the loop at full speed with everything paused.
+            return Duration::from_secs(3600);
+        }
         match self.last_refresh {
             None => Duration::from_millis(0), // Immediate refresh needed
             Some(last) => {
@@ -223,6 +399,10 @@ pub enum CoordinatorCommand {
     Register(String, Duration),
     /// Update component refresh interval
     UpdateInterval(String, Duration),
+    /// Poll exactly these components; pause every other registered one.
+    SetPollSet(Vec<String>),
+    /// Resume every component (the normal-window poll set).
+    ClearPollSet,
 }
 
 impl RefreshCoordinator {
@@ -280,6 +460,45 @@ impl RefreshCoordinator {
                                 log::info!("Updated interval for {} to {:?}", id, interval);
                             }
                         }
+                        CoordinatorCommand::SetPollSet(poll_set) => {
+                            // One command carries the whole set, so the
+                            // coordinator stays stateless about modes and the
+                            // command is safe to re-send on every switch.
+                            let mut newly_paused = Vec::new();
+                            let mut resumed = Vec::new();
+                            for (id, component) in self.components.iter_mut() {
+                                let should_poll = poll_set.iter().any(|name| name == id);
+                                if !should_poll && !component.paused {
+                                    component.paused = true;
+                                    newly_paused.push(id.clone());
+                                } else if should_poll && component.paused {
+                                    component.paused = false;
+                                    resumed.push(id.clone());
+                                }
+                            }
+                            log::info!(
+                                "poll set updated: paused={:?} resumed={:?}",
+                                newly_paused,
+                                resumed
+                            );
+                        }
+                        CoordinatorCommand::ClearPollSet => {
+                            let resumed: Vec<String> = self
+                                .components
+                                .iter_mut()
+                                .filter_map(|(id, component)| {
+                                    if component.paused {
+                                        component.paused = false;
+                                        Some(id.clone())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            if !resumed.is_empty() {
+                                log::info!("poll set cleared, resumed={:?}", resumed);
+                            }
+                        }
                     }
                 }
             }
@@ -306,5 +525,27 @@ impl CoordinatorHandle {
         self.command_tx
             .send(CoordinatorCommand::UpdateInterval(id, interval))
             .map_err(|e| anyhow::anyhow!("Failed to update interval: {}", e))
+    }
+
+    /// Poll exactly `components`; pause every other registered component.
+    ///
+    /// Used by panel mode, where drawing ten rows needs a handful of the
+    /// registered components. Passing an empty set pauses everything, which is
+    /// correct for a panel with every row switched off: nothing is drawn, so
+    /// nothing needs polling.
+    pub fn set_poll_set(&self, components: Vec<String>) -> Result<()> {
+        self.command_tx
+            .send(CoordinatorCommand::SetPollSet(components))
+            .map_err(|e| anyhow::anyhow!("Failed to update poll set: {}", e))
+    }
+
+    /// Resume every registered component.
+    ///
+    /// Distinct from `set_poll_set(vec![])`, which pauses everything: the normal
+    /// window polls all of them, so returning to it must un-pause, not pause.
+    pub fn clear_poll_set(&self) -> Result<()> {
+        self.command_tx
+            .send(CoordinatorCommand::ClearPollSet)
+            .map_err(|e| anyhow::anyhow!("Failed to clear poll set: {}", e))
     }
 }
