@@ -2,6 +2,7 @@ use egui::{Ui, ScrollArea, CollapsingHeader, Grid, ProgressBar, RichText};
 use egui::Color32;
 use lapsphere_common::types::GamepadStatus;
 use crate::app::AppState;
+use crate::stat_format;
 use crate::theme::{temp_color, load_color, power_color};
 
 pub const STATISTICS_SECTIONS: [(&str, &str); 9] = [
@@ -108,21 +109,21 @@ fn draw_memory_info(ui: &mut Ui, state: &AppState) {
                         ui.label("Usage:");
                         ui.add(
                             ProgressBar::new(mem.used_percent / 100.0)
-                                .text(format!("{:.1}%", mem.used_percent))
-                                .fill(load_color(mem.used_percent))
+                                .text(stat_format::percent1(mem.used_percent))
+                                .fill(load_color(mem.used_percent)),
                         );
                         ui.end_row();
 
                         ui.label("Used:");
-                        ui.label(format!("{:.2} GiB", mem.used_gib));
+                        ui.label(stat_format::gib2(mem.used_gib));
                         ui.end_row();
 
                         ui.label("Available:");
-                        ui.label(format!("{:.2} GiB", mem.available_gib));
+                        ui.label(stat_format::gib2(mem.available_gib));
                         ui.end_row();
 
                         ui.label("Total:");
-                        ui.label(format!("{:.2} GiB", mem.total_gib));
+                        ui.label(stat_format::gib2(mem.total_gib));
                         ui.end_row();
                     });
             } else {
@@ -176,16 +177,20 @@ fn draw_cpu_info(ui: &mut Ui, state: &AppState) {
                         ui.end_row();
                         
                         ui.label("Average Frequency:");
-                        ui.label(RichText::new(format!("{} MHz", cpu.average_frequency / 1000))
-                            .monospace());
+                        ui.label(
+                            RichText::new(stat_format::average_frequency_mhz(
+                                cpu.average_frequency,
+                            ))
+                            .monospace(),
+                        );
                         ui.end_row();
                         
                         ui.label("Average Load:");
                         ui.horizontal(|ui| {
                             ui.add(
                                 ProgressBar::new(cpu.average_load / 100.0)
-                                    .text(format!("{:.1}%", cpu.average_load))
-                                    .fill(load_color(cpu.average_load))
+                                    .text(stat_format::percent1(cpu.average_load))
+                                    .fill(load_color(cpu.average_load)),
                             );
                         });
                         ui.end_row();
@@ -193,7 +198,7 @@ fn draw_cpu_info(ui: &mut Ui, state: &AppState) {
                         ui.label("Package Temperature:");
                         ui.colored_label(
                             temp_color(cpu.package_temp),
-                            RichText::new(format!("{:.1}°C", cpu.package_temp))
+                            RichText::new(stat_format::celsius1(cpu.package_temp))
                                 .strong()
                                 .monospace()
                         );
@@ -205,9 +210,11 @@ fn draw_cpu_info(ui: &mut Ui, state: &AppState) {
                                 for source in &cpu.all_power_sources {
                                     ui.horizontal(|ui| {
                                         ui.label(RichText::new(&source.name).small());
-                                        ui.label(RichText::new(format!("{:.1} W", source.value))
-                                            .small()
-                                            .monospace());
+                                        ui.label(
+                                            RichText::new(stat_format::watts1(source.value))
+                                                .small()
+                                                .monospace(),
+                                        );
                                     });
                                 }
                             });
@@ -277,8 +284,12 @@ fn draw_cpu_info(ui: &mut Ui, state: &AppState) {
                                 
                                 for core in &cpu.cores {
                                     ui.label(format!("CPU {}", core.id));
-                                    ui.label(RichText::new(format!("{} MHz", core.frequency / 1000))
-                                        .monospace());
+                                    ui.label(
+                                        RichText::new(stat_format::average_frequency_mhz(
+                                            core.frequency,
+                                        ))
+                                        .monospace(),
+                                    );
                                     ui.add(
                                         ProgressBar::new(core.load / 100.0)
                                             .text(format!("{:.0}%", core.load))
@@ -286,7 +297,7 @@ fn draw_cpu_info(ui: &mut Ui, state: &AppState) {
                                     );
                                     ui.colored_label(
                                         temp_color(core.temperature),
-                                        format!("{:.0}°C", core.temperature)
+                                        format!("{:.0}°C", core.temperature),
                                     );
                                     ui.end_row();
                                 }
@@ -333,9 +344,16 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                             if let Some(freq) = gpu.frequency {
                                 ui.label("Core Frequency:");
                                 ui.horizontal(|ui| {
-                                    ui.label(format!("{} MHz", freq));
+                                    ui.label(stat_format::mhz(freq));
                                     if let Some((min, max)) = gpu.core_clock_range {
-                                        ui.label(RichText::new(format!(" (Range: {} - {} MHz)", min, max)).small().italics());
+                                        ui.label(
+                                            RichText::new(format!(
+                                                " (Range: {} - {} MHz)",
+                                                min, max
+                                            ))
+                                            .small()
+                                            .italics(),
+                                        );
                                     }
                                 });
                                 ui.end_row();
@@ -350,9 +368,16 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                             if let Some(mem_freq) = gpu.memory_frequency {
                                 ui.label("Memory Frequency:");
                                 ui.horizontal(|ui| {
-                                    ui.label(format!("{} MHz", mem_freq));
+                                    ui.label(stat_format::mhz(mem_freq));
                                     if let Some((min, max)) = gpu.memory_clock_range {
-                                        ui.label(RichText::new(format!(" (Range: {} - {} MHz)", min, max)).small().italics());
+                                        ui.label(
+                                            RichText::new(format!(
+                                                " (Range: {} - {} MHz)",
+                                                min, max
+                                            ))
+                                            .small()
+                                            .italics(),
+                                        );
                                     }
                                 });
                                 ui.end_row();
@@ -366,10 +391,7 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                             
                             if let Some(temp) = gpu.temperature {
                                 ui.label("Temperature:");
-                                ui.colored_label(
-                                    temp_color(temp),
-                                    format!("{:.1}°C", temp)
-                                );
+                                ui.colored_label(temp_color(temp), stat_format::celsius1(temp));
                                 ui.end_row();
                             }
                             
@@ -377,7 +399,7 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                                 ui.label("Hotspot Temperature:");
                                 ui.colored_label(
                                     temp_color(hotspot_temp),
-                                    format!("{:.1}°C", hotspot_temp)
+                                    stat_format::celsius1(hotspot_temp),
                                 );
                                 ui.end_row();
                             }
@@ -386,30 +408,29 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
                                 ui.label("Memory Temperature:");
                                 ui.colored_label(
                                     temp_color(mem_temp),
-                                    format!("{:.1}°C", mem_temp)
+                                    stat_format::celsius1(mem_temp),
                                 );
                                 ui.end_row();
                             }
                             
                             if let Some(load) = gpu.load {
                                 ui.label("Load:");
-                                ui.add(ProgressBar::new(load / 100.0)
-                                    .text(format!("{:.1}%", load)));
+                                ui.add(
+                                    ProgressBar::new(load / 100.0)
+                                        .text(stat_format::percent1(load)),
+                                );
                                 ui.end_row();
                             }
                             
                             if let Some(power) = gpu.power {
                                 ui.label("Power:");
-                                ui.colored_label(
-                                    power_color(power),
-                                    format!("{:.1} W", power)
-                                );
+                                ui.colored_label(power_color(power), stat_format::watts1(power));
                                 ui.end_row();
                             }
 
                             if let Some(voltage) = gpu.voltage {
                                 ui.label("Voltage:");
-                                ui.label(format!("{:.3} V", voltage));
+                                ui.label(stat_format::volts3(voltage));
                                 ui.end_row();
                             }
 
@@ -417,25 +438,25 @@ fn draw_gpu_info(ui: &mut Ui, state: &AppState) {
 
                             if let Some(fo) = gpu.freq_offset {
                                 ui.label("Freq Offset:");
-                                ui.label(format!("{}{} MHz", if fo >= 0 { "+" } else { "" }, fo));
+                                ui.label(stat_format::signed_mhz(fo));
                                 ui.end_row();
                             }
 
                             if let Some(do_) = gpu.drain_offset {
                                 ui.label("Drain Offset:");
-                                ui.label(format!("{}{} MHz", if do_ >= 0 { "+" } else { "" }, do_));
+                                ui.label(stat_format::signed_mhz(do_));
                                 ui.end_row();
                             }
 
                             if let Some(po) = gpu.power_offset {
                                 ui.label("Power Offset:");
-                                ui.label(format!("{}{} MHz", if po >= 0 { "+" } else { "" }, po));
+                                ui.label(stat_format::signed_mhz(po));
                                 ui.end_row();
                             }
 
                             if let Some(to) = gpu.total_offset {
                                 ui.label("Total Offset:");
-                                ui.label(RichText::new(format!("{}{} MHz", if to >= 0 { "+" } else { "" }, to)).strong());
+                                ui.label(RichText::new(stat_format::signed_mhz(to)).strong());
                                 ui.end_row();
                             }
                         });
@@ -622,12 +643,12 @@ fn draw_battery_info(ui: &mut Ui, state: &AppState) {
                         ui.end_row();
                         
                         ui.label("Voltage:");
-                        ui.label(format!("{:.2} V", battery.voltage_mv as f64 / 1000.0));
+                        ui.label(stat_format::volts2(battery.voltage_mv as f64 / 1000.0));
                         ui.end_row();
                         
                         ui.label("Current:");
                         let current_a = battery.current_ma as f64 / 1000.0;
-                        ui.label(format!("{:.2} A", current_a.abs()));
+                        ui.label(stat_format::amperes2(current_a));
                         ui.end_row();
                         
                         ui.label("Status:");
@@ -639,7 +660,7 @@ fn draw_battery_info(ui: &mut Ui, state: &AppState) {
                             ui.label("Power:");
                             ui.colored_label(
                                 power_color(power_w.abs() as f32),
-                                format!("{:.1} W", power_w.abs())
+                                stat_format::watts1(power_w.abs() as f32),
                             );
                             ui.end_row();
                         }
@@ -699,7 +720,10 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
                                     };
 
                                     let progress_bar = ProgressBar::new(signal_percent)
-                                        .text(RichText::new(format!("{} dBm", signal)).color(Color32::BLACK))
+                                        .text(
+                                            RichText::new(format!("{} dBm", signal))
+                                                .color(Color32::BLACK),
+                                        )
                                         .fill(color);
                                     ui.add(progress_bar);
                                 });
@@ -711,7 +735,7 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
                             // Received Data
                             ui.label("Received Data:");
                             if let Some(rx_bytes) = wifi.rx_bytes {
-                                ui.label(RichText::new(format_bytes(rx_bytes)).monospace());
+                                ui.label(RichText::new(stat_format::bytes(rx_bytes)).monospace());
                             } else {
                                 ui.label(RichText::new("—").weak());
                             }
@@ -720,7 +744,7 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
                             // Sent Data
                             ui.label("Sent Data:");
                             if let Some(tx_bytes) = wifi.tx_bytes {
-                                ui.label(RichText::new(format_bytes(tx_bytes)).monospace());
+                                ui.label(RichText::new(stat_format::bytes(tx_bytes)).monospace());
                             } else {
                                 ui.label(RichText::new("—").weak());
                             }
@@ -750,10 +774,18 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
                             if wifi.rx_bitrate.is_some() || wifi.tx_bitrate.is_some() {
                                 ui.horizontal(|ui| {
                                     if let Some(rx) = wifi.rx_bitrate {
-                                        ui.label(RichText::new(format!("RX: {:.1} Mbps", rx)).small().monospace());
+                                        ui.label(
+                                            RichText::new(format!("RX: {:.1} Mbps", rx))
+                                                .small()
+                                                .monospace(),
+                                        );
                                     }
                                     if let Some(tx) = wifi.tx_bitrate {
-                                        ui.label(RichText::new(format!(" TX: {:.1} Mbps", tx)).small().monospace());
+                                        ui.label(
+                                            RichText::new(format!(" TX: {:.1} Mbps", tx))
+                                                .small()
+                                                .monospace(),
+                                        );
                                     }
                                 });
                             } else {
@@ -766,14 +798,18 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
                             if wifi.rx_rate.is_some() || wifi.tx_rate.is_some() {
                                 ui.horizontal(|ui| {
                                     if let Some(rx) = wifi.rx_rate {
-                                        ui.label(RichText::new(format!("↓ {:.2} Mbps", rx))
-                                            .monospace()
-                                            .color(Color32::from_rgb(100, 200, 255)));
+                                        ui.label(
+                                            RichText::new(format!("↓ {:.2} Mbps", rx))
+                                                .monospace()
+                                                .color(Color32::from_rgb(100, 200, 255)),
+                                        );
                                     }
                                     if let Some(tx) = wifi.tx_rate {
-                                        ui.label(RichText::new(format!(" ↑ {:.2} Mbps", tx))
-                                            .monospace()
-                                            .color(Color32::from_rgb(255, 150, 100)));
+                                        ui.label(
+                                            RichText::new(format!(" ↑ {:.2} Mbps", tx))
+                                                .monospace()
+                                                .color(Color32::from_rgb(255, 150, 100)),
+                                        );
                                     }
                                 });
                             } else {
@@ -786,7 +822,7 @@ fn draw_wifi_info(ui: &mut Ui, state: &AppState) {
                             if let Some(temp) = wifi.temperature {
                                 ui.colored_label(
                                     temp_color(temp),
-                                    RichText::new(format!("{:.1}°C", temp)).monospace()
+                                    RichText::new(stat_format::celsius1(temp)).monospace(),
                                 );
                             } else {
                                 ui.label(RichText::new("—").weak());
@@ -824,34 +860,37 @@ fn draw_storage_info(ui: &mut Ui, state: &AppState) {
 
                             if let Some(temp) = device.temperature {
                                 ui.label("Temperature:");
-                                ui.colored_label(
-                                    temp_color(temp),
-                                    format!("{:.1}°C", temp)
-                                );
+                                ui.colored_label(temp_color(temp), stat_format::celsius1(temp));
                                 ui.end_row();
                             }
 
                             if let Some(read_speed) = device.read_speed {
                                 ui.label("Read Speed:");
-                                ui.label(RichText::new(format!("{:.1} MB/s", read_speed)).monospace());
+                                ui.label(RichText::new(stat_format::mbps1(read_speed)).monospace());
                                 ui.end_row();
                             }
 
                             if let Some(write_speed) = device.write_speed {
                                 ui.label("Write Speed:");
-                                ui.label(RichText::new(format!("{:.1} MB/s", write_speed)).monospace());
+                                ui.label(
+                                    RichText::new(stat_format::mbps1(write_speed)).monospace(),
+                                );
                                 ui.end_row();
                             }
 
                             if let Some(read_iops) = device.read_iops {
                                 ui.label("Read IOPS:");
-                                ui.label(RichText::new(format!("{:.0} IOPS", read_iops)).monospace());
+                                ui.label(
+                                    RichText::new(format!("{:.0} IOPS", read_iops)).monospace(),
+                                );
                                 ui.end_row();
                             }
 
                             if let Some(write_iops) = device.write_iops {
                                 ui.label("Write IOPS:");
-                                ui.label(RichText::new(format!("{:.0} IOPS", write_iops)).monospace());
+                                ui.label(
+                                    RichText::new(format!("{:.0} IOPS", write_iops)).monospace(),
+                                );
                                 ui.end_row();
                             }
                         });
@@ -874,14 +913,17 @@ fn draw_storage_info(ui: &mut Ui, state: &AppState) {
                             ui.horizontal(|ui| {
                                 ui.add(
                                     ProgressBar::new(mount.used_percent as f32 / 100.0)
-                                        .text(format!("{:.1}%", mount.used_percent))
-                                        .desired_width(200.0)
+                                        .text(stat_format::percent1_f64(mount.used_percent))
+                                        .desired_width(200.0),
                                 );
                             });
                             ui.end_row();
 
                             ui.label("Free Space:");
-                            ui.label(format!("{:.1} GB", mount.total_gb as f64 - mount.used_gb as f64));
+                            ui.label(format!(
+                                "{:.1} GB",
+                                mount.total_gb as f64 - mount.used_gb as f64
+                            ));
                             ui.end_row();
 
                             ui.label("Filesystem:");
@@ -927,9 +969,11 @@ fn draw_gamepad_info(ui: &mut Ui, state: &AppState) {
                                 ui.label("Battery:");
                                 if let Some(level) = gamepad.battery_level {
                                     ui.horizontal(|ui| {
-                                        ui.add(ProgressBar::new(level as f32 / 100.0)
-                                            .text(format!("{}%", level))
-                                            .desired_width(120.0));
+                                        ui.add(
+                                            ProgressBar::new(level as f32 / 100.0)
+                                                .text(format!("{}%", level))
+                                                .desired_width(120.0),
+                                        );
                                     });
                                 } else {
                                     ui.label("—");
@@ -986,10 +1030,7 @@ fn draw_fan_info(ui: &mut Ui, state: &AppState) {
                             });
                             
                             if let Some(temp) = fan.temperature {
-                                ui.colored_label(
-                                    temp_color(temp),
-                                    format!("{:.1}°C", temp)
-                                );
+                                ui.colored_label(temp_color(temp), stat_format::celsius1(temp));
                             } else {
                                 ui.label("—");
                             }
@@ -1007,21 +1048,4 @@ fn draw_fan_info(ui: &mut Ui, state: &AppState) {
                 ui.label("No fan information available");
             }
         });
-}
-
-fn format_bytes(bytes: u64) -> String {
-    const KIB: f64 = 1024.0;
-    const MIB: f64 = KIB * 1024.0;
-    const GIB: f64 = MIB * 1024.0;
-
-    let bytes_f = bytes as f64;
-    if bytes_f >= GIB {
-        format!("{:.2} GiB", bytes_f / GIB)
-    } else if bytes_f >= MIB {
-        format!("{:.2} MiB", bytes_f / MIB)
-    } else if bytes_f >= KIB {
-        format!("{:.2} KiB", bytes_f / KIB)
-    } else {
-        format!("{} B", bytes)
-    }
 }

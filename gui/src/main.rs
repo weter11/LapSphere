@@ -3,6 +3,8 @@ mod dbus_client;
 mod gamepad_registry;
 mod theme;
 mod pages;
+mod panel;
+mod stat_format;
 mod keyboard_shortcuts;
 mod widgets;
 mod polling_scheduler;
@@ -222,6 +224,7 @@ fn main() -> Result<(), eframe::Error> {
 
     let args: Vec<String> = std::env::args().collect();
     let start_in_tray_arg = args.contains(&"--tray".to_string());
+    let start_in_panel_arg = args.contains(&"--panel".to_string());
 
     let config = app::load_config_from_disk().unwrap_or_default();
     let start_minimized = start_in_tray_arg || config.start_minimized;
@@ -255,7 +258,7 @@ fn main() -> Result<(), eframe::Error> {
     eframe::run_native(
         "LapSphere",
         options,
-        Box::new(move |cc| Ok(Box::new(LapSphereApp::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(LapSphereApp::new(cc, start_in_panel_arg)))),
     )
 }
 
