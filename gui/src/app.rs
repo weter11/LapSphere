@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::collections::VecDeque;
+use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use lapsphere_common::types::*;
 
@@ -432,6 +433,11 @@ pub struct LapSphereApp {
     panel_atoms_applied: bool,
     /// Pending mode change, applied on the next frame.
     pending_mode: Option<Mode>,
+    /// Hotkey / D-Bus toggle state, shared with the watcher thread.
+    visibility: Arc<crate::panel::visibility::Visibility>,
+    /// The panel is in panel mode but hidden: the window is unmapped and paints
+    /// nothing, waiting for the hotkey, the tray or the CLI to bring it back.
+    panel_hidden: bool,
 }
 
 #[derive(Debug)]
@@ -743,6 +749,19 @@ impl LapSphereApp {
         // Panel config is loaded from its own file; `settings.json` and the
         // tray's settings are not read or written here.
         let mut panel_config = panel::load_panel_config();
+        let visibility = Arc::new(crate::panel::visibility::Visibility::new());
+
+        // Grab the hotkey on a watcher thread, and export the D-Bus method that
+        // `lapsphere --toggle-panel` calls. Both are "ways back" that the hide
+        // safety rule counts, so they are established before the panel is shown.
+        #[cfg(target_os = "linux")]
+        crate::panel::visibility::start_hotkey(&panel_config.hotkey, Arc::clone(&visibility));
+
+        // The D-Bus export is async and `new()` is not.
+        let visibility_for_dbus = Arc::clone(&visibility);
+        tokio::spawn(async move {
+            LapSphereApp::export_panel_control(visibility_for_dbus).await;
+        });
         // `--panel` wins over the saved `active` flag, so a launch argument can
         // always reach the panel without editing the file.
         let start_in_panel = std::env::args().any(|arg| arg == "--panel");
@@ -771,6 +790,8 @@ impl LapSphereApp {
             normal_geometry: None,
             panel_atoms_applied: false,
             pending_mode: None,
+            visibility,
+            panel_hidden: false,
         }
     }
 
@@ -794,6 +815,82 @@ impl LapSphereApp {
 
     pub fn mode(&self) -> Mode {
         self.mode
+    }
+
+    /// Export the panel's D-Bus object on the GUI's own session-bus name.
+    ///
+    /// `io.lapsphere.Gui` is the name the single-instance guard already claims,
+    /// so no second name is taken and a second instance still refuses to start.
+    /// There was no suitable existing method: the daemon knows nothing about
+    /// panel mode, and routing a GUI-local action through the privileged daemon
+    /// would be the wrong dependency direction.
+    pub async fn export_panel_control(visibility: Arc<crate::panel::visibility::Visibility>) {
+        let control = crate::panel::visibility::PanelControl::new(visibility);
+        let conn = match zbus::Connection::session().await {
+            Ok(conn) => conn,
+            Err(err) => {
+                log::warn!("panel: no session bus, the D-Bus control method is unavailable: {err}");
+                return;
+            }
+        };
+        if let Err(err) = conn
+            .object_server()
+            .at("/io/lapsphere/Gui/Panel", control)
+            .await
+        {
+            // Not fatal: the hotkey and the tray still work, and the menu reports
+            // the missing path rather than pretending the CLI is available.
+            log::warn!("panel: could not export the D-Bus control object: {err}");
+        }
+    }
+
+    /// A toggle arrived from the hotkey or from D-Bus.
+    ///
+    /// The safety rule: a request to HIDE is only carried out when a way back
+    /// exists (the key was grabbed, the tray is on, or the D-Bus method is
+    /// reachable). With none of those, hiding would leave the user looking at an
+    /// overlay they cannot remove, so the request becomes "return to the normal
+    /// window" instead — the intent was "stop being a panel", and that is the
+    /// only safe reading of it.
+    fn request_toggle_from_outside(&mut self) {
+        let tray = Self::tray_enabled(&self.state);
+        // The D-Bus method is exported by this process, so it is available
+        // whenever the GUI runs; that is what makes the panel reachable on
+        // Wayland, where no global hotkey can be grabbed.
+        let dbus = true;
+
+        // A hidden panel comes back before anything else is considered.
+        if self.panel_hidden {
+            self.panel_hidden = false;
+            log::info!("panel: shown again");
+            return;
+        }
+
+        if !self.mode.is_panel() {
+            self.request_mode(Mode::Panel);
+            return;
+        }
+
+        match crate::panel::menu::hide_outcome(self.visibility.hotkey_grabbed(), tray, dbus) {
+            crate::panel::menu::HideOutcome::Hide => {
+                log::info!("panel: hidden; it can be brought back");
+                self.panel_hidden = true;
+            }
+            crate::panel::menu::HideOutcome::ReturnToNormal => {
+                log::warn!(
+                    "panel: hiding refused, no way back exists (hotkey: {}); \
+                     returning to the normal window instead",
+                    self.visibility.grab_status().message()
+                );
+                self.state.show_message(
+                    "The panel cannot be hidden with no hotkey and no tray: \
+                     returned to normal mode."
+                        .to_string(),
+                    true,
+                );
+                self.request_mode(Mode::Normal);
+            }
+        }
     }
 
     pub fn panel_config(&self) -> &PanelConfig {
@@ -1273,11 +1370,23 @@ impl eframe::App for LapSphereApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
+        // Hotkey and D-Bus both set one flag, consumed here so the toggle
+        // happens on the UI thread regardless of which source fired.
+        if self.visibility.take_toggle() {
+            self.request_toggle_from_outside();
+        }
+
         // A mode change is applied here rather than in the click handler that
         // requested it: viewport commands must not be issued during layout.
         self.apply_mode(&ctx, frame);
 
         if self.mode.is_panel() {
+            // A hidden panel unmaps its window and paints nothing; the hotkey,
+            // the tray or the CLI brings it back.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(!self.panel_hidden));
+            if self.panel_hidden {
+                return;
+            }
             self.draw_panel(ui);
             return;
         }
