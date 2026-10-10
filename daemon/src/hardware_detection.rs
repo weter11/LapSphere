@@ -1932,7 +1932,7 @@ fn suspended_decision(
 /// query is the conservative choice for RTD3 (a wrong "awake" answer would wake
 /// the adapter), and the caller's error path already says the metadata is not
 /// cached.
-fn is_gpu_suspended_by_index(index: u32) -> bool {
+pub(crate) fn is_gpu_suspended_by_index(index: u32) -> bool {
     let sysfs = sysfs_nvidia_devices();
     let known_bdf = bdf_for_nvml_index(index);
     match suspended_decision(&sysfs, known_bdf.as_deref(), sysfs.len()) {
@@ -1944,6 +1944,75 @@ fn is_gpu_suspended_by_index(index: u32) -> bool {
             true
         }
     }
+}
+
+/// Outcome of the GPU write gate for one attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GpuWriteDecision {
+    /// dGPU is awake (or the device has no runtime PM): write now.
+    Write,
+    /// Defer: the adapter is in a state where a write would wake or race it.
+    Defer,
+}
+
+/// Pure write gate. Only `active` and `unsupported` allow a GPU write; every
+/// other sysfs word (suspended, suspending, resuming, empty, unknown) defers.
+/// `known` is false when no BDF mapping exists for the NVML index, or the BDF
+/// is not present in sysfs; in that case the write is deferred and the
+/// position in the device list is never used to guess.
+pub(crate) fn gpu_write_gate(status: &str, known: bool) -> GpuWriteDecision {
+    if !known {
+        return GpuWriteDecision::Defer;
+    }
+    match status {
+        "active" | "unsupported" => GpuWriteDecision::Write,
+        _ => GpuWriteDecision::Defer,
+    }
+}
+
+/// Single entry point for every GPU write site: reads the BDF mapping and the
+/// sysfs runtime-PM word for `index`, then applies [`gpu_write_gate`]. A
+/// deferral logs one line at debug level, only when the status changes, so
+/// per-tick polling does not flood the journal.
+pub(crate) fn gpu_write_allowed(index: u32) -> bool {
+    let sysfs = sysfs_nvidia_devices();
+    let bdf = bdf_for_nvml_index(index);
+    let (status, known) = match bdf.as_deref() {
+        Some(bdf) => match sysfs.iter().find(|d| d.bdf.eq_ignore_ascii_case(bdf)) {
+            Some(dev) => (dev.runtime_status.clone(), true),
+            None => (String::new(), false),
+        },
+        None => (String::new(), false),
+    };
+    match gpu_write_gate(&status, known) {
+        GpuWriteDecision::Write => {
+            clear_deferred_status(index);
+            true
+        }
+        GpuWriteDecision::Defer => {
+            note_deferred_status(index, &status, known);
+            false
+        }
+    }
+}
+
+static LAST_DEFER_LOG: std::sync::Mutex<Option<(u32, String, bool)>> =
+    std::sync::Mutex::new(None);
+
+fn note_deferred_status(index: u32, status: &str, known: bool) {
+    let mut last = crate::hardware_control::lock_or_recover(&LAST_DEFER_LOG, "LAST_DEFER_LOG");
+    let current = (index, status.to_string(), known);
+    if last.as_ref() != Some(&current) {
+        log::debug!(target: "hw.gpu",
+            "GPU write deferred index={} status={:?} mapped={}",
+            index, status, known);
+        *last = Some(current);
+    }
+}
+
+fn clear_deferred_status(_index: u32) {
+    let mut last = crate::hardware_control::lock_or_recover(&LAST_DEFER_LOG, "LAST_DEFER_LOG");
+    *last = None;
 }
 
 // NVIDIA Direct Driver Constants and Structs
@@ -5023,5 +5092,30 @@ mod hil_gpu_tier_tests {
             Err(e) => println!("[-] NvidiaDriverHandle::open(0) failed: {:#}", e),
         }
         println!("[*] runtime_status after: {}", runtime_status());
+    }
+}
+
+#[cfg(test)]
+mod gpu_write_gate_tests {
+    use super::{gpu_write_gate, GpuWriteDecision};
+
+    #[test]
+    fn active_and_unsupported_allow_write_when_mapped() {
+        assert_eq!(gpu_write_gate("active", true), GpuWriteDecision::Write);
+        assert_eq!(gpu_write_gate("unsupported", true), GpuWriteDecision::Write);
+    }
+
+    #[test]
+    fn every_other_status_defers_when_mapped() {
+        for s in ["suspended", "suspending", "resuming", "", "unknown", "ACTIVE", "Active", " active"] {
+            assert_eq!(gpu_write_gate(s, true), GpuWriteDecision::Defer, "status {:?}", s);
+        }
+    }
+
+    #[test]
+    fn unmapped_defers_regardless_of_status() {
+        for s in ["active", "unsupported", "suspended", ""] {
+            assert_eq!(gpu_write_gate(s, false), GpuWriteDecision::Defer, "status {:?}", s);
+        }
     }
 }

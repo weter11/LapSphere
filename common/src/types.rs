@@ -1154,3 +1154,80 @@ impl Default for FanSettings {
         }
     }
 }
+
+/// Result of clamping a profile's frequency limits to the hardware range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FreqLimits {
+    pub min: Option<u64>,
+    pub max: Option<u64>,
+    pub changed: bool,
+}
+
+/// Clamp profile min/max frequency (kHz) into [hw_min_khz, hw_max_khz] and
+/// enforce min <= max. `None` stays `None` (the governor then uses hardware
+/// defaults). Returns whether any value changed.
+pub fn normalize_freq_limits(
+    min_khz: Option<u64>,
+    max_khz: Option<u64>,
+    hw_min_khz: u64,
+    hw_max_khz: u64,
+) -> FreqLimits {
+    let clamp = |v: u64| v.clamp(hw_min_khz, hw_max_khz);
+    let min_c = min_khz.map(clamp);
+    let mut max_c = max_khz.map(clamp);
+    if let (Some(lo), Some(hi)) = (min_c, max_c) {
+        if lo > hi {
+            // Keep the user's min when possible; move max up to it.
+            max_c = Some(lo);
+        }
+    }
+    let changed = min_c != min_khz || max_c != max_khz;
+    FreqLimits { min: min_c, max: max_c, changed }
+}
+
+#[cfg(test)]
+mod freq_limit_tests {
+    use super::normalize_freq_limits;
+
+    const HW_MIN: u64 = 403_488;
+    const HW_MAX: u64 = 4_465_261;
+
+    #[test]
+    fn below_hardware_minimum_is_raised() {
+        let r = normalize_freq_limits(Some(400_000), Some(3_000_000), HW_MIN, HW_MAX);
+        assert_eq!(r.min, Some(HW_MIN));
+        assert_eq!(r.max, Some(3_000_000));
+        assert!(r.changed);
+    }
+
+    #[test]
+    fn above_hardware_maximum_is_lowered() {
+        let r = normalize_freq_limits(Some(1_000_000), Some(5_000_000), HW_MIN, HW_MAX);
+        assert_eq!(r.max, Some(HW_MAX));
+        assert!(r.changed);
+    }
+
+    #[test]
+    fn min_above_max_is_resolved() {
+        let r = normalize_freq_limits(Some(3_000_000), Some(2_000_000), HW_MIN, HW_MAX);
+        assert_eq!(r.min, Some(3_000_000));
+        assert_eq!(r.max, Some(3_000_000));
+        assert!(r.changed);
+    }
+
+    #[test]
+    fn exact_hardware_boundary_is_unchanged() {
+        let r = normalize_freq_limits(Some(HW_MIN), Some(HW_MAX), HW_MIN, HW_MAX);
+        assert_eq!(r.min, Some(HW_MIN));
+        assert_eq!(r.max, Some(HW_MAX));
+        assert!(!r.changed);
+    }
+
+    #[test]
+    fn none_stays_none() {
+        let r = normalize_freq_limits(None, None, HW_MIN, HW_MAX);
+        assert_eq!(r.min, None);
+        assert_eq!(r.max, None);
+        assert!(!r.changed);
+    }
+}

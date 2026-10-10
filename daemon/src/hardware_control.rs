@@ -401,8 +401,35 @@ fn get_cpu_count() -> Result<u32> {
     Ok(count as u32)
 }
 
+/// NVML index of the NVIDIA adapter as learned by the last live pass. `None`
+/// until that pass has run; callers defer GPU writes instead of guessing 0.
+pub(crate) fn cached_nvidia_nvml_index() -> Option<u32> {
+    let cache = match crate::HARDWARE_CACHE.lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    cache.gpu_info.iter()
+        .find(|g| g.name.to_lowercase().contains("nvidia"))
+        .and_then(|g| g.nvml_index)
+}
+
+/// Pure check behind `set_cpu_governor`: the kernel lists the governors valid
+/// for the current pstate mode in `scaling_available_governors`.
+pub(crate) fn governor_is_available(available: &str, governor: &str) -> bool {
+    available.split_whitespace().any(|g| g == governor)
+}
+
 pub fn set_cpu_governor(governor: &str) -> Result<()> {
     let cpu_count = get_cpu_count()?;
+
+    let avail_path = "/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors";
+    let available = fs::read_to_string(avail_path)
+        .map_err(|e| anyhow!("cannot read {}: {}", avail_path, e))?;
+    if !governor_is_available(&available, governor) {
+        log::error!(target: "hw.cpu", "governor \"{}\" not available in current mode; available=[{}]",
+            governor, available.trim());
+        return Err(anyhow!("governor \"{}\" not available (available: {})", governor, available.trim()));
+    }
 
     guard_sysfs_write("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor", governor)?;
 
@@ -561,9 +588,16 @@ pub fn apply_profile(profile: &Profile) -> Result<()> {
     }
 
     log::info!(target: "hw.detect", "Applying profile: {}", profile.name);
+    // Generation and GPU state are committed only after the whole apply
+    // succeeded. On failure neither the generation nor GPU_DAEMON_STATE moves.
     let result = apply_profile_inner(profile);
     match result {
         Ok(()) => {
+            crate::GPU_APPLY_GEN.fetch_add(1, Ordering::SeqCst);
+            {
+                let mut state = lock_or_recover(&crate::GPU_DAEMON_STATE, "GPU_DAEMON_STATE");
+                *state = Some(profile.gpu_settings.clone());
+            }
             // Record the profile only now that every hardware step succeeded.
             let mut last_profile = lock_or_recover(&LAST_APPLIED_PROFILE, "LAST_APPLIED_PROFILE");
             *last_profile = Some(profile.clone());
@@ -584,13 +618,52 @@ pub fn apply_profile(profile: &Profile) -> Result<()> {
 
 /// All hardware steps of a profile apply, in order. The caller owns the
 /// last-applied marker so a failure never leaves a stale "already applied" state.
-fn apply_profile_inner(profile: &Profile) -> Result<()> {
-    
-    // Apply CPU settings
-    if let Some(ref governor) = profile.cpu_settings.governor {
-        set_cpu_governor(governor)?;
+/// Pure preflight: validate everything that can be checked without writing.
+/// `pstate_active` is the current amd-pstate mode the governor will land in;
+/// `hw_bounds` is the CPU frequency window in kHz. Returns the first problem.
+pub(crate) fn preflight_profile(
+    profile: &Profile,
+    pstate_active: bool,
+    hw_bounds: Option<(u64, u64)>,
+) -> Result<()> {
+    if let Some(ref gov) = profile.cpu_settings.governor {
+        if pstate_active && !matches!(gov.as_str(), "performance" | "powersave") {
+            return Err(anyhow!(
+                "governor \"{}\" is not valid in amd-pstate active mode (allowed: performance, powersave)",
+                gov
+            ));
+        }
     }
-    
+    if let (Some(min), Some(max)) = (profile.cpu_settings.min_frequency, profile.cpu_settings.max_frequency) {
+        if min > max {
+            return Err(anyhow!("min frequency {} kHz is above max {} kHz", min, max));
+        }
+        if let Some((hw_min, hw_max)) = hw_bounds {
+            if min < hw_min || max > hw_max {
+                return Err(anyhow!(
+                    "frequency limits {}-{} kHz outside hardware range {}-{} kHz",
+                    min, max, hw_min, hw_max
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_profile_inner(profile: &Profile) -> Result<()> {
+    // Checks that need no hardware write come first: a rejected profile must
+    // leave the machine untouched.
+    // The governor must be valid for the mode the profile is about to set,
+    // not the mode the machine is currently in.
+    let target_pstate_active = match profile.cpu_settings.amd_pstate_status.as_deref() {
+        Some(s) => s == "active",
+        None => fs::read_to_string("/sys/devices/system/cpu/amd_pstate/status")
+            .map(|s| s.trim() == "active")
+            .unwrap_or(false),
+    };
+    preflight_profile(profile, target_pstate_active, read_hw_freq_bounds())?;
+
+    // Apply CPU settings
     if let Some(ref tdp_profile) = profile.cpu_settings.tdp_profile {
         set_tdp_profile(tdp_profile)?;
     }
@@ -613,6 +686,12 @@ fn apply_profile_inner(profile: &Profile) -> Result<()> {
         set_amd_pstate_status(amd_status)?;
     }
 
+    // Governor only after the pstate mode is final: the kernel's list of
+    // available governors depends on it.
+    if let Some(ref governor) = profile.cpu_settings.governor {
+        set_cpu_governor(governor)?;
+    }
+
     if let Some(ref intel_status) = profile.cpu_settings.intel_pstate_status {
         set_intel_pstate_status(intel_status)?;
     }
@@ -625,41 +704,6 @@ fn apply_profile_inner(profile: &Profile) -> Result<()> {
         set_cpu_frequency_limits(min, max)?;
     }
 
-    // Apply GPU settings
-    let nvidia_gpu_idx = {
-        let cache = match crate::HARDWARE_CACHE.lock() {
-            Ok(g) => g,
-            Err(e) => {
-                log::error!(target: "hw.cache", "HARDWARE_CACHE poisoned — clearing poison and recovering");
-                let g = e.into_inner();
-                crate::HARDWARE_CACHE.clear_poison();
-                g
-            }
-        };
-        cache.gpu_info.iter()
-            .find(|g| g.name.to_lowercase().contains("nvidia"))
-            .and_then(|g| g.nvml_index)
-            .unwrap_or(0)
-    };
-
-    if let Some(limit) = profile.gpu_settings.power_limit {
-        let _ = set_gpu_power_limit(nvidia_gpu_idx, limit);
-    }
-
-    if let Some(core_offset) = profile.gpu_settings.core_offset {
-        let _ = set_gpu_core_offset(nvidia_gpu_idx, core_offset as f32);
-    }
-
-    if let Some(memory_offset) = profile.gpu_settings.memory_offset {
-        let _ = set_gpu_memory_offset(nvidia_gpu_idx, memory_offset as f32);
-    }
-
-    if let (Some(min_clock), Some(max_clock)) = (profile.gpu_settings.min_gpu_clock, profile.gpu_settings.max_gpu_clock) {
-        let _ = set_gpu_locked_clocks(nvidia_gpu_idx, min_clock, max_clock);
-    } else {
-        let _ = reset_gpu_clocks(nvidia_gpu_idx);
-    }
-    
     if let Some(boost) = profile.cpu_settings.boost {
         set_cpu_boost(boost)?;
     }
@@ -677,15 +721,44 @@ fn apply_profile_inner(profile: &Profile) -> Result<()> {
     // Apply fan settings - update daemon state
     apply_fan_settings(&profile.fan_settings)?;
 
-    // Apply NVIDIA fan settings
-    for fan_setting in &profile.gpu_settings.nvidia_fans {
-        if fan_setting.manual {
-            let _ = set_gpu_fan_speed(fan_setting.device_index, fan_setting.fan_id, fan_setting.speed);
-        } else {
-            let _ = set_gpu_fan_auto(fan_setting.device_index, fan_setting.fan_id);
+    // Single GPU write path, after every other step succeeded. The poll runs
+    // the same executor on later ticks; nothing here writes GPU state directly.
+    // Without a cached index or with a suspended dGPU the poll applies it later.
+    if let Some(idx) = cached_nvidia_nvml_index() {
+        if crate::hardware_detection::gpu_write_allowed(idx) {
+            // The generation this apply will commit (wrapper bumps it on success).
+            let generation = crate::GPU_APPLY_GEN.load(Ordering::SeqCst) + 1;
+            execute_gpu_plan(idx, &profile.gpu_settings, generation)?;
         }
     }
 
+    Ok(())
+}
+
+/// Execute the GPU plan for one generation. Returns Ok only if every
+/// NVML-touching op succeeded; the caller records the generation after that.
+/// The only place GPU NVML writes are issued (poll and profile apply share it).
+pub(crate) fn execute_gpu_plan(
+    idx: u32,
+    settings: &lapsphere_common::types::GpuSettings,
+    generation: u64,
+) -> Result<()> {
+    let applied = crate::GPU_APPLIED_GEN.load(Ordering::SeqCst);
+    let plan = crate::gpu_plan::gpu_apply_plan(false, settings, generation, applied);
+    if let crate::gpu_plan::GpuPlan::Apply { ops, generation } = plan {
+        for op in &ops {
+            match op {
+                crate::gpu_plan::GpuOp::PowerLimit(w) => set_gpu_power_limit(idx, *w)?,
+                crate::gpu_plan::GpuOp::CoreOffset(o) => set_gpu_core_offset(idx, *o)?,
+                crate::gpu_plan::GpuOp::MemoryOffset(o) => set_gpu_memory_offset(idx, *o)?,
+                crate::gpu_plan::GpuOp::LockedClocks(lo, hi) => set_gpu_locked_clocks(idx, *lo, *hi)?,
+                crate::gpu_plan::GpuOp::ResetClocks => reset_gpu_clocks(idx)?,
+                crate::gpu_plan::GpuOp::FanSpeed { fan_id, speed } => set_gpu_fan_speed(idx, *fan_id, *speed)?,
+                crate::gpu_plan::GpuOp::FanAuto { fan_id } => set_gpu_fan_auto(idx, *fan_id)?,
+            }
+        }
+        crate::GPU_APPLIED_GEN.store(generation, Ordering::SeqCst);
+    }
     Ok(())
 }
 
@@ -1065,24 +1138,6 @@ pub fn set_energy_performance_preference(epp: &str) -> Result<()> {
     }
 
     log::info!(target: "hw.cpu", "set_epp preference=\"{}\"", epp);
-    Ok(())
-}
-
-/// Apply an EPP preference to every CPU/policy.
-///
-/// This is the explicit "all CPUs" entry point. It writes exactly the target set
-/// returned by [`existing_epp_paths`] — the same list
-/// `set_energy_performance_preference` uses — and nothing else, so the function
-/// and [`guard_sysfs_write`] cannot disagree about what is writable (the test
-/// `epp_write_targets_stay_inside_the_allowlist` pins that with synthetic CPU
-/// numbers). It previously also attempted
-/// `/sys/devices/system/cpu/cpufreq/energy_performance_preference`, which is not
-/// an attribute in the kernel's cpufreq layout and is not on the allowlist: that
-/// branch could only ever be skipped (path absent) or rejected by the guard.
-pub fn set_all_cpu_epp(epp: &str) -> Result<()> {
-    set_energy_performance_preference(epp)?;
-
-    log::info!(target: "hw.cpu", "set_all_cpu_epp preference={}", epp);
     Ok(())
 }
 
@@ -1545,34 +1600,6 @@ mod tests {
         }
     }
 
-    /// The function itself must not address a path the allowlist refuses, and
-    /// that is not observable through `Path::exists()` on a host where the
-    /// attribute is absent. Pin it at the source level instead: the old body
-    /// addressed `/sys/devices/system/cpu/cpufreq/energy_performance_preference`
-    /// (the policy parent directory, which holds `policyN/` and `boost`), so this
-    /// test fails if that branch ever comes back.
-    #[test]
-    fn epp_entry_points_never_address_the_policy_parent_directory() {
-        let offending = "/sys/devices/system/cpu/cpufreq/energy_performance_preference";
-        assert!(
-            !is_allowed_sysfs_path(offending),
-            "the policy parent directory must not become writable"
-        );
-
-        let source = include_str!("hardware_control.rs");
-        let body = source
-            .split("pub fn set_all_cpu_epp")
-            .nth(1)
-            .expect("set_all_cpu_epp is missing from the source");
-        // Bound the body at the function's own closing brace (the first line that
-        // is exactly "}"), so the scan cannot run on into unrelated code.
-        let body = body.split("\n}").next().unwrap_or(body);
-        assert!(
-            !body.contains(offending),
-            "set_all_cpu_epp addresses the policy parent directory again:\n{body}"
-        );
-    }
-
     #[test]
     fn brightness_guard_rejects_invalid_value_without_panicking() {
         // Nonexistent LED/backlight fixtures ensure this test never writes hardware.
@@ -1760,5 +1787,85 @@ mod tests {
             let g2 = crate::DAEMON_LOGS.lock().unwrap();
             assert!(g2.capacity() >= 500);
         }
+    }
+}
+
+#[cfg(test)]
+mod governor_availability_tests {
+    use super::governor_is_available;
+
+    #[test]
+    fn listed_governor_is_available() {
+        assert!(governor_is_available("performance powersave\n", "powersave"));
+    }
+
+    #[test]
+    fn unlisted_governor_is_rejected() {
+        // amd-pstate active mode lists only these two; ondemand is not valid.
+        assert!(!governor_is_available("performance powersave\n", "ondemand"));
+    }
+
+    #[test]
+    fn match_is_whole_word() {
+        assert!(!governor_is_available("performance powersave", "power"));
+    }
+}
+
+#[cfg(test)]
+mod preflight_tests {
+    use super::preflight_profile;
+    use lapsphere_common::types::Profile;
+
+    const HW: (u64, u64) = (403_488, 4_465_261);
+
+    fn with(gov: Option<&str>, min: Option<u64>, max: Option<u64>) -> Profile {
+        let mut p = Profile::default();
+        p.cpu_settings.governor = gov.map(str::to_string);
+        p.cpu_settings.min_frequency = min;
+        p.cpu_settings.max_frequency = max;
+        p
+    }
+
+    #[test]
+    fn active_pstate_rejects_governor_outside_performance_powersave() {
+        let err = preflight_profile(&with(Some("ondemand"), None, None), true, Some(HW)).unwrap_err();
+        assert!(err.to_string().contains("ondemand"));
+    }
+
+    #[test]
+    fn target_active_profile_with_conservative_is_rejected_by_preflight() {
+        // Regression: the profile's own target pstate must decide, not the current sysfs state.
+        let mut p = with(Some("conservative"), None, None);
+        p.cpu_settings.amd_pstate_status = Some("active".to_string());
+        assert!(preflight_profile(&p, true, Some(HW)).is_err());
+    }
+
+    #[test]
+    fn active_pstate_accepts_performance_and_powersave() {
+        assert!(preflight_profile(&with(Some("performance"), None, None), true, Some(HW)).is_ok());
+        assert!(preflight_profile(&with(Some("powersave"), None, None), true, Some(HW)).is_ok());
+    }
+
+    #[test]
+    fn passive_pstate_does_not_restrict_governor_here() {
+        // Passive mode: the driver's own rule applies at write time; preflight only checks active.
+        assert!(preflight_profile(&with(Some("ondemand"), None, None), false, Some(HW)).is_ok());
+    }
+
+    #[test]
+    fn frequency_outside_hardware_window_is_rejected() {
+        assert!(preflight_profile(&with(None, Some(100_000), Some(3_000_000)), false, Some(HW)).is_err());
+        assert!(preflight_profile(&with(None, Some(1_000_000), Some(9_000_000)), false, Some(HW)).is_err());
+    }
+
+    #[test]
+    fn inverted_min_max_is_rejected() {
+        assert!(preflight_profile(&with(None, Some(3_000_000), Some(1_000_000)), false, Some(HW)).is_err());
+    }
+
+    #[test]
+    fn unknown_hardware_window_skips_range_check_but_not_ordering() {
+        assert!(preflight_profile(&with(None, Some(1), Some(2)), false, None).is_ok());
+        assert!(preflight_profile(&with(None, Some(5), Some(2)), false, None).is_err());
     }
 }

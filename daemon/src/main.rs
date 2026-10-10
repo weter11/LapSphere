@@ -3,6 +3,7 @@ mod daemon_settings;
 mod hardware_control;
 mod hardware_detection;
 mod gpu_activity;
+mod gpu_plan;
 mod tuxedo_io;
 mod battery_control;
 mod polling_scheduler;
@@ -62,6 +63,12 @@ pub static DAEMON_POLL_SETTINGS: once_cell::sync::Lazy<
 // Global GPU daemon state
 pub static GPU_DAEMON_STATE: once_cell::sync::Lazy<Arc<Mutex<Option<lapsphere_common::types::GpuSettings>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
+
+/// Bumped on every profile apply; the GPU job re-applies the full GPU set
+/// once per bump, not on every poll tick.
+pub static GPU_APPLY_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Last generation whose full GPU set was applied while the dGPU was active.
+pub static GPU_APPLIED_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub struct GpuOverclockStats {
     pub freq_offset: i32,
@@ -396,6 +403,16 @@ async fn main() -> Result<()> {
         };
 
         if let Some(ref gpu_settings) = settings {
+            // Full GPU set, once per profile generation, only while the dGPU
+            // is awake. A suspended adapter yields Skip and is left alone.
+            let idx = match hardware_control::cached_nvidia_nvml_index() {
+                Some(idx) => idx,
+                None => return Ok(()),
+            };
+            let generation = GPU_APPLY_GEN.load(std::sync::atomic::Ordering::SeqCst);
+            if hardware_detection::gpu_write_allowed(idx) {
+                hardware_control::execute_gpu_plan(idx, gpu_settings, generation)?;
+            }
             apply_gpu_overclocking(gpu_settings)?;
         } else {
             {
@@ -601,19 +618,27 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
             *last = None;
         }
         if !gpu_settings.manual_clocks {
+            // A suspended dGPU has nothing to clear; waking it for a reset
+            // would defeat RTD3. The stored offsets are left as they are.
+            let Some(idx) = hardware_control::cached_nvidia_nvml_index() else {
+                return Ok(());
+            };
+            if !hardware_detection::gpu_write_allowed(idx) {
+                return Ok(());
+            }
             // Only clear if not already cleared to avoid waking up GPU unnecessarily
             let needs_clear = {
                 let map = lock_or_recover(&MANUAL_GPU_OFFSETS, "MANUAL_GPU_OFFSETS");
-                map.get(&0).map_or(true, |offsets| offsets.0 != 0.0 || offsets.1 != 0.0)
+                map.get(&idx).map_or(true, |offsets| offsets.0 != 0.0 || offsets.1 != 0.0)
             };
 
             if needs_clear {
                 log::info!("Manual clocks disabled, resetting GPU offsets to 0");
-                let _ = crate::hardware_control::set_gpu_core_offset(0, 0.0);
-                let _ = crate::hardware_control::set_gpu_memory_offset(0, 0.0);
+                let _ = crate::hardware_control::set_gpu_core_offset(idx, 0.0);
+                let _ = crate::hardware_control::set_gpu_memory_offset(idx, 0.0);
                 {
                     let mut map = lock_or_recover(&MANUAL_GPU_OFFSETS, "MANUAL_GPU_OFFSETS");
-                    map.insert(0, (0.0, 0.0));
+                    map.insert(idx, (0.0, 0.0));
                 }
             }
         }
@@ -626,23 +651,13 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
     let nvidia_gpu = gpus.iter().find(|g| g.name.to_lowercase().contains("nvidia"));
 
     if let Some(gpu) = nvidia_gpu {
-        // The two status values are separate now: the runtime-PM word says
-        // whether the adapter is asleep, the NVML performance state says whether
-        // it is being queried (P0..P15) at all. When the quiet tier is active
-        // there is no performance state and no telemetry to steer offsets with,
-        // so skip rather than acting on absent values.
-        let is_suspended = gpu
-            .runtime_status
-            .as_deref()
-            .map(|status| status.eq_ignore_ascii_case("suspended"))
-            .unwrap_or(false);
-
-        // If suspended, don't do anything
-        if is_suspended {
+        // Index comes from the hardware cache; without it there is no safe target.
+        let Some(idx) = hardware_control::cached_nvidia_nvml_index() else {
             return Ok(());
-        }
-
-        // Check if GPU is in an active state for overclocking (typically P0)
+        };
+        // Write permission is decided only by gpu_write_allowed (above). Here the
+        // NVML telemetry is used for offset math; without it there is nothing to
+        // steer from, so skip.
         if gpu.performance_state.is_none() || gpu.frequency.is_none() {
             return Ok(());
         }
@@ -725,9 +740,16 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
         if gpu.performance_state.as_deref() != Some("P0") {
             let mut last = lock_or_recover(&LAST_APPLIED_OFFSET, "LAST_APPLIED_OFFSET");
             if *last != Some(0) {
-                crate::hardware_control::set_gpu_core_offset(0, 0.0)?;
-                *last = Some(0);
-                log::debug!("Cleared dynamic GPU offset (P-state not 0)");
+                // The driver can refuse a clock-offset write outside P0. Keep
+                // the marker unset so the reset is retried, but do not abort
+                // the poll tick on every pass.
+                match crate::hardware_control::set_gpu_core_offset(idx, 0.0) {
+                    Ok(()) => {
+                        *last = Some(0);
+                        log::debug!("Cleared dynamic GPU offset (P-state not 0)");
+                    }
+                    Err(e) => log::warn!(target: "hw.gpu", "offset reset refused (non-P0): {e}"),
+                }
             }
             drop(last);
             let mut stats = lock_or_recover(&CURRENT_GPU_OVERCLOCK_STATS, "CURRENT_GPU_OVERCLOCK_STATS");
@@ -757,7 +779,7 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
         {
             let mut last = lock_or_recover(&LAST_APPLIED_OFFSET, "LAST_APPLIED_OFFSET");
             if *last != Some(final_offset_i32) {
-                crate::hardware_control::set_gpu_core_offset(0, final_offset_i32 as f32)?;
+                crate::hardware_control::set_gpu_core_offset(idx, final_offset_i32 as f32)?;
                 *last = Some(final_offset_i32);
                 if final_offset_i32 == 0 {
                     log::debug!("Cleared dynamic GPU offset (P-state not 0)");

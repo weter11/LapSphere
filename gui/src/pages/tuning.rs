@@ -368,44 +368,55 @@ fn draw_cpu_tuning(
         ui.label(RichText::new("Frequency Limits:").strong());
 
         if let (Some(hw_min), Some(hw_max)) = (cpu_info.hw_min_freq, cpu_info.hw_max_freq) {
-            let mut min_freq = profile.cpu_settings.min_frequency
-                .unwrap_or(hw_min) as f64 / 1000.0;
-            let mut max_freq = profile.cpu_settings.max_frequency
-                .unwrap_or(hw_max) as f64 / 1000.0;
-
-            // Ensure min <= max
-            if min_freq > max_freq {
-                min_freq = max_freq;
+            // Clamp to the hardware range before display, so the sliders show
+            // the value that will actually be applied. Ordering and bounds come
+            // from normalize_freq_limits; nothing is re-sorted by hand here.
+            let clamped = lapsphere_common::types::normalize_freq_limits(
+                profile.cpu_settings.min_frequency,
+                profile.cpu_settings.max_frequency,
+                hw_min,
+                hw_max,
+            );
+            let mut min_khz = clamped.min.unwrap_or(hw_min);
+            let mut max_khz = clamped.max.unwrap_or(hw_max);
+            if clamped.changed {
+                profile.cpu_settings.min_frequency = clamped.min;
+                profile.cpu_settings.max_frequency = clamped.max;
             }
 
+            // Sliders work in MHz as integers of kHz/1000 for display only.
+            let mut changed = false;
             ui.horizontal(|ui| {
                 ui.label("Min:");
-                if ui.add(Slider::new(&mut min_freq,
-                    (hw_min / 1000) as f64..=(hw_max / 1000) as f64)
-                    .suffix(" MHz")
-                    ).changed() {
-                    // Ensure min doesn't exceed max
-                    if min_freq > max_freq {
-                        max_freq = min_freq;
-                    }
+                let mut mhz = min_khz as f64 / 1000.0;
+                if ui.add(Slider::new(&mut mhz, hw_min as f64 / 1000.0..=hw_max as f64 / 1000.0)
+                    .suffix(" MHz")).changed()
+                {
+                    min_khz = (mhz * 1000.0).round() as u64;
+                    changed = true;
                 }
             });
 
             ui.horizontal(|ui| {
                 ui.label("Max:");
-                if ui.add(Slider::new(&mut max_freq,
-                    (hw_min / 1000) as f64..=(hw_max / 1000) as f64)
-                    .suffix(" MHz")
-                    ).changed() {
-                    // Ensure max doesn't go below min
-                    if max_freq < min_freq {
-                        min_freq = max_freq;
-                    }
+                let mut mhz = max_khz as f64 / 1000.0;
+                if ui.add(Slider::new(&mut mhz, hw_min as f64 / 1000.0..=hw_max as f64 / 1000.0)
+                    .suffix(" MHz")).changed()
+                {
+                    max_khz = (mhz * 1000.0).round() as u64;
+                    changed = true;
                 }
             });
 
-            profile.cpu_settings.min_frequency = Some((min_freq * 1000.0) as u64);
-            profile.cpu_settings.max_frequency = Some((max_freq * 1000.0) as u64);
+            // Store only when the user moved a slider; the stored pair is
+            // normalized (clamped + min<=max) by the same shared function.
+            if changed {
+                let n = lapsphere_common::types::normalize_freq_limits(
+                    Some(min_khz), Some(max_khz), hw_min, hw_max,
+                );
+                profile.cpu_settings.min_frequency = n.min;
+                profile.cpu_settings.max_frequency = n.max;
+            }
 
         } else {
             ui.label("Could not determine hardware frequency limits. Sliders disabled.");
