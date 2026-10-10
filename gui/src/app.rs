@@ -100,6 +100,10 @@ pub struct AppState {
     pub system_info: Option<SystemInfo>,
     pub memory_info: Option<MemoryInfo>,
     pub cpu_info: Option<CpuInfo>,
+    /// Last (hw_min_khz, hw_max_khz) the profiles were normalized against.
+    pub last_hw_limits: Option<(u64, u64)>,
+    /// ApplyProfile replies not yet read: (profile name, reply receiver).
+    pub pending_apply: Vec<(String, tokio::sync::oneshot::Receiver<anyhow::Result<()>>)>,
     pub gpu_info: Vec<GpuInfo>,
     pub battery_info: Option<BatteryInfo>,
     pub wifi_info: Vec<WiFiInfo>,
@@ -165,6 +169,8 @@ impl AppState {
             system_info: None,
             memory_info: None,
             cpu_info: None,
+            last_hw_limits: None,
+            pending_apply: Vec::new(),
             gpu_info: Vec::new(),
             battery_info: None,
             wifi_info: Vec::new(),
@@ -242,6 +248,83 @@ pub fn load_config(&mut self) {
         tray_config::save_tray_config(&get_config_dir(), &self.config)?;
         self.show_message("Tray settings saved", false);
         Ok(())
+    }
+
+    /// Clamp every profile's CPU frequency limits into the hardware range.
+    /// Runs once hw limits are known and again after a hardware change. If
+    /// anything changed, the previous file is copied to `profiles.json.bak`
+    /// and each change is logged to the UI journal with the hardware note.
+    pub fn normalize_profiles_to_hw(&mut self, hw_min_khz: u64, hw_max_khz: u64) {
+        let mut changes: Vec<(String, String)> = Vec::new();
+        for profile in self.config.profiles.iter_mut() {
+            let before_min = profile.cpu_settings.min_frequency;
+            let before_max = profile.cpu_settings.max_frequency;
+            let r = lapsphere_common::types::normalize_freq_limits(
+                before_min, before_max, hw_min_khz, hw_max_khz,
+            );
+            if r.changed {
+                profile.cpu_settings.min_frequency = r.min;
+                profile.cpu_settings.max_frequency = r.max;
+                changes.push((
+                    profile.name.clone(),
+                    format!(
+                        "min {:?}->{:?} kHz, max {:?}->{:?} kHz (предел железа {}-{} kHz)",
+                        before_min, r.min, before_max, r.max, hw_min_khz, hw_max_khz
+                    ),
+                ));
+            }
+        }
+        if changes.is_empty() {
+            return;
+        }
+        // Keep a copy of the previous file before overwriting it.
+        let path = std::path::PathBuf::from(format!("{}/profiles.json", get_config_dir()));
+        let _ = std::fs::copy(&path, path.with_extension("json.bak"));
+        match self.save_profiles() {
+            Ok(()) => {
+                for (name, text) in changes {
+                    self.push_ui_log("warn", &format!("Профиль '{}': {} (предел железа)", name, text));
+                }
+            }
+            Err(e) => self.push_ui_log("error", &format!("Нормализация профилей не сохранена: {}", e)),
+        }
+    }
+
+    /// Read finished ApplyProfile replies without blocking; failures go to the
+    /// UI journal and the status line. Pending ones stay queued.
+    pub fn drain_apply_replies(&mut self) {
+        let pending = std::mem::take(&mut self.pending_apply);
+        let mut still = Vec::new();
+        for (name, mut rx) in pending {
+            match rx.try_recv() {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    let msg = format!("Профиль '{}' не применён: {}", name, e);
+                    self.push_ui_log("error", &msg);
+                    self.show_message(msg, true);
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => still.push((name, rx)),
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    let msg = format!("Профиль '{}': демон не ответил", name);
+                    self.push_ui_log("error", &msg);
+                    self.show_message(msg, true);
+                }
+            }
+        }
+        self.pending_apply.extend(still);
+    }
+
+    /// Append a line to the UI journal (not the daemon's).
+    pub fn push_ui_log(&mut self, level: &str, message: &str) {
+        self.daemon_logs.push_back(lapsphere_common::types::LogEntry {
+            level: level.to_string(),
+            target: "gui".to_string(),
+            message: message.to_string(),
+            timestamp: Local::now().to_rfc3339(),
+        });
+        while self.daemon_logs.len() > 2000 {
+            self.daemon_logs.pop_front();
+        }
     }
 
     pub fn save_profiles(&mut self) -> anyhow::Result<()> {
@@ -719,7 +802,7 @@ impl LapSphereApp {
         // Apply current profile to daemon on startup to ensure background jobs are active
         if let Some(profile) = state.current_profile().cloned() {
             if let Some(ref client) = dbus_client {
-                let _ = client.apply_profile(profile);
+                state.pending_apply.push(("startup".to_string(), client.apply_profile(profile)));
             }
         }
 
@@ -785,7 +868,19 @@ impl LapSphereApp {
                     self.state.memory_info = Some(info);
                 }
                 HardwareUpdate::CpuInfo(info) => {
+                    // Normalize profiles when the hardware limits are first known
+                    // or change (e.g. a different CPU). Same limits => no rewrite.
+                    let limits = match (info.hw_min_freq, info.hw_max_freq) {
+                        (Some(lo), Some(hi)) => Some((lo, hi)),
+                        _ => None,
+                    };
                     self.state.cpu_info = Some(info);
+                    if let Some((lo, hi)) = limits {
+                        if self.state.last_hw_limits != Some((lo, hi)) {
+                            self.state.last_hw_limits = Some((lo, hi));
+                            self.state.normalize_profiles_to_hw(lo, hi);
+                        }
+                    }
                 }
                 HardwareUpdate::GpuInfo(info) => {
                     self.state.gpu_info = info;
@@ -1279,7 +1374,8 @@ impl LapSphereApp {
                     if let Some(profile) = self.state.config.profiles.get(idx).cloned() {
                         self.state.config.current_profile = profile.name.clone();
                         if let Some(client) = &self.dbus_client {
-                            let _ = client.apply_profile(profile);
+                            let name = profile.name.clone();
+                            self.state.pending_apply.push((name, client.apply_profile(profile)));
                         }
                     }
                 }
@@ -1324,6 +1420,7 @@ impl eframe::App for LapSphereApp {
         self.state.clamp_fan_selection();
 
         self.handle_tray_events(&ctx);
+        self.state.drain_apply_replies();
         
         if ctx.input(|input| input.viewport().close_requested())
             && self.state.config.tray_enabled

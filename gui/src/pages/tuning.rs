@@ -368,6 +368,10 @@ fn draw_cpu_tuning(
         ui.label(RichText::new("Frequency Limits:").strong());
 
         if let (Some(hw_min), Some(hw_max)) = (cpu_info.hw_min_freq, cpu_info.hw_max_freq) {
+            // Work in MHz for the slider. Float division keeps the bounds exact
+            // (hw_min 403488 kHz -> 403.488 MHz, not 403 MHz).
+            let lo_mhz = hw_min as f64 / 1000.0;
+            let hi_mhz = hw_max as f64 / 1000.0;
             let mut min_freq = profile.cpu_settings.min_frequency
                 .unwrap_or(hw_min) as f64 / 1000.0;
             let mut max_freq = profile.cpu_settings.max_frequency
@@ -378,12 +382,13 @@ fn draw_cpu_tuning(
                 min_freq = max_freq;
             }
 
+            let mut changed = false;
             ui.horizontal(|ui| {
                 ui.label("Min:");
-                if ui.add(Slider::new(&mut min_freq,
-                    (hw_min / 1000) as f64..=(hw_max / 1000) as f64)
+                if ui.add(Slider::new(&mut min_freq, lo_mhz..=hi_mhz)
                     .suffix(" MHz")
                     ).changed() {
+                    changed = true;
                     // Ensure min doesn't exceed max
                     if min_freq > max_freq {
                         max_freq = min_freq;
@@ -393,10 +398,10 @@ fn draw_cpu_tuning(
 
             ui.horizontal(|ui| {
                 ui.label("Max:");
-                if ui.add(Slider::new(&mut max_freq,
-                    (hw_min / 1000) as f64..=(hw_max / 1000) as f64)
+                if ui.add(Slider::new(&mut max_freq, lo_mhz..=hi_mhz)
                     .suffix(" MHz")
                     ).changed() {
+                    changed = true;
                     // Ensure max doesn't go below min
                     if max_freq < min_freq {
                         min_freq = max_freq;
@@ -404,8 +409,12 @@ fn draw_cpu_tuning(
                 }
             });
 
-            profile.cpu_settings.min_frequency = Some((min_freq * 1000.0) as u64);
-            profile.cpu_settings.max_frequency = Some((max_freq * 1000.0) as u64);
+            // Store only when the user actually moved a slider, so an untouched
+            // profile is not rewritten with rounded values.
+            if changed {
+                profile.cpu_settings.min_frequency = Some((min_freq * 1000.0).round() as u64);
+                profile.cpu_settings.max_frequency = Some((max_freq * 1000.0).round() as u64);
+            }
 
         } else {
             ui.label("Could not determine hardware frequency limits. Sliders disabled.");
