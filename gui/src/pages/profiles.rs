@@ -228,6 +228,7 @@ fn create_standard_profile() -> lapsphere_common::types::Profile {
             min_mem_clock: None,
             max_mem_clock: None,
             manual_clocks: false,
+            release_oc_when_idle: true,
             core_offset: Some(0.0),
             memory_offset: Some(0.0),
             power_limit: None,

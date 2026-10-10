@@ -565,6 +565,8 @@ pub struct GpuSettings {
     pub max_mem_clock: Option<u32>,
     /// Whether manual clock control is active.
     pub manual_clocks: bool,
+    #[serde(default = "release_oc_default")]
+    pub release_oc_when_idle: bool,
     /// Core frequency offset in MHz.
     pub core_offset: Option<f32>,
     /// Memory frequency offset in MHz.
@@ -1067,6 +1069,8 @@ impl Default for CpuSettings {
     }
 }
 
+fn release_oc_default() -> bool { true }
+
 impl Default for GpuSettings {
     fn default() -> Self {
         Self {
@@ -1076,6 +1080,7 @@ impl Default for GpuSettings {
             min_mem_clock: None,
             max_mem_clock: None,
             manual_clocks: false,
+            release_oc_when_idle: true,
             core_offset: Some(0.0),
             memory_offset: Some(0.0),
             power_limit: None,
@@ -1205,6 +1210,16 @@ pub fn normalize_profiles_freq(
 
 #[cfg(test)]
 mod freq_limit_tests {
+    #[test]
+    fn idle_oc_defaults_and_explicit_false_round_trip() {
+        let settings = super::GpuSettings::default();
+        assert!(settings.release_oc_when_idle);
+        let mut json = serde_json::to_value(settings).unwrap();
+        json.as_object_mut().unwrap().remove("release_oc_when_idle");
+        assert!(serde_json::from_value::<super::GpuSettings>(json.clone()).unwrap().release_oc_when_idle);
+        json["release_oc_when_idle"] = false.into();
+        assert!(!serde_json::from_value::<super::GpuSettings>(json).unwrap().release_oc_when_idle);
+    }
     use super::normalize_freq_limits;
 
     const HW_MIN: u64 = 403_488;

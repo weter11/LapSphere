@@ -463,6 +463,8 @@ fn draw_gpu_tuning(
         ui.radio_value(&mut state.config.profiles[profile_idx].gpu_settings.advanced_control, false, "Standard");
         ui.radio_value(&mut state.config.profiles[profile_idx].gpu_settings.advanced_control, true, "Advanced");
     });
+    ui.checkbox(&mut state.config.profiles[profile_idx].gpu_settings.release_oc_when_idle, "Снимать разгон при простое")
+        .on_hover_text("Иначе карта не уходит в глубокий простой: возможны шум и нагрев");
     let tuning_mode_advanced = state.config.profiles[profile_idx].gpu_settings.advanced_control;
     ui.label(RichText::new("GPU settings will be applied when you click Save. Disabling manual control will reset to factory settings.").small().italics());
 
@@ -1463,6 +1465,7 @@ fn create_default_profile_for_reset(is_standard: bool) -> Profile {
                 min_mem_clock: None,
                 max_mem_clock: None,
                 manual_clocks: false,
+                release_oc_when_idle: true,
                 core_offset: Some(0.0),
                 memory_offset: Some(0.0),
                 power_limit: None,
