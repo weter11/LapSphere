@@ -729,10 +729,14 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
         // non-P0 reading leaves the applied offset cleared as before.
         if gpu.performance_state.as_deref() != Some("P0") {
             let mut last = lock_or_recover(&LAST_APPLIED_OFFSET, "LAST_APPLIED_OFFSET");
-            if *last != Some(0) {
-                crate::hardware_control::set_gpu_core_offset(0, 0.0)?;
-                *last = Some(0);
-                log::debug!("Cleared dynamic GPU offset (P-state not 0)");
+            if *last != Some(0) && hardware_detection::gpu_write_allowed(0) {
+                match crate::hardware_control::set_gpu_core_offset(0, 0.0) {
+                    Ok(()) => {
+                        *last = Some(0);
+                        log::debug!("Cleared dynamic GPU offset (P-state not 0)");
+                    }
+                    Err(e) => log::warn!("clear dynamic GPU offset to 0 MHz failed: {e}"),
+                }
             }
             drop(last);
             let mut stats = lock_or_recover(&CURRENT_GPU_OVERCLOCK_STATS, "CURRENT_GPU_OVERCLOCK_STATS");
