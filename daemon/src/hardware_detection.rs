@@ -1968,12 +1968,16 @@ const NV_ESC_REGISTER_FD: u8 = 201;
 const NV01_DEVICE_0: u32 = 0x00000080;
 const NV20_SUBDEVICE_0: u32 = 0x00002080;
 
-// NVIDIA RM Control API constants
-// These values are verified to match NVIDIA driver headers and LACT implementation
-const NV2080_CTRL_CMD_FB_GET_INFO: u32 = 0x20800101;
-const NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE: u32 = 0x01;
-const NV2080_CTRL_FB_INFO_INDEX_BUS_WIDTH: u32 = 0x02;
-const NV2080_CTRL_FB_INFO_INDEX_MEMORYINFO_VENDOR_ID: u32 = 0x06;
+// NVIDIA RM Control API constants.
+// Verified against the installed driver's open headers
+// (src/common/sdk/nvidia/inc/ctrl/ctrl2080/ctrl2080fb.h, driver 610.57.04):
+// RAM_TYPE=0x0D, BUS_WIDTH=0x0B, MEMORYINFO_VENDOR_ID=0x1C.
+// The old 0x01/0x02/0x06 values belong to no released driver and returned
+// garbage (ram_type=0xd1d915c4, bus=93) or NV_ERR_NOT_SUPPORTED.
+const NV2080_CTRL_CMD_FB_GET_INFO: u32 = 0x20801301;
+const NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE: u32 = 0x0D;
+const NV2080_CTRL_FB_INFO_INDEX_BUS_WIDTH: u32 = 0x0B;
+const NV2080_CTRL_FB_INFO_INDEX_MEMORYINFO_VENDOR_ID: u32 = 0x1C;
 
 type NvHandle = u32;
 
@@ -2363,39 +2367,50 @@ fn get_vram_info(minor_number: u32) -> (Option<String>, Option<String>, Option<u
                 log::warn!(target: "hw.detect", "Failed to retrieve any VRAM info for minor {} - all queries returned errors", minor_number);
             }
 
+            // Values from NV2080_CTRL_FB_INFO_RAM_TYPE_* in the driver's open
+            // headers (ctrl2080fb.h). Matches the enum used by nvidia/driver.rs
+            // and upstream LACT, so the two paths cannot drift apart again.
             let ram_type = ram_type_val.map(|v| match v {
+                0x00000000 => "Unknown",
                 0x00000001 => "SDRAM",
                 0x00000002 => "DDR1",
                 0x00000003 => "DDR2",
-                0x00000004 => "DDR3",
-                0x00000005 => "GDDR2",
-                0x00000006 => "GDDR3",
-                0x00000007 => "GDDR4",
+                0x00000004 => "GDDR2",
+                0x00000005 => "GDDR3",
+                0x00000006 => "GDDR4",
+                0x00000007 => "DDR3",
                 0x00000008 => "GDDR5",
                 0x00000009 => "LPDDR2",
-                0x0000000A => "GDDR5X",
-                0x0000000B => "GDDR6",
-                0x0000000C => "GDDR6X",
-                0x0000000D => "HBM1",
-                0x0000000E => "HBM2",
-                0x0000000F => "HBM3",
-                0x00000010 => "LPDDR4",
-                0x00000011 => "LPDDR5",
-                0x00000012 => "GDDR7",
+                0x0000000A => "LPDDR3",
+                0x0000000C => "SDDR4",
+                0x0000000D => "LPDDR4",
+                0x0000000E => "HBM1",
+                0x0000000F => "HBM2",
+                0x00000010 => "GDDR5X",
+                0x00000011 => "GDDR6",
+                0x00000012 => "GDDR6X",
+                0x00000013 => "LPDDR5",
+                0x00000014 => "HBM3",
+                0x00000015 => "GDDR7",
+                0x00000016 => "HBM4",
                 _ => "Unknown",
             }.to_string());
 
+            // Values from NV2080_CTRL_FB_INFO_MEMORYINFO_VENDOR_ID_* in the
+            // driver's open headers (ctrl2080fb.h). The previous table was
+            // offset by one and reported Micron as Samsung and vice versa.
             let vendor = vendor_id.map(|v| match v {
-                0x00000001 => "Micron",
-                0x00000002 => "Samsung",
-                0x00000003 => "Qimonda",
-                0x00000004 => "Elpida",
-                0x00000005 => "Etron",
-                0x00000006 => "Nanya",
-                0x00000007 => "Hynix",
-                0x00000008 => "Mosel",
-                0x00000009 => "Winbond",
-                0x0000000A => "ESMT",
+                0x00000001 => "Samsung",
+                0x00000002 => "Qimonda",
+                0x00000003 => "Elpida",
+                0x00000004 => "Etron",
+                0x00000005 => "Nanya",
+                0x00000006 => "Hynix",
+                0x00000007 => "Mosel",
+                0x00000008 => "Winbond",
+                0x00000009 => "ESMT",
+                0x0000000F => "Micron",
+                0xFFFFFFFF => "Unknown",
                 _ => "Unknown",
             }.to_string());
 
