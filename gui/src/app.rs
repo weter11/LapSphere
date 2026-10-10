@@ -616,13 +616,6 @@ impl LapSphereApp {
             let _ = handle.register("gamepads".to_string(), Duration::from_millis(state.config.statistics_sections.gamepad_poll_rate));
             let _ = handle.register("storage".to_string(), Duration::from_millis(state.config.statistics_sections.storage_poll_rate));
             let _ = handle.register("mount".to_string(), Duration::from_millis(state.config.statistics_sections.storage_poll_rate));
-            // NOTE: there is intentionally no "gpu_overclock" registration. The
-            // daemon already runs dynamic overclocking on its own
-            // `gpu_overclock_ms` timer (see daemon/src/daemon_settings.rs), and
-            // this coordinator has no fetch arm for that id — registering it
-            // spawned a task that matched `_ => {}` and returned immediately,
-            // which was one allocation-churning spawn per poll interval with no
-            // work behind it.
             let _ = handle.register("webcam".to_string(), Duration::from_secs(5));
             // Registered, but the callback only fetches while the Logs tab is on
             // screen (see `should_fetch_logs`): the ring reply is ~470 kB each time.
