@@ -631,21 +631,8 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
     let nvidia_gpu = gpus.iter().find(|g| g.name.to_lowercase().contains("nvidia"));
 
     if let Some(gpu) = nvidia_gpu {
-        // The two status values are separate now: the runtime-PM word says
-        // whether the adapter is asleep, the NVML performance state says whether
-        // it is being queried (P0..P15) at all. When the quiet tier is active
-        // there is no performance state and no telemetry to steer offsets with,
-        // so skip rather than acting on absent values.
-        let is_suspended = gpu
-            .runtime_status
-            .as_deref()
-            .map(|status| status.eq_ignore_ascii_case("suspended"))
-            .unwrap_or(false);
-
-        // If suspended, don't do anything
-        if is_suspended {
-            return Ok(());
-        }
+        // The NVML performance state says whether the adapter is being queried
+        // (P0..P15) at all; without it there is no telemetry to steer offsets with.
 
         // Check if GPU is in an active state for overclocking (typically P0)
         if gpu.performance_state.is_none() || gpu.frequency.is_none() {
