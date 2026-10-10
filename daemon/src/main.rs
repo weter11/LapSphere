@@ -843,6 +843,19 @@ fn idle_oc_action(flag: bool, idle_for: u64, has_oc: bool, writable: bool, relea
 #[cfg(test)]
 mod tests {
     #[test]
+    #[test]
+    fn idle_oc_decision_all_cases() {
+        use super::IdleOcAction::{None, Release, Restore};
+        assert_eq!(idle_oc_action(false, 30, true, true, false, false), None);
+        assert_eq!(idle_oc_action(true, 29, true, true, false, false), None);
+        assert_eq!(idle_oc_action(true, 30, false, true, false, false), None);
+        assert_eq!(idle_oc_action(true, 30, true, false, false, false), None);
+        assert_eq!(idle_oc_action(true, 30, true, true, true, false), None);
+        assert_eq!(idle_oc_action(true, 30, true, true, false, false), Release);
+        assert_eq!(idle_oc_action(true, 1, true, false, true, true), Restore);
+        assert_eq!(idle_oc_action(true, 30, true, true, false, true), None);
+    }
+
     fn dynamic_offset_is_attempted_once_per_target() {
         assert!(should_write_dynamic_offset(None, -40, true));
         assert!(should_write_dynamic_offset(Some(0), -40, true));
