@@ -741,9 +741,16 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
         if gpu.performance_state.as_deref() != Some("P0") {
             let mut last = lock_or_recover(&LAST_APPLIED_OFFSET, "LAST_APPLIED_OFFSET");
             if *last != Some(0) {
-                crate::hardware_control::set_gpu_core_offset(idx, 0.0)?;
-                *last = Some(0);
-                log::debug!("Cleared dynamic GPU offset (P-state not 0)");
+                // The driver can refuse a clock-offset write outside P0. Keep
+                // the marker unset so the reset is retried, but do not abort
+                // the poll tick on every pass.
+                match crate::hardware_control::set_gpu_core_offset(idx, 0.0) {
+                    Ok(()) => {
+                        *last = Some(0);
+                        log::debug!("Cleared dynamic GPU offset (P-state not 0)");
+                    }
+                    Err(e) => log::warn!(target: "hw.gpu", "offset reset refused (non-P0): {e}"),
+                }
             }
             drop(last);
             let mut stats = lock_or_recover(&CURRENT_GPU_OVERCLOCK_STATS, "CURRENT_GPU_OVERCLOCK_STATS");
