@@ -409,9 +409,8 @@ async fn main() -> Result<()> {
                 Some(idx) => idx,
                 None => return Ok(()),
             };
-            let suspended = hardware_detection::is_gpu_suspended_by_index(idx);
             let generation = GPU_APPLY_GEN.load(std::sync::atomic::Ordering::SeqCst);
-            if !suspended {
+            if hardware_detection::gpu_write_allowed(idx) {
                 hardware_control::execute_gpu_plan(idx, gpu_settings, generation)?;
             }
             apply_gpu_overclocking(gpu_settings)?;
@@ -624,7 +623,7 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
             let Some(idx) = hardware_control::cached_nvidia_nvml_index() else {
                 return Ok(());
             };
-            if hardware_detection::is_gpu_suspended_by_index(idx) {
+            if !hardware_detection::gpu_write_allowed(idx) {
                 return Ok(());
             }
             // Only clear if not already cleared to avoid waking up GPU unnecessarily
@@ -656,7 +655,7 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
         let Some(idx) = hardware_control::cached_nvidia_nvml_index() else {
             return Ok(());
         };
-        // Suspend is decided only by is_gpu_suspended_by_index (above). Here the
+        // Write permission is decided only by gpu_write_allowed (above). Here the
         // NVML telemetry is used for offset math; without it there is nothing to
         // steer from, so skip.
         if gpu.performance_state.is_none() || gpu.frequency.is_none() {

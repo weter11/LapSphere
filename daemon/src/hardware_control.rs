@@ -725,7 +725,7 @@ fn apply_profile_inner(profile: &Profile) -> Result<()> {
     // the same executor on later ticks; nothing here writes GPU state directly.
     // Without a cached index or with a suspended dGPU the poll applies it later.
     if let Some(idx) = cached_nvidia_nvml_index() {
-        if !crate::hardware_detection::is_gpu_suspended_by_index(idx) {
+        if crate::hardware_detection::gpu_write_allowed(idx) {
             // The generation this apply will commit (wrapper bumps it on success).
             let generation = crate::GPU_APPLY_GEN.load(Ordering::SeqCst) + 1;
             execute_gpu_plan(idx, &profile.gpu_settings, generation)?;
