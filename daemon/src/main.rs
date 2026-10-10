@@ -592,6 +592,12 @@ fn apply_fan_curves(io: &tuxedo_io::TuxedoIo, settings: &FanSettings, sorted_cur
     Ok(())
 }
 
+/// Write the dynamic core offset only when the target changed and the adapter is
+/// writable. Pure so the decision is testable without NVML.
+fn should_write_dynamic_offset(last: Option<i32>, target: i32, writable: bool) -> bool {
+    last != Some(target) && writable
+}
+
 /// Clear the applied dynamic offset only when it is not already 0 and the
 /// adapter is writable. Pure so the decision is testable without NVML.
 fn should_clear_offset(last: Option<i32>, writable: bool) -> bool {
@@ -761,13 +767,19 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
         // ONLY APPLY IF CHANGED (fix stuttering)
         {
             let mut last = lock_or_recover(&LAST_APPLIED_OFFSET, "LAST_APPLIED_OFFSET");
-            if *last != Some(final_offset_i32) && hardware_detection::gpu_write_allowed(0) {
-                crate::hardware_control::set_gpu_core_offset(0, final_offset_i32 as f32)?;
+            if should_write_dynamic_offset(*last, final_offset_i32, hardware_detection::gpu_write_allowed(0)) {
+                // Recorded before the write: a failed attempt is not retried every
+                // tick; it is retried only when the target value changes.
                 *last = Some(final_offset_i32);
-                if final_offset_i32 == 0 {
-                    log::debug!("Cleared dynamic GPU offset (P-state not 0)");
-                } else {
-                    log::debug!("Applied new dynamic GPU offset: {} MHz", final_offset_i32);
+                match crate::hardware_control::set_gpu_core_offset(0, final_offset_i32 as f32) {
+                    Ok(()) => {
+                        if final_offset_i32 == 0 {
+                            log::debug!("Cleared dynamic GPU offset (P-state not 0)");
+                        } else {
+                            log::debug!("Applied new dynamic GPU offset: {} MHz", final_offset_i32);
+                        }
+                    }
+                    Err(e) => log::warn!("apply dynamic GPU offset {} MHz failed: {e}", final_offset_i32),
                 }
             }
         }
@@ -817,6 +829,17 @@ fn calculate_fan_speed(sorted_points: &[(u8, u8)], temp: f32) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dynamic_offset_is_attempted_once_per_target() {
+        assert!(should_write_dynamic_offset(None, -40, true));
+        assert!(should_write_dynamic_offset(Some(0), -40, true));
+        assert!(!should_write_dynamic_offset(Some(-40), -40, true));
+        assert!(!should_write_dynamic_offset(Some(0), -40, false));
+        // A recorded attempt for -40 suppresses retries on later ticks.
+        let recorded = Some(-40);
+        assert!(!should_write_dynamic_offset(recorded, -40, true));
+    }
+
     #[test]
     fn clear_is_skipped_when_already_zero_or_gate_closed() {
         assert!(should_clear_offset(Some(-40), true));
