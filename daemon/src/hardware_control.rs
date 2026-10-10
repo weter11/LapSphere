@@ -401,8 +401,35 @@ fn get_cpu_count() -> Result<u32> {
     Ok(count as u32)
 }
 
+/// NVML index of the NVIDIA adapter as learned by the last live pass. `None`
+/// until that pass has run; callers defer GPU writes instead of guessing 0.
+pub(crate) fn cached_nvidia_nvml_index() -> Option<u32> {
+    let cache = match crate::HARDWARE_CACHE.lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    cache.gpu_info.iter()
+        .find(|g| g.name.to_lowercase().contains("nvidia"))
+        .and_then(|g| g.nvml_index)
+}
+
+/// Pure check behind `set_cpu_governor`: the kernel lists the governors valid
+/// for the current pstate mode in `scaling_available_governors`.
+pub(crate) fn governor_is_available(available: &str, governor: &str) -> bool {
+    available.split_whitespace().any(|g| g == governor)
+}
+
 pub fn set_cpu_governor(governor: &str) -> Result<()> {
     let cpu_count = get_cpu_count()?;
+
+    let avail_path = "/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors";
+    let available = fs::read_to_string(avail_path)
+        .map_err(|e| anyhow!("cannot read {}: {}", avail_path, e))?;
+    if !governor_is_available(&available, governor) {
+        log::error!(target: "hw.cpu", "governor \"{}\" not available in current mode; available=[{}]",
+            governor, available.trim());
+        return Err(anyhow!("governor \"{}\" not available (available: {})", governor, available.trim()));
+    }
 
     guard_sysfs_write("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor", governor)?;
 
@@ -587,10 +614,6 @@ pub fn apply_profile(profile: &Profile) -> Result<()> {
 fn apply_profile_inner(profile: &Profile) -> Result<()> {
     
     // Apply CPU settings
-    if let Some(ref governor) = profile.cpu_settings.governor {
-        set_cpu_governor(governor)?;
-    }
-    
     if let Some(ref tdp_profile) = profile.cpu_settings.tdp_profile {
         set_tdp_profile(tdp_profile)?;
     }
@@ -613,6 +636,12 @@ fn apply_profile_inner(profile: &Profile) -> Result<()> {
         set_amd_pstate_status(amd_status)?;
     }
 
+    // Governor only after the pstate mode is final: the kernel's list of
+    // available governors depends on it.
+    if let Some(ref governor) = profile.cpu_settings.governor {
+        set_cpu_governor(governor)?;
+    }
+
     if let Some(ref intel_status) = profile.cpu_settings.intel_pstate_status {
         set_intel_pstate_status(intel_status)?;
     }
@@ -625,51 +654,40 @@ fn apply_profile_inner(profile: &Profile) -> Result<()> {
         set_cpu_frequency_limits(min, max)?;
     }
 
-    // Apply GPU settings
-    let nvidia_gpu_idx = {
-        let cache = match crate::HARDWARE_CACHE.lock() {
-            Ok(g) => g,
-            Err(e) => {
-                log::error!(target: "hw.cache", "HARDWARE_CACHE poisoned — clearing poison and recovering");
-                let g = e.into_inner();
-                crate::HARDWARE_CACHE.clear_poison();
-                g
-            }
-        };
-        cache.gpu_info.iter()
-            .find(|g| g.name.to_lowercase().contains("nvidia"))
-            .and_then(|g| g.nvml_index)
-            .unwrap_or(0)
-    };
-
-    // Bump the generation so the GPU poll re-applies the full set once the
-    // dGPU is awake. Settings live in GPU_DAEMON_STATE regardless.
+    // Apply GPU settings. The NVML index comes from the hardware cache; without
+    // it the GPU writes are deferred to the poll, never sent to index 0.
     crate::GPU_APPLY_GEN.fetch_add(1, Ordering::SeqCst);
-
-    // Check the suspend state before any NVML call: a suspended dGPU must not
-    // be woken by a profile switch. The settings stay in GPU_DAEMON_STATE and
-    // are applied by the poll once the adapter is active.
-    let gpu_suspended = crate::hardware_detection::is_gpu_suspended_by_index(nvidia_gpu_idx);
-    if gpu_suspended {
-        log::info!(target: "hw.gpu", "dGPU suspended; GPU writes deferred to poll gen={}",
-            crate::GPU_APPLY_GEN.load(Ordering::SeqCst));
-    } else {
+    let gpu_idx = match cached_nvidia_nvml_index() {
+        None => {
+            log::warn!(target: "hw.gpu", "NVML index not cached; GPU writes deferred to poll gen={}",
+                crate::GPU_APPLY_GEN.load(Ordering::SeqCst));
+            None
+        }
+        // A suspended dGPU must not be woken by a profile switch.
+        Some(idx) if crate::hardware_detection::is_gpu_suspended_by_index(idx) => {
+            log::info!(target: "hw.gpu", "dGPU suspended; GPU writes deferred to poll gen={}",
+                crate::GPU_APPLY_GEN.load(Ordering::SeqCst));
+            None
+        }
+        Some(idx) => Some(idx),
+    };
+    if let Some(idx) = gpu_idx {
         if let Some(limit) = profile.gpu_settings.power_limit {
-            let _ = set_gpu_power_limit(nvidia_gpu_idx, limit);
+            let _ = set_gpu_power_limit(idx, limit);
         }
 
         if let Some(core_offset) = profile.gpu_settings.core_offset {
-            let _ = set_gpu_core_offset(nvidia_gpu_idx, core_offset as f32);
+            let _ = set_gpu_core_offset(idx, core_offset as f32);
         }
 
         if let Some(memory_offset) = profile.gpu_settings.memory_offset {
-            let _ = set_gpu_memory_offset(nvidia_gpu_idx, memory_offset as f32);
+            let _ = set_gpu_memory_offset(idx, memory_offset as f32);
         }
 
         if let (Some(min_clock), Some(max_clock)) = (profile.gpu_settings.min_gpu_clock, profile.gpu_settings.max_gpu_clock) {
-            let _ = set_gpu_locked_clocks(nvidia_gpu_idx, min_clock, max_clock);
+            let _ = set_gpu_locked_clocks(idx, min_clock, max_clock);
         } else {
-            let _ = reset_gpu_clocks(nvidia_gpu_idx);
+            let _ = reset_gpu_clocks(idx);
         }
     }
     
@@ -692,7 +710,7 @@ fn apply_profile_inner(profile: &Profile) -> Result<()> {
 
     // Apply NVIDIA fan settings (skipped while the dGPU is suspended; the poll
     // applies them with the rest of the GPU set).
-    if !gpu_suspended {
+    if gpu_idx.is_some() {
         for fan_setting in &profile.gpu_settings.nvidia_fans {
             if fan_setting.manual {
                 let _ = set_gpu_fan_speed(fan_setting.device_index, fan_setting.fan_id, fan_setting.speed);
@@ -1081,24 +1099,6 @@ pub fn set_energy_performance_preference(epp: &str) -> Result<()> {
     }
 
     log::info!(target: "hw.cpu", "set_epp preference=\"{}\"", epp);
-    Ok(())
-}
-
-/// Apply an EPP preference to every CPU/policy.
-///
-/// This is the explicit "all CPUs" entry point. It writes exactly the target set
-/// returned by [`existing_epp_paths`] — the same list
-/// `set_energy_performance_preference` uses — and nothing else, so the function
-/// and [`guard_sysfs_write`] cannot disagree about what is writable (the test
-/// `epp_write_targets_stay_inside_the_allowlist` pins that with synthetic CPU
-/// numbers). It previously also attempted
-/// `/sys/devices/system/cpu/cpufreq/energy_performance_preference`, which is not
-/// an attribute in the kernel's cpufreq layout and is not on the allowlist: that
-/// branch could only ever be skipped (path absent) or rejected by the guard.
-pub fn set_all_cpu_epp(epp: &str) -> Result<()> {
-    set_energy_performance_preference(epp)?;
-
-    log::info!(target: "hw.cpu", "set_all_cpu_epp preference={}", epp);
     Ok(())
 }
 
@@ -1561,34 +1561,6 @@ mod tests {
         }
     }
 
-    /// The function itself must not address a path the allowlist refuses, and
-    /// that is not observable through `Path::exists()` on a host where the
-    /// attribute is absent. Pin it at the source level instead: the old body
-    /// addressed `/sys/devices/system/cpu/cpufreq/energy_performance_preference`
-    /// (the policy parent directory, which holds `policyN/` and `boost`), so this
-    /// test fails if that branch ever comes back.
-    #[test]
-    fn epp_entry_points_never_address_the_policy_parent_directory() {
-        let offending = "/sys/devices/system/cpu/cpufreq/energy_performance_preference";
-        assert!(
-            !is_allowed_sysfs_path(offending),
-            "the policy parent directory must not become writable"
-        );
-
-        let source = include_str!("hardware_control.rs");
-        let body = source
-            .split("pub fn set_all_cpu_epp")
-            .nth(1)
-            .expect("set_all_cpu_epp is missing from the source");
-        // Bound the body at the function's own closing brace (the first line that
-        // is exactly "}"), so the scan cannot run on into unrelated code.
-        let body = body.split("\n}").next().unwrap_or(body);
-        assert!(
-            !body.contains(offending),
-            "set_all_cpu_epp addresses the policy parent directory again:\n{body}"
-        );
-    }
-
     #[test]
     fn brightness_guard_rejects_invalid_value_without_panicking() {
         // Nonexistent LED/backlight fixtures ensure this test never writes hardware.
@@ -1776,5 +1748,26 @@ mod tests {
             let g2 = crate::DAEMON_LOGS.lock().unwrap();
             assert!(g2.capacity() >= 500);
         }
+    }
+}
+
+#[cfg(test)]
+mod governor_availability_tests {
+    use super::governor_is_available;
+
+    #[test]
+    fn listed_governor_is_available() {
+        assert!(governor_is_available("performance powersave\n", "powersave"));
+    }
+
+    #[test]
+    fn unlisted_governor_is_rejected() {
+        // amd-pstate active mode lists only these two; ondemand is not valid.
+        assert!(!governor_is_available("performance powersave\n", "ondemand"));
+    }
+
+    #[test]
+    fn match_is_whole_word() {
+        assert!(!governor_is_available("performance powersave", "power"));
     }
 }
