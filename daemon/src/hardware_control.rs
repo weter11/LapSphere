@@ -591,6 +591,17 @@ pub fn apply_profile(profile: &Profile) -> Result<()> {
     // Generation and GPU state are committed only after the whole apply
     // succeeded. On failure neither the generation nor GPU_DAEMON_STATE moves.
     let result = apply_profile_inner(profile);
+    if let Err(e) = &result {
+        if let Some(gf) = e.downcast_ref::<GpuAttemptFailed>() {
+            // The attempt is the generation: record it so the poll does not re-run it.
+            commit_gpu_generation(gf.generation);
+            crate::GPU_APPLY_GEN.fetch_add(1, Ordering::SeqCst);
+            {
+                let mut state = lock_or_recover(&crate::GPU_DAEMON_STATE, "GPU_DAEMON_STATE");
+                *state = Some(profile.gpu_settings.clone());
+            }
+        }
+    }
     match result {
         Ok(gpu_applied) => {
             let committed = crate::GPU_APPLY_GEN.fetch_add(1, Ordering::SeqCst) + 1;
@@ -733,10 +744,7 @@ fn apply_profile_inner(profile: &Profile) -> Result<bool> {
             let generation = crate::GPU_APPLY_GEN.load(Ordering::SeqCst) + 1;
             let outcome = execute_gpu_plan(idx, &profile.gpu_settings, generation);
             if !outcome.failures.is_empty() {
-                return Err(anyhow::anyhow!(
-                    "GPU write failures: {}",
-                    outcome.failures.iter().map(|(n, e)| format!("{}: {}", n, e)).collect::<Vec<_>>().join("; ")
-                ));
+                return Err(GpuAttemptFailed { generation, failures: outcome.failures }.into());
             }
             return Ok(outcome.attempted);
         }
@@ -777,6 +785,29 @@ pub(crate) fn execute_gpu_plan(
         outcome.attempted = true;
     }
     outcome
+}
+
+/// GPU ops failed in one generation attempt. The wrapper records the attempt
+/// and returns this as the apply error with every failed op name.
+#[derive(Debug)]
+pub(crate) struct GpuAttemptFailed {
+    pub generation: u64,
+    pub failures: Vec<(&'static str, String)>,
+}
+
+impl std::fmt::Display for GpuAttemptFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let list = self.failures.iter().map(|(n, e)| format!("{}: {}", n, e)).collect::<Vec<_>>().join("; ");
+        write!(f, "GPU write failures (generation {}): {}", self.generation, list)
+    }
+}
+
+impl std::error::Error for GpuAttemptFailed {}
+
+/// Pure decision: which generation an attempt commits. Any attempt commits its
+/// generation, success or failure, so the poll never re-runs the same one.
+pub(crate) fn attempt_commit_generation(outcome: &GpuPlanOutcome) -> Option<u64> {
+    if outcome.attempted { Some(outcome.generation) } else { None }
 }
 
 /// The single place where the applied GPU generation is recorded.
@@ -1899,5 +1930,60 @@ mod preflight_tests {
     fn unknown_hardware_window_skips_range_check_but_not_ordering() {
         assert!(preflight_profile(&with(None, Some(1), Some(2)), false, None).is_ok());
         assert!(preflight_profile(&with(None, Some(5), Some(2)), false, None).is_err());
+    }
+}
+
+#[cfg(test)]
+mod gpu_attempt_commit_tests {
+    use super::*;
+
+    fn outcome(attempted: bool, generation: u64, failures: usize) -> GpuPlanOutcome {
+        GpuPlanOutcome {
+            generation,
+            attempted,
+            failures: (0..failures).map(|_| ("set_gpu_power_limit", "NotSupported".to_string())).collect(),
+        }
+    }
+
+    #[test]
+    fn failed_attempt_still_commits_its_generation() {
+        assert_eq!(attempt_commit_generation(&outcome(true, 7, 2)), Some(7));
+    }
+
+    #[test]
+    fn successful_attempt_commits_its_generation() {
+        assert_eq!(attempt_commit_generation(&outcome(true, 8, 0)), Some(8));
+    }
+
+    #[test]
+    fn no_attempt_commits_nothing() {
+        assert_eq!(attempt_commit_generation(&outcome(false, 9, 0)), None);
+    }
+
+    #[test]
+    fn same_generation_after_failure_is_not_replanned() {
+        // The poll asks gpu_apply_plan with applied == the failed generation.
+        let plan = crate::gpu_plan::gpu_apply_plan(false, &lapsphere_common::types::GpuSettings::default(), 5, 5);
+        assert!(matches!(plan, crate::gpu_plan::GpuPlan::UpToDate));
+    }
+
+    #[test]
+    fn new_generation_after_failure_is_planned() {
+        let plan = crate::gpu_plan::gpu_apply_plan(false, &lapsphere_common::types::GpuSettings::default(), 6, 5);
+        assert!(matches!(plan, crate::gpu_plan::GpuPlan::Apply { .. }));
+    }
+
+    #[test]
+    fn apply_failure_error_lists_every_failed_op_and_generation() {
+        let e = GpuAttemptFailed {
+            generation: 4,
+            failures: vec![("set_gpu_power_limit", "x".into()), ("set_gpu_core_offset", "y".into())],
+        };
+        let msg = e.to_string();
+        assert!(msg.contains("generation 4"));
+        assert!(msg.contains("set_gpu_power_limit: x"));
+        assert!(msg.contains("set_gpu_core_offset: y"));
+        let any: anyhow::Error = e.into();
+        assert!(any.downcast_ref::<GpuAttemptFailed>().is_some());
     }
 }

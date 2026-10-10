@@ -412,16 +412,16 @@ async fn main() -> Result<()> {
             let generation = GPU_APPLY_GEN.load(std::sync::atomic::Ordering::SeqCst);
             if hardware_detection::gpu_write_allowed(idx) {
                 let outcome = hardware_control::execute_gpu_plan(idx, gpu_settings, generation);
+                // Commit the attempt whatever its outcome: a failed generation is not retried.
+                if outcome.attempted {
+                    hardware_control::commit_gpu_generation(outcome.generation);
+                }
                 if !outcome.failures.is_empty() {
-                    // Warn once per generation; later ticks for the same generation stay quiet.
+                    // Warn-level details already logged per op in execute_gpu_plan; this is the once-per-generation summary.
                     static WARNED_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
                     if WARNED_GEN.swap(generation, std::sync::atomic::Ordering::SeqCst) != generation {
-                        for (name, err) in &outcome.failures {
-                            log::warn!(target: "hw.gpu", "GPU op {} failed for generation {}: {}", name, generation, err);
-                        }
+                        log::warn!(target: "hw.gpu", "poll: generation {} abandoned after {} failed op(s); not retried", generation, outcome.failures.len());
                     }
-                } else if outcome.attempted {
-                    hardware_control::commit_gpu_generation(outcome.generation);
                 }
             }
             apply_gpu_overclocking(gpu_settings)?;
