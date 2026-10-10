@@ -561,6 +561,7 @@ pub fn apply_pending_gpu(writable: bool) {
     GPU_PENDING.store(false, Ordering::SeqCst);
     if let Some((idx, g)) = settings {
         let failures = apply_gpu_static(idx, &g);
+        warn_gpu_failures("deferred profile GPU step", idx, &failures);
         log::info!(target: "hw.gpu", "deferred profile GPU step applied gpu={idx} failures={}", failures.len());
     }
 }
@@ -710,15 +711,55 @@ fn apply_profile_inner(profile: &Profile) -> Result<()> {
         log::debug!(target: "hw.gpu", "profile GPU writes deferred gpu={}", nvidia_gpu_idx);
     }
 
+    // A newly applied profile supersedes any GPU step deferred by an earlier one.
+    let new_pending = pending_after_profile_apply(gpu_writable, (nvidia_gpu_idx, profile.gpu_settings.clone()));
     if gpu_writable {
-        apply_gpu_static(nvidia_gpu_idx, &profile.gpu_settings);
+        let failures = apply_gpu_static(nvidia_gpu_idx, &profile.gpu_settings);
+        warn_gpu_failures("profile GPU apply", nvidia_gpu_idx, &failures);
     } else {
-        *lock_or_recover(&PENDING_GPU_SETTINGS, "PENDING_GPU_SETTINGS") =
-            Some((nvidia_gpu_idx, profile.gpu_settings.clone()));
-        GPU_PENDING.store(true, Ordering::SeqCst);
+        log::debug!(target: "hw.gpu", "profile GPU writes deferred gpu={}", nvidia_gpu_idx);
+    }
+    {
+        let mut slot = lock_or_recover(&PENDING_GPU_SETTINGS, "PENDING_GPU_SETTINGS");
+        GPU_PENDING.store(new_pending.is_some(), Ordering::SeqCst);
+        *slot = new_pending;
     }
 
+    if let Some(boost) = profile.cpu_settings.boost {
+        set_cpu_boost(boost)?;
+    }
+
+    if let Some(smt) = profile.cpu_settings.smt {
+        set_smt(smt)?;
+    }
+
+    // Apply keyboard settings
+    apply_keyboard_settings(&profile.keyboard_settings)?;
+
+    // Apply screen settings
+    apply_screen_settings(&profile.screen_settings)?;
+
+    // Apply fan settings - update daemon state
+    apply_fan_settings(&profile.fan_settings)?;
+
     Ok(())
+}
+
+/// Pending GPU state after a profile apply. Pure so the supersede rule is testable.
+/// Writable adapter: the step is applied now, so nothing stays pending (this also
+/// drops a step deferred by an earlier profile). Blocked adapter: the newest profile's
+/// step replaces whatever was pending.
+pub fn pending_after_profile_apply(writable: bool, deferred: (u32, GpuSettings)) -> Option<(u32, GpuSettings)> {
+    if writable { None } else { Some(deferred) }
+}
+
+/// Summarise failed GPU operations from `apply_gpu_static` in one warning.
+fn warn_gpu_failures(ctx: &str, idx: u32, failures: &[(&'static str, String)]) {
+    if failures.is_empty() {
+        return;
+    }
+    let names: Vec<&str> = failures.iter().map(|(op, _)| *op).collect();
+    log::warn!(target: "hw.gpu", "{ctx} gpu={idx}: {} operation(s) failed: {}", failures.len(), names.join(", "));
 }
 
 pub fn apply_battery_settings(settings: &BatterySettings) -> Result<()> {
@@ -1770,5 +1811,37 @@ mod pending_gpu_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod pending_supersede_tests {
+    use super::{pending_after_profile_apply, pending_gpu_due};
+    use lapsphere_common::types::GpuSettings;
+
+    fn settings(core: f32) -> GpuSettings {
+        GpuSettings {
+            core_offset: Some(core),
+            ..Default::default()
+        }
+    }
+
+    /// A deferred (gate closed), then B applied with the gate open. The tick
+    /// must act on B only and leave nothing pending.
+    #[test]
+    fn deferred_a_then_applied_b_leaves_only_b_and_no_pending() {
+        let a = (0u32, settings(-50.0));
+        let b = (0u32, settings(-100.0));
+
+        // Gate closed for A: A becomes pending.
+        let after_a = pending_after_profile_apply(false, a.clone());
+        assert_eq!(after_a, Some(a.clone()));
+
+        // Gate open for B: B is applied now, and A's pending step is dropped.
+        let after_b = pending_after_profile_apply(true, b.clone());
+        assert_eq!(after_b, None, "writable apply must clear pending A");
+
+        // Tick with gate open: pending flag is false, so the tick does not run A.
+        assert!(!pending_gpu_due(after_b.is_some(), true, true));
     }
 }
