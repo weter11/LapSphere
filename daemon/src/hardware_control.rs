@@ -642,22 +642,35 @@ fn apply_profile_inner(profile: &Profile) -> Result<()> {
             .unwrap_or(0)
     };
 
-    if let Some(limit) = profile.gpu_settings.power_limit {
-        let _ = set_gpu_power_limit(nvidia_gpu_idx, limit);
-    }
+    // Bump the generation so the GPU poll re-applies the full set once the
+    // dGPU is awake. Settings live in GPU_DAEMON_STATE regardless.
+    crate::GPU_APPLY_GEN.fetch_add(1, Ordering::SeqCst);
 
-    if let Some(core_offset) = profile.gpu_settings.core_offset {
-        let _ = set_gpu_core_offset(nvidia_gpu_idx, core_offset as f32);
-    }
-
-    if let Some(memory_offset) = profile.gpu_settings.memory_offset {
-        let _ = set_gpu_memory_offset(nvidia_gpu_idx, memory_offset as f32);
-    }
-
-    if let (Some(min_clock), Some(max_clock)) = (profile.gpu_settings.min_gpu_clock, profile.gpu_settings.max_gpu_clock) {
-        let _ = set_gpu_locked_clocks(nvidia_gpu_idx, min_clock, max_clock);
+    // Check the suspend state before any NVML call: a suspended dGPU must not
+    // be woken by a profile switch. The settings stay in GPU_DAEMON_STATE and
+    // are applied by the poll once the adapter is active.
+    let gpu_suspended = crate::hardware_detection::is_gpu_suspended_by_index(nvidia_gpu_idx);
+    if gpu_suspended {
+        log::info!(target: "hw.gpu", "dGPU suspended; GPU writes deferred to poll gen={}",
+            crate::GPU_APPLY_GEN.load(Ordering::SeqCst));
     } else {
-        let _ = reset_gpu_clocks(nvidia_gpu_idx);
+        if let Some(limit) = profile.gpu_settings.power_limit {
+            let _ = set_gpu_power_limit(nvidia_gpu_idx, limit);
+        }
+
+        if let Some(core_offset) = profile.gpu_settings.core_offset {
+            let _ = set_gpu_core_offset(nvidia_gpu_idx, core_offset as f32);
+        }
+
+        if let Some(memory_offset) = profile.gpu_settings.memory_offset {
+            let _ = set_gpu_memory_offset(nvidia_gpu_idx, memory_offset as f32);
+        }
+
+        if let (Some(min_clock), Some(max_clock)) = (profile.gpu_settings.min_gpu_clock, profile.gpu_settings.max_gpu_clock) {
+            let _ = set_gpu_locked_clocks(nvidia_gpu_idx, min_clock, max_clock);
+        } else {
+            let _ = reset_gpu_clocks(nvidia_gpu_idx);
+        }
     }
     
     if let Some(boost) = profile.cpu_settings.boost {
@@ -677,12 +690,15 @@ fn apply_profile_inner(profile: &Profile) -> Result<()> {
     // Apply fan settings - update daemon state
     apply_fan_settings(&profile.fan_settings)?;
 
-    // Apply NVIDIA fan settings
-    for fan_setting in &profile.gpu_settings.nvidia_fans {
-        if fan_setting.manual {
-            let _ = set_gpu_fan_speed(fan_setting.device_index, fan_setting.fan_id, fan_setting.speed);
-        } else {
-            let _ = set_gpu_fan_auto(fan_setting.device_index, fan_setting.fan_id);
+    // Apply NVIDIA fan settings (skipped while the dGPU is suspended; the poll
+    // applies them with the rest of the GPU set).
+    if !gpu_suspended {
+        for fan_setting in &profile.gpu_settings.nvidia_fans {
+            if fan_setting.manual {
+                let _ = set_gpu_fan_speed(fan_setting.device_index, fan_setting.fan_id, fan_setting.speed);
+            } else {
+                let _ = set_gpu_fan_auto(fan_setting.device_index, fan_setting.fan_id);
+            }
         }
     }
 

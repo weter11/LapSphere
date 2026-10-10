@@ -1932,7 +1932,7 @@ fn suspended_decision(
 /// query is the conservative choice for RTD3 (a wrong "awake" answer would wake
 /// the adapter), and the caller's error path already says the metadata is not
 /// cached.
-fn is_gpu_suspended_by_index(index: u32) -> bool {
+pub(crate) fn is_gpu_suspended_by_index(index: u32) -> bool {
     let sysfs = sysfs_nvidia_devices();
     let known_bdf = bdf_for_nvml_index(index);
     match suspended_decision(&sysfs, known_bdf.as_deref(), sysfs.len()) {

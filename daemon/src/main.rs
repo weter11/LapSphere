@@ -3,6 +3,7 @@ mod daemon_settings;
 mod hardware_control;
 mod hardware_detection;
 mod gpu_activity;
+mod gpu_plan;
 mod tuxedo_io;
 mod battery_control;
 mod polling_scheduler;
@@ -62,6 +63,12 @@ pub static DAEMON_POLL_SETTINGS: once_cell::sync::Lazy<
 // Global GPU daemon state
 pub static GPU_DAEMON_STATE: once_cell::sync::Lazy<Arc<Mutex<Option<lapsphere_common::types::GpuSettings>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
+
+/// Bumped on every profile apply; the GPU job re-applies the full GPU set
+/// once per bump, not on every poll tick.
+pub static GPU_APPLY_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Last generation whose full GPU set was applied while the dGPU was active.
+pub static GPU_APPLIED_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub struct GpuOverclockStats {
     pub freq_offset: i32,
@@ -396,6 +403,35 @@ async fn main() -> Result<()> {
         };
 
         if let Some(ref gpu_settings) = settings {
+            // Full GPU set, once per profile generation, only while the dGPU
+            // is awake. A suspended adapter yields Skip and is left alone.
+            let suspended = hardware_detection::is_gpu_suspended_by_index(0);
+            let generation = GPU_APPLY_GEN.load(std::sync::atomic::Ordering::SeqCst);
+            let applied = GPU_APPLIED_GEN.load(std::sync::atomic::Ordering::SeqCst);
+            match gpu_plan::gpu_apply_plan(suspended, gpu_settings, generation, applied) {
+                gpu_plan::GpuPlan::Skip | gpu_plan::GpuPlan::UpToDate => {}
+                gpu_plan::GpuPlan::Apply { ops, generation } => {
+                    for op in &ops {
+                        let _ = match op {
+                            gpu_plan::GpuOp::PowerLimit(w) =>
+                                hardware_control::set_gpu_power_limit(0, *w),
+                            gpu_plan::GpuOp::CoreOffset(o) =>
+                                hardware_control::set_gpu_core_offset(0, *o),
+                            gpu_plan::GpuOp::MemoryOffset(o) =>
+                                hardware_control::set_gpu_memory_offset(0, *o),
+                            gpu_plan::GpuOp::LockedClocks(lo, hi) =>
+                                hardware_control::set_gpu_locked_clocks(0, *lo, *hi),
+                            gpu_plan::GpuOp::ResetClocks =>
+                                hardware_control::reset_gpu_clocks(0),
+                            gpu_plan::GpuOp::FanSpeed { fan_id, speed } =>
+                                hardware_control::set_gpu_fan_speed(0, *fan_id, *speed),
+                            gpu_plan::GpuOp::FanAuto { fan_id } =>
+                                hardware_control::set_gpu_fan_auto(0, *fan_id),
+                        };
+                    }
+                    GPU_APPLIED_GEN.store(generation, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
             apply_gpu_overclocking(gpu_settings)?;
         } else {
             {
@@ -601,6 +637,11 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
             *last = None;
         }
         if !gpu_settings.manual_clocks {
+            // A suspended dGPU has nothing to clear; waking it for a reset
+            // would defeat RTD3. The stored offsets are left as they are.
+            if hardware_detection::is_gpu_suspended_by_index(0) {
+                return Ok(());
+            }
             // Only clear if not already cleared to avoid waking up GPU unnecessarily
             let needs_clear = {
                 let map = lock_or_recover(&MANUAL_GPU_OFFSETS, "MANUAL_GPU_OFFSETS");
