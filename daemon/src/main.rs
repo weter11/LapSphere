@@ -413,6 +413,9 @@ async fn main() -> Result<()> {
         Ok(())
     };
 
+    // Step 5: idle-OC timer tracking (no new detector; relies on GpuPollState.load).
+    let mut idle_oc_released = false;
+    let mut idle_oc_idle_sec: u64 = 0;
     let log_tick = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let gpu_job_poll = {
         let log_tick = log_tick.clone();
@@ -825,6 +828,16 @@ fn calculate_fan_speed(sorted_points: &[(u8, u8)], temp: f32) -> u8 {
     }
     
     50 // Fallback
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IdleOcAction { None, Release, Restore }
+
+fn idle_oc_action(flag: bool, idle_for: u64, has_oc: bool, writable: bool, released: bool, load_high: bool) -> IdleOcAction {
+    if !flag || !has_oc { return IdleOcAction::None; }
+    if released && load_high { return IdleOcAction::Restore; }
+    if !released && !load_high && writable && idle_for >= 30 { return IdleOcAction::Release; }
+    IdleOcAction::None
 }
 
 #[cfg(test)]

@@ -2821,7 +2821,9 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
     // -----------------------------------------------------------------------
     // Tier decision — the single gate for invasive queries on this tick.
     //
-    // The only input is the sysfs runtime_status word above, so a suspended
+    static LAST_GPU_LOAD: Lazy<Mutex<Option<f32>>> = Lazy::new(|| Mutex::new(None));
+
+    /// The only input is the sysfs runtime_status word above
     // adapter is never touched. Rules (see gpu_poll_tier):
     //   P0..P2  -> live NVML + NVAPI query every tick, no cached values
     //   work at any p-state -> live too (light 3D work sits on P3/P5)
@@ -3010,6 +3012,14 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             device.power_usage().ok().map(|p| p as f32 / 1000.0),
         );
 
+        // Step 2: targeted utilization-rate storage for release-oc decision.
+        {
+            let load_ref: Option<f32> = load;
+            if load_ref.is_some() {
+                let mut guard = crate::hardware_control::lock_or_recover(&LAST_GPU_LOAD, "LAST_GPU_LOAD");
+                *guard = load_ref;
+            }
+        }
         // Only the first pass after a suspend may wait: a successful NVML read
         // right after a D3 wake can report stale nonsense (measured 753 W on a
         // 150 W-max GPU). Ordinary ticks never acquire a retry loop.
