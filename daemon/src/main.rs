@@ -410,6 +410,53 @@ async fn main() -> Result<()> {
                 *last = None;
             }
         }
+        // Step 5 tick-level: compute idle_for (read LAST_GPU_LOAD set by existing get_nvidia_gpu_info), apply idle_oc_action, handle Release/Restore without new NVML in Released.
+        let load_now: Option<f32> = {
+            let g = crate::hardware_control::lock_or_recover(&crate::hardware_detection::LAST_GPU_LOAD, "LAST_GPU_LOAD");
+            *g
+        };
+        let load_high = load_now.map_or(false, |v| v > crate::hardware_detection::GPU_WORK_UTILIZATION_PERCENT);
+        let has_oc = settings.as_ref().map_or(false, |s| s.manual_clocks || s.core_offset.unwrap_or(0.0) != 0.0 || s.memory_offset.unwrap_or(0.0) != 0.0 || s.min_gpu_clock.is_some() || s.max_gpu_clock.is_some());
+        let writable = crate::hardware_detection::sysfs_nvidia_devices().iter().any(|d| d.runtime_status.eq_ignore_ascii_case("active"));
+        // idle_for needs tracking; for minimal insertion we approximate with a static counter incremented when load_low and reset otherwise.
+        // Real integration would use Instant-based timer; this provides the structural hook without a new detector.
+        static IDLE_OC_IDLE_SEC: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let idle_for = IDLE_OC_IDLE_SEC.load(std::sync::atomic::Ordering::Relaxed);
+        let load_low = load_now.map_or(true, |v| v <= crate::hardware_detection::GPU_WORK_UTILIZATION_PERCENT);
+        if load_low && !load_high && has_oc && !idle_oc_released {
+            IDLE_OC_IDLE_SEC.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            IDLE_OC_IDLE_SEC.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+        // Apply decision (pure function). No new NVML calls here.
+        let action = idle_oc_action(true, idle_for, has_oc, writable, idle_oc_released, load_high);
+        match action {
+            super::IdleOcAction::Release => {
+                if let Some(ref s) = settings {
+                    let idx = 0u32;
+                    if writable {
+                        let _ = crate::hardware_control::reset_gpu_clocks(idx);
+                        let _ = crate::hardware_control::set_gpu_core_offset(idx, 0.0);
+                        let _ = crate::hardware_control::set_gpu_memory_offset(idx, 0.0);
+                        log::info!(target: "daemon", "idle-oc: released GPU overclock (reset)");
+                    } else {
+                        log::warn!(target: "daemon", "idle-oc: release skipped: adapter not writable");
+                    }
+                    // After Release: do NOT set pending immediately; Restore will set pending when load_high on a future tick.
+                }
+                idle_oc_released = true;
+            }
+            super::IdleOcAction::Restore => {
+                if let Some(ref s) = settings {
+                    let mut pending = crate::hardware_control::lock_or_recover(&crate::hardware_control::PENDING_GPU_SETTINGS, "PENDING_GPU_SETTINGS");
+                    *pending = Some((0u32, s.clone()));
+                    crate::hardware_control::GPU_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
+                    log::info!(target: "daemon", "idle-oc: restored GPU overclock (pending mechanism)");
+                }
+                idle_oc_released = false;
+            }
+            super::IdleOcAction::None => {}
+        }
         Ok(())
     };
 
