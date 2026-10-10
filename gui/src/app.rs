@@ -1278,6 +1278,9 @@ impl LapSphereApp {
                 TrayEvent::SwitchProfile(idx) => {
                     if let Some(profile) = self.state.config.profiles.get(idx).cloned() {
                         self.state.config.current_profile = profile.name.clone();
+                        if let Err(e) = save_profiles_to_disk(&self.state.config) {
+                            log::error!("failed to save current profile: {e}");
+                        }
                         if let Some(client) = &self.dbus_client {
                             let _ = client.apply_profile(profile);
                         }
