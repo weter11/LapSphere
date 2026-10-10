@@ -92,6 +92,21 @@ pub fn should_fetch_logs() -> bool {
     logs_fetch_needed(Page::Settings, SettingsTab::Logs, now_ms().saturating_sub(last_frame))
 }
 
+/// Is any UI frame being painted right now?
+///
+/// The whole polling coordinator consults this, not just the log-ring callback.
+/// An iconified/minimized window stops calling `ui()`, so its frame stamp goes
+/// stale: no frame can be consuming the polled data, and the fetch tasks would
+/// only pile replies into a channel nobody drains. Worse, the coordinator kept
+/// waking at every component interval and re-creating its `select!` branch
+/// futures on each pass — pure allocation churn against an allocator that does
+/// not decommit partially-live pages, which grew RSS by ~1 MiB/min over days of
+/// idle tray time (measured: 1.6 GiB after two days at 0 CPU).
+pub fn ui_is_alive() -> bool {
+    let last_frame = LAST_UI_FRAME_MS.load(Ordering::Relaxed);
+    now_ms().saturating_sub(last_frame) <= UI_FRAME_FRESH_MS
+}
+
 pub struct AppState {
     // Core data
     pub config: AppConfig,
@@ -491,6 +506,15 @@ impl LapSphereApp {
             let in_flight = in_flight.clone();
             tokio::spawn(async move {
                 coordinator.run(move |component_id| {
+                    // Nothing is painting: the window is iconified or hidden to
+                    // the tray. No frame can consume a polled update, so this
+                    // tick is skipped before it claims a permit or clones a
+                    // handle. Keeping the loop spinning here was the source of
+                    // the idle RSS creep (see `ui_is_alive`).
+                    if !ui_is_alive() {
+                        return;
+                    }
+
                     // One request per component at a time. If the previous tick's
                     // fetch has not finished, this tick is skipped rather than
                     // stacked: with the window hidden nothing drains the update
@@ -616,7 +640,13 @@ impl LapSphereApp {
             let _ = handle.register("gamepads".to_string(), Duration::from_millis(state.config.statistics_sections.gamepad_poll_rate));
             let _ = handle.register("storage".to_string(), Duration::from_millis(state.config.statistics_sections.storage_poll_rate));
             let _ = handle.register("mount".to_string(), Duration::from_millis(state.config.statistics_sections.storage_poll_rate));
-            let _ = handle.register("gpu_overclock".to_string(), Duration::from_millis(state.config.statistics_sections.gpu_overclock_poll_rate));
+            // NOTE: there is intentionally no "gpu_overclock" registration. The
+            // daemon already runs dynamic overclocking on its own
+            // `gpu_overclock_ms` timer (see daemon/src/daemon_settings.rs), and
+            // this coordinator has no fetch arm for that id — registering it
+            // spawned a task that matched `_ => {}` and returned immediately,
+            // which was one allocation-churning spawn per poll interval with no
+            // work behind it.
             let _ = handle.register("webcam".to_string(), Duration::from_secs(5));
             // Registered, but the callback only fetches while the Logs tab is on
             // screen (see `should_fetch_logs`): the ring reply is ~470 kB each time.
@@ -1958,6 +1988,22 @@ mod log_fetch_gate_tests {
         note_ui_frame(Page::Settings, SettingsTab::Logs);
         LAST_UI_FRAME_MS.store(now_ms() - (UI_FRAME_FRESH_MS + 1), Ordering::Relaxed);
         assert!(!should_fetch_logs());
+    }
+
+    #[test]
+    fn ui_alive_tracks_the_frame_heartbeat() {
+        // No frame ever stamped (fresh process): the window has not painted, so
+        // the whole polling path must stay quiet.
+        LAST_UI_FRAME_MS.store(0, Ordering::Relaxed);
+        assert!(!ui_is_alive(), "no frame recorded yet");
+
+        // A frame painted now keeps polling alive for the freshness window.
+        LAST_UI_FRAME_MS.store(now_ms(), Ordering::Relaxed);
+        assert!(ui_is_alive());
+
+        // The heartbeat going stale is exactly the iconified/tray-only case.
+        LAST_UI_FRAME_MS.store(now_ms() - (UI_FRAME_FRESH_MS + 1), Ordering::Relaxed);
+        assert!(!ui_is_alive(), "a stale heartbeat must gate polling off");
     }
 
     #[test]

@@ -1,4 +1,12 @@
 [D-BUS Service]
 Name=io.lapsphere.Control
+# Route activation through the systemd unit instead of spawning a bare process.
+# Without this key, D-Bus starts /usr/bin/lapsphere-daemon directly AND the
+# enabled lapsphere-daemon.service starts its own copy, so the box ends up with
+# two or three daemons at once (observed: two children in system.slice/dbus.service
+# plus one in lapsphere-daemon.service, all reparented to pid 1). With the key,
+# activation starts the unit, which is the sole supervisor (Restart, MemoryMax,
+# TasksMax, CPUQuota all live there).
+SystemdService=lapsphere-daemon.service
 Exec=/usr/bin/lapsphere-daemon
 User=root
