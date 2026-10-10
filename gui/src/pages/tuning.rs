@@ -557,7 +557,11 @@ fn draw_gpu_tuning(
                 state.config.statistics_sections.gpu_overclock_poll_rate = gpu_oc_poll;
                 let _ = state.save_settings();
                 if let Some(ref handle) = state.coordinator_handle {
-                    let _ = handle.update_interval("gpu_overclock".to_string(), std::time::Duration::from_millis(gpu_oc_poll));
+                    // Intentionally no handle.update_interval("gpu_overclock"):
+                    // the coordinator no longer registers that component (there
+                    // is no fetch arm for it), so it has no interval to update.
+                    // The daemon-side interval is updated below via D-Bus.
+                    let _ = handle;
                 }
                 if let Some(client) = dbus_client {
                     let _ = client.update_polling_interval("gpu_overclock", gpu_oc_poll);
