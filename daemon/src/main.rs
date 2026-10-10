@@ -411,30 +411,8 @@ async fn main() -> Result<()> {
             };
             let suspended = hardware_detection::is_gpu_suspended_by_index(idx);
             let generation = GPU_APPLY_GEN.load(std::sync::atomic::Ordering::SeqCst);
-            let applied = GPU_APPLIED_GEN.load(std::sync::atomic::Ordering::SeqCst);
-            match gpu_plan::gpu_apply_plan(suspended, gpu_settings, generation, applied) {
-                gpu_plan::GpuPlan::Skip | gpu_plan::GpuPlan::UpToDate => {}
-                gpu_plan::GpuPlan::Apply { ops, generation } => {
-                    for op in &ops {
-                        let _ = match op {
-                            gpu_plan::GpuOp::PowerLimit(w) =>
-                                hardware_control::set_gpu_power_limit(idx, *w),
-                            gpu_plan::GpuOp::CoreOffset(o) =>
-                                hardware_control::set_gpu_core_offset(idx, *o),
-                            gpu_plan::GpuOp::MemoryOffset(o) =>
-                                hardware_control::set_gpu_memory_offset(idx, *o),
-                            gpu_plan::GpuOp::LockedClocks(lo, hi) =>
-                                hardware_control::set_gpu_locked_clocks(idx, *lo, *hi),
-                            gpu_plan::GpuOp::ResetClocks =>
-                                hardware_control::reset_gpu_clocks(idx),
-                            gpu_plan::GpuOp::FanSpeed { fan_id, speed } =>
-                                hardware_control::set_gpu_fan_speed(idx, *fan_id, *speed),
-                            gpu_plan::GpuOp::FanAuto { fan_id } =>
-                                hardware_control::set_gpu_fan_auto(idx, *fan_id),
-                        };
-                    }
-                    GPU_APPLIED_GEN.store(generation, std::sync::atomic::Ordering::SeqCst);
-                }
+            if !suspended {
+                hardware_control::execute_gpu_plan(idx, gpu_settings, generation)?;
             }
             apply_gpu_overclocking(gpu_settings)?;
         } else {

@@ -255,32 +255,12 @@ pub fn load_config(&mut self) {
     /// anything changed, the previous file is copied to `profiles.json.bak`
     /// and each change is logged to the UI journal with the hardware note.
     pub fn normalize_profiles_to_hw(&mut self, hw_min_khz: u64, hw_max_khz: u64) {
-        let mut changes: Vec<(String, String)> = Vec::new();
-        for profile in self.config.profiles.iter_mut() {
-            let before_min = profile.cpu_settings.min_frequency;
-            let before_max = profile.cpu_settings.max_frequency;
-            let r = lapsphere_common::types::normalize_freq_limits(
-                before_min, before_max, hw_min_khz, hw_max_khz,
-            );
-            if r.changed {
-                profile.cpu_settings.min_frequency = r.min;
-                profile.cpu_settings.max_frequency = r.max;
-                changes.push((
-                    profile.name.clone(),
-                    format!(
-                        "min {:?}->{:?} kHz, max {:?}->{:?} kHz (предел железа {}-{} kHz)",
-                        before_min, r.min, before_max, r.max, hw_min_khz, hw_max_khz
-                    ),
-                ));
-            }
-        }
+        let changes = normalize_profiles_to_hw_pure(&mut self.config.profiles, hw_min_khz, hw_max_khz);
         if changes.is_empty() {
             return;
         }
-        // Keep a copy of the previous file before overwriting it.
         let path = std::path::PathBuf::from(format!("{}/profiles.json", get_config_dir()));
-        let _ = std::fs::copy(&path, path.with_extension("json.bak"));
-        match self.save_profiles() {
+        match write_profiles_with_backup(&path, || self.save_profiles()) {
             Ok(()) => {
                 for (name, text) in changes {
                     self.push_ui_log("warn", &format!("Профиль '{}': {} (предел железа)", name, text));
@@ -294,24 +274,17 @@ pub fn load_config(&mut self) {
     /// UI journal and the status line. Pending ones stay queued.
     pub fn drain_apply_replies(&mut self) {
         let pending = std::mem::take(&mut self.pending_apply);
-        let mut still = Vec::new();
-        for (name, mut rx) in pending {
-            match rx.try_recv() {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    let msg = format!("Профиль '{}' не применён: {}", name, e);
-                    self.push_ui_log("error", &msg);
-                    self.show_message(msg, true);
-                }
-                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => still.push((name, rx)),
-                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                    let msg = format!("Профиль '{}': демон не ответил", name);
-                    self.push_ui_log("error", &msg);
-                    self.show_message(msg, true);
-                }
-            }
+        let (still, outcomes) = drain_apply_replies_pure(pending);
+        self.pending_apply = still;
+        for outcome in outcomes {
+            let msg = match outcome {
+                ApplyOutcome::Failed { name, error } => format!("Профиль '{}' не применён: {}", name, error),
+                ApplyOutcome::NoReply { name } => format!("Профиль '{}': демон не ответил", name),
+            };
+            let is_error = true;
+            self.push_ui_log("error", &msg);
+            self.show_message(msg, is_error);
         }
-        self.pending_apply.extend(still);
     }
 
     /// Append a line to the UI journal (not the daemon's).
@@ -2072,5 +2045,161 @@ mod log_fetch_gate_tests {
         // Consuming a frame re-arms it, so the next arrival requests again.
         REPAINT_PENDING.store(false, Ordering::Release);
         assert!(!REPAINT_PENDING.load(Ordering::Acquire));
+    }
+}
+
+/// Result of one finished ApplyProfile reply, as shown to the user.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ApplyOutcome {
+    Failed { name: String, error: String },
+    NoReply { name: String },
+}
+
+/// Pure: clamp each profile's frequency limits in place. Returns one
+/// (profile name, description) per changed profile, for the UI journal.
+pub fn normalize_profiles_to_hw_pure(
+    profiles: &mut [lapsphere_common::types::Profile],
+    hw_min_khz: u64,
+    hw_max_khz: u64,
+) -> Vec<(String, String)> {
+    let mut changes = Vec::new();
+    for profile in profiles.iter_mut() {
+        let before_min = profile.cpu_settings.min_frequency;
+        let before_max = profile.cpu_settings.max_frequency;
+        let r = lapsphere_common::types::normalize_freq_limits(before_min, before_max, hw_min_khz, hw_max_khz);
+        if r.changed {
+            profile.cpu_settings.min_frequency = r.min;
+            profile.cpu_settings.max_frequency = r.max;
+            changes.push((
+                profile.name.clone(),
+                format!(
+                    "min {:?}->{:?} kHz, max {:?}->{:?} kHz (предел железа {}-{} kHz)",
+                    before_min, r.min, before_max, r.max, hw_min_khz, hw_max_khz
+                ),
+            ));
+        }
+    }
+    changes
+}
+
+/// Pure: write the profiles via `save`, after copying the current file to
+/// `<path>.bak`. The backup is best-effort (a missing file is not an error).
+pub fn write_profiles_with_backup(
+    path: &std::path::Path,
+    save: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let _ = std::fs::copy(path, path.with_extension("json.bak"));
+    save()
+}
+
+/// Pure, non-blocking: take finished replies out of `pending`. Pending
+/// receivers stay queued; closed or failed ones become outcomes.
+pub fn drain_apply_replies_pure(
+    pending: Vec<(String, tokio::sync::oneshot::Receiver<anyhow::Result<()>>)>,
+) -> (Vec<(String, tokio::sync::oneshot::Receiver<anyhow::Result<()>>)>, Vec<ApplyOutcome>) {
+    let mut still = Vec::new();
+    let mut outcomes = Vec::new();
+    for (name, mut rx) in pending {
+        match rx.try_recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => outcomes.push(ApplyOutcome::Failed { name, error: e.to_string() }),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => still.push((name, rx)),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                outcomes.push(ApplyOutcome::NoReply { name })
+            }
+        }
+    }
+    (still, outcomes)
+}
+
+#[cfg(test)]
+mod pure_app_tests {
+    use super::*;
+    use lapsphere_common::types::Profile;
+
+    const HW_MIN: u64 = 403_488;
+    const HW_MAX: u64 = 4_465_261;
+
+    fn profile(name: &str, min: Option<u64>, max: Option<u64>) -> Profile {
+        let mut p = Profile::default();
+        p.name = name.to_string();
+        p.cpu_settings.min_frequency = min;
+        p.cpu_settings.max_frequency = max;
+        p
+    }
+
+    #[test]
+    fn normalize_clamps_out_of_range_and_reports_change() {
+        let mut ps = vec![profile("a", Some(100_000), Some(9_000_000))];
+        let changes = normalize_profiles_to_hw_pure(&mut ps, HW_MIN, HW_MAX);
+        assert_eq!(ps[0].cpu_settings.min_frequency, Some(HW_MIN));
+        assert_eq!(ps[0].cpu_settings.max_frequency, Some(HW_MAX));
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].0, "a");
+    }
+
+    #[test]
+    fn normalize_leaves_in_range_profile_untouched_and_silent() {
+        let mut ps = vec![profile("ok", Some(1_000_000), Some(3_000_000))];
+        let changes = normalize_profiles_to_hw_pure(&mut ps, HW_MIN, HW_MAX);
+        assert!(changes.is_empty());
+        assert_eq!(ps[0].cpu_settings.min_frequency, Some(1_000_000));
+    }
+
+    #[test]
+    fn normalize_keeps_none_as_none() {
+        let mut ps = vec![profile("auto", None, None)];
+        assert!(normalize_profiles_to_hw_pure(&mut ps, HW_MIN, HW_MAX).is_empty());
+        assert_eq!(ps[0].cpu_settings.min_frequency, None);
+    }
+
+    #[test]
+    fn backup_is_written_before_save() {
+        let dir = std::env::temp_dir().join(format!("lap-bak-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("profiles.json");
+        std::fs::write(&path, "OLD").unwrap();
+        write_profiles_with_backup(&path, || {
+            // At save time the backup must already hold the old content.
+            assert_eq!(std::fs::read_to_string(dir.join("profiles.json.bak")).unwrap(), "OLD");
+            std::fs::write(&path, "NEW")?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "NEW");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn drain_keeps_pending_and_reports_failure_without_blocking() {
+        let (tx_pending, rx_pending) = oneshot::channel::<anyhow::Result<()>>();
+        let (tx_fail, rx_fail) = oneshot::channel::<anyhow::Result<()>>();
+        tx_fail.send(Err(anyhow::anyhow!("boom"))).unwrap();
+        let (still, outcomes) = drain_apply_replies_pure(vec![
+            ("pending".into(), rx_pending),
+            ("failed".into(), rx_fail),
+        ]);
+        assert_eq!(still.len(), 1);
+        assert_eq!(still[0].0, "pending");
+        assert_eq!(outcomes, vec![ApplyOutcome::Failed { name: "failed".into(), error: "boom".into() }]);
+        drop(tx_pending);
+    }
+
+    #[test]
+    fn drain_reports_closed_channel_as_no_reply() {
+        let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
+        drop(tx);
+        let (still, outcomes) = drain_apply_replies_pure(vec![("gone".into(), rx)]);
+        assert!(still.is_empty());
+        assert_eq!(outcomes, vec![ApplyOutcome::NoReply { name: "gone".into() }]);
+    }
+
+    #[test]
+    fn drain_success_produces_no_outcome() {
+        let (tx, rx) = oneshot::channel::<anyhow::Result<()>>();
+        tx.send(Ok(())).unwrap();
+        let (still, outcomes) = drain_apply_replies_pure(vec![("ok".into(), rx)]);
+        assert!(still.is_empty());
+        assert!(outcomes.is_empty());
     }
 }
