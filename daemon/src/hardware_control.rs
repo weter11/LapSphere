@@ -713,9 +713,11 @@ fn apply_profile_inner(profile: &Profile) -> Result<()> {
 
     // A newly applied profile supersedes any GPU step deferred by an earlier one.
     let new_pending = pending_after_profile_apply(gpu_writable, (nvidia_gpu_idx, profile.gpu_settings.clone()));
+    let mut gpu_failures = Vec::new();
     if gpu_writable {
         let failures = apply_gpu_static(nvidia_gpu_idx, &profile.gpu_settings);
         warn_gpu_failures("profile GPU apply", nvidia_gpu_idx, &failures);
+        gpu_failures = failures;
     } else {
         log::debug!(target: "hw.gpu", "profile GPU writes deferred gpu={}", nvidia_gpu_idx);
     }
@@ -742,7 +744,7 @@ fn apply_profile_inner(profile: &Profile) -> Result<()> {
     // Apply fan settings - update daemon state
     apply_fan_settings(&profile.fan_settings)?;
 
-    Ok(())
+    profile_gpu_result(&gpu_failures)
 }
 
 /// Pending GPU state after a profile apply. Pure so the supersede rule is testable.
@@ -751,6 +753,21 @@ fn apply_profile_inner(profile: &Profile) -> Result<()> {
 /// step replaces whatever was pending.
 pub fn pending_after_profile_apply(writable: bool, deferred: (u32, GpuSettings)) -> Option<(u32, GpuSettings)> {
     if writable { None } else { Some(deferred) }
+}
+
+fn profile_gpu_result(failures: &[(&str, String)]) -> Result<()> {
+    if failures.is_empty() { Ok(()) } else {
+        Err(anyhow!("profile GPU apply failed: {} operation(s)", failures.len()))
+    }
+}
+
+#[cfg(test)]
+mod profile_gpu_result_tests {
+    #[test]
+    fn gpu_failure_rejects_profile_success() {
+        assert!(super::profile_gpu_result(&[("offset", "refused".into())]).is_err());
+        assert!(super::profile_gpu_result(&[]).is_ok());
+    }
 }
 
 /// Summarise failed GPU operations from `apply_gpu_static` in one warning.
