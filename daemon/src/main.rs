@@ -83,6 +83,16 @@ pub static CURRENT_GPU_OVERCLOCK_STATS: once_cell::sync::Lazy<Arc<Mutex<Option<G
 pub static LAST_APPLIED_OFFSET: once_cell::sync::Lazy<Arc<Mutex<Option<i32>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
 
+/// GPU_APPLY_GEN value under which LAST_APPLIED_OFFSET was last attempted.
+pub static LAST_APPLIED_OFFSET_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Pure decision for the dynamic core-offset write. Writes when the value
+/// differs from the last attempt or the GPU generation changed. A refused write
+/// is still an attempt, so the same value is not re-sent on every tick.
+pub(crate) fn offset_write_due(last: Option<i32>, last_gen: u64, target: i32, gen: u64) -> bool {
+    last != Some(target) || last_gen != gen
+}
+
 pub static MANUAL_GPU_OFFSETS: once_cell::sync::Lazy<Arc<Mutex<HashMap<u32, (f32, f32)>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
@@ -645,8 +655,12 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
 
             if needs_clear {
                 log::info!("Manual clocks disabled, resetting GPU offsets to 0");
-                let _ = crate::hardware_control::set_gpu_core_offset(idx, 0.0);
-                let _ = crate::hardware_control::set_gpu_memory_offset(idx, 0.0);
+                if let Err(e) = crate::hardware_control::set_gpu_core_offset(idx, 0.0) {
+                    log::warn!(target: "hw.gpu", "clear offsets: set_gpu_core_offset gpu={} failed: {}", idx, e);
+                }
+                if let Err(e) = crate::hardware_control::set_gpu_memory_offset(idx, 0.0) {
+                    log::warn!(target: "hw.gpu", "clear offsets: set_gpu_memory_offset gpu={} failed: {}", idx, e);
+                }
                 {
                     let mut map = lock_or_recover(&MANUAL_GPU_OFFSETS, "MANUAL_GPU_OFFSETS");
                     map.insert(idx, (0.0, 0.0));
@@ -788,14 +802,27 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
 
         // ONLY APPLY IF CHANGED (fix stuttering)
         {
+            let gen_now = GPU_APPLY_GEN.load(std::sync::atomic::Ordering::SeqCst);
             let mut last = lock_or_recover(&LAST_APPLIED_OFFSET, "LAST_APPLIED_OFFSET");
-            if *last != Some(final_offset_i32) {
-                crate::hardware_control::set_gpu_core_offset(idx, final_offset_i32 as f32)?;
+            let last_gen = LAST_APPLIED_OFFSET_GEN.load(std::sync::atomic::Ordering::SeqCst);
+            if offset_write_due(*last, last_gen, final_offset_i32, gen_now) {
+                // Record the attempt before writing: a refused write is not retried
+                // every tick, only after the value or the generation changes.
                 *last = Some(final_offset_i32);
-                if final_offset_i32 == 0 {
-                    log::debug!("Cleared dynamic GPU offset (P-state not 0)");
-                } else {
-                    log::debug!("Applied new dynamic GPU offset: {} MHz", final_offset_i32);
+                LAST_APPLIED_OFFSET_GEN.store(gen_now, std::sync::atomic::Ordering::SeqCst);
+                match crate::hardware_control::set_gpu_core_offset(idx, final_offset_i32 as f32) {
+                    Ok(()) => {
+                        if final_offset_i32 == 0 {
+                            log::debug!("Cleared dynamic GPU offset (P-state not 0)");
+                        } else {
+                            log::debug!("Applied new dynamic GPU offset: {} MHz", final_offset_i32);
+                        }
+                    }
+                    Err(e) => log::warn!(
+                        target: "hw.gpu",
+                        "poll: set_gpu_core_offset gpu={} value={} failed: {}",
+                        idx, final_offset_i32, e
+                    ),
                 }
             }
         }
@@ -847,6 +874,32 @@ fn calculate_fan_speed(sorted_points: &[(u8, u8)], temp: f32) -> u8 {
 mod tests {
     use super::*;
     use log::Log;
+
+    #[test]
+    fn offset_first_attempt_is_written() {
+        assert!(offset_write_due(None, 0, 5, 1));
+    }
+
+    #[test]
+    fn offset_same_value_same_generation_not_rewritten() {
+        assert!(!offset_write_due(Some(5), 1, 5, 1));
+    }
+
+    #[test]
+    fn offset_failed_attempt_not_retried_for_same_value() {
+        // A refused write leaves the attempt recorded; the same value stays suppressed.
+        assert!(!offset_write_due(Some(-30), 4, -30, 4));
+    }
+
+    #[test]
+    fn offset_new_value_is_written() {
+        assert!(offset_write_due(Some(5), 1, 6, 1));
+    }
+
+    #[test]
+    fn offset_generation_change_rewrites_same_value() {
+        assert!(offset_write_due(Some(5), 1, 5, 2));
+    }
     
     #[test]
     fn test_daemon_logger_captures_all_levels() {

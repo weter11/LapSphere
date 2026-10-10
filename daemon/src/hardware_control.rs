@@ -804,12 +804,6 @@ impl std::fmt::Display for GpuAttemptFailed {
 
 impl std::error::Error for GpuAttemptFailed {}
 
-/// Pure decision: which generation an attempt commits. Any attempt commits its
-/// generation, success or failure, so the poll never re-runs the same one.
-pub(crate) fn attempt_commit_generation(outcome: &GpuPlanOutcome) -> Option<u64> {
-    if outcome.attempted { Some(outcome.generation) } else { None }
-}
-
 /// The single place where the applied GPU generation is recorded.
 /// Called only after a generation's GPU ops all succeeded.
 pub(crate) fn commit_gpu_generation(generation: u64) {
@@ -1936,29 +1930,6 @@ mod preflight_tests {
 #[cfg(test)]
 mod gpu_attempt_commit_tests {
     use super::*;
-
-    fn outcome(attempted: bool, generation: u64, failures: usize) -> GpuPlanOutcome {
-        GpuPlanOutcome {
-            generation,
-            attempted,
-            failures: (0..failures).map(|_| ("set_gpu_power_limit", "NotSupported".to_string())).collect(),
-        }
-    }
-
-    #[test]
-    fn failed_attempt_still_commits_its_generation() {
-        assert_eq!(attempt_commit_generation(&outcome(true, 7, 2)), Some(7));
-    }
-
-    #[test]
-    fn successful_attempt_commits_its_generation() {
-        assert_eq!(attempt_commit_generation(&outcome(true, 8, 0)), Some(8));
-    }
-
-    #[test]
-    fn no_attempt_commits_nothing() {
-        assert_eq!(attempt_commit_generation(&outcome(false, 9, 0)), None);
-    }
 
     #[test]
     fn same_generation_after_failure_is_not_replanned() {
