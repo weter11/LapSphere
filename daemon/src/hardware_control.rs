@@ -9,6 +9,15 @@ use lapsphere_common::types::*;
 use crate::tuxedo_io::{TuxedoIo, HardwareInterface};
 
 static CPU_LIMITS_MODIFIED: AtomicBool = AtomicBool::new(false);
+/// Set when a profile's GPU step was deferred by the write gate.
+pub static GPU_PENDING: AtomicBool = AtomicBool::new(false);
+/// GPU settings of the deferred profile step, with the adapter index.
+pub static PENDING_GPU_SETTINGS: Lazy<Mutex<Option<(u32, GpuSettings)>>> = Lazy::new(|| Mutex::new(None));
+
+/// Whether a deferred profile GPU step should be applied on this tick.
+pub fn pending_gpu_due(pending: bool, writable: bool, has_settings: bool) -> bool {
+    pending && writable && has_settings
+}
 static LAST_APPLIED_PROFILE: Lazy<Mutex<Option<Profile>>> = Lazy::new(|| Mutex::new(None));
 
 /// Lock a shared daemon mutex, recovering from poisoning instead of panicking.
@@ -541,6 +550,21 @@ pub fn set_intel_pstate_status(status: &str) -> Result<()> {
     Ok(())
 }
 
+/// Apply the deferred profile GPU step once the adapter is writable.
+/// One attempt per deferral: the flag is cleared before the write.
+pub fn apply_pending_gpu(writable: bool) {
+    let settings = lock_or_recover(&PENDING_GPU_SETTINGS, "PENDING_GPU_SETTINGS").clone();
+    let pending = GPU_PENDING.load(Ordering::SeqCst);
+    if !pending_gpu_due(pending, writable, settings.is_some()) {
+        return;
+    }
+    GPU_PENDING.store(false, Ordering::SeqCst);
+    if let Some((idx, g)) = settings {
+        let failures = apply_gpu_static(idx, &g);
+        log::info!(target: "hw.gpu", "deferred profile GPU step applied gpu={idx} failures={}", failures.len());
+    }
+}
+
 pub fn apply_profile(profile: &Profile) -> Result<()> {
     // Check if this profile is already applied to avoid redundant hardware calls.
     //
@@ -565,8 +589,12 @@ pub fn apply_profile(profile: &Profile) -> Result<()> {
     match result {
         Ok(()) => {
             // Record the profile only now that every hardware step succeeded.
-            let mut last_profile = lock_or_recover(&LAST_APPLIED_PROFILE, "LAST_APPLIED_PROFILE");
-            *last_profile = Some(profile.clone());
+            // A deferred GPU step is not "applied": leave the marker unset so
+            // re-selecting this profile runs the GPU step again.
+            if !GPU_PENDING.load(Ordering::SeqCst) {
+                let mut last_profile = lock_or_recover(&LAST_APPLIED_PROFILE, "LAST_APPLIED_PROFILE");
+                *last_profile = Some(profile.clone());
+            }
             log::info!(target: "hw.detect", "Profile '{}' applied successfully", profile.name);
             Ok(())
         }
@@ -684,6 +712,10 @@ fn apply_profile_inner(profile: &Profile) -> Result<()> {
 
     if gpu_writable {
         apply_gpu_static(nvidia_gpu_idx, &profile.gpu_settings);
+    } else {
+        *lock_or_recover(&PENDING_GPU_SETTINGS, "PENDING_GPU_SETTINGS") =
+            Some((nvidia_gpu_idx, profile.gpu_settings.clone()));
+        GPU_PENDING.store(true, Ordering::SeqCst);
     }
 
     Ok(())
@@ -1719,6 +1751,24 @@ mod tests {
         {
             let g2 = crate::DAEMON_LOGS.lock().unwrap();
             assert!(g2.capacity() >= 500);
+        }
+    }
+}
+
+#[cfg(test)]
+mod pending_gpu_tests {
+    use super::pending_gpu_due;
+
+    #[test]
+    fn pending_gpu_due_truth_table() {
+        for &pending in &[false, true] {
+            for &writable in &[false, true] {
+                for &has in &[false, true] {
+                    let expected = pending && writable && has;
+                    assert_eq!(pending_gpu_due(pending, writable, has), expected,
+                        "pending={pending} writable={writable} has={has}");
+                }
+            }
         }
     }
 }

@@ -395,6 +395,9 @@ async fn main() -> Result<()> {
             state.clone()
         };
 
+        // Deferred profile GPU step: runs once the adapter is writable.
+        hardware_control::apply_pending_gpu(hardware_detection::gpu_write_allowed(0));
+
         if let Some(ref gpu_settings) = settings {
             apply_gpu_overclocking(gpu_settings)?;
         } else {
