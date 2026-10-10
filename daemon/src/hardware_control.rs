@@ -552,9 +552,10 @@ pub fn set_intel_pstate_status(status: &str) -> Result<()> {
 
 /// Apply the deferred profile GPU step once the adapter is writable.
 /// One attempt per deferral: the flag is cleared before the write.
-pub fn apply_pending_gpu(writable: bool) {
+pub fn apply_pending_gpu() {
     let settings = lock_or_recover(&PENDING_GPU_SETTINGS, "PENDING_GPU_SETTINGS").clone();
     let pending = GPU_PENDING.load(Ordering::SeqCst);
+    let writable = settings.as_ref().map(|(idx, _)| crate::hardware_detection::gpu_write_allowed(*idx)).unwrap_or(false);
     if !pending_gpu_due(pending, writable, settings.is_some()) {
         return;
     }
