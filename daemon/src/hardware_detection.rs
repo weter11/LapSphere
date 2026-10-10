@@ -5025,3 +5025,81 @@ mod hil_gpu_tier_tests {
         println!("[*] runtime_status after: {}", runtime_status());
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GpuWriteDecision {
+    Write,
+    Defer,
+}
+
+/// Only `active` and `unsupported` allow a GPU write; unmapped defers.
+pub(crate) fn gpu_write_gate(status: &str, known: bool) -> GpuWriteDecision {
+    if !known {
+        return GpuWriteDecision::Defer;
+    }
+    match status {
+        "active" | "unsupported" => GpuWriteDecision::Write,
+        _ => GpuWriteDecision::Defer,
+    }
+}
+
+/// Entry point for GPU write sites: reads sysfs runtime_status for `index`.
+pub(crate) fn gpu_write_allowed(index: u32) -> bool {
+    let sysfs = sysfs_nvidia_devices();
+    let bdf = bdf_for_nvml_index(index);
+    let (status, known) = match bdf.as_deref() {
+        Some(bdf) => match sysfs.iter().find(|d| d.bdf.eq_ignore_ascii_case(bdf)) {
+            Some(dev) => (dev.runtime_status.clone(), true),
+            None => (String::new(), false),
+        },
+        None => (String::new(), false),
+    };
+    match gpu_write_gate(&status, known) {
+        GpuWriteDecision::Write => {
+            clear_deferred_status(index);
+            true
+        }
+        GpuWriteDecision::Defer => {
+            note_deferred_status(index, &status, known);
+            false
+        }
+    }
+}
+
+static LAST_DEFER_LOG: std::sync::Mutex<Option<(u32, String, bool)>> =
+    std::sync::Mutex::new(None);
+
+fn note_deferred_status(index: u32, status: &str, known: bool) {
+    let mut last = crate::hardware_control::lock_or_recover(&LAST_DEFER_LOG, "LAST_DEFER_LOG");
+    let current = (index, status.to_string(), known);
+    if last.as_ref() != Some(&current) {
+        log::debug!(target: "hw.gpu",
+            "GPU write deferred index={} status={:?} mapped={}",
+            index, status, known);
+        *last = Some(current);
+    }
+}
+
+fn clear_deferred_status(_index: u32) {
+    let mut last = crate::hardware_control::lock_or_recover(&LAST_DEFER_LOG, "LAST_DEFER_LOG");
+    *last = None;
+}
+
+#[cfg(test)]
+mod gpu_write_gate_tests {
+    use super::{gpu_write_gate, GpuWriteDecision};
+
+    #[test]
+    fn active_and_unsupported_allow_write_when_mapped() {
+        assert_eq!(gpu_write_gate("active", true), GpuWriteDecision::Write);
+        assert_eq!(gpu_write_gate("unsupported", true), GpuWriteDecision::Write);
+    }
+
+    #[test]
+    fn other_status_and_unmapped_defer() {
+        for s in ["suspended", "suspending", "resuming", "", "unknown", "ACTIVE"] {
+            assert_eq!(gpu_write_gate(s, true), GpuWriteDecision::Defer, "status {:?}", s);
+        }
+        assert_eq!(gpu_write_gate("active", false), GpuWriteDecision::Defer);
+    }
+}

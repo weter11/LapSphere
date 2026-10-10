@@ -642,6 +642,13 @@ fn apply_profile_inner(profile: &Profile) -> Result<()> {
             .unwrap_or(0)
     };
 
+    // Writes to a runtime-suspended or unmapped adapter wake/race it; defer them.
+    let gpu_writable = crate::hardware_detection::gpu_write_allowed(nvidia_gpu_idx);
+    if !gpu_writable {
+        log::debug!(target: "hw.gpu", "profile GPU writes deferred gpu={}", nvidia_gpu_idx);
+    }
+
+    if gpu_writable {
     if let Some(limit) = profile.gpu_settings.power_limit {
         let _ = set_gpu_power_limit(nvidia_gpu_idx, limit);
     }
@@ -659,7 +666,8 @@ fn apply_profile_inner(profile: &Profile) -> Result<()> {
     } else {
         let _ = reset_gpu_clocks(nvidia_gpu_idx);
     }
-    
+    }
+
     if let Some(boost) = profile.cpu_settings.boost {
         set_cpu_boost(boost)?;
     }

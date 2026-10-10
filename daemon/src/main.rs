@@ -607,7 +607,7 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
                 map.get(&0).map_or(true, |offsets| offsets.0 != 0.0 || offsets.1 != 0.0)
             };
 
-            if needs_clear {
+            if needs_clear && hardware_detection::gpu_write_allowed(0) {
                 log::info!("Manual clocks disabled, resetting GPU offsets to 0");
                 let _ = crate::hardware_control::set_gpu_core_offset(0, 0.0);
                 let _ = crate::hardware_control::set_gpu_memory_offset(0, 0.0);
@@ -617,6 +617,11 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
                 }
             }
         }
+        return Ok(());
+    }
+
+    // Dynamic offsets are written only when the adapter may be written to.
+    if !hardware_detection::gpu_write_allowed(0) {
         return Ok(());
     }
 
@@ -756,7 +761,7 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
         // ONLY APPLY IF CHANGED (fix stuttering)
         {
             let mut last = lock_or_recover(&LAST_APPLIED_OFFSET, "LAST_APPLIED_OFFSET");
-            if *last != Some(final_offset_i32) {
+            if *last != Some(final_offset_i32) && hardware_detection::gpu_write_allowed(0) {
                 crate::hardware_control::set_gpu_core_offset(0, final_offset_i32 as f32)?;
                 *last = Some(final_offset_i32);
                 if final_offset_i32 == 0 {
