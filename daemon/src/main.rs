@@ -413,7 +413,13 @@ async fn main() -> Result<()> {
             if hardware_detection::gpu_write_allowed(idx) {
                 let outcome = hardware_control::execute_gpu_plan(idx, gpu_settings, generation);
                 if !outcome.failures.is_empty() {
-                    log::warn!(target: "hw.gpu", "poll: {} GPU op(s) failed for generation {}; retry on next tick", outcome.failures.len(), generation);
+                    // Warn once per generation; later ticks for the same generation stay quiet.
+                    static WARNED_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+                    if WARNED_GEN.swap(generation, std::sync::atomic::Ordering::SeqCst) != generation {
+                        for (name, err) in &outcome.failures {
+                            log::warn!(target: "hw.gpu", "GPU op {} failed for generation {}: {}", name, generation, err);
+                        }
+                    }
                 } else if outcome.attempted {
                     hardware_control::commit_gpu_generation(outcome.generation);
                 }
