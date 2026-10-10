@@ -616,7 +616,6 @@ impl LapSphereApp {
             let _ = handle.register("gamepads".to_string(), Duration::from_millis(state.config.statistics_sections.gamepad_poll_rate));
             let _ = handle.register("storage".to_string(), Duration::from_millis(state.config.statistics_sections.storage_poll_rate));
             let _ = handle.register("mount".to_string(), Duration::from_millis(state.config.statistics_sections.storage_poll_rate));
-            let _ = handle.register("gpu_overclock".to_string(), Duration::from_millis(state.config.statistics_sections.gpu_overclock_poll_rate));
             let _ = handle.register("webcam".to_string(), Duration::from_secs(5));
             // Registered, but the callback only fetches while the Logs tab is on
             // screen (see `should_fetch_logs`): the ring reply is ~470 kB each time.
