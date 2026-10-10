@@ -411,7 +411,12 @@ async fn main() -> Result<()> {
             };
             let generation = GPU_APPLY_GEN.load(std::sync::atomic::Ordering::SeqCst);
             if hardware_detection::gpu_write_allowed(idx) {
-                hardware_control::execute_gpu_plan(idx, gpu_settings, generation)?;
+                let outcome = hardware_control::execute_gpu_plan(idx, gpu_settings, generation);
+                if !outcome.failures.is_empty() {
+                    log::warn!(target: "hw.gpu", "poll: {} GPU op(s) failed for generation {}; retry on next tick", outcome.failures.len(), generation);
+                } else if outcome.attempted {
+                    hardware_control::commit_gpu_generation(outcome.generation);
+                }
             }
             apply_gpu_overclocking(gpu_settings)?;
         } else {

@@ -592,8 +592,11 @@ pub fn apply_profile(profile: &Profile) -> Result<()> {
     // succeeded. On failure neither the generation nor GPU_DAEMON_STATE moves.
     let result = apply_profile_inner(profile);
     match result {
-        Ok(()) => {
-            crate::GPU_APPLY_GEN.fetch_add(1, Ordering::SeqCst);
+        Ok(gpu_applied) => {
+            let committed = crate::GPU_APPLY_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+            if gpu_applied {
+                commit_gpu_generation(committed);
+            }
             {
                 let mut state = lock_or_recover(&crate::GPU_DAEMON_STATE, "GPU_DAEMON_STATE");
                 *state = Some(profile.gpu_settings.clone());
@@ -650,7 +653,7 @@ pub(crate) fn preflight_profile(
     Ok(())
 }
 
-fn apply_profile_inner(profile: &Profile) -> Result<()> {
+fn apply_profile_inner(profile: &Profile) -> Result<bool> {
     // Checks that need no hardware write come first: a rejected profile must
     // leave the machine untouched.
     // The governor must be valid for the mode the profile is about to set,
@@ -728,11 +731,18 @@ fn apply_profile_inner(profile: &Profile) -> Result<()> {
         if crate::hardware_detection::gpu_write_allowed(idx) {
             // The generation this apply will commit (wrapper bumps it on success).
             let generation = crate::GPU_APPLY_GEN.load(Ordering::SeqCst) + 1;
-            execute_gpu_plan(idx, &profile.gpu_settings, generation)?;
+            let outcome = execute_gpu_plan(idx, &profile.gpu_settings, generation);
+            if !outcome.failures.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "GPU write failures: {}",
+                    outcome.failures.iter().map(|(n, e)| format!("{}: {}", n, e)).collect::<Vec<_>>().join("; ")
+                ));
+            }
+            return Ok(outcome.attempted);
         }
     }
 
-    Ok(())
+    Ok(false)
 }
 
 /// Execute the GPU plan for one generation. Returns Ok only if every
@@ -742,24 +752,46 @@ pub(crate) fn execute_gpu_plan(
     idx: u32,
     settings: &lapsphere_common::types::GpuSettings,
     generation: u64,
-) -> Result<()> {
+) -> GpuPlanOutcome {
     let applied = crate::GPU_APPLIED_GEN.load(Ordering::SeqCst);
+    let mut outcome = GpuPlanOutcome { generation, ..Default::default() };
     let plan = crate::gpu_plan::gpu_apply_plan(false, settings, generation, applied);
     if let crate::gpu_plan::GpuPlan::Apply { ops, generation } = plan {
+        outcome.generation = generation;
+        // Keep going after a failed op: every failure is collected with its name.
         for op in &ops {
-            match op {
-                crate::gpu_plan::GpuOp::PowerLimit(w) => set_gpu_power_limit(idx, *w)?,
-                crate::gpu_plan::GpuOp::CoreOffset(o) => set_gpu_core_offset(idx, *o)?,
-                crate::gpu_plan::GpuOp::MemoryOffset(o) => set_gpu_memory_offset(idx, *o)?,
-                crate::gpu_plan::GpuOp::LockedClocks(lo, hi) => set_gpu_locked_clocks(idx, *lo, *hi)?,
-                crate::gpu_plan::GpuOp::ResetClocks => reset_gpu_clocks(idx)?,
-                crate::gpu_plan::GpuOp::FanSpeed { fan_id, speed } => set_gpu_fan_speed(idx, *fan_id, *speed)?,
-                crate::gpu_plan::GpuOp::FanAuto { fan_id } => set_gpu_fan_auto(idx, *fan_id)?,
+            let (name, res) = match op {
+                crate::gpu_plan::GpuOp::PowerLimit(w) => ("set_gpu_power_limit", set_gpu_power_limit(idx, *w)),
+                crate::gpu_plan::GpuOp::CoreOffset(o) => ("set_gpu_core_offset", set_gpu_core_offset(idx, *o)),
+                crate::gpu_plan::GpuOp::MemoryOffset(o) => ("set_gpu_memory_offset", set_gpu_memory_offset(idx, *o)),
+                crate::gpu_plan::GpuOp::LockedClocks(lo, hi) => ("set_gpu_locked_clocks", set_gpu_locked_clocks(idx, *lo, *hi)),
+                crate::gpu_plan::GpuOp::ResetClocks => ("reset_gpu_clocks", reset_gpu_clocks(idx)),
+                crate::gpu_plan::GpuOp::FanSpeed { fan_id, speed } => ("set_gpu_fan_speed", set_gpu_fan_speed(idx, *fan_id, *speed)),
+                crate::gpu_plan::GpuOp::FanAuto { fan_id } => ("set_gpu_fan_auto", set_gpu_fan_auto(idx, *fan_id)),
+            };
+            if let Err(e) = res {
+                log::warn!(target: "hw.gpu", "GPU op {} failed for generation {}: {}", name, outcome.generation, e);
+                outcome.failures.push((name, e.to_string()));
             }
         }
-        crate::GPU_APPLIED_GEN.store(generation, Ordering::SeqCst);
+        outcome.attempted = true;
     }
-    Ok(())
+    outcome
+}
+
+/// The single place where the applied GPU generation is recorded.
+/// Called only after a generation's GPU ops all succeeded.
+pub(crate) fn commit_gpu_generation(generation: u64) {
+    crate::GPU_APPLIED_GEN.store(generation, Ordering::SeqCst);
+}
+
+/// Result of one GPU executor run. The executor never records the generation;
+/// the apply wrapper commits it only when `failures` is empty.
+#[derive(Debug, Default)]
+pub(crate) struct GpuPlanOutcome {
+    pub generation: u64,
+    pub attempted: bool,
+    pub failures: Vec<(&'static str, String)>,
 }
 
 pub fn apply_battery_settings(settings: &BatterySettings) -> Result<()> {
