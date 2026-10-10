@@ -390,6 +390,8 @@ pub struct LapSphereApp {
 
     startup_frames: u32,
     startup_apply_pending: bool,
+    startup_started: std::time::Instant,
+    startup_timeout_warned: bool,
     startup_apply_reply: Option<oneshot::Receiver<anyhow::Result<()>>>,
 
     last_tray_profile: String,
@@ -760,6 +762,8 @@ impl LapSphereApp {
             shortcuts: KeyboardShortcuts::new(),
             startup_frames: 10,
             startup_apply_pending: true,
+            startup_started: std::time::Instant::now(),
+            startup_timeout_warned: false,
             startup_apply_reply: None,
             last_tray_profile,
             last_tray_profiles_count,
@@ -788,8 +792,10 @@ impl LapSphereApp {
                             &mut self.state.config.profiles, hw_min, hw_max,
                         );
                         for (name, (old_min, old_max), r) in &changed {
-                            log::warn!("profile '{}' CPU freq clamped: min {:?} -> {:?}, max {:?} -> {:?}",
-                                name, old_min, r.min, old_max, r.max);
+                            log::warn!(
+                                "profile '{}' CPU freq clamped: min {:?} -> {:?}, max {:?} -> {:?} (hw {}..{} kHz)",
+                                name, old_min, r.min, old_max, r.max, hw_min, hw_max
+                            );
                         }
                         if !changed.is_empty() {
                             if let Err(e) = save_profiles_to_disk(&self.state.config) {
@@ -920,6 +926,13 @@ impl LapSphereApp {
             }
         }
         
+        if self.startup_apply_pending
+            && !self.startup_timeout_warned
+            && self.startup_started.elapsed() >= std::time::Duration::from_secs(10)
+        {
+            self.startup_timeout_warned = true;
+            log::warn!("стартовое применение профиля ждёт пределы CPU от демона, профиль не применён");
+        }
         if let Some(mut rx) = self.startup_apply_reply.take() {
             match rx.try_recv() {
                 Ok(Ok(())) => {}
