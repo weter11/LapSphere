@@ -1076,24 +1076,6 @@ pub fn set_energy_performance_preference(epp: &str) -> Result<()> {
     Ok(())
 }
 
-/// Apply an EPP preference to every CPU/policy.
-///
-/// This is the explicit "all CPUs" entry point. It writes exactly the target set
-/// returned by [`existing_epp_paths`] — the same list
-/// `set_energy_performance_preference` uses — and nothing else, so the function
-/// and [`guard_sysfs_write`] cannot disagree about what is writable (the test
-/// `epp_write_targets_stay_inside_the_allowlist` pins that with synthetic CPU
-/// numbers). It previously also attempted
-/// `/sys/devices/system/cpu/cpufreq/energy_performance_preference`, which is not
-/// an attribute in the kernel's cpufreq layout and is not on the allowlist: that
-/// branch could only ever be skipped (path absent) or rejected by the guard.
-pub fn set_all_cpu_epp(epp: &str) -> Result<()> {
-    set_energy_performance_preference(epp)?;
-
-    log::info!(target: "hw.cpu", "set_all_cpu_epp preference={}", epp);
-    Ok(())
-}
-
 #[derive(Debug, Clone)]
 pub struct RgbKeyboardControl {
     paths: Vec<String>,
@@ -1520,12 +1502,8 @@ mod tests {
     /// Every target the EPP entry points can write stays inside the allowlist,
     /// and the policy-level parent path stays out.
     ///
-    /// `set_all_cpu_epp` used to write
-    /// `/sys/devices/system/cpu/cpufreq/energy_performance_preference`, which is
-    /// not an attribute in the kernel's layout (that directory holds `policyN/`
-    /// and `boost`) and is not on the allowlist — so the guard could only reject
-    /// it. The policy attribute is addressed through the per-CPU aliases, which
-    /// are symlinks into `cpufreq/policyN`.
+    /// The policy-level `cpufreq/energy_performance_preference` is not a kernel
+    /// attribute and is not on the allowlist; EPP is addressed per CPU.
     #[test]
     fn epp_write_targets_stay_inside_the_allowlist() {
         // Synthetic CPU numbers: the contract, not this machine's CPU count.
@@ -1551,34 +1529,6 @@ mod tests {
             assert!(!is_allowed_sysfs_path(path), "unexpectedly allowlisted: {path}");
             assert!(guard_sysfs_write(path, "balance-performance").is_err());
         }
-    }
-
-    /// The function itself must not address a path the allowlist refuses, and
-    /// that is not observable through `Path::exists()` on a host where the
-    /// attribute is absent. Pin it at the source level instead: the old body
-    /// addressed `/sys/devices/system/cpu/cpufreq/energy_performance_preference`
-    /// (the policy parent directory, which holds `policyN/` and `boost`), so this
-    /// test fails if that branch ever comes back.
-    #[test]
-    fn epp_entry_points_never_address_the_policy_parent_directory() {
-        let offending = "/sys/devices/system/cpu/cpufreq/energy_performance_preference";
-        assert!(
-            !is_allowed_sysfs_path(offending),
-            "the policy parent directory must not become writable"
-        );
-
-        let source = include_str!("hardware_control.rs");
-        let body = source
-            .split("pub fn set_all_cpu_epp")
-            .nth(1)
-            .expect("set_all_cpu_epp is missing from the source");
-        // Bound the body at the function's own closing brace (the first line that
-        // is exactly "}"), so the scan cannot run on into unrelated code.
-        let body = body.split("\n}").next().unwrap_or(body);
-        assert!(
-            !body.contains(offending),
-            "set_all_cpu_epp addresses the policy parent directory again:\n{body}"
-        );
     }
 
     #[test]
