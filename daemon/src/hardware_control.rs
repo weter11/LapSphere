@@ -653,10 +653,15 @@ pub(crate) fn preflight_profile(
 fn apply_profile_inner(profile: &Profile) -> Result<()> {
     // Checks that need no hardware write come first: a rejected profile must
     // leave the machine untouched.
-    let pstate_active = fs::read_to_string("/sys/devices/system/cpu/amd_pstate/status")
-        .map(|s| s.trim() == "active")
-        .unwrap_or(false);
-    preflight_profile(profile, pstate_active, read_hw_freq_bounds())?;
+    // The governor must be valid for the mode the profile is about to set,
+    // not the mode the machine is currently in.
+    let target_pstate_active = match profile.cpu_settings.amd_pstate_status.as_deref() {
+        Some(s) => s == "active",
+        None => fs::read_to_string("/sys/devices/system/cpu/amd_pstate/status")
+            .map(|s| s.trim() == "active")
+            .unwrap_or(false),
+    };
+    preflight_profile(profile, target_pstate_active, read_hw_freq_bounds())?;
 
     // Apply CPU settings
     if let Some(ref tdp_profile) = profile.cpu_settings.tdp_profile {
@@ -1825,6 +1830,14 @@ mod preflight_tests {
     fn active_pstate_rejects_governor_outside_performance_powersave() {
         let err = preflight_profile(&with(Some("ondemand"), None, None), true, Some(HW)).unwrap_err();
         assert!(err.to_string().contains("ondemand"));
+    }
+
+    #[test]
+    fn target_active_profile_with_conservative_is_rejected_by_preflight() {
+        // Regression: the profile's own target pstate must decide, not the current sysfs state.
+        let mut p = with(Some("conservative"), None, None);
+        p.cpu_settings.amd_pstate_status = Some("active".to_string());
+        assert!(preflight_profile(&p, true, Some(HW)).is_err());
     }
 
     #[test]
