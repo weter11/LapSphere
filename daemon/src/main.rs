@@ -589,6 +589,12 @@ fn apply_fan_curves(io: &tuxedo_io::TuxedoIo, settings: &FanSettings, sorted_cur
     Ok(())
 }
 
+/// Clear the applied dynamic offset only when it is not already 0 and the
+/// adapter is writable. Pure so the decision is testable without NVML.
+fn should_clear_offset(last: Option<i32>, writable: bool) -> bool {
+    last != Some(0) && writable
+}
+
 fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -> Result<()> {
     // Clear stats and last offset if advanced control or manual clocks are disabled
     if !gpu_settings.advanced_control || !gpu_settings.manual_clocks {
@@ -716,12 +722,12 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
         // non-P0 reading leaves the applied offset cleared as before.
         if gpu.performance_state.as_deref() != Some("P0") {
             let mut last = lock_or_recover(&LAST_APPLIED_OFFSET, "LAST_APPLIED_OFFSET");
-            if *last != Some(0) && hardware_detection::gpu_write_allowed(0) {
+            if should_clear_offset(*last, hardware_detection::gpu_write_allowed(0)) {
+                // Recorded before the write: a failed attempt is not retried on
+                // later ticks until the recorded state changes.
+                *last = Some(0);
                 match crate::hardware_control::set_gpu_core_offset(0, 0.0) {
-                    Ok(()) => {
-                        *last = Some(0);
-                        log::debug!("Cleared dynamic GPU offset (P-state not 0)");
-                    }
+                    Ok(()) => log::debug!("Cleared dynamic GPU offset (P-state not 0)"),
                     Err(e) => log::warn!("clear dynamic GPU offset to 0 MHz failed: {e}"),
                 }
             }
@@ -808,6 +814,15 @@ fn calculate_fan_speed(sorted_points: &[(u8, u8)], temp: f32) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clear_is_skipped_when_already_zero_or_gate_closed() {
+        assert!(should_clear_offset(Some(-40), true));
+        assert!(should_clear_offset(None, true));
+        assert!(!should_clear_offset(Some(0), true));
+        assert!(!should_clear_offset(Some(-40), false));
+        assert!(!should_clear_offset(None, false));
+    }
+
     use super::*;
     use log::Log;
     
