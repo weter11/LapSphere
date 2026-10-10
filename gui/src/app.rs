@@ -389,6 +389,8 @@ pub struct LapSphereApp {
     shortcuts: KeyboardShortcuts,
 
     startup_frames: u32,
+    startup_apply_pending: bool,
+    startup_apply_reply: Option<oneshot::Receiver<anyhow::Result<()>>>,
 
     last_tray_profile: String,
     last_tray_profiles_count: usize,
@@ -716,12 +718,6 @@ impl LapSphereApp {
         );
         theme.apply_with_font_size(&cc.egui_ctx, &state.config.font_size);
 
-        // Apply current profile to daemon on startup to ensure background jobs are active
-        if let Some(profile) = state.current_profile().cloned() {
-            if let Some(ref client) = dbus_client {
-                let _ = client.apply_profile(profile);
-            }
-        }
 
         let system_tray = match SystemTray::new(&state.config.profiles, &state.config.current_profile) {
             Ok(tray) => Some(tray),
@@ -763,6 +759,8 @@ impl LapSphereApp {
             hw_update_rx,
             shortcuts: KeyboardShortcuts::new(),
             startup_frames: 10,
+            startup_apply_pending: true,
+            startup_apply_reply: None,
             last_tray_profile,
             last_tray_profiles_count,
         }
@@ -786,13 +784,25 @@ impl LapSphereApp {
                 }
                 HardwareUpdate::CpuInfo(info) => {
                     if let (Some(hw_min), Some(hw_max)) = (info.hw_min_freq, info.hw_max_freq) {
-                        for (name, (old_min, old_max), r) in lapsphere_common::types::normalize_profiles_freq(
+                        let changed = lapsphere_common::types::normalize_profiles_freq(
                             &mut self.state.config.profiles, hw_min, hw_max,
-                        ) {
-                            log::warn!(
-                                "profile '{}' CPU freq clamped: min {:?} -> {:?}, max {:?} -> {:?} (hw {}..{} kHz)",
-                                name, old_min, r.min, old_max, r.max, hw_min, hw_max
-                            );
+                        );
+                        for (name, (old_min, old_max), r) in &changed {
+                            log::warn!("profile '{}' CPU freq clamped: min {:?} -> {:?}, max {:?} -> {:?}",
+                                name, old_min, r.min, old_max, r.max);
+                        }
+                        if !changed.is_empty() {
+                            if let Err(e) = save_profiles_to_disk(&self.state.config) {
+                                log::warn!("failed to save normalized profiles: {}", e);
+                            }
+                        }
+                        if self.startup_apply_pending {
+                            self.startup_apply_pending = false;
+                            if let (Some(profile), Some(client)) =
+                                (self.state.current_profile().cloned(), &self.dbus_client)
+                            {
+                                self.startup_apply_reply = Some(client.apply_profile(profile));
+                            }
                         }
                     }
                     self.state.cpu_info = Some(info);
@@ -910,6 +920,17 @@ impl LapSphereApp {
             }
         }
         
+        if let Some(mut rx) = self.startup_apply_reply.take() {
+            match rx.try_recv() {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => log::warn!("startup apply of current profile failed: {}", e),
+                Err(oneshot::error::TryRecvError::Empty) => self.startup_apply_reply = Some(rx),
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    log::warn!("startup apply reply channel closed");
+                }
+            }
+        }
+
         // Check pending battery update
         if let Some(mut rx) = self.state.pending_battery_update.take() {
             match rx.try_recv() {

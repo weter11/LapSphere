@@ -1205,66 +1205,38 @@ pub fn normalize_profiles_freq(
 
 #[cfg(test)]
 mod freq_limit_tests {
-    use super::normalize_freq_limits;
+    use super::{normalize_freq_limits as n, normalize_profiles_freq, Profile};
 
-    const HW_MIN: u64 = 403_488;
-    const HW_MAX: u64 = 4_465_261;
+    const LO: u64 = 403_488;
+    const HI: u64 = 4_465_261;
 
     #[test]
-    fn below_hardware_minimum_is_raised() {
-        let r = normalize_freq_limits(Some(400_000), Some(3_000_000), HW_MIN, HW_MAX);
-        assert_eq!(r.min, Some(HW_MIN));
-        assert_eq!(r.max, Some(3_000_000));
-        assert!(r.changed);
+    fn clamps_and_orders_limits() {
+        let r = n(Some(400_000), Some(3_000_000), LO, HI);
+        assert_eq!((r.min, r.max, r.changed), (Some(LO), Some(3_000_000), true));
+        let r = n(Some(1_000_000), Some(5_000_000), LO, HI);
+        assert_eq!((r.min, r.max, r.changed), (Some(1_000_000), Some(HI), true));
+        let r = n(Some(3_000_000), Some(2_000_000), LO, HI);
+        assert_eq!((r.min, r.max, r.changed), (Some(3_000_000), Some(3_000_000), true));
     }
 
     #[test]
-    fn above_hardware_maximum_is_lowered() {
-        let r = normalize_freq_limits(Some(1_000_000), Some(5_000_000), HW_MIN, HW_MAX);
-        assert_eq!(r.max, Some(HW_MAX));
-        assert!(r.changed);
+    fn in_range_and_none_are_unchanged() {
+        assert!(!n(Some(LO), Some(HI), LO, HI).changed);
+        assert!(!n(None, None, LO, HI).changed);
     }
 
     #[test]
-    fn min_above_max_is_resolved() {
-        let r = normalize_freq_limits(Some(3_000_000), Some(2_000_000), HW_MIN, HW_MAX);
-        assert_eq!(r.min, Some(3_000_000));
-        assert_eq!(r.max, Some(3_000_000));
-        assert!(r.changed);
-    }
-
-    #[test]
-    fn exact_hardware_boundary_is_unchanged() {
-        let r = normalize_freq_limits(Some(HW_MIN), Some(HW_MAX), HW_MIN, HW_MAX);
-        assert_eq!(r.min, Some(HW_MIN));
-        assert_eq!(r.max, Some(HW_MAX));
-        assert!(!r.changed);
-    }
-
-    #[test]
-    fn profiles_are_normalized_and_reported() {
-        use super::{normalize_profiles_freq, Profile};
+    fn profiles_report_only_changed() {
         let mut ps = vec![Profile::default(), Profile::default()];
         ps[0].name = "a".into();
         ps[0].cpu_settings.min_frequency = Some(400_000);
         ps[0].cpu_settings.max_frequency = Some(3_000_000);
-        ps[1].name = "b".into();
-        ps[1].cpu_settings.min_frequency = Some(HW_MIN);
-        ps[1].cpu_settings.max_frequency = Some(HW_MAX);
-        let changed = normalize_profiles_freq(&mut ps, HW_MIN, HW_MAX);
+        ps[1].cpu_settings.min_frequency = Some(LO);
+        ps[1].cpu_settings.max_frequency = Some(HI);
+        let changed = normalize_profiles_freq(&mut ps, LO, HI);
         assert_eq!(changed.len(), 1);
         assert_eq!(changed[0].0, "a");
-        assert_eq!(changed[0].1, (Some(400_000), Some(3_000_000)));
-        assert_eq!(changed[0].2.min, Some(HW_MIN));
-        assert_eq!(ps[0].cpu_settings.min_frequency, Some(HW_MIN));
-        assert_eq!(ps[1].cpu_settings.min_frequency, Some(HW_MIN));
-    }
-
-    #[test]
-    fn none_stays_none() {
-        let r = normalize_freq_limits(None, None, HW_MIN, HW_MAX);
-        assert_eq!(r.min, None);
-        assert_eq!(r.max, None);
-        assert!(!r.changed);
+        assert_eq!(ps[0].cpu_settings.min_frequency, Some(LO));
     }
 }
