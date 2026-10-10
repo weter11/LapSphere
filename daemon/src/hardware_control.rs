@@ -584,6 +584,40 @@ pub fn apply_profile(profile: &Profile) -> Result<()> {
 
 /// All hardware steps of a profile apply, in order. The caller owns the
 /// last-applied marker so a failure never leaves a stale "already applied" state.
+/// Apply the static GPU part of a profile. Every step runs even if an earlier
+/// one failed; each failure is logged and the failures are returned.
+pub(crate) fn apply_gpu_static(idx: u32, g: &lapsphere_common::types::GpuSettings) -> Vec<(&'static str, String)> {
+    let mut failures: Vec<(&'static str, String)> = Vec::new();
+    let mut record = |op: &'static str, r: Result<()>| {
+        if let Err(e) = r {
+            log::warn!(target: "hw.gpu", "{op} gpu={idx} failed: {e}");
+            failures.push((op, e.to_string()));
+        }
+    };
+    if let Some(limit) = g.power_limit {
+        record("set_gpu_power_limit", set_gpu_power_limit(idx, limit));
+    }
+    if let Some(core_offset) = g.core_offset {
+        record("set_gpu_core_offset", set_gpu_core_offset(idx, core_offset as f32));
+    }
+    if let Some(memory_offset) = g.memory_offset {
+        record("set_gpu_memory_offset", set_gpu_memory_offset(idx, memory_offset as f32));
+    }
+    if let (Some(min_clock), Some(max_clock)) = (g.min_gpu_clock, g.max_gpu_clock) {
+        record("set_gpu_locked_clocks", set_gpu_locked_clocks(idx, min_clock, max_clock));
+    } else {
+        record("reset_gpu_clocks", reset_gpu_clocks(idx));
+    }
+    for fan in &g.nvidia_fans {
+        if fan.manual {
+            record("set_gpu_fan_speed", set_gpu_fan_speed(fan.device_index, fan.fan_id, fan.speed));
+        } else {
+            record("set_gpu_fan_auto", set_gpu_fan_auto(fan.device_index, fan.fan_id));
+        }
+    }
+    failures
+}
+
 fn apply_profile_inner(profile: &Profile) -> Result<()> {
     
     // Apply CPU settings
@@ -649,49 +683,7 @@ fn apply_profile_inner(profile: &Profile) -> Result<()> {
     }
 
     if gpu_writable {
-    if let Some(limit) = profile.gpu_settings.power_limit {
-        let _ = set_gpu_power_limit(nvidia_gpu_idx, limit);
-    }
-
-    if let Some(core_offset) = profile.gpu_settings.core_offset {
-        let _ = set_gpu_core_offset(nvidia_gpu_idx, core_offset as f32);
-    }
-
-    if let Some(memory_offset) = profile.gpu_settings.memory_offset {
-        let _ = set_gpu_memory_offset(nvidia_gpu_idx, memory_offset as f32);
-    }
-
-    if let (Some(min_clock), Some(max_clock)) = (profile.gpu_settings.min_gpu_clock, profile.gpu_settings.max_gpu_clock) {
-        let _ = set_gpu_locked_clocks(nvidia_gpu_idx, min_clock, max_clock);
-    } else {
-        let _ = reset_gpu_clocks(nvidia_gpu_idx);
-    }
-    }
-
-    if let Some(boost) = profile.cpu_settings.boost {
-        set_cpu_boost(boost)?;
-    }
-    
-    if let Some(smt) = profile.cpu_settings.smt {
-        set_smt(smt)?;
-    }
-    
-    // Apply keyboard settings
-    apply_keyboard_settings(&profile.keyboard_settings)?;
-    
-    // Apply screen settings
-    apply_screen_settings(&profile.screen_settings)?;
-    
-    // Apply fan settings - update daemon state
-    apply_fan_settings(&profile.fan_settings)?;
-
-    // Apply NVIDIA fan settings
-    for fan_setting in &profile.gpu_settings.nvidia_fans {
-        if fan_setting.manual {
-            let _ = set_gpu_fan_speed(fan_setting.device_index, fan_setting.fan_id, fan_setting.speed);
-        } else {
-            let _ = set_gpu_fan_auto(fan_setting.device_index, fan_setting.fan_id);
-        }
+        apply_gpu_static(nvidia_gpu_idx, &profile.gpu_settings);
     }
 
     Ok(())
