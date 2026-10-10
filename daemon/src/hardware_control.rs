@@ -1531,6 +1531,16 @@ mod tests {
         }
     }
 
+    /// The policy-level EPP path is a directory-level attribute that does not
+    /// exist in the kernel layout, so it must stay off the allowlist.
+    #[test]
+    fn policy_parent_epp_path_is_not_allowlisted() {
+        assert!(
+            !is_allowed_sysfs_path("/sys/devices/system/cpu/cpufreq/energy_performance_preference"),
+            "the policy parent directory must not become writable"
+        );
+    }
+
     #[test]
     fn brightness_guard_rejects_invalid_value_without_panicking() {
         // Nonexistent LED/backlight fixtures ensure this test never writes hardware.
