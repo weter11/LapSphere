@@ -785,6 +785,16 @@ impl LapSphereApp {
                     self.state.memory_info = Some(info);
                 }
                 HardwareUpdate::CpuInfo(info) => {
+                    if let (Some(hw_min), Some(hw_max)) = (info.hw_min_freq, info.hw_max_freq) {
+                        for (name, (old_min, old_max), r) in lapsphere_common::types::normalize_profiles_freq(
+                            &mut self.state.config.profiles, hw_min, hw_max,
+                        ) {
+                            log::warn!(
+                                "profile '{}' CPU freq clamped: min {:?} -> {:?}, max {:?} -> {:?} (hw {}..{} kHz)",
+                                name, old_min, r.min, old_max, r.max, hw_min, hw_max
+                            );
+                        }
+                    }
                     self.state.cpu_info = Some(info);
                 }
                 HardwareUpdate::GpuInfo(info) => {

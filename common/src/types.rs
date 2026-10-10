@@ -1163,9 +1163,8 @@ pub struct FreqLimits {
     pub changed: bool,
 }
 
-/// Clamp profile min/max frequency (kHz) into [hw_min_khz, hw_max_khz] and
-/// enforce min <= max. `None` stays `None` (the governor then uses hardware
-/// defaults). Returns whether any value changed.
+/// Clamp min/max (kHz) into [hw_min_khz, hw_max_khz]; enforce min <= max.
+/// `None` stays `None`.
 pub fn normalize_freq_limits(
     min_khz: Option<u64>,
     max_khz: Option<u64>,
@@ -1177,12 +1176,31 @@ pub fn normalize_freq_limits(
     let mut max_c = max_khz.map(clamp);
     if let (Some(lo), Some(hi)) = (min_c, max_c) {
         if lo > hi {
-            // Keep the user's min when possible; move max up to it.
             max_c = Some(lo);
         }
     }
     let changed = min_c != min_khz || max_c != max_khz;
     FreqLimits { min: min_c, max: max_c, changed }
+}
+
+/// Normalize every profile's CPU min/max against the hardware range.
+/// Returns `(name, old_min, old_max, new)` for each profile that changed.
+pub fn normalize_profiles_freq(
+    profiles: &mut [Profile],
+    hw_min_khz: u64,
+    hw_max_khz: u64,
+) -> Vec<(String, (Option<u64>, Option<u64>), FreqLimits)> {
+    let mut changed = Vec::new();
+    for p in profiles.iter_mut() {
+        let old = (p.cpu_settings.min_frequency, p.cpu_settings.max_frequency);
+        let r = normalize_freq_limits(old.0, old.1, hw_min_khz, hw_max_khz);
+        if r.changed {
+            p.cpu_settings.min_frequency = r.min;
+            p.cpu_settings.max_frequency = r.max;
+            changed.push((p.name.clone(), old, r));
+        }
+    }
+    changed
 }
 
 #[cfg(test)]
@@ -1221,6 +1239,25 @@ mod freq_limit_tests {
         assert_eq!(r.min, Some(HW_MIN));
         assert_eq!(r.max, Some(HW_MAX));
         assert!(!r.changed);
+    }
+
+    #[test]
+    fn profiles_are_normalized_and_reported() {
+        use super::{normalize_profiles_freq, Profile};
+        let mut ps = vec![Profile::default(), Profile::default()];
+        ps[0].name = "a".into();
+        ps[0].cpu_settings.min_frequency = Some(400_000);
+        ps[0].cpu_settings.max_frequency = Some(3_000_000);
+        ps[1].name = "b".into();
+        ps[1].cpu_settings.min_frequency = Some(HW_MIN);
+        ps[1].cpu_settings.max_frequency = Some(HW_MAX);
+        let changed = normalize_profiles_freq(&mut ps, HW_MIN, HW_MAX);
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].0, "a");
+        assert_eq!(changed[0].1, (Some(400_000), Some(3_000_000)));
+        assert_eq!(changed[0].2.min, Some(HW_MIN));
+        assert_eq!(ps[0].cpu_settings.min_frequency, Some(HW_MIN));
+        assert_eq!(ps[1].cpu_settings.min_frequency, Some(HW_MIN));
     }
 
     #[test]
