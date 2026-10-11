@@ -101,7 +101,7 @@ const QUIET_REPROBE_SECS: u64 = 45;
 /// Measured on the XMG: an idle desktop reports 0.0, while real 3D work sits
 /// well above this (5 % at P0, 26-46 % at P3/P5). The margin keeps a one-off
 /// Xorg blit from holding the live tier open.
-const GPU_WORK_UTILIZATION_PERCENT: f32 = 1.0;
+pub const GPU_WORK_UTILIZATION_PERCENT: f32 = 1.0;
 
 /// Per-GPU control state. This is NOT a telemetry store: `last_pstate` and
 /// `last_runtime_status` decide the tier only and are never published as
@@ -121,6 +121,7 @@ struct GpuPollState {
 
 static GPU_POLL_STATE: Lazy<Mutex<HashMap<String, GpuPollState>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+pub static LAST_GPU_LOAD: Lazy<Mutex<Option<f32>>> = Lazy::new(|| Mutex::new(None));
 
 /// NVML device index -> PCI BDF, learned from the driver during live passes.
 ///
@@ -2821,8 +2822,6 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
     // -----------------------------------------------------------------------
     // Tier decision — the single gate for invasive queries on this tick.
     //
-    static LAST_GPU_LOAD: Lazy<Mutex<Option<f32>>> = Lazy::new(|| Mutex::new(None));
-
     /// The only input is the sysfs runtime_status word above
     // adapter is never touched. Rules (see gpu_poll_tier):
     //   P0..P2  -> live NVML + NVAPI query every tick, no cached values
