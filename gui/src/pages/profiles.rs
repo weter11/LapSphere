@@ -125,7 +125,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>)
                 // Apply to hardware
                 if let Some(client) = dbus_client {
                     let profile_clone = state.config.profiles[idx].clone();
-                    let _rx = client.apply_profile(profile_clone);
+                    state.pending_profile_apply = Some(client.apply_profile(profile_clone));
                     state.show_message(format!("Switched to profile '{}'", state.config.profiles[idx].name), false);
                 }
             }
@@ -139,7 +139,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>)
                 if state.config.profiles[idx].name == state.config.current_profile {
                     if let Some(client) = dbus_client {
                         let profile_clone = state.config.profiles[idx].clone();
-                        let _rx = client.apply_profile(profile_clone);
+                        state.pending_profile_apply = Some(client.apply_profile(profile_clone));
                     }
                 }
                 state.show_message("Standard profile reset to default settings", false);
@@ -154,7 +154,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>)
                     state.config.current_profile = "Standard".to_string();
                     if let Some(standard) = state.config.profiles.iter().find(|p| p.name == "Standard") {
                         if let Some(client) = dbus_client {
-                            let _rx = client.apply_profile(standard.clone());
+                            state.pending_profile_apply = Some(client.apply_profile(standard.clone()));
                         }
                     }
                 }

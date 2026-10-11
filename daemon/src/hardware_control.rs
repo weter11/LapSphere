@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use nvml_wrapper::error::NvmlError;
 use nvml_wrapper::Nvml;
 use once_cell::sync::Lazy;
 use std::fs;
@@ -652,7 +653,7 @@ pub fn apply_pending_gpu() {
     }
 }
 
-pub fn apply_profile(profile: &Profile) -> Result<()> {
+pub fn apply_profile(profile: &Profile) -> Result<Vec<String>> {
     // Check if this profile is already applied to avoid redundant hardware calls.
     //
     // IMPORTANT: the "already applied" marker is only written *after* every
@@ -666,7 +667,7 @@ pub fn apply_profile(profile: &Profile) -> Result<()> {
         if let Some(ref last) = *last_profile {
             if last == profile {
                 log::info!(target: "hw.detect", "Profile '{}' is already applied, skipping", profile.name);
-                return Ok(());
+                return Ok(Vec::new());
             }
         }
     }
@@ -675,13 +676,17 @@ pub fn apply_profile(profile: &Profile) -> Result<()> {
     log::info!(target: "hw.detect", "Applying profile: {}", profile.name);
     let result = apply_profile_inner(profile);
     match result {
-        Ok(gpu_deferred) => {
+        Ok((gpu_deferred, warnings)) => {
             if !gpu_deferred {
                 let mut last_profile = lock_or_recover(&LAST_APPLIED_PROFILE, "LAST_APPLIED_PROFILE");
                 *last_profile = Some(profile.clone());
             }
-            log::info!(target: "hw.detect", "Profile '{}' applied successfully", profile.name);
-            Ok(())
+            if warnings.is_empty() {
+                log::info!(target: "hw.detect", "Profile '{}' applied successfully", profile.name);
+            } else {
+                log::warn!(target: "hw.detect", "Profile '{}' applied with warnings: {}", profile.name, warnings.join("; "));
+            }
+            Ok(warnings)
         }
         Err(e) => {
             // A partial apply must NOT be remembered as "applied": otherwise the
@@ -698,13 +703,24 @@ pub fn apply_profile(profile: &Profile) -> Result<()> {
 /// All hardware steps of a profile apply, in order. The caller owns the
 /// last-applied marker so a failure never leaves a stale "already applied" state.
 /// Apply the static GPU part of a profile. Every step runs even if an earlier
-/// one failed; each failure is logged and the failures are returned.
-pub(crate) fn apply_gpu_static(idx: u32, g: &lapsphere_common::types::GpuSettings) -> Vec<(&'static str, String)> {
-    let mut failures: Vec<(&'static str, String)> = Vec::new();
+/// one failed; each failure is logged, classified and returned.
+pub(crate) fn apply_gpu_static(idx: u32, g: &lapsphere_common::types::GpuSettings) -> Vec<GpuOpFailure> {
+    let mut failures: Vec<GpuOpFailure> = Vec::new();
     let mut record = |op: &'static str, r: Result<()>| {
         if let Err(e) = r {
-            log::warn!(target: "hw.gpu", "{op} gpu={idx} failed: {e}");
-            failures.push((op, e.to_string()));
+            let kind = classify_gpu_failure(&e);
+            match kind {
+                GpuOpFailureKind::Unsupported => {
+                    log::warn!(target: "hw.gpu", "{op} gpu={idx} unsupported by this adapter: {e}");
+                }
+                GpuOpFailureKind::GateClosed => {
+                    log::warn!(target: "hw.gpu", "{op} gpu={idx} refused by the runtime write gate: {e}");
+                }
+                GpuOpFailureKind::Failed => {
+                    log::warn!(target: "hw.gpu", "{op} gpu={idx} failed: {e}");
+                }
+            }
+            failures.push(GpuOpFailure { op, message: e.to_string(), kind });
         }
     };
     if let Some(limit) = g.power_limit {
@@ -731,7 +747,7 @@ pub(crate) fn apply_gpu_static(idx: u32, g: &lapsphere_common::types::GpuSetting
     failures
 }
 
-fn apply_profile_inner(profile: &Profile) -> Result<bool> {
+fn apply_profile_inner(profile: &Profile) -> Result<(bool, Vec<String>)> {
     
     // Apply CPU settings
     if let Some(ref governor) = profile.cpu_settings.governor {
@@ -821,8 +837,8 @@ fn apply_profile_inner(profile: &Profile) -> Result<bool> {
     // Apply fan settings - update daemon state
     apply_fan_settings(&profile.fan_settings)?;
 
-    profile_gpu_result(&gpu_failures)?;
-    Ok(gpu_deferred)
+    let warnings = profile_gpu_result(&gpu_failures)?;
+    Ok((gpu_deferred, warnings))
 }
 
 /// Pending GPU state after a profile apply. Pure so the supersede rule is testable.
@@ -833,28 +849,94 @@ pub fn pending_after_profile_apply(writable: bool, deferred: (u32, GpuSettings))
     if writable { None } else { Some(deferred) }
 }
 
-fn profile_gpu_result(failures: &[(&str, String)]) -> Result<()> {
-    if failures.is_empty() { Ok(()) } else {
-        Err(anyhow!("profile GPU apply failed: {} operation(s)", failures.len()))
+/// Split classified GPU failures into non-fatal warnings (operations the
+/// adapter does not support — retrying them is pointless) and fatal details
+/// (everything else). Pure so the policy is testable without hardware.
+fn split_gpu_failures(failures: &[GpuOpFailure]) -> (Vec<String>, Vec<String>) {
+    let mut warnings = Vec::new();
+    let mut fatal = Vec::new();
+    for f in failures {
+        let entry = format!("{}: {}", f.op, f.message);
+        match f.kind {
+            GpuOpFailureKind::Unsupported => warnings.push(entry),
+            _ => fatal.push(entry),
+        }
+    }
+    (warnings, fatal)
+}
+
+/// A profile apply fails only for genuine (non-unsupported) GPU failures;
+/// explicitly unsupported operations come back as warnings for the caller to
+/// report to the user.
+fn profile_gpu_result(failures: &[GpuOpFailure]) -> Result<Vec<String>> {
+    let (warnings, fatal) = split_gpu_failures(failures);
+    if !fatal.is_empty() {
+        return Err(anyhow!("profile GPU apply failed: {}", fatal.join("; ")));
+    }
+    Ok(warnings)
+}
+
+/// Summarise failed GPU operations from `apply_gpu_static` in one line per
+/// class: unsupported operations are warnings, everything else a failure.
+fn warn_gpu_failures(ctx: &str, idx: u32, failures: &[GpuOpFailure]) {
+    if failures.is_empty() {
+        return;
+    }
+    let (warnings, fatal) = split_gpu_failures(failures);
+    if !warnings.is_empty() {
+        log::warn!(target: "hw.gpu", "{ctx} gpu={idx}: {} unsupported operation(s) skipped: {}", warnings.len(), warnings.join("; "));
+    }
+    if !fatal.is_empty() {
+        log::warn!(target: "hw.gpu", "{ctx} gpu={idx}: {} operation(s) failed: {}", fatal.len(), fatal.join("; "));
     }
 }
 
 #[cfg(test)]
 mod profile_gpu_result_tests {
-    #[test]
-    fn gpu_failure_rejects_profile_success() {
-        assert!(super::profile_gpu_result(&[("offset", "refused".into())]).is_err());
-        assert!(super::profile_gpu_result(&[]).is_ok());
-    }
-}
+    use super::{profile_gpu_result, split_gpu_failures, GpuOpFailure, GpuOpFailureKind};
 
-/// Summarise failed GPU operations from `apply_gpu_static` in one warning.
-fn warn_gpu_failures(ctx: &str, idx: u32, failures: &[(&'static str, String)]) {
-    if failures.is_empty() {
-        return;
+    fn failure(op: &'static str, kind: GpuOpFailureKind) -> GpuOpFailure {
+        GpuOpFailure { op, message: format!("{op} refused"), kind }
     }
-    let names: Vec<&str> = failures.iter().map(|(op, _)| *op).collect();
-    log::warn!(target: "hw.gpu", "{ctx} gpu={idx}: {} operation(s) failed: {}", failures.len(), names.join(", "));
+
+    #[test]
+    fn unsupported_only_is_a_warning_not_an_error() {
+        let failures = vec![failure("set_gpu_power_limit", GpuOpFailureKind::Unsupported)];
+        let warnings = profile_gpu_result(&failures).expect("unsupported ops must not fail the profile");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("set_gpu_power_limit"));
+    }
+
+    #[test]
+    fn unsupported_operation_beside_applied_ones_is_only_a_warning() {
+        // Operations that succeeded produce no failure entries, so a list
+        // holding only the unsupported op models the mixed case: the profile
+        // must succeed and carry exactly that warning.
+        let failures = vec![failure("set_gpu_power_limit", GpuOpFailureKind::Unsupported)];
+        let (warnings, fatal) = split_gpu_failures(&failures);
+        assert_eq!(warnings.len(), 1);
+        assert!(fatal.is_empty(), "applied operations must not become fatal");
+        assert!(profile_gpu_result(&failures).is_ok());
+    }
+
+    #[test]
+    fn genuine_failure_rejects_the_profile() {
+        let failures = vec![failure("set_gpu_core_offset", GpuOpFailureKind::Failed)];
+        let err = profile_gpu_result(&failures).unwrap_err();
+        assert!(err.to_string().contains("set_gpu_core_offset"), "error must name the failing op: {err}");
+    }
+
+    #[test]
+    fn unsupported_and_genuine_failure_together_still_reject() {
+        let failures = vec![
+            failure("set_gpu_power_limit", GpuOpFailureKind::Unsupported),
+            failure("set_gpu_core_offset", GpuOpFailureKind::Failed),
+        ];
+        let (warnings, fatal) = split_gpu_failures(&failures);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(fatal.len(), 1);
+        assert!(profile_gpu_result(&failures).is_err());
+    }
 }
 
 pub fn apply_battery_settings(settings: &BatterySettings) -> Result<()> {
@@ -1080,18 +1162,66 @@ pub(crate) fn gpu_utilization_percent(index: u32) -> Result<f32> {
     Ok(device.utilization_rates()?.gpu as f32)
 }
 
+/// Typed refusal from the runtime write gate: the adapter is not writable
+/// right now. Callers distinguish this transient state from permanent
+/// failures (see `classify_gpu_failure`), so a deferred step can stay pending
+/// until the adapter wakes instead of being dropped.
+#[derive(Debug)]
+pub(crate) struct GpuGateClosed {
+    pub device_index: u32,
+}
+
+impl std::fmt::Display for GpuGateClosed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "GPU {} is not writable in its current runtime state; retry when it is active",
+            self.device_index
+        )
+    }
+}
+
+impl std::error::Error for GpuGateClosed {}
+
 fn with_gpu_write_gate<T>(
     device_index: u32,
     is_writable: impl FnOnce(u32) -> bool,
     write: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
     if !is_writable(device_index) {
-        return Err(anyhow!(
-            "GPU {} is not writable in its current runtime state; retry when it is active",
-            device_index
-        ));
+        return Err(anyhow::Error::new(GpuGateClosed { device_index }));
     }
     write()
+}
+
+/// Why one GPU operation failed. This decides retry and reporting policy:
+/// `Unsupported` is a permanent property of the adapter (warn, never retry);
+/// `GateClosed` is a transient runtime-PM refusal (retry once writable);
+/// `Failed` is anything else (report; do not retain a deferred slot for it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GpuOpFailureKind {
+    Unsupported,
+    GateClosed,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct GpuOpFailure {
+    pub op: &'static str,
+    pub message: String,
+    pub kind: GpuOpFailureKind,
+}
+
+/// Classify a GPU operation error structurally — typed marker errors and the
+/// NVML error code, never the human-readable message.
+pub(crate) fn classify_gpu_failure(error: &anyhow::Error) -> GpuOpFailureKind {
+    if error.downcast_ref::<GpuGateClosed>().is_some() {
+        return GpuOpFailureKind::GateClosed;
+    }
+    if let Some(NvmlError::NotSupported) = error.downcast_ref::<NvmlError>() {
+        return GpuOpFailureKind::Unsupported;
+    }
+    GpuOpFailureKind::Failed
 }
 
 #[cfg(test)]
@@ -1116,6 +1246,46 @@ mod gpu_write_gate_tests {
             let result = with_gpu_write_gate(0, |_| matches!(runtime_status, "active" | "unsupported"), || Ok(7));
             assert_eq!(result.unwrap(), 7);
         }
+    }
+}
+
+#[cfg(test)]
+mod gpu_failure_classification_tests {
+    use super::{apply_gpu_static, classify_gpu_failure, with_gpu_write_gate, GpuOpFailureKind};
+    use lapsphere_common::types::{GpuSettings, NvidiaFanSettings};
+
+    #[test]
+    fn gate_closure_classifies_as_gate_closed() {
+        let err = with_gpu_write_gate(0, |_| false, || Ok(())).unwrap_err();
+        assert_eq!(classify_gpu_failure(&err), GpuOpFailureKind::GateClosed);
+    }
+
+    #[test]
+    fn nvml_not_supported_classifies_as_unsupported_and_other_errors_as_failed() {
+        let unsupported = anyhow::Error::new(nvml_wrapper::error::NvmlError::NotSupported);
+        assert_eq!(classify_gpu_failure(&unsupported), GpuOpFailureKind::Unsupported);
+        let other = anyhow::anyhow!("disk exploded");
+        assert_eq!(classify_gpu_failure(&other), GpuOpFailureKind::Failed);
+    }
+
+    #[test]
+    fn every_gpu_operation_is_attempted_even_after_a_refusal() {
+        // NVML index 999 has no sysfs mapping, so the runtime gate refuses
+        // every operation deterministically, on any host and without touching
+        // NVML. All five operation groups must still be attempted and
+        // classified — proof the sequence continues past the first failure.
+        let g = GpuSettings {
+            power_limit: Some(150),
+            core_offset: Some(100.0),
+            memory_offset: Some(500.0),
+            min_gpu_clock: Some(405),
+            max_gpu_clock: Some(1750),
+            nvidia_fans: vec![NvidiaFanSettings { device_index: 999, fan_id: 0, speed: 50, manual: true }],
+            ..GpuSettings::default()
+        };
+        let failures = apply_gpu_static(999, &g);
+        assert_eq!(failures.len(), 5, "one failure per attempted operation group: {failures:?}");
+        assert!(failures.iter().all(|f| f.kind == GpuOpFailureKind::GateClosed));
     }
 }
 

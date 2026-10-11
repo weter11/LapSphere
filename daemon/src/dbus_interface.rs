@@ -205,7 +205,7 @@ impl ControlInterface {
         )
     }
 
-    async fn apply_profile(&self, profile_json: &str) -> Result<(), zbus::fdo::Error> {
+    async fn apply_profile(&self, profile_json: &str) -> Result<String, zbus::fdo::Error> {
         log::debug!(target: "api.call", "ApplyProfile");
         let start = std::time::Instant::now();
         let res = (|| async {
@@ -220,10 +220,11 @@ impl ControlInterface {
 
         let duration = start.elapsed().as_millis();
         match &res {
-            Ok(_) => log::debug!(target: "api.ok", "ApplyProfile duration_ms={}", duration),
+            Ok(warnings) => log::debug!(target: "api.ok", "ApplyProfile duration_ms={} warnings={}", duration, warnings.len()),
             Err(e) => log::warn!(target: "api.fail", "ApplyProfile reason=\"{}\" duration_ms={}", e, duration),
         }
-        res.map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+        res.map(|warnings| warnings.join("; "))
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
 
     async fn get_tdp_profiles(&self) -> Result<String, zbus::fdo::Error> {

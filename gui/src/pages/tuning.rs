@@ -49,7 +49,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>,
                         // Also apply to hardware
                         if let Some(client) = dbus_client {
                             let profile_clone = state.config.profiles[idx].clone();
-                            let _rx = client.apply_profile(profile_clone.clone());
+                            state.pending_profile_apply = Some(client.apply_profile(profile_clone.clone()));
 
                             // Apply GPU settings on save
                             let gpu_info = state.gpu_info.clone();

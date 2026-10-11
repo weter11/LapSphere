@@ -145,6 +145,9 @@ pub struct AppState {
     
     // Async state
     pub pending_battery_update: Option<oneshot::Receiver<Result<(), anyhow::Error>>>,
+    /// Reply of a profile apply started outside the startup flow (profile
+    /// switch/reset/delete, tray), so warnings and failures can be surfaced.
+    pub pending_profile_apply: Option<oneshot::Receiver<anyhow::Result<String>>>,
     
     // Refresh coordinator handle
     pub coordinator_handle: Option<CoordinatorHandle>,
@@ -156,6 +159,7 @@ pub struct AppState {
 pub enum StartupProfileStatus {
     WaitingForCpuLimits,
     Applying,
+    AppliedWithWarnings(String),
     Failed(String),
     Complete,
 }
@@ -212,6 +216,7 @@ impl AppState {
             pending_prime_profile: None,
             editing_profile_name: None,
             pending_battery_update: None,
+            pending_profile_apply: None,
             coordinator_handle: None,
             selected_fan_curve: 0,
             keyboard_brush_color: [255, 255, 255],
@@ -414,7 +419,7 @@ pub struct LapSphereApp {
     startup_apply_pending: bool,
     startup_started: std::time::Instant,
     startup_timeout_warned: bool,
-    startup_apply_reply: Option<oneshot::Receiver<anyhow::Result<()>>>,
+    startup_apply_reply: Option<oneshot::Receiver<anyhow::Result<String>>>,
 
     last_tray_profile: String,
     last_tray_profiles_count: usize,
@@ -964,7 +969,13 @@ impl LapSphereApp {
         }
         if let Some(mut rx) = self.startup_apply_reply.take() {
             match rx.try_recv() {
-                Ok(Ok(())) => self.state.startup_profile_status = StartupProfileStatus::Complete,
+                Ok(Ok(warnings)) => {
+                    self.state.startup_profile_status = if warnings.is_empty() {
+                        StartupProfileStatus::Complete
+                    } else {
+                        StartupProfileStatus::AppliedWithWarnings(warnings)
+                    };
+                }
                 Ok(Err(e)) => {
                     let error = format!("Startup profile application failed: {e}");
                     log::error!("{error}");
@@ -994,6 +1005,24 @@ impl LapSphereApp {
                 }
             }
         }
+
+        if let Some(mut rx) = self.state.pending_profile_apply.take() {
+            match rx.try_recv() {
+                Ok(Ok(warnings)) if !warnings.is_empty() => {
+                    self.state.show_message(format!("Profile applied with warnings: {warnings}"), true);
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    self.state.show_message(format!("Profile apply failed: {e}"), true);
+                }
+                Err(oneshot::error::TryRecvError::Empty) => {
+                    self.state.pending_profile_apply = Some(rx);
+                }
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    self.state.show_message("Profile apply reply channel closed", true);
+                }
+            }
+        }
     }
     
     fn draw_top_bar(&mut self, ui: &mut egui::Ui) {
@@ -1003,6 +1032,10 @@ impl LapSphereApp {
             StartupProfileStatus::WaitingForCpuLimits =>
                 Some(("Warning: still waiting for CPU frequency limits; startup profile has not been applied".to_string(), egui::Color32::from_rgb(240, 120, 70))),
             StartupProfileStatus::Applying => Some(("Applying startup profile…".to_string(), egui::Color32::from_rgb(100, 170, 240))),
+            StartupProfileStatus::AppliedWithWarnings(warnings) => Some((
+                format!("Startup profile applied with warnings: {warnings}"),
+                egui::Color32::from_rgb(230, 190, 70),
+            )),
             StartupProfileStatus::Failed(error) => Some((error.clone(), egui::Color32::from_rgb(240, 90, 90))),
             StartupProfileStatus::Complete => None,
         };
@@ -1375,7 +1408,7 @@ impl LapSphereApp {
                     if let Some(profile) = self.state.config.profiles.get(idx).cloned() {
                         self.state.config.current_profile = profile.name.clone();
                         if let Some(client) = &self.dbus_client {
-                            let _ = client.apply_profile(profile);
+                            self.state.pending_profile_apply = Some(client.apply_profile(profile));
                         }
                     }
                 }
