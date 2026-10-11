@@ -9,9 +9,7 @@ use lapsphere_common::types::*;
 use crate::tuxedo_io::{TuxedoIo, HardwareInterface};
 
 static CPU_LIMITS_MODIFIED: AtomicBool = AtomicBool::new(false);
-/// Set when a profile's GPU step was deferred by the write gate.
-pub static GPU_PENDING: AtomicBool = AtomicBool::new(false);
-/// GPU settings of the deferred profile step, with the adapter index.
+/// Deferred GPU settings and their consumption state share one lock.
 pub static PENDING_GPU_SETTINGS: Lazy<Mutex<Option<(u32, GpuSettings)>>> = Lazy::new(|| Mutex::new(None));
 pub static GPU_APPLY_GEN: AtomicU64 = AtomicU64::new(0);
 
@@ -274,6 +272,79 @@ fn read_hw_freq_bounds() -> Option<(u64, u64)> {
     Some((min, max))
 }
 
+fn normalize_cpu_frequency_request(
+    min_freq: u64,
+    max_freq: u64,
+    bounds: Option<(u64, u64)>,
+) -> Result<(u64, u64)> {
+    let (hw_min, hw_max) = bounds.ok_or_else(|| {
+        anyhow!("CPU hardware frequency bounds are unavailable; refusing unvalidated limits")
+    })?;
+    if hw_min > hw_max {
+        return Err(anyhow!(
+            "invalid CPU hardware frequency bounds: min {hw_min} exceeds max {hw_max}"
+        ));
+    }
+    let limits = normalize_freq_limits(Some(min_freq), Some(max_freq), hw_min, hw_max);
+    Ok((
+        limits
+            .min
+            .ok_or_else(|| anyhow!("normalized CPU minimum frequency is missing"))?,
+        limits
+            .max
+            .ok_or_else(|| anyhow!("normalized CPU maximum frequency is missing"))?,
+    ))
+}
+
+#[cfg(test)]
+mod cpu_frequency_normalization_tests {
+    use super::normalize_cpu_frequency_request;
+
+    const BOUNDS: (u64, u64) = (403_488, 4_465_261);
+
+    #[test]
+    fn request_below_hardware_minimum_is_raised() {
+        assert_eq!(
+            normalize_cpu_frequency_request(100_000, 2_000_000, Some(BOUNDS)).unwrap(),
+            (BOUNDS.0, 2_000_000)
+        );
+    }
+
+    #[test]
+    fn request_above_hardware_maximum_is_lowered() {
+        assert_eq!(
+            normalize_cpu_frequency_request(1_000_000, 5_000_000, Some(BOUNDS)).unwrap(),
+            (1_000_000, BOUNDS.1)
+        );
+    }
+
+    #[test]
+    fn resolves_minimum_above_maximum() {
+        assert_eq!(
+            normalize_cpu_frequency_request(3_000_000, 2_000_000, Some(BOUNDS)).unwrap(),
+            (3_000_000, 3_000_000)
+        );
+    }
+
+    #[test]
+    fn accepts_valid_in_range_limits_unchanged() {
+        assert_eq!(
+            normalize_cpu_frequency_request(1_000_000, 4_000_000, Some(BOUNDS)).unwrap(),
+            (1_000_000, 4_000_000)
+        );
+    }
+
+    #[test]
+    fn refuses_to_write_without_hardware_bounds() {
+        assert!(normalize_cpu_frequency_request(1_000_000, 4_000_000, None).is_err());
+    }
+
+    #[test]
+    fn refuses_invalid_hardware_bounds() {
+        assert!(normalize_cpu_frequency_request(1_000_000, 4_000_000, Some((4_000_000, 1_000_000))).is_err());
+    }
+}
+
 /// Maximum brightness the hardware reports (sibling of the writable attr).
 fn read_max_brightness(base: &str) -> Option<u32> {
     let s = fs::read_to_string(format!("{base}/max_brightness")).ok()?;
@@ -427,6 +498,11 @@ pub fn set_cpu_governor(governor: &str) -> Result<()> {
 }
 
 pub fn set_cpu_frequency_limits(min_freq: u64, max_freq: u64) -> Result<()> {
+    let requested = (min_freq, max_freq);
+    let (min_freq, max_freq) = normalize_cpu_frequency_request(min_freq, max_freq, read_hw_freq_bounds())?;
+    if (min_freq, max_freq) != requested {
+        log::warn!(target: "hw.cpu", "normalized CPU frequency limits {:?} to {:?} using hardware bounds", requested, (min_freq, max_freq));
+    }
     let cpu_count = get_cpu_count()?;
     
     // IMPORTANT: Set max first, then min to avoid conflicts
@@ -551,18 +627,31 @@ pub fn set_intel_pstate_status(status: &str) -> Result<()> {
     Ok(())
 }
 
-/// Apply the deferred profile GPU step once the adapter is writable.
-/// One attempt per deferral: the flag is cleared before the write.
+/// Apply and consume one pending value while preventing concurrent replacement.
+fn consume_pending_locked<T, R>(
+    slot: &Mutex<Option<T>>,
+    label: &str,
+    apply: impl FnOnce(&T) -> Option<R>,
+) -> Option<R> {
+    let mut pending = lock_or_recover(slot, label);
+    let result = apply(pending.as_ref()?)?;
+    *pending = None;
+    Some(result)
+}
+
+pub fn replace_pending_gpu_settings(idx: u32, settings: GpuSettings) {
+    *lock_or_recover(&PENDING_GPU_SETTINGS, "PENDING_GPU_SETTINGS") = Some((idx, settings));
+}
+
+/// Apply the newest deferred profile GPU step once the adapter is writable.
 pub fn apply_pending_gpu() {
-    let settings = lock_or_recover(&PENDING_GPU_SETTINGS, "PENDING_GPU_SETTINGS").clone();
-    let pending = GPU_PENDING.load(Ordering::SeqCst);
-    let writable = settings.as_ref().map(|(idx, _)| crate::hardware_detection::gpu_write_allowed(*idx)).unwrap_or(false);
-    if !pending_gpu_due(pending, writable, settings.is_some()) {
-        return;
-    }
-    GPU_PENDING.store(false, Ordering::SeqCst);
-    if let Some((idx, g)) = settings {
-        let failures = apply_gpu_static(idx, &g);
+    let applied = consume_pending_locked(&PENDING_GPU_SETTINGS, "PENDING_GPU_SETTINGS", |(idx, settings)| {
+        if !crate::hardware_detection::gpu_write_allowed(*idx) {
+            return None;
+        }
+        Some((*idx, apply_gpu_static(*idx, settings)))
+    });
+    if let Some((idx, failures)) = applied {
         warn_gpu_failures("deferred profile GPU step", idx, &failures);
         log::info!(target: "hw.gpu", "deferred profile GPU step applied gpu={idx} failures={}", failures.len());
     }
@@ -591,11 +680,8 @@ pub fn apply_profile(profile: &Profile) -> Result<()> {
     log::info!(target: "hw.detect", "Applying profile: {}", profile.name);
     let result = apply_profile_inner(profile);
     match result {
-        Ok(()) => {
-            // Record the profile only now that every hardware step succeeded.
-            // A deferred GPU step is not "applied": leave the marker unset so
-            // re-selecting this profile runs the GPU step again.
-            if !GPU_PENDING.load(Ordering::SeqCst) {
+        Ok(gpu_deferred) => {
+            if !gpu_deferred {
                 let mut last_profile = lock_or_recover(&LAST_APPLIED_PROFILE, "LAST_APPLIED_PROFILE");
                 *last_profile = Some(profile.clone());
             }
@@ -650,7 +736,7 @@ pub(crate) fn apply_gpu_static(idx: u32, g: &lapsphere_common::types::GpuSetting
     failures
 }
 
-fn apply_profile_inner(profile: &Profile) -> Result<()> {
+fn apply_profile_inner(profile: &Profile) -> Result<bool> {
     
     // Apply CPU settings
     if let Some(ref governor) = profile.cpu_settings.governor {
@@ -708,27 +794,20 @@ fn apply_profile_inner(profile: &Profile) -> Result<()> {
             .unwrap_or(0)
     };
 
-    // Writes to a runtime-suspended or unmapped adapter wake/race it; defer them.
-    let gpu_writable = crate::hardware_detection::gpu_write_allowed(nvidia_gpu_idx);
-    if !gpu_writable {
-        log::debug!(target: "hw.gpu", "profile GPU writes deferred gpu={}", nvidia_gpu_idx);
-    }
-
-    // A newly applied profile supersedes any GPU step deferred by an earlier one.
-    let new_pending = pending_after_profile_apply(gpu_writable, (nvidia_gpu_idx, profile.gpu_settings.clone()));
-    let mut gpu_failures = Vec::new();
-    if gpu_writable {
-        let failures = apply_gpu_static(nvidia_gpu_idx, &profile.gpu_settings);
-        warn_gpu_failures("profile GPU apply", nvidia_gpu_idx, &failures);
-        gpu_failures = failures;
-    } else {
-        log::debug!(target: "hw.gpu", "profile GPU writes deferred gpu={}", nvidia_gpu_idx);
-    }
-    {
-        let mut slot = lock_or_recover(&PENDING_GPU_SETTINGS, "PENDING_GPU_SETTINGS");
-        GPU_PENDING.store(new_pending.is_some(), Ordering::SeqCst);
-        *slot = new_pending;
-    }
+    let (gpu_deferred, gpu_failures) = {
+        let mut pending = lock_or_recover(&PENDING_GPU_SETTINGS, "PENDING_GPU_SETTINGS");
+        let gpu_writable = crate::hardware_detection::gpu_write_allowed(nvidia_gpu_idx);
+        if gpu_writable {
+            let failures = apply_gpu_static(nvidia_gpu_idx, &profile.gpu_settings);
+            *pending = pending_after_profile_apply(true, (nvidia_gpu_idx, profile.gpu_settings.clone()));
+            warn_gpu_failures("profile GPU apply", nvidia_gpu_idx, &failures);
+            (false, failures)
+        } else {
+            log::debug!(target: "hw.gpu", "profile GPU writes deferred gpu={}", nvidia_gpu_idx);
+            *pending = pending_after_profile_apply(false, (nvidia_gpu_idx, profile.gpu_settings.clone()));
+            (true, Vec::new())
+        }
+    };
 
     if let Some(boost) = profile.cpu_settings.boost {
         set_cpu_boost(boost)?;
@@ -747,7 +826,8 @@ fn apply_profile_inner(profile: &Profile) -> Result<()> {
     // Apply fan settings - update daemon state
     apply_fan_settings(&profile.fan_settings)?;
 
-    profile_gpu_result(&gpu_failures)
+    profile_gpu_result(&gpu_failures)?;
+    Ok(gpu_deferred)
 }
 
 /// Pending GPU state after a profile apply. Pure so the supersede rule is testable.
@@ -1005,72 +1085,124 @@ pub(crate) fn gpu_utilization_percent(index: u32) -> Result<f32> {
     Ok(device.utilization_rates()?.gpu as f32)
 }
 
-pub fn set_gpu_locked_clocks(device_index: u32, min_clock: u32, max_clock: u32) -> Result<()> {
-    let nvml = get_nvml()?;
-    let mut device = nvml.device_by_index(device_index)?;
-    device.set_gpu_locked_clocks(GpuLockedClocksSetting::Numeric {
-        min_clock_mhz: min_clock,
-        max_clock_mhz: max_clock,
-    })?;
-    Ok(())
+fn with_gpu_write_gate<T>(
+    device_index: u32,
+    is_writable: impl FnOnce(u32) -> bool,
+    write: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    if !is_writable(device_index) {
+        return Err(anyhow!(
+            "GPU {} is not writable in its current runtime state; retry when it is active",
+            device_index
+        ));
+    }
+    write()
 }
 
+#[cfg(test)]
+mod gpu_write_gate_tests {
+    use super::with_gpu_write_gate;
+    use std::cell::Cell;
+
+    #[test]
+    fn direct_mutation_entrypoint_does_not_write_when_gpu_is_non_writable() {
+        let writes = Cell::new(0);
+        let result = with_gpu_write_gate(0, |_| false, || {
+            writes.set(writes.get() + 1);
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert_eq!(writes.get(), 0);
+    }
+
+    #[test]
+    fn active_and_unsupported_runtime_states_remain_writable() {
+        for runtime_status in ["active", "unsupported"] {
+            let result = with_gpu_write_gate(0, |_| matches!(runtime_status, "active" | "unsupported"), || Ok(7));
+            assert_eq!(result.unwrap(), 7);
+        }
+    }
+}
+
+pub fn set_gpu_locked_clocks(device_index: u32, min_clock: u32, max_clock: u32) -> Result<()> {
+    with_gpu_write_gate(device_index, crate::hardware_detection::gpu_write_allowed, || {
+        let nvml = get_nvml()?;
+        let mut device = nvml.device_by_index(device_index)?;
+        device.set_gpu_locked_clocks(GpuLockedClocksSetting::Numeric {
+            min_clock_mhz: min_clock,
+            max_clock_mhz: max_clock,
+        })?;
+        Ok(())
+    })
+}
 
 pub fn reset_gpu_clocks(device_index: u32) -> Result<()> {
-    let nvml = get_nvml()?;
-    let mut device = nvml.device_by_index(device_index)?;
-    device.reset_gpu_locked_clocks()?;
-    Ok(())
+    with_gpu_write_gate(device_index, crate::hardware_detection::gpu_write_allowed, || {
+        let nvml = get_nvml()?;
+        let mut device = nvml.device_by_index(device_index)?;
+        device.reset_gpu_locked_clocks()?;
+        Ok(())
+    })
 }
 
 pub fn set_gpu_core_offset(device_index: u32, offset: f32) -> Result<()> {
-    let nvml = get_nvml()?;
-    let mut device = nvml.device_by_index(device_index)?;
-    device.set_clock_offset(Clock::Graphics, PerformanceState::Zero, offset.round() as i32)?;
-    {
-        let mut map = lock_or_recover(&crate::MANUAL_GPU_OFFSETS, "MANUAL_GPU_OFFSETS");
-        let entry = map.entry(device_index).or_insert((0.0, 0.0));
-        entry.0 = offset;
-    }
-    log::info!(target: "hw.gpu", "set_core_offset gpu={} offset={} offset_rounded={}", device_index, offset, offset.round());
-    Ok(())
+    with_gpu_write_gate(device_index, crate::hardware_detection::gpu_write_allowed, || {
+        let nvml = get_nvml()?;
+        let mut device = nvml.device_by_index(device_index)?;
+        device.set_clock_offset(Clock::Graphics, PerformanceState::Zero, offset.round() as i32)?;
+        {
+            let mut map = lock_or_recover(&crate::MANUAL_GPU_OFFSETS, "MANUAL_GPU_OFFSETS");
+            let entry = map.entry(device_index).or_insert((0.0, 0.0));
+            entry.0 = offset;
+        }
+        log::info!(target: "hw.gpu", "set_core_offset gpu={} offset={} offset_rounded={}", device_index, offset, offset.round());
+        Ok(())
+    })
 }
 
 pub fn set_gpu_memory_offset(device_index: u32, offset: f32) -> Result<()> {
-    let nvml = get_nvml()?;
-    let mut device = nvml.device_by_index(device_index)?;
-    device.set_clock_offset(Clock::Memory, PerformanceState::Zero, offset.round() as i32)?;
-    {
-        let mut map = lock_or_recover(&crate::MANUAL_GPU_OFFSETS, "MANUAL_GPU_OFFSETS");
-        let entry = map.entry(device_index).or_insert((0.0, 0.0));
-        entry.1 = offset;
-    }
-    log::info!(target: "hw.gpu", "set_mem_offset gpu={} offset={} offset_rounded={}", device_index, offset, offset.round());
-    Ok(())
+    with_gpu_write_gate(device_index, crate::hardware_detection::gpu_write_allowed, || {
+        let nvml = get_nvml()?;
+        let mut device = nvml.device_by_index(device_index)?;
+        device.set_clock_offset(Clock::Memory, PerformanceState::Zero, offset.round() as i32)?;
+        {
+            let mut map = lock_or_recover(&crate::MANUAL_GPU_OFFSETS, "MANUAL_GPU_OFFSETS");
+            let entry = map.entry(device_index).or_insert((0.0, 0.0));
+            entry.1 = offset;
+        }
+        log::info!(target: "hw.gpu", "set_mem_offset gpu={} offset={} offset_rounded={}", device_index, offset, offset.round());
+        Ok(())
+    })
 }
 
 pub fn set_gpu_power_limit(device_index: u32, limit_watts: u32) -> Result<()> {
-    let nvml = get_nvml()?;
-    let mut device = nvml.device_by_index(device_index)?;
-    device.set_power_management_limit(limit_watts * 1000)?; // Watts to mW
-    log::info!(target: "hw.gpu", "set_power_limit gpu={} limit={}W", device_index, limit_watts);
-    Ok(())
+    with_gpu_write_gate(device_index, crate::hardware_detection::gpu_write_allowed, || {
+        let nvml = get_nvml()?;
+        let mut device = nvml.device_by_index(device_index)?;
+        device.set_power_management_limit(limit_watts * 1000)?;
+        log::info!(target: "hw.gpu", "set_power_limit gpu={} limit={}W", device_index, limit_watts);
+        Ok(())
+    })
 }
 
 pub fn set_gpu_fan_speed(device_index: u32, fan_index: u32, speed_percent: u32) -> Result<()> {
-    let nvml = get_nvml()?;
-    let mut device = nvml.device_by_index(device_index)?;
-    device.set_fan_speed(fan_index, speed_percent)?;
-    log::info!(target: "hw.gpu", "set_fan_speed gpu={} fan={} speed={}%", device_index, fan_index, speed_percent);
-    Ok(())
+    with_gpu_write_gate(device_index, crate::hardware_detection::gpu_write_allowed, || {
+        let nvml = get_nvml()?;
+        let mut device = nvml.device_by_index(device_index)?;
+        device.set_fan_speed(fan_index, speed_percent)?;
+        log::info!(target: "hw.gpu", "set_fan_speed gpu={} fan={} speed={}%", device_index, fan_index, speed_percent);
+        Ok(())
+    })
 }
 
 pub fn set_gpu_fan_auto(device_index: u32, fan_index: u32) -> Result<()> {
-    let nvml = get_nvml()?;
-    let mut device = nvml.device_by_index(device_index)?;
-    device.set_default_fan_speed(fan_index)?;
-    log::info!(target: "hw.gpu", "set_fan_auto gpu={} fan={}", device_index, fan_index);
-    Ok(())
+    with_gpu_write_gate(device_index, crate::hardware_detection::gpu_write_allowed, || {
+        let nvml = get_nvml()?;
+        let mut device = nvml.device_by_index(device_index)?;
+        device.set_default_fan_speed(fan_index)?;
+        log::info!(target: "hw.gpu", "set_fan_auto gpu={} fan={}", device_index, fan_index);
+        Ok(())
+    })
 }
 
 fn find_binary(cmd: &str) -> Option<String> {
@@ -1842,8 +1974,10 @@ mod pending_gpu_tests {
 
 #[cfg(test)]
 mod pending_supersede_tests {
-    use super::{pending_after_profile_apply, pending_gpu_due};
+    use super::{consume_pending_locked, pending_after_profile_apply, pending_gpu_due};
     use lapsphere_common::types::GpuSettings;
+    use std::sync::{mpsc, Arc, Mutex};
+    use std::time::Duration;
 
     fn settings(core: f32) -> GpuSettings {
         GpuSettings {
@@ -1852,22 +1986,63 @@ mod pending_supersede_tests {
         }
     }
 
-    /// A deferred (gate closed), then B applied with the gate open. The tick
-    /// must act on B only and leave nothing pending.
+    #[test]
+    fn pending_value_is_consumed_after_application() {
+        let slot = Mutex::new(Some(7));
+        assert_eq!(consume_pending_locked(&slot, "test", |value| Some(*value * 2)), Some(14));
+        assert_eq!(*slot.lock().unwrap(), None);
+        assert_eq!(consume_pending_locked(&slot, "test", |value| Some(*value)), None);
+    }
+
+    #[test]
+    fn replacing_pending_settings_keeps_the_newest_request() {
+        let slot = Mutex::new(Some((0u32, settings(-50.0))));
+        *slot.lock().unwrap() = Some((0u32, settings(-100.0)));
+        assert_eq!(slot.lock().unwrap().as_ref().unwrap().1.core_offset, Some(-100.0));
+    }
+
+    #[test]
+    fn apply_a_then_concurrent_b_replacement_leaves_b_pending() {
+        let slot = Arc::new(Mutex::new(Some('A')));
+        let (apply_started_tx, apply_started_rx) = mpsc::channel();
+        let (finish_apply_tx, finish_apply_rx) = mpsc::channel();
+        let worker_slot = Arc::clone(&slot);
+        let worker = std::thread::spawn(move || {
+            consume_pending_locked(&worker_slot, "test", |value| {
+                apply_started_tx.send(*value).unwrap();
+                finish_apply_rx.recv().unwrap();
+                Some(*value)
+            })
+        });
+        assert_eq!(apply_started_rx.recv_timeout(Duration::from_secs(1)).unwrap(), 'A');
+
+        let (replace_started_tx, replace_started_rx) = mpsc::channel();
+        let (replace_done_tx, replace_done_rx) = mpsc::channel();
+        let replace_slot = Arc::clone(&slot);
+        let replacer = std::thread::spawn(move || {
+            replace_started_tx.send(()).unwrap();
+            *replace_slot.lock().unwrap() = Some('B');
+            replace_done_tx.send(()).unwrap();
+        });
+        replace_started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(replace_done_rx.recv_timeout(Duration::from_millis(20)).is_err());
+
+        finish_apply_tx.send(()).unwrap();
+        assert_eq!(worker.join().unwrap(), Some('A'));
+        replace_done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        replacer.join().unwrap();
+        assert_eq!(consume_pending_locked(&slot, "test", |value| Some(*value)), Some('B'));
+        assert_eq!(*slot.lock().unwrap(), None);
+    }
+
     #[test]
     fn deferred_a_then_applied_b_leaves_only_b_and_no_pending() {
         let a = (0u32, settings(-50.0));
         let b = (0u32, settings(-100.0));
-
-        // Gate closed for A: A becomes pending.
         let after_a = pending_after_profile_apply(false, a.clone());
-        assert_eq!(after_a, Some(a.clone()));
-
-        // Gate open for B: B is applied now, and A's pending step is dropped.
-        let after_b = pending_after_profile_apply(true, b.clone());
-        assert_eq!(after_b, None, "writable apply must clear pending A");
-
-        // Tick with gate open: pending flag is false, so the tick does not run A.
+        assert_eq!(after_a, Some(a));
+        let after_b = pending_after_profile_apply(true, b);
+        assert_eq!(after_b, None);
         assert!(!pending_gpu_due(after_b.is_some(), true, true));
     }
 }
