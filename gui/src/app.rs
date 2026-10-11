@@ -931,7 +931,7 @@ impl LapSphereApp {
             && self.startup_started.elapsed() >= std::time::Duration::from_secs(10)
         {
             self.startup_timeout_warned = true;
-            log::warn!("стартовое применение профиля ждёт пределы CPU от демона, профиль не применён");
+            log::warn!("startup profile apply is waiting for CPU limits from the daemon; profile not applied");
         }
         if let Some(mut rx) = self.startup_apply_reply.take() {
             match rx.try_recv() {
