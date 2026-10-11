@@ -164,10 +164,17 @@ pub enum StartupProfileStatus {
     Complete,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageLevel {
+    Info,
+    Warning,
+    Error,
+}
+
 #[derive(Debug, Clone)]
 pub struct StatusMessage {
     pub text: String,
-    pub is_error: bool,
+    pub level: MessageLevel,
     pub shown_at: Instant,
 }
 
@@ -266,9 +273,20 @@ pub fn load_config(&mut self) {
     }
     
     pub fn show_message(&mut self, text: impl Into<String>, is_error: bool) {
+        let level = if is_error { MessageLevel::Error } else { MessageLevel::Info };
+        self.show_message_at_level(text, level);
+    }
+
+    /// Show a warning-styled status message: the operation completed with
+    /// caveats — neither a clean success nor an error.
+    pub fn show_warning(&mut self, text: impl Into<String>) {
+        self.show_message_at_level(text, MessageLevel::Warning);
+    }
+
+    fn show_message_at_level(&mut self, text: impl Into<String>, level: MessageLevel) {
         self.status_message = Some(StatusMessage {
             text: text.into(),
-            is_error,
+            level,
             shown_at: Instant::now(),
         });
     }
@@ -456,6 +474,7 @@ pub enum HardwareUpdate {
     MemoryInfo(MemoryInfo),
     CpuInfo(CpuInfo),
     GpuInfo(Vec<GpuInfo>),
+    DeferredGpuReport(DeferredGpuReport),
     BatteryInfo(BatteryInfo),
     WifiInfo(Vec<WiFiInfo>),
     GamepadInfo(Vec<GamepadInfo>),
@@ -563,6 +582,14 @@ impl LapSphereApp {
                                     Ok(Ok(info)) => { send_polled_update(&tx, HardwareUpdate::GpuInfo(info), &ctx); }
                                     Ok(Err(e)) => log::error!("Failed to get GPU info: {}", e),
                                     Err(e) => log::error!("DBus error getting GPU info: {}", e),
+                                }
+                                // A deferred GPU apply finishes after its
+                                // ApplyProfile reply was sent; pick the outcome
+                                // up here (take-once, empty on almost every tick).
+                                // Lossless send: the daemon has already cleared
+                                // the report, so a full channel must wait, not drop.
+                                if let Ok(Ok(Some(report))) = client.get_deferred_gpu_report().await {
+                                    send_update(&tx, HardwareUpdate::DeferredGpuReport(report), &ctx).await;
                                 }
                             }
                             "memory" => {
@@ -813,6 +840,13 @@ impl LapSphereApp {
                 HardwareUpdate::MemoryInfo(info) => {
                     self.state.memory_info = Some(info);
                 }
+                HardwareUpdate::DeferredGpuReport(report) => {
+                    if report.is_failure {
+                        self.state.show_message(report.text, true);
+                    } else {
+                        self.state.show_warning(report.text);
+                    }
+                }
                 HardwareUpdate::CpuInfo(info) => {
                     if let (Some(hw_min), Some(hw_max)) = (info.hw_min_freq, info.hw_max_freq) {
                         let changed = lapsphere_common::types::normalize_profiles_freq(
@@ -1009,7 +1043,7 @@ impl LapSphereApp {
         if let Some(mut rx) = self.state.pending_profile_apply.take() {
             match rx.try_recv() {
                 Ok(Ok(warnings)) if !warnings.is_empty() => {
-                    self.state.show_message(format!("Profile applied with warnings: {warnings}"), true);
+                    self.state.show_warning(format!("Profile applied with warnings: {warnings}"));
                 }
                 Ok(Ok(_)) => {}
                 Ok(Err(e)) => {
@@ -1149,10 +1183,10 @@ impl LapSphereApp {
                 egui::Panel::top("status_bar").show_inside(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.add_space(12.0);
-                        let color = if msg.is_error {
-                            egui::Color32::from_rgb(220, 80, 80)
-                        } else {
-                            egui::Color32::from_rgb(80, 200, 120)
+                        let color = match msg.level {
+                            MessageLevel::Error => egui::Color32::from_rgb(220, 80, 80),
+                            MessageLevel::Warning => egui::Color32::from_rgb(230, 190, 70),
+                            MessageLevel::Info => egui::Color32::from_rgb(80, 200, 120),
                         };
                         ui.colored_label(color, &msg.text);
                     });

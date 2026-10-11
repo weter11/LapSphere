@@ -28,6 +28,7 @@ pub enum DbusCommand {
     GetMemoryInfo { reply: oneshot::Sender<Result<MemoryInfo>> },
     GetCpuInfo { reply: oneshot::Sender<Result<CpuInfo>> },
     GetGpuInfo { reply: oneshot::Sender<Result<Vec<GpuInfo>>> },
+    GetDeferredGpuReport { reply: oneshot::Sender<Result<Option<DeferredGpuReport>>> },
     GetFanInfo { reply: oneshot::Sender<Result<Vec<FanInfo>>> },
     GetBatteryInfo { reply: oneshot::Sender<Result<BatteryInfo>> },
     GetStorageDeviceInfo { reply: oneshot::Sender<Result<Vec<StorageDevice>>> },
@@ -100,6 +101,14 @@ impl DbusClient {
     pub fn get_gpu_info(&self) -> oneshot::Receiver<Result<Vec<GpuInfo>>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.command_tx.send(DbusCommand::GetGpuInfo { reply: tx });
+        rx
+    }
+
+    /// Outcome of the last completed deferred GPU apply attempt (None when
+    /// there is nothing new). Take-once: the daemon clears it on delivery.
+    pub fn get_deferred_gpu_report(&self) -> oneshot::Receiver<Result<Option<DeferredGpuReport>>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::GetDeferredGpuReport { reply: tx });
         rx
     }
     
@@ -394,6 +403,12 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
                 }
+                DbusCommand::GetDeferredGpuReport { reply } => {
+                    let result = get_deferred_gpu_report_impl(&proxy).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
                 DbusCommand::GetFanInfo { reply } => {
                     let result = get_fan_info_impl(&proxy).await;
                     let is_err = result.is_err();
@@ -673,6 +688,14 @@ async fn get_cpu_info_impl(proxy: &zbus::Proxy<'_>) -> Result<CpuInfo> {
 async fn get_gpu_info_impl(proxy: &zbus::Proxy<'_>) -> Result<Vec<GpuInfo>> {
     let json: String = proxy.call("GetGpuInfo", &()).await?;
     Ok(serde_json::from_str(&json)?)
+}
+
+async fn get_deferred_gpu_report_impl(proxy: &zbus::Proxy<'_>) -> Result<Option<DeferredGpuReport>> {
+    let json: String = proxy.call("TakeDeferredGpuReport", &()).await?;
+    if json.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::from_str(&json)?))
 }
 
 async fn get_fan_info_impl(proxy: &zbus::Proxy<'_>) -> Result<Vec<FanInfo>> {

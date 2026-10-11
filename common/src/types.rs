@@ -32,6 +32,21 @@ pub struct LogEntry {
     pub timestamp: String,
 }
 
+/// Outcome of the last completed deferred GPU apply attempt, delivered to the
+/// GUI on its next poll.
+///
+/// The `ApplyProfile` reply is sent before a deferred attempt runs, so this
+/// take-once report is the delivery path for the deferred outcome. Identical
+/// repeated outcomes are published once; the newest report replaces an
+/// unclaimed older one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DeferredGpuReport {
+    /// Human-readable summary of the deferred attempt's outcome.
+    pub text: String,
+    /// True when a genuine failure occurred; false for an unsupported-op warning.
+    pub is_failure: bool,
+}
+
 /// Complete CPU telemetry snapshot.
 ///
 /// Sourced from `/sys/devices/system/cpu/`, `/sys/class/thermal/`,

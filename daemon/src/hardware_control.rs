@@ -15,6 +15,20 @@ pub static PENDING_GPU_SETTINGS: Lazy<Mutex<Option<(u32, GpuSettings)>>> = Lazy:
 pub static GPU_APPLY_GEN: AtomicU64 = AtomicU64::new(0);
 static LAST_APPLIED_PROFILE: Lazy<Mutex<Option<Profile>>> = Lazy::new(|| Mutex::new(None));
 
+/// Outcome of the last completed deferred GPU apply attempt, waiting for the
+/// GUI to pick it up (take-once). The `ApplyProfile` reply is sent long before
+/// a deferred attempt runs, so this slot is its delivery path. Identical
+/// repeated outcomes (e.g. the idle-OC restore re-hitting a permanently
+/// unsupported operation) are published once.
+static DEFERRED_GPU_REPORT: Lazy<Mutex<DeferredGpuReportState>> =
+    Lazy::new(|| Mutex::new(DeferredGpuReportState::default()));
+
+#[derive(Default)]
+struct DeferredGpuReportState {
+    pending: Option<DeferredGpuReport>,
+    last_published: Option<String>,
+}
+
 /// Lock a shared daemon mutex, recovering from poisoning instead of panicking.
 ///
 /// A `.lock().unwrap()` on a poisoned mutex (i.e. a thread panicked while
@@ -685,10 +699,38 @@ pub fn apply_pending_gpu() {
         warn_gpu_failures("deferred profile GPU step", idx, &failures);
         if pending_consumed_after_attempt(&failures) {
             log::info!(target: "hw.gpu", "deferred profile GPU step applied gpu={idx} failures={}", failures.len());
+            publish_deferred_gpu_report(&failures);
         } else {
             log::info!(target: "hw.gpu", "deferred profile GPU step gpu={idx} kept pending: runtime write gate closed mid-apply");
         }
     }
+}
+
+/// Queue the completed deferred attempt's outcome for the GUI. Silent for a
+/// clean attempt; identical repeated outcomes are published once.
+fn publish_deferred_gpu_report(failures: &[GpuOpFailure]) {
+    if failures.is_empty() {
+        return;
+    }
+    let (warnings, fatal) = split_gpu_failures(failures);
+    let (text, is_failure) = if fatal.is_empty() {
+        (format!("Deferred GPU step applied with warnings: {}", warnings.join("; ")), false)
+    } else if warnings.is_empty() {
+        (format!("Deferred GPU step failed: {}", fatal.join("; ")), true)
+    } else {
+        (format!("Deferred GPU step failed: {} (unsupported: {})", fatal.join("; "), warnings.join("; ")), true)
+    };
+    let mut state = lock_or_recover(&DEFERRED_GPU_REPORT, "DEFERRED_GPU_REPORT");
+    if state.last_published.as_deref() == Some(text.as_str()) {
+        return;
+    }
+    state.last_published = Some(text.clone());
+    state.pending = Some(DeferredGpuReport { text, is_failure });
+}
+
+/// Take the pending deferred-GPU report, if any (take-once delivery).
+pub fn take_deferred_gpu_report() -> Option<DeferredGpuReport> {
+    lock_or_recover(&DEFERRED_GPU_REPORT, "DEFERRED_GPU_REPORT").pending.take()
 }
 
 pub fn apply_profile(profile: &Profile) -> Result<Vec<String>> {
@@ -2369,5 +2411,41 @@ mod pending_gate_race_tests {
         assert!(result.is_none(), "a refused pre-check must not consume the slot");
         assert!(!attempted, "a refused pre-check must not run operations");
         assert!(slot.lock().unwrap().is_some());
+    }
+}
+
+#[cfg(test)]
+mod deferred_report_tests {
+    use super::{publish_deferred_gpu_report, take_deferred_gpu_report, GpuOpFailure, GpuOpFailureKind};
+
+    fn failure(op: &'static str, kind: GpuOpFailureKind) -> GpuOpFailure {
+        GpuOpFailure { op, message: format!("{op} refused"), kind }
+    }
+
+    #[test]
+    fn deferred_reports_are_taken_once_and_identical_outcomes_publish_once() {
+        // Single test owns this process-global; drain anything a sibling left.
+        let _ = take_deferred_gpu_report();
+
+        let unsupported = vec![failure("set_gpu_power_limit", GpuOpFailureKind::Unsupported)];
+        publish_deferred_gpu_report(&unsupported);
+        let report = take_deferred_gpu_report().expect("a warning outcome must be queued");
+        assert!(!report.is_failure);
+        assert!(report.text.contains("set_gpu_power_limit"));
+        assert!(take_deferred_gpu_report().is_none(), "delivery is take-once");
+
+        // Identical outcome again: deduplicated, nothing queued.
+        publish_deferred_gpu_report(&unsupported);
+        assert!(take_deferred_gpu_report().is_none());
+
+        // A different (failing) outcome publishes and is flagged.
+        publish_deferred_gpu_report(&[failure("set_gpu_core_offset", GpuOpFailureKind::Failed)]);
+        let report = take_deferred_gpu_report().expect("a failure outcome must be queued");
+        assert!(report.is_failure);
+        assert!(report.text.contains("set_gpu_core_offset"));
+
+        // A clean attempt queues nothing.
+        publish_deferred_gpu_report(&[]);
+        assert!(take_deferred_gpu_report().is_none());
     }
 }
