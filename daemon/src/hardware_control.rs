@@ -655,15 +655,31 @@ fn pending_consumed_after_attempt(failures: &[GpuOpFailure]) -> bool {
     !failures.iter().any(|f| f.kind == GpuOpFailureKind::GateClosed)
 }
 
+/// One attempt at a profile's GPU step — shared by the immediate apply and the
+/// deferred retry. Pre-checks the runtime write gate, runs the operations and
+/// decides whether the attempt is final (`consumed`) or must be retried
+/// because the gate closed mid-apply. `None` means the pre-check refused and
+/// nothing was attempted. Gate and operations are parameters so tests can
+/// drive the exact race without hardware.
+fn attempt_gpu_step(
+    idx: u32,
+    settings: &GpuSettings,
+    writable: impl FnOnce(u32) -> bool,
+    apply: impl FnOnce(u32, &GpuSettings) -> Vec<GpuOpFailure>,
+) -> Option<(Vec<GpuOpFailure>, bool)> {
+    if !writable(idx) {
+        return None;
+    }
+    let failures = apply(idx, settings);
+    let consumed = pending_consumed_after_attempt(&failures);
+    Some((failures, consumed))
+}
+
 /// Apply the newest deferred profile GPU step once the adapter is writable.
 pub fn apply_pending_gpu() {
     let applied = consume_pending_locked(&PENDING_GPU_SETTINGS, "PENDING_GPU_SETTINGS", |(idx, settings)| {
-        if !crate::hardware_detection::gpu_write_allowed(*idx) {
-            return None;
-        }
-        let failures = apply_gpu_static(*idx, settings);
-        let consumed = pending_consumed_after_attempt(&failures);
-        Some(((*idx, failures), consumed))
+        attempt_gpu_step(*idx, settings, crate::hardware_detection::gpu_write_allowed, apply_gpu_static)
+            .map(|(failures, consumed)| ((*idx, failures), consumed))
     });
     if let Some((idx, failures)) = applied {
         warn_gpu_failures("deferred profile GPU step", idx, &failures);
@@ -829,16 +845,20 @@ fn apply_profile_inner(profile: &Profile) -> Result<(bool, Vec<String>)> {
 
     let (gpu_deferred, gpu_failures) = {
         let mut pending = lock_or_recover(&PENDING_GPU_SETTINGS, "PENDING_GPU_SETTINGS");
-        let gpu_writable = crate::hardware_detection::gpu_write_allowed(nvidia_gpu_idx);
-        if gpu_writable {
-            let failures = apply_gpu_static(nvidia_gpu_idx, &profile.gpu_settings);
-            *pending = pending_after_profile_apply(true, (nvidia_gpu_idx, profile.gpu_settings.clone()));
-            warn_gpu_failures("profile GPU apply", nvidia_gpu_idx, &failures);
-            (false, failures)
-        } else {
-            log::debug!(target: "hw.gpu", "profile GPU writes deferred gpu={}", nvidia_gpu_idx);
-            *pending = pending_after_profile_apply(false, (nvidia_gpu_idx, profile.gpu_settings.clone()));
-            (true, Vec::new())
+        match attempt_gpu_step(nvidia_gpu_idx, &profile.gpu_settings, crate::hardware_detection::gpu_write_allowed, apply_gpu_static) {
+            Some((failures, consumed)) => {
+                // Same consumption rule as the deferred retry: a gate refusal
+                // that lands mid-apply keeps this profile's step pending so the
+                // refused operations are retried once the adapter is writable.
+                *pending = pending_after_profile_apply(consumed, (nvidia_gpu_idx, profile.gpu_settings.clone()));
+                warn_gpu_failures("profile GPU apply", nvidia_gpu_idx, &failures);
+                (!consumed, failures)
+            }
+            None => {
+                log::debug!(target: "hw.gpu", "profile GPU writes deferred gpu={}", nvidia_gpu_idx);
+                *pending = pending_after_profile_apply(false, (nvidia_gpu_idx, profile.gpu_settings.clone()));
+                (true, Vec::new())
+            }
         }
     };
 
@@ -863,12 +883,13 @@ fn apply_profile_inner(profile: &Profile) -> Result<(bool, Vec<String>)> {
     Ok((gpu_deferred, warnings))
 }
 
-/// Pending GPU state after a profile apply. Pure so the supersede rule is testable.
-/// Writable adapter: the step is applied now, so nothing stays pending (this also
-/// drops a step deferred by an earlier profile). Blocked adapter: the newest profile's
-/// step replaces whatever was pending.
-pub fn pending_after_profile_apply(writable: bool, deferred: (u32, GpuSettings)) -> Option<(u32, GpuSettings)> {
-    if writable { None } else { Some(deferred) }
+/// Pending GPU state after a profile apply attempt. Pure so the rule is testable.
+/// A consumed attempt (every operation reached a final outcome) leaves nothing
+/// pending — this also drops a step deferred by an earlier profile. An attempt
+/// that must be retried (the write gate closed mid-apply, or the pre-check
+/// refused) stores the newest profile's step.
+pub fn pending_after_profile_apply(consumed: bool, deferred: (u32, GpuSettings)) -> Option<(u32, GpuSettings)> {
+    if consumed { None } else { Some(deferred) }
 }
 
 /// Split classified GPU failures into non-fatal warnings (operations the
@@ -2217,7 +2238,7 @@ mod pending_supersede_tests {
 
 #[cfg(test)]
 mod pending_gate_race_tests {
-    use super::{consume_pending_locked, pending_consumed_after_attempt, GpuOpFailure, GpuOpFailureKind};
+    use super::{attempt_gpu_step, consume_pending_locked, pending_after_profile_apply, pending_consumed_after_attempt, GpuOpFailure, GpuOpFailureKind};
     use lapsphere_common::types::GpuSettings;
     use std::sync::Mutex;
 
@@ -2274,5 +2295,79 @@ mod pending_gate_race_tests {
             failure("set_gpu_core_offset", GpuOpFailureKind::GateClosed),
             failure("set_gpu_power_limit", GpuOpFailureKind::Unsupported),
         ]));
+    }
+
+    #[test]
+    fn immediate_apply_keeps_the_newest_settings_when_the_gate_closes_mid_apply() {
+        // The immediate apply's production decision path: attempt_gpu_step
+        // (shared with the deferred retry) + pending_after_profile_apply,
+        // driven with injected gate and operation functions.
+        let settings = settings();
+        let slot = Mutex::new(None::<(u32, GpuSettings)>);
+
+        // The pre-check passes; an individual operation is then refused with
+        // the typed GpuGateClosed failure.
+        let (failures, consumed) = attempt_gpu_step(0, &settings, |_| true, |_, _| {
+            vec![failure("set_gpu_core_offset", GpuOpFailureKind::GateClosed)]
+        })
+        .expect("the pre-check passed");
+        assert!(!consumed);
+        assert_eq!(failures.len(), 1);
+
+        // The immediate-apply decision stores the step for retry instead of
+        // discarding it.
+        *slot.lock().unwrap() = pending_after_profile_apply(consumed, (0u32, settings.clone()));
+        assert!(slot.lock().unwrap().is_some(), "a mid-apply gate refusal must keep the settings pending");
+
+        // The next writable attempt applies everything and consumes the slot.
+        let (failures, consumed) = attempt_gpu_step(0, &settings, |_| true, |_, _| Vec::new())
+            .expect("the pre-check passed");
+        assert!(failures.is_empty());
+        assert!(consumed);
+        *slot.lock().unwrap() = pending_after_profile_apply(consumed, (0u32, settings));
+        assert!(slot.lock().unwrap().is_none(), "a final attempt must clear the slot");
+    }
+
+    #[test]
+    fn deferred_retry_keeps_then_consumes_through_the_shared_attempt_path() {
+        // The deferred retry's production path: consume_pending_locked +
+        // attempt_gpu_step, with the same injected gate/operation functions.
+        let slot = Mutex::new(Some((0u32, settings())));
+
+        // Tick 1: pre-check passes, an operation is refused mid-apply — the
+        // slot stays pending.
+        let first = consume_pending_locked(&slot, "test", |(idx, s)| {
+            attempt_gpu_step(*idx, s, |_| true, |_, _| {
+                vec![failure("set_gpu_core_offset", GpuOpFailureKind::GateClosed)]
+            })
+            .map(|(failures, consumed)| ((*idx, failures), consumed))
+        });
+        assert!(first.is_some());
+        assert!(slot.lock().unwrap().is_some(), "a mid-apply gate refusal must keep the settings pending");
+
+        // Tick 2: the adapter is writable and every operation succeeds — the
+        // slot is consumed.
+        let second = consume_pending_locked(&slot, "test", |(idx, s)| {
+            attempt_gpu_step(*idx, s, |_| true, |_, _| Vec::new())
+                .map(|(failures, consumed)| ((*idx, failures), consumed))
+        });
+        assert!(second.is_some());
+        assert!(slot.lock().unwrap().is_none(), "a clean writable tick must consume the settings");
+    }
+
+    #[test]
+    fn gate_pre_check_refusal_keeps_settings_without_attempting() {
+        let slot = Mutex::new(Some((0u32, settings())));
+        let mut attempted = false;
+        let result = consume_pending_locked(&slot, "test", |(idx, s)| {
+            attempt_gpu_step(*idx, s, |_| false, |_, _| {
+                attempted = true;
+                Vec::new()
+            })
+            .map(|(failures, consumed)| ((*idx, failures), consumed))
+        });
+        assert!(result.is_none(), "a refused pre-check must not consume the slot");
+        assert!(!attempted, "a refused pre-check must not run operations");
+        assert!(slot.lock().unwrap().is_some());
     }
 }
