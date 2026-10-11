@@ -1003,6 +1003,7 @@ fn should_run_gpu_dynamic(action: IdleOcAction, released: bool) -> bool {
     action == IdleOcAction::None && !released
 }
 
+#[cfg(test)]
 fn idle_oc_action(flag: bool, idle_for: Option<Duration>, has_oc: bool, writable: bool, released: bool, load_high: bool) -> IdleOcAction {
     idle_oc_action_with_retry(flag, idle_for, has_oc, writable, released, false, load_high, true)
 }

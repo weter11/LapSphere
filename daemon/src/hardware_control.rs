@@ -12,11 +12,6 @@ static CPU_LIMITS_MODIFIED: AtomicBool = AtomicBool::new(false);
 /// Deferred GPU settings and their consumption state share one lock.
 pub static PENDING_GPU_SETTINGS: Lazy<Mutex<Option<(u32, GpuSettings)>>> = Lazy::new(|| Mutex::new(None));
 pub static GPU_APPLY_GEN: AtomicU64 = AtomicU64::new(0);
-
-/// Whether a deferred profile GPU step should be applied on this tick.
-pub fn pending_gpu_due(pending: bool, writable: bool, has_settings: bool) -> bool {
-    pending && writable && has_settings
-}
 static LAST_APPLIED_PROFILE: Lazy<Mutex<Option<Profile>>> = Lazy::new(|| Mutex::new(None));
 
 /// Lock a shared daemon mutex, recovering from poisoning instead of panicking.
@@ -1955,26 +1950,8 @@ mod tests {
 }
 
 #[cfg(test)]
-mod pending_gpu_tests {
-    use super::pending_gpu_due;
-
-    #[test]
-    fn pending_gpu_due_truth_table() {
-        for &pending in &[false, true] {
-            for &writable in &[false, true] {
-                for &has in &[false, true] {
-                    let expected = pending && writable && has;
-                    assert_eq!(pending_gpu_due(pending, writable, has), expected,
-                        "pending={pending} writable={writable} has={has}");
-                }
-            }
-        }
-    }
-}
-
-#[cfg(test)]
 mod pending_supersede_tests {
-    use super::{consume_pending_locked, pending_after_profile_apply, pending_gpu_due};
+    use super::{consume_pending_locked, pending_after_profile_apply};
     use lapsphere_common::types::GpuSettings;
     use std::sync::{mpsc, Arc, Mutex};
     use std::time::Duration;
@@ -2043,6 +2020,5 @@ mod pending_supersede_tests {
         assert_eq!(after_a, Some(a));
         let after_b = pending_after_profile_apply(true, b);
         assert_eq!(after_b, None);
-        assert!(!pending_gpu_due(after_b.is_some(), true, true));
     }
 }
