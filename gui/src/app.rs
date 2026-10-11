@@ -1706,6 +1706,9 @@ fn save_profiles_to_disk(config: &AppConfig) -> anyhow::Result<()> {
     std::fs::create_dir_all(&config_dir)?;
     let profiles_path = format!("{}/profiles.json", config_dir);
     let json = serde_json::to_string_pretty(&ProfilesConfig::from(config))?;
+    if Path::new(&profiles_path).exists() {
+        std::fs::copy(&profiles_path, format!("{profiles_path}.bak"))?;
+    }
     std::fs::write(profiles_path, json)?;
     Ok(())
 }
