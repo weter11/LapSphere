@@ -135,6 +135,7 @@ pub struct AppState {
     pub current_page: Page,
     pub settings_tab: SettingsTab,
     pub status_message: Option<StatusMessage>,
+    pub startup_profile_status: StartupProfileStatus,
     pub restart_confirmation_pending: bool,
     pub pending_prime_profile: Option<String>,
     pub selected_fan_curve: usize,
@@ -149,6 +150,14 @@ pub struct AppState {
     pub coordinator_handle: Option<CoordinatorHandle>,
 
     pub keyboard_brush_color: [u8; 3],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartupProfileStatus {
+    WaitingForCpuLimits,
+    Applying,
+    Failed(String),
+    Complete,
 }
 
 #[derive(Debug, Clone)]
@@ -198,6 +207,7 @@ impl AppState {
             current_page: Page::Statistics,
             settings_tab: SettingsTab::Main,
             status_message: None,
+            startup_profile_status: StartupProfileStatus::WaitingForCpuLimits,
             restart_confirmation_pending: false,
             pending_prime_profile: None,
             editing_profile_name: None,
@@ -372,6 +382,18 @@ fn send_polled_update(
         }
         Err(mpsc::error::TrySendError::Closed(_)) => {}
     }
+}
+
+fn claim_startup_apply(pending: &mut bool, has_cpu_bounds: bool) -> bool {
+    if !*pending || !has_cpu_bounds {
+        return false;
+    }
+    *pending = false;
+    true
+}
+
+fn startup_limits_warning_due(elapsed: Duration) -> bool {
+    elapsed >= Duration::from_secs(5)
 }
 
 pub struct LapSphereApp {
@@ -802,12 +824,16 @@ impl LapSphereApp {
                                 log::warn!("failed to save normalized profiles: {}", e);
                             }
                         }
-                        if self.startup_apply_pending {
-                            self.startup_apply_pending = false;
+                        if claim_startup_apply(&mut self.startup_apply_pending, true) {
                             if let (Some(profile), Some(client)) =
                                 (self.state.current_profile().cloned(), &self.dbus_client)
                             {
                                 self.startup_apply_reply = Some(client.apply_profile(profile));
+                                self.state.startup_profile_status = StartupProfileStatus::Applying;
+                            } else {
+                                let error = "Could not apply startup profile: daemon connection is unavailable".to_string();
+                                log::error!("{error}");
+                                self.state.startup_profile_status = StartupProfileStatus::Failed(error);
                             }
                         }
                     }
@@ -926,20 +952,29 @@ impl LapSphereApp {
             }
         }
         
-        if self.startup_apply_pending
-            && !self.startup_timeout_warned
-            && self.startup_started.elapsed() >= std::time::Duration::from_secs(10)
-        {
-            self.startup_timeout_warned = true;
-            log::warn!("startup profile apply is waiting for CPU limits from the daemon; profile not applied");
+        if self.startup_apply_pending {
+            let elapsed = self.startup_started.elapsed();
+            if startup_limits_warning_due(elapsed) && !self.startup_timeout_warned {
+                self.startup_timeout_warned = true;
+                log::warn!("startup profile apply is still waiting for CPU frequency limits; profile not applied");
+            }
+            if elapsed < Duration::from_secs(5) {
+                self.state.startup_profile_status = StartupProfileStatus::WaitingForCpuLimits;
+            }
         }
         if let Some(mut rx) = self.startup_apply_reply.take() {
             match rx.try_recv() {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => log::warn!("startup apply of current profile failed: {}", e),
+                Ok(Ok(())) => self.state.startup_profile_status = StartupProfileStatus::Complete,
+                Ok(Err(e)) => {
+                    let error = format!("Startup profile application failed: {e}");
+                    log::error!("{error}");
+                    self.state.startup_profile_status = StartupProfileStatus::Failed(error);
+                }
                 Err(oneshot::error::TryRecvError::Empty) => self.startup_apply_reply = Some(rx),
                 Err(oneshot::error::TryRecvError::Closed) => {
-                    log::warn!("startup apply reply channel closed");
+                    let error = "Startup profile application failed: daemon reply channel closed".to_string();
+                    log::error!("{error}");
+                    self.state.startup_profile_status = StartupProfileStatus::Failed(error);
                 }
             }
         }
@@ -962,6 +997,23 @@ impl LapSphereApp {
     }
     
     fn draw_top_bar(&mut self, ui: &mut egui::Ui) {
+        let startup_banner = match &self.state.startup_profile_status {
+            StartupProfileStatus::WaitingForCpuLimits if self.startup_started.elapsed() < Duration::from_secs(5) =>
+                Some(("Detecting CPU frequency limits; startup profile has not been applied yet".to_string(), egui::Color32::from_rgb(230, 190, 70))),
+            StartupProfileStatus::WaitingForCpuLimits =>
+                Some(("Warning: still waiting for CPU frequency limits; startup profile has not been applied".to_string(), egui::Color32::from_rgb(240, 120, 70))),
+            StartupProfileStatus::Applying => Some(("Applying startup profile…".to_string(), egui::Color32::from_rgb(100, 170, 240))),
+            StartupProfileStatus::Failed(error) => Some((error.clone(), egui::Color32::from_rgb(240, 90, 90))),
+            StartupProfileStatus::Complete => None,
+        };
+        if let Some((message, color)) = startup_banner {
+            egui::Panel::top("startup_profile_status").show_inside(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add_space(12.0);
+                    ui.colored_label(color, message);
+                });
+            });
+        }
         let mut dismiss_update = false;
         if let Some(version) = &self.state.new_version_available {
             let version = version.clone();
@@ -1713,6 +1765,39 @@ fn save_profiles_to_disk(config: &AppConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
+
+#[cfg(test)]
+mod startup_profile_feedback_tests {
+    use super::{claim_startup_apply, startup_limits_warning_due, StartupProfileStatus};
+    use std::time::Duration;
+
+    #[test]
+    fn limits_arriving_before_warning_claim_startup_apply_once() {
+        let mut pending = true;
+        assert!(!startup_limits_warning_due(Duration::from_secs(4)));
+        assert!(claim_startup_apply(&mut pending, true));
+        assert!(!pending);
+        assert!(!claim_startup_apply(&mut pending, true));
+    }
+
+    #[test]
+    fn delayed_and_never_arriving_limits_keep_profile_pending_and_warn() {
+        let mut pending = true;
+        assert!(!claim_startup_apply(&mut pending, false));
+        assert!(pending);
+        assert!(startup_limits_warning_due(Duration::from_secs(5)));
+        assert!(startup_limits_warning_due(Duration::from_secs(3600)));
+        assert!(!claim_startup_apply(&mut pending, false));
+        assert!(pending);
+    }
+
+    #[test]
+    fn startup_apply_failure_has_persistent_user_visible_state() {
+        let error = "Startup profile application failed: daemon rejected request";
+        let status = StartupProfileStatus::Failed(error.to_string());
+        assert!(matches!(status, StartupProfileStatus::Failed(message) if message.contains("failed")));
+    }
+}
 
 #[cfg(test)]
 mod tray_migration_e2e_tests {
