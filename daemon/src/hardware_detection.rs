@@ -2830,7 +2830,7 @@ fn get_nvidia_gpu_info(include_utilization: bool) -> Result<Vec<GpuInfo>> {
     // -----------------------------------------------------------------------
     // Tier decision — the single gate for invasive queries on this tick.
     //
-    /// The only input is the sysfs runtime_status word above
+    // The only input is the sysfs runtime_status word above, so a suspended
     // adapter is never touched. Rules (see gpu_poll_tier):
     //   P0..P2  -> live NVML + NVAPI query every tick, no cached values
     //   work at any p-state -> live too (light 3D work sits on P3/P5)
