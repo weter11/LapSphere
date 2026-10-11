@@ -81,6 +81,9 @@ pub static LAST_APPLIED_OFFSET: once_cell::sync::Lazy<Arc<Mutex<Option<i32>>>> =
 struct IdleOcState {
     idle_since: Option<Instant>,
     released: bool,
+    release_pending: bool,
+    last_release_attempt: Option<Instant>,
+    release_failure_logged: bool,
     seen_gen: u64,
 }
 
@@ -88,7 +91,10 @@ static IDLE_OC_STATE: once_cell::sync::Lazy<Mutex<IdleOcState>> =
     once_cell::sync::Lazy::new(|| Mutex::new(IdleOcState::default()));
 static IDLE_OC_LOAD_ERROR_LOGGED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+static DYNAMIC_OFFSET_ERROR_LOGGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 const IDLE_RELEASE_AFTER: Duration = Duration::from_secs(30);
+const IDLE_RELEASE_RETRY_AFTER: Duration = Duration::from_secs(5);
 
 pub static MANUAL_GPU_OFFSETS: once_cell::sync::Lazy<Arc<Mutex<HashMap<u32, (f32, f32)>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
@@ -434,10 +440,25 @@ async fn main() -> Result<()> {
         idle.idle_since = next_idle_since(idle.idle_since, now, load_now, flag, has_oc, writable_idx.is_some(), idle.released);
         let idle_for = idle.idle_since.map(|since| now.saturating_duration_since(since));
         let released = idle.released;
-        let action = idle_oc_action(flag, idle_for, has_oc, writable_idx.is_some(), released, load_high);
+        let retry_ready = idle_release_retry_ready(idle.last_release_attempt, now);
+        let action = idle_oc_action_with_retry(
+            flag,
+            idle_for,
+            has_oc,
+            writable_idx.is_some(),
+            released,
+            idle.release_pending,
+            load_high,
+            retry_ready,
+        );
+        if action == IdleOcAction::Release {
+            idle.release_pending = true;
+            idle.last_release_attempt = Some(now);
+        }
+        let release_in_progress = idle.release_pending || idle_for.map_or(false, |duration| duration >= IDLE_RELEASE_AFTER);
         drop(idle);
 
-        let run_dynamic = should_run_gpu_dynamic(action, released);
+        let run_dynamic = should_run_gpu_dynamic(action, released) && !release_in_progress;
         match action {
             IdleOcAction::Release => {
                 if let Some(gpu_idx) = writable_idx {
@@ -449,21 +470,25 @@ async fn main() -> Result<()> {
                     ] {
                         if let Err(error) = result { failures.push(format!("{operation}: {error}")); }
                     }
-                    if !failures.is_empty() {
-                        log::warn!(target: "daemon", "idle-oc: release GPU writes failed: {}", failures.join("; "));
-                    }
                     let mut idle = lock_or_recover(&IDLE_OC_STATE, "IDLE_OC_STATE");
                     let mut last = lock_or_recover(&LAST_APPLIED_OFFSET, "LAST_APPLIED_OFFSET");
-                    complete_idle_oc_release(&mut idle, &mut last);
-                    log::info!(target: "daemon", "idle-oc: released GPU overclock");
+                    let confirmed = finish_idle_oc_release(&mut idle, &mut last, failures.is_empty());
+                    if confirmed {
+                        log::info!(target: "daemon", "idle-oc: released GPU overclock");
+                    } else if !idle.release_failure_logged {
+                        log::warn!(target: "daemon", "idle-oc: GPU release incomplete; retrying failed or idempotent reset operations: {}", failures.join("; "));
+                        idle.release_failure_logged = true;
+                    }
                 }
             }
             IdleOcAction::Restore => {
                 if let (Some(gpu_idx), Some(settings)) = (idx, settings.as_ref()) {
-                    *lock_or_recover(&hardware_control::PENDING_GPU_SETTINGS, "PENDING_GPU_SETTINGS") = Some((gpu_idx, settings.clone()));
-                    hardware_control::GPU_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
+                    hardware_control::replace_pending_gpu_settings(gpu_idx, settings.clone());
                     let mut idle = lock_or_recover(&IDLE_OC_STATE, "IDLE_OC_STATE");
                     idle.released = false;
+                    idle.release_pending = false;
+                    idle.last_release_attempt = None;
+                    idle.release_failure_logged = false;
                     idle.idle_since = None;
                     log::info!(target: "daemon", "idle-oc: restored GPU overclock (pending mechanism)");
                 }
@@ -683,6 +708,9 @@ fn reset_idle_oc_state(state: &mut IdleOcState, generation: u64, settings_presen
     if state.seen_gen != generation || !settings_present || !has_oc {
         state.idle_since = None;
         state.released = false;
+        state.release_pending = false;
+        state.last_release_attempt = None;
+        state.release_failure_logged = false;
         state.seen_gen = generation;
     }
 }
@@ -691,12 +719,43 @@ fn complete_idle_oc_release(state: &mut IdleOcState, last_offset: &mut Option<i3
     *last_offset = Some(0);
     state.idle_since = None;
     state.released = true;
+    state.release_pending = false;
+    state.last_release_attempt = None;
+    state.release_failure_logged = false;
+}
+
+fn finish_idle_oc_release(state: &mut IdleOcState, last_offset: &mut Option<i32>, all_succeeded: bool) -> bool {
+    if all_succeeded {
+        complete_idle_oc_release(state, last_offset);
+        true
+    } else {
+        state.released = false;
+        state.release_pending = true;
+        false
+    }
+}
+
+fn idle_release_retry_ready(last_attempt: Option<Instant>, now: Instant) -> bool {
+    last_attempt.map_or(true, |last| now.saturating_duration_since(last) >= IDLE_RELEASE_RETRY_AFTER)
 }
 
 /// Write the dynamic core offset only when the target changed and the adapter is
 /// writable. Pure so the decision is testable without NVML.
 fn should_write_dynamic_offset(last: Option<i32>, target: i32, writable: bool) -> bool {
     last != Some(target) && writable
+}
+
+fn apply_offset_target(
+    last_applied: &mut Option<i32>,
+    target: i32,
+    write: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<bool> {
+    if *last_applied == Some(target) {
+        return Ok(false);
+    }
+    write()?;
+    *last_applied = Some(target);
+    Ok(true)
 }
 
 /// Clear the applied dynamic offset only when it is not already 0 and the
@@ -833,12 +892,17 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings, i
         if gpu.performance_state.as_deref() != Some("P0") {
             let mut last = lock_or_recover(&LAST_APPLIED_OFFSET, "LAST_APPLIED_OFFSET");
             if should_clear_offset(*last, gpu_write_target(Some(idx), hardware_detection::gpu_write_allowed(idx)).is_some()) {
-                // Recorded before the write: a failed attempt is not retried on
-                // later ticks until the recorded state changes.
-                *last = Some(0);
-                match crate::hardware_control::set_gpu_core_offset(idx, 0.0) {
-                    Ok(()) => log::debug!("Cleared dynamic GPU offset (P-state not 0)"),
-                    Err(e) => log::warn!("clear dynamic GPU offset to 0 MHz failed: {e}"),
+                match apply_offset_target(&mut last, 0, || crate::hardware_control::set_gpu_core_offset(idx, 0.0)) {
+                    Ok(true) => {
+                        DYNAMIC_OFFSET_ERROR_LOGGED.store(false, std::sync::atomic::Ordering::SeqCst);
+                        log::debug!("Cleared dynamic GPU offset (P-state not 0)");
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        if !DYNAMIC_OFFSET_ERROR_LOGGED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                            log::warn!("clear dynamic GPU offset to 0 MHz failed and will retry: {e}");
+                        }
+                    }
                 }
             }
             drop(last);
@@ -865,22 +929,26 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings, i
 
         let final_offset_i32 = final_offset as i32;
 
-        // ONLY APPLY IF CHANGED (fix stuttering)
         {
             let mut last = lock_or_recover(&LAST_APPLIED_OFFSET, "LAST_APPLIED_OFFSET");
-            if should_write_dynamic_offset(*last, final_offset_i32, gpu_write_target(Some(idx), hardware_detection::gpu_write_allowed(idx)).is_some()) {
-                // Recorded before the write: a failed attempt is not retried every
-                // tick; it is retried only when the target value changes.
-                *last = Some(final_offset_i32);
-                match crate::hardware_control::set_gpu_core_offset(idx, final_offset_i32 as f32) {
-                    Ok(()) => {
+            if should_write_dynamic_offset(*last, final_offset_i32, true) {
+                match apply_offset_target(&mut last, final_offset_i32, || {
+                    crate::hardware_control::set_gpu_core_offset(idx, final_offset_i32 as f32)
+                }) {
+                    Ok(true) => {
+                        DYNAMIC_OFFSET_ERROR_LOGGED.store(false, std::sync::atomic::Ordering::SeqCst);
                         if final_offset_i32 == 0 {
-                            log::debug!("Cleared dynamic GPU offset (P-state not 0)");
+                            log::debug!("Cleared dynamic GPU offset");
                         } else {
                             log::debug!("Applied new dynamic GPU offset: {} MHz", final_offset_i32);
                         }
                     }
-                    Err(e) => log::warn!("apply dynamic GPU offset {} MHz failed: {e}", final_offset_i32),
+                    Ok(false) => {}
+                    Err(e) => {
+                        if !DYNAMIC_OFFSET_ERROR_LOGGED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                            log::warn!("apply dynamic GPU offset {} MHz failed and will retry: {e}", final_offset_i32);
+                        }
+                    }
                 }
             }
         }
@@ -936,9 +1004,24 @@ fn should_run_gpu_dynamic(action: IdleOcAction, released: bool) -> bool {
 }
 
 fn idle_oc_action(flag: bool, idle_for: Option<Duration>, has_oc: bool, writable: bool, released: bool, load_high: bool) -> IdleOcAction {
+    idle_oc_action_with_retry(flag, idle_for, has_oc, writable, released, false, load_high, true)
+}
+
+fn idle_oc_action_with_retry(
+    flag: bool,
+    idle_for: Option<Duration>,
+    has_oc: bool,
+    writable: bool,
+    released: bool,
+    release_pending: bool,
+    load_high: bool,
+    retry_ready: bool,
+) -> IdleOcAction {
     if !flag || !has_oc { return IdleOcAction::None; }
-    if released && load_high { return IdleOcAction::Restore; }
-    if !released && writable && idle_for.map_or(false, |duration| duration >= IDLE_RELEASE_AFTER) { return IdleOcAction::Release; }
+    if (released || release_pending) && load_high { return IdleOcAction::Restore; }
+    if !released && writable && retry_ready && idle_for.map_or(false, |duration| duration >= IDLE_RELEASE_AFTER) {
+        return IdleOcAction::Release;
+    }
     IdleOcAction::None
 }
 
@@ -1019,7 +1102,7 @@ mod tests {
     #[test]
     fn release_restore_release_sequence_is_supported() {
         let now = Instant::now();
-        let mut state = IdleOcState { idle_since: Some(now - Duration::from_secs(30)), released: false, seen_gen: 0 };
+        let mut state = IdleOcState { idle_since: Some(now - Duration::from_secs(30)), released: false, seen_gen: 0, ..Default::default() };
         assert_eq!(idle_oc_action(true, state.idle_since.map(|since| now.duration_since(since)), true, true, state.released, false), IdleOcAction::Release);
         let mut last = None;
         complete_idle_oc_release(&mut state, &mut last);
@@ -1031,7 +1114,7 @@ mod tests {
 
     #[test]
     fn profile_generation_change_resets_idle_state() {
-        let mut state = IdleOcState { idle_since: Some(Instant::now()), released: true, seen_gen: 4 };
+        let mut state = IdleOcState { idle_since: Some(Instant::now()), released: true, seen_gen: 4, ..Default::default() };
         reset_idle_oc_state(&mut state, 5, true, true);
         assert_eq!(state.idle_since, None);
         assert!(!state.released);
@@ -1046,8 +1129,56 @@ mod tests {
     }
 
     #[test]
+    fn partial_release_stays_incomplete_and_successful_retry_completes() {
+        let mut state = IdleOcState { idle_since: Some(Instant::now()), ..Default::default() };
+        let mut last = Some(125);
+        assert!(!finish_idle_oc_release(&mut state, &mut last, false));
+        assert!(!state.released);
+        assert!(state.release_pending);
+        assert_eq!(last, Some(125));
+
+        assert!(finish_idle_oc_release(&mut state, &mut last, true));
+        assert!(state.released);
+        assert!(!state.release_pending);
+        assert_eq!(last, Some(0));
+    }
+
+    #[test]
+    fn idle_release_retry_is_due_only_when_idle_and_rate_limit_elapsed() {
+        use super::IdleOcAction::{None, Release};
+        let idle = Some(Duration::from_secs(30));
+        assert_eq!(idle_oc_action_with_retry(true, idle, true, true, false, true, false, false), None);
+        assert_eq!(idle_oc_action_with_retry(true, idle, true, true, false, true, false, true), Release);
+        assert_eq!(idle_oc_action_with_retry(false, idle, true, true, false, true, false, true), None);
+    }
+
+    #[test]
+    fn failed_dynamic_offset_write_remains_retryable_until_success() {
+        let mut applied = None;
+        assert!(apply_offset_target(&mut applied, -40, || anyhow::bail!("transient failure")).is_err());
+        assert_eq!(applied, None);
+        let mut attempts = 0;
+        assert_eq!(
+            apply_offset_target(&mut applied, -40, || {
+                attempts += 1;
+                Ok(())
+            }).unwrap(),
+            true
+        );
+        assert_eq!(attempts, 1);
+        assert_eq!(applied, Some(-40));
+    }
+
+    #[test]
+    fn idle_release_retries_after_five_seconds_not_before() {
+        let attempt = Instant::now();
+        assert!(!idle_release_retry_ready(Some(attempt), attempt + Duration::from_secs(4)));
+        assert!(idle_release_retry_ready(Some(attempt), attempt + Duration::from_secs(5)));
+    }
+
+    #[test]
     fn release_records_zero_as_last_applied_offset() {
-        let mut state = IdleOcState { idle_since: Some(Instant::now()), released: false, seen_gen: 2 };
+        let mut state = IdleOcState { idle_since: Some(Instant::now()), released: false, seen_gen: 2, ..Default::default() };
         let mut last = Some(125);
         complete_idle_oc_release(&mut state, &mut last);
         assert_eq!(last, Some(0));
