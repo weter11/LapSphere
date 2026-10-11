@@ -463,8 +463,8 @@ fn draw_gpu_tuning(
         ui.radio_value(&mut state.config.profiles[profile_idx].gpu_settings.advanced_control, false, "Standard");
         ui.radio_value(&mut state.config.profiles[profile_idx].gpu_settings.advanced_control, true, "Advanced");
     });
-    ui.checkbox(&mut state.config.profiles[profile_idx].gpu_settings.release_oc_when_idle, "Снимать разгон при простое")
-        .on_hover_text("Иначе карта не уходит в глубокий простой: возможны шум и нагрев");
+    ui.checkbox(&mut state.config.profiles[profile_idx].gpu_settings.release_oc_when_idle, "Release overclock when idle")
+        .on_hover_text("Without this the GPU cannot reach its deep idle state: expect extra noise and heat");
     let tuning_mode_advanced = state.config.profiles[profile_idx].gpu_settings.advanced_control;
     ui.label(RichText::new("GPU settings will be applied when you click Save. Disabling manual control will reset to factory settings.").small().italics());
 
