@@ -1642,11 +1642,19 @@ pub fn get_system_info() -> Result<SystemInfo> {
 }
 
 pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
+    get_gpu_info_inner(true)
+}
+
+pub(crate) fn get_gpu_info_without_utilization() -> Result<Vec<GpuInfo>> {
+    get_gpu_info_inner(false)
+}
+
+fn get_gpu_info_inner(include_utilization: bool) -> Result<Vec<GpuInfo>> {
     let mut gpus = Vec::new();
     
     // First, try to get NVIDIA GPU info via NVML
     if Path::new("/sys/bus/pci/drivers/nvidia").exists() {
-        if let Ok(nvidia_gpus) = get_nvidia_gpu_info() {
+        if let Ok(nvidia_gpus) = get_nvidia_gpu_info(include_utilization) {
             for gpu in nvidia_gpus {
                 gpus.push(gpu);
             }
@@ -2802,7 +2810,7 @@ fn degraded_gpu_info(device: &SysfsNvidiaDevice) -> GpuInfo {
     }
 }
 
-fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
+fn get_nvidia_gpu_info(include_utilization: bool) -> Result<Vec<GpuInfo>> {
     let (manual_clocks_enabled, _advanced_control_enabled) = {
         let state = crate::hardware_control::lock_or_recover(&crate::GPU_DAEMON_STATE, "GPU_DAEMON_STATE");
         state.as_ref().map_or((false, false), |s| (s.manual_clocks, s.advanced_control))
@@ -3007,17 +3015,13 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             device.temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu)
                 .ok()
                 .map(|t| t as f32),
-            device.utilization_rates().ok().map(|u| u.gpu as f32),
+            if include_utilization { device.utilization_rates().ok().map(|u| u.gpu as f32) } else { None },
             device.power_usage().ok().map(|p| p as f32 / 1000.0),
         );
 
-        // Step 2: targeted utilization-rate storage for release-oc decision.
-        {
-            let load_ref: Option<f32> = load;
-            if load_ref.is_some() {
-                let mut guard = crate::hardware_control::lock_or_recover(&LAST_GPU_LOAD, "LAST_GPU_LOAD");
-                *guard = load_ref;
-            }
+        if include_utilization {
+            let mut guard = crate::hardware_control::lock_or_recover(&LAST_GPU_LOAD, "LAST_GPU_LOAD");
+            *guard = load;
         }
         // Only the first pass after a suspend may wait: a successful NVML read
         // right after a D3 wake can report stale nonsense (measured 753 W on a
@@ -4803,7 +4807,7 @@ mod hil_gpu_tier_tests {
         // Reset the tier state so the first call is a learning pass.
         crate::hardware_control::lock_or_recover(&GPU_POLL_STATE, "GPU_POLL_STATE").clear();
 
-        let first = get_nvidia_gpu_info().expect("first pass failed");
+        let first = get_nvidia_gpu_info(true).expect("first pass failed");
         let gpu = discrete(&first);
         println!(
             "[+] first pass: runtime_status={:?} perf={:?} freq={:?} load={:?} power={:?} hotspot={:?}",
@@ -4830,7 +4834,7 @@ mod hil_gpu_tier_tests {
         let mut saw_quiet_tick = false;
         let mut saw_live_tick = false;
         for tick in 0..40 {
-            let gpus = get_nvidia_gpu_info().unwrap();
+            let gpus = get_nvidia_gpu_info(true).unwrap();
             let g = discrete(&gpus);
             if g.performance_state.is_none() {
                 // Quiet or suspended tier: blanks only, never a value from a
@@ -4896,7 +4900,7 @@ mod hil_gpu_tier_tests {
 
         let mut p0_seen = false;
         for round in 0..6 {
-            let gpus = get_nvidia_gpu_info().expect("pass failed");
+            let gpus = get_nvidia_gpu_info(true).expect("pass failed");
             let g = discrete(&gpus);
             println!(
                 "[round {}] perf={:?} runtime={:?} freq={:?} load={:?} power={:?} hotspot={:?} memtemp={:?} volt={:?}",
@@ -4949,7 +4953,7 @@ mod hil_gpu_tier_tests {
             wait_for("suspended", 75),
             "precondition failed: dGPU did not reach \"suspended\""
         );
-        let gpus = get_nvidia_gpu_info().expect("suspended pass failed");
+        let gpus = get_nvidia_gpu_info(true).expect("suspended pass failed");
         let g = discrete(&gpus);
         assert_eq!(g.runtime_status.as_deref(), Some("suspended"));
         assert!(g.performance_state.is_none());

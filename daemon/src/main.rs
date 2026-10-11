@@ -9,6 +9,7 @@ mod polling_scheduler;
 
 use anyhow::Result;
 use tokio::signal;
+use std::time::{Duration, Instant};
 use std::sync::{Arc, Mutex};
 use std::collections::{VecDeque, HashMap};
 use lapsphere_common::types::*;
@@ -75,6 +76,19 @@ pub static CURRENT_GPU_OVERCLOCK_STATS: once_cell::sync::Lazy<Arc<Mutex<Option<G
 
 pub static LAST_APPLIED_OFFSET: once_cell::sync::Lazy<Arc<Mutex<Option<i32>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
+
+#[derive(Default)]
+struct IdleOcState {
+    idle_since: Option<Instant>,
+    released: bool,
+    seen_gen: u64,
+}
+
+static IDLE_OC_STATE: once_cell::sync::Lazy<Mutex<IdleOcState>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(IdleOcState::default()));
+static IDLE_OC_LOAD_ERROR_LOGGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+const IDLE_RELEASE_AFTER: Duration = Duration::from_secs(30);
 
 pub static MANUAL_GPU_OFFSETS: once_cell::sync::Lazy<Arc<Mutex<HashMap<u32, (f32, f32)>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
@@ -390,76 +404,83 @@ async fn main() -> Result<()> {
 
     // Add GPU overclocking polling job
     let gpu_poll_fn = || {
-        let settings = {
-            let state = lock_or_recover(&GPU_DAEMON_STATE, "GPU_DAEMON_STATE");
-            state.clone()
-        };
-
-        // Deferred profile GPU step: runs once the adapter is writable.
+        let settings = lock_or_recover(&GPU_DAEMON_STATE, "GPU_DAEMON_STATE").clone();
         hardware_control::apply_pending_gpu();
-
-        if let Some(ref gpu_settings) = settings {
-            apply_gpu_overclocking(gpu_settings)?;
-        } else {
-            {
-                let mut stats = lock_or_recover(&CURRENT_GPU_OVERCLOCK_STATS, "CURRENT_GPU_OVERCLOCK_STATS");
-                *stats = None;
-            }
-            {
-                let mut last = lock_or_recover(&LAST_APPLIED_OFFSET, "LAST_APPLIED_OFFSET");
-                *last = None;
-            }
-        }
-        // Step 5 tick-level: compute idle_for (read LAST_GPU_LOAD set by existing get_nvidia_gpu_info), apply idle_oc_action, handle Release/Restore without new NVML in Released.
-        let load_now: Option<f32> = crate::hardware_detection::LAST_GPU_LOAD.lock().unwrap().clone();
-        let load_high = load_now.map_or(false, |v| v > crate::hardware_detection::GPU_WORK_UTILIZATION_PERCENT);
+        let idx = cached_nvidia_gpu_index();
+        let writable_idx = idx.and_then(|i| gpu_write_target(Some(i), hardware_detection::gpu_write_allowed(i)));
+        let flag = settings.as_ref().map_or(false, |s| s.release_oc_when_idle);
         let has_oc = settings.as_ref().map_or(false, |s| s.manual_clocks || s.core_offset.unwrap_or(0.0) != 0.0 || s.memory_offset.unwrap_or(0.0) != 0.0 || s.min_gpu_clock.is_some() || s.max_gpu_clock.is_some());
-        let writable = crate::hardware_detection::gpu_write_allowed(0);
-        // idle_for needs tracking; for minimal insertion we approximate with a static counter incremented when load_low and reset otherwise.
-        // Real integration would use Instant-based timer; this provides the structural hook without a new detector.
-        static IDLE_OC_IDLE_SEC: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let idle_for = IDLE_OC_IDLE_SEC.load(std::sync::atomic::Ordering::Relaxed);
-        let load_low = load_now.map_or(true, |v| v <= crate::hardware_detection::GPU_WORK_UTILIZATION_PERCENT);
-        if load_low && !load_high && has_oc && !IDLE_OC_RELEASED.load(std::sync::atomic::Ordering::Relaxed) {
-            IDLE_OC_IDLE_SEC.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        } else {
-            IDLE_OC_IDLE_SEC.store(0, std::sync::atomic::Ordering::Relaxed);
+        let generation = hardware_control::GPU_APPLY_GEN.load(std::sync::atomic::Ordering::SeqCst);
+        let now = Instant::now();
+        let mut idle = lock_or_recover(&IDLE_OC_STATE, "IDLE_OC_STATE");
+        reset_idle_oc_state(&mut idle, generation, settings.is_some(), has_oc);
+        if flag && has_oc && writable_idx.is_some() && !idle.released {
+            let gpu_idx = writable_idx.expect("checked above");
+            match hardware_control::gpu_utilization_percent(gpu_idx) {
+                Ok(load) => {
+                    *lock_or_recover(&hardware_detection::LAST_GPU_LOAD, "LAST_GPU_LOAD") = Some(load);
+                    IDLE_OC_LOAD_ERROR_LOGGED.store(false, std::sync::atomic::Ordering::SeqCst);
+                }
+                Err(e) => {
+                    *lock_or_recover(&hardware_detection::LAST_GPU_LOAD, "LAST_GPU_LOAD") = None;
+                    if !IDLE_OC_LOAD_ERROR_LOGGED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        log::warn!(target: "daemon", "idle-oc: GPU utilization read failed: {e}");
+                    }
+                }
+            }
         }
-        // Apply decision (pure function). No new NVML calls here.
-        let action = idle_oc_action(true, idle_for, has_oc, writable, IDLE_OC_RELEASED.load(std::sync::atomic::Ordering::Relaxed), load_high);
+        let load_now = *lock_or_recover(&hardware_detection::LAST_GPU_LOAD, "LAST_GPU_LOAD");
+        let load_high = load_now.map_or(false, |v| v > hardware_detection::GPU_WORK_UTILIZATION_PERCENT);
+        idle.idle_since = next_idle_since(idle.idle_since, now, load_now, flag, has_oc, writable_idx.is_some(), idle.released);
+        let idle_for = idle.idle_since.map(|since| now.saturating_duration_since(since));
+        let released = idle.released;
+        let action = idle_oc_action(flag, idle_for, has_oc, writable_idx.is_some(), released, load_high);
+        drop(idle);
+
+        let run_dynamic = should_run_gpu_dynamic(action, released);
         match action {
             IdleOcAction::Release => {
-                if let Some(ref s) = settings {
-                    let idx = 0u32;
-                    if writable {
-                        let _ = crate::hardware_control::reset_gpu_clocks(idx);
-                        let _ = crate::hardware_control::set_gpu_core_offset(idx, 0.0);
-                        let _ = crate::hardware_control::set_gpu_memory_offset(idx, 0.0);
-                        log::info!(target: "daemon", "idle-oc: released GPU overclock (reset)");
-                    } else {
-                        log::warn!(target: "daemon", "idle-oc: release skipped: adapter not writable");
+                if let Some(gpu_idx) = writable_idx {
+                    let mut failures = Vec::new();
+                    for (operation, result) in [
+                        ("reset_gpu_clocks", hardware_control::reset_gpu_clocks(gpu_idx)),
+                        ("set_gpu_core_offset", hardware_control::set_gpu_core_offset(gpu_idx, 0.0)),
+                        ("set_gpu_memory_offset", hardware_control::set_gpu_memory_offset(gpu_idx, 0.0)),
+                    ] {
+                        if let Err(error) = result { failures.push(format!("{operation}: {error}")); }
                     }
-                    // After Release: do NOT set pending immediately; Restore will set pending when load_high on a future tick.
+                    if !failures.is_empty() {
+                        log::warn!(target: "daemon", "idle-oc: release GPU writes failed: {}", failures.join("; "));
+                    }
+                    let mut idle = lock_or_recover(&IDLE_OC_STATE, "IDLE_OC_STATE");
+                    let mut last = lock_or_recover(&LAST_APPLIED_OFFSET, "LAST_APPLIED_OFFSET");
+                    complete_idle_oc_release(&mut idle, &mut last);
+                    log::info!(target: "daemon", "idle-oc: released GPU overclock");
                 }
-                IDLE_OC_RELEASED.store(true, std::sync::atomic::Ordering::Relaxed);
             }
             IdleOcAction::Restore => {
-                if let Some(ref s) = settings {
-                    let mut pending = crate::hardware_control::lock_or_recover(&crate::hardware_control::PENDING_GPU_SETTINGS, "PENDING_GPU_SETTINGS");
-                    *pending = Some((0u32, s.clone()));
-                    crate::hardware_control::GPU_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
+                if let (Some(gpu_idx), Some(settings)) = (idx, settings.as_ref()) {
+                    *lock_or_recover(&hardware_control::PENDING_GPU_SETTINGS, "PENDING_GPU_SETTINGS") = Some((gpu_idx, settings.clone()));
+                    hardware_control::GPU_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
+                    let mut idle = lock_or_recover(&IDLE_OC_STATE, "IDLE_OC_STATE");
+                    idle.released = false;
+                    idle.idle_since = None;
                     log::info!(target: "daemon", "idle-oc: restored GPU overclock (pending mechanism)");
                 }
-                IDLE_OC_RELEASED.store(false, std::sync::atomic::Ordering::Relaxed);
             }
             IdleOcAction::None => {}
+        }
+        if run_dynamic {
+            if let (Some(settings), Some(gpu_idx)) = (settings.as_ref(), idx) {
+                apply_gpu_overclocking(settings, gpu_idx)?;
+            } else if settings.is_none() {
+                *lock_or_recover(&CURRENT_GPU_OVERCLOCK_STATS, "CURRENT_GPU_OVERCLOCK_STATS") = None;
+                *lock_or_recover(&LAST_APPLIED_OFFSET, "LAST_APPLIED_OFFSET") = None;
+            }
         }
         Ok(())
     };
 
-    // Step 5: idle-OC timer tracking (static to survive closure scope; relies on GpuPollState.load).
-    static IDLE_OC_RELEASED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    static IDLE_OC_IDLE_SEC: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let log_tick = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let gpu_job_poll = {
         let log_tick = log_tick.clone();
@@ -639,6 +660,39 @@ fn apply_fan_curves(io: &tuxedo_io::TuxedoIo, settings: &FanSettings, sorted_cur
     Ok(())
 }
 
+fn cached_nvidia_gpu_index() -> Option<u32> {
+    let cache = lock_or_recover(&HARDWARE_CACHE, "HARDWARE_CACHE");
+    cache.gpu_info.iter()
+        .find(|gpu| gpu.name.to_lowercase().contains("nvidia"))
+        .and_then(|gpu| gpu.nvml_index)
+}
+
+fn gpu_write_target(index: Option<u32>, writable: bool) -> Option<u32> {
+    index.filter(|_| writable)
+}
+
+fn next_idle_since(prev: Option<Instant>, now: Instant, load: Option<f32>, flag: bool, has_oc: bool, active_writable: bool, released: bool) -> Option<Instant> {
+    if flag && has_oc && active_writable && !released && load.map_or(false, |v| v <= hardware_detection::GPU_WORK_UTILIZATION_PERCENT) {
+        Some(prev.unwrap_or(now))
+    } else {
+        None
+    }
+}
+
+fn reset_idle_oc_state(state: &mut IdleOcState, generation: u64, settings_present: bool, has_oc: bool) {
+    if state.seen_gen != generation || !settings_present || !has_oc {
+        state.idle_since = None;
+        state.released = false;
+        state.seen_gen = generation;
+    }
+}
+
+fn complete_idle_oc_release(state: &mut IdleOcState, last_offset: &mut Option<i32>) {
+    *last_offset = Some(0);
+    state.idle_since = None;
+    state.released = true;
+}
+
 /// Write the dynamic core offset only when the target changed and the adapter is
 /// writable. Pure so the decision is testable without NVML.
 fn should_write_dynamic_offset(last: Option<i32>, target: i32, writable: bool) -> bool {
@@ -651,7 +705,7 @@ fn should_clear_offset(last: Option<i32>, writable: bool) -> bool {
     last != Some(0) && writable
 }
 
-fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -> Result<()> {
+fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings, idx: u32) -> Result<()> {
     // Clear stats and last offset if advanced control or manual clocks are disabled
     if !gpu_settings.advanced_control || !gpu_settings.manual_clocks {
         {
@@ -666,16 +720,16 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
             // Only clear if not already cleared to avoid waking up GPU unnecessarily
             let needs_clear = {
                 let map = lock_or_recover(&MANUAL_GPU_OFFSETS, "MANUAL_GPU_OFFSETS");
-                map.get(&0).map_or(true, |offsets| offsets.0 != 0.0 || offsets.1 != 0.0)
+                map.get(&idx).map_or(true, |offsets| offsets.0 != 0.0 || offsets.1 != 0.0)
             };
 
-            if needs_clear && hardware_detection::gpu_write_allowed(0) {
+            if needs_clear && gpu_write_target(Some(idx), hardware_detection::gpu_write_allowed(idx)).is_some() {
                 log::info!("Manual clocks disabled, resetting GPU offsets to 0");
-                let _ = crate::hardware_control::set_gpu_core_offset(0, 0.0);
-                let _ = crate::hardware_control::set_gpu_memory_offset(0, 0.0);
+                let _ = crate::hardware_control::set_gpu_core_offset(idx, 0.0);
+                let _ = crate::hardware_control::set_gpu_memory_offset(idx, 0.0);
                 {
                     let mut map = lock_or_recover(&MANUAL_GPU_OFFSETS, "MANUAL_GPU_OFFSETS");
-                    map.insert(0, (0.0, 0.0));
+                    map.insert(idx, (0.0, 0.0));
                 }
             }
         }
@@ -683,14 +737,14 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
     }
 
     // Dynamic offsets are written only when the adapter may be written to.
-    if !hardware_detection::gpu_write_allowed(0) {
+    if gpu_write_target(Some(idx), hardware_detection::gpu_write_allowed(idx)).is_none() {
         return Ok(());
     }
 
     // 1. Get current GPU stats (temperature, power, frequency)
     // We only do this if advanced control is enabled
-    let gpus = crate::hardware_detection::get_gpu_info()?;
-    let nvidia_gpu = gpus.iter().find(|g| g.name.to_lowercase().contains("nvidia"));
+    let gpus = crate::hardware_detection::get_gpu_info_without_utilization()?;
+    let nvidia_gpu = gpus.iter().find(|g| g.nvml_index == Some(idx));
 
     if let Some(gpu) = nvidia_gpu {
         // The NVML performance state says whether the adapter is being queried
@@ -778,11 +832,11 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
         // non-P0 reading leaves the applied offset cleared as before.
         if gpu.performance_state.as_deref() != Some("P0") {
             let mut last = lock_or_recover(&LAST_APPLIED_OFFSET, "LAST_APPLIED_OFFSET");
-            if should_clear_offset(*last, hardware_detection::gpu_write_allowed(0)) {
+            if should_clear_offset(*last, gpu_write_target(Some(idx), hardware_detection::gpu_write_allowed(idx)).is_some()) {
                 // Recorded before the write: a failed attempt is not retried on
                 // later ticks until the recorded state changes.
                 *last = Some(0);
-                match crate::hardware_control::set_gpu_core_offset(0, 0.0) {
+                match crate::hardware_control::set_gpu_core_offset(idx, 0.0) {
                     Ok(()) => log::debug!("Cleared dynamic GPU offset (P-state not 0)"),
                     Err(e) => log::warn!("clear dynamic GPU offset to 0 MHz failed: {e}"),
                 }
@@ -814,11 +868,11 @@ fn apply_gpu_overclocking(gpu_settings: &lapsphere_common::types::GpuSettings) -
         // ONLY APPLY IF CHANGED (fix stuttering)
         {
             let mut last = lock_or_recover(&LAST_APPLIED_OFFSET, "LAST_APPLIED_OFFSET");
-            if should_write_dynamic_offset(*last, final_offset_i32, hardware_detection::gpu_write_allowed(0)) {
+            if should_write_dynamic_offset(*last, final_offset_i32, gpu_write_target(Some(idx), hardware_detection::gpu_write_allowed(idx)).is_some()) {
                 // Recorded before the write: a failed attempt is not retried every
                 // tick; it is retried only when the target value changes.
                 *last = Some(final_offset_i32);
-                match crate::hardware_control::set_gpu_core_offset(0, final_offset_i32 as f32) {
+                match crate::hardware_control::set_gpu_core_offset(idx, final_offset_i32 as f32) {
                     Ok(()) => {
                         if final_offset_i32 == 0 {
                             log::debug!("Cleared dynamic GPU offset (P-state not 0)");
@@ -877,29 +931,35 @@ fn calculate_fan_speed(sorted_points: &[(u8, u8)], temp: f32) -> u8 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum IdleOcAction { None, Release, Restore }
 
-fn idle_oc_action(flag: bool, idle_for: u64, has_oc: bool, writable: bool, released: bool, load_high: bool) -> IdleOcAction {
+fn should_run_gpu_dynamic(action: IdleOcAction, released: bool) -> bool {
+    action == IdleOcAction::None && !released
+}
+
+fn idle_oc_action(flag: bool, idle_for: Option<Duration>, has_oc: bool, writable: bool, released: bool, load_high: bool) -> IdleOcAction {
     if !flag || !has_oc { return IdleOcAction::None; }
     if released && load_high { return IdleOcAction::Restore; }
-    if !released && !load_high && writable && idle_for >= 30 { return IdleOcAction::Release; }
+    if !released && writable && idle_for.map_or(false, |duration| duration >= IDLE_RELEASE_AFTER) { return IdleOcAction::Release; }
     IdleOcAction::None
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    #[test]
     fn idle_oc_decision_all_cases() {
         use super::IdleOcAction::{None, Release, Restore};
-        assert_eq!(idle_oc_action(false, 30, true, true, false, false), None);
-        assert_eq!(idle_oc_action(true, 29, true, true, false, false), None);
-        assert_eq!(idle_oc_action(true, 30, false, true, false, false), None);
-        assert_eq!(idle_oc_action(true, 30, true, false, false, false), None);
-        assert_eq!(idle_oc_action(true, 30, true, true, true, false), None);
-        assert_eq!(idle_oc_action(true, 30, true, true, false, false), Release);
-        assert_eq!(idle_oc_action(true, 1, true, false, true, true), Restore);
-        assert_eq!(idle_oc_action(true, 30, true, true, false, true), None);
+        let thirty = Some(Duration::from_secs(30));
+        let twenty_nine = Some(Duration::from_secs(29));
+        assert_eq!(idle_oc_action(false, thirty, true, true, false, false), None);
+        assert_eq!(idle_oc_action(true, twenty_nine, true, true, false, false), None);
+        assert_eq!(idle_oc_action(true, thirty, false, true, false, false), None);
+        assert_eq!(idle_oc_action(true, thirty, true, false, false, false), None);
+        assert_eq!(idle_oc_action(true, thirty, true, true, true, false), None);
+        assert_eq!(idle_oc_action(true, thirty, true, true, false, false), Release);
+        assert_eq!(idle_oc_action(true, Some(Duration::from_secs(1)), true, false, true, true), Restore);
+        assert_eq!(idle_oc_action(true, std::option::Option::None, true, true, false, true), None);
     }
 
+    #[test]
     fn dynamic_offset_is_attempted_once_per_target() {
         assert!(should_write_dynamic_offset(None, -40, true));
         assert!(should_write_dynamic_offset(Some(0), -40, true));
@@ -917,6 +977,82 @@ mod tests {
         assert!(!should_clear_offset(Some(0), true));
         assert!(!should_clear_offset(Some(-40), false));
         assert!(!should_clear_offset(None, false));
+    }
+
+    #[test]
+    fn released_state_skips_dynamic_gpu_telemetry_and_writes() {
+        assert!(!should_run_gpu_dynamic(IdleOcAction::None, true));
+        assert!(!should_run_gpu_dynamic(IdleOcAction::Release, false));
+        assert!(should_run_gpu_dynamic(IdleOcAction::None, false));
+    }
+
+    #[test]
+    fn idle_release_boundary_is_29_9_and_30_seconds() {
+        assert_eq!(idle_oc_action(true, Some(Duration::from_millis(29_900)), true, true, false, false), IdleOcAction::None);
+        assert_eq!(idle_oc_action(true, Some(Duration::from_secs(30)), true, true, false, false), IdleOcAction::Release);
+    }
+
+    #[test]
+    fn idle_release_flag_off_never_releases() {
+        assert_eq!(idle_oc_action(false, Some(Duration::from_secs(60)), true, true, false, false), IdleOcAction::None);
+    }
+
+    #[test]
+    fn unknown_load_does_not_start_idle_timer() {
+        let now = Instant::now();
+        assert_eq!(next_idle_since(None, now, None, true, true, true, false), None);
+    }
+
+    #[test]
+    fn idle_timer_resets_on_high_load_or_release() {
+        let now = Instant::now();
+        let prev = Some(now - Duration::from_secs(10));
+        assert_eq!(next_idle_since(prev, now, Some(2.0), true, true, true, false), None);
+        assert_eq!(next_idle_since(prev, now, Some(0.0), true, true, true, true), None);
+    }
+
+    #[test]
+    fn release_requires_open_write_gate() {
+        assert_eq!(idle_oc_action(true, Some(Duration::from_secs(30)), true, false, false, false), IdleOcAction::None);
+    }
+
+    #[test]
+    fn release_restore_release_sequence_is_supported() {
+        let now = Instant::now();
+        let mut state = IdleOcState { idle_since: Some(now - Duration::from_secs(30)), released: false, seen_gen: 0 };
+        assert_eq!(idle_oc_action(true, state.idle_since.map(|since| now.duration_since(since)), true, true, state.released, false), IdleOcAction::Release);
+        let mut last = None;
+        complete_idle_oc_release(&mut state, &mut last);
+        assert_eq!(idle_oc_action(true, None, true, false, state.released, true), IdleOcAction::Restore);
+        state.released = false;
+        state.idle_since = Some(now - Duration::from_secs(30));
+        assert_eq!(idle_oc_action(true, state.idle_since.map(|since| now.duration_since(since)), true, true, state.released, false), IdleOcAction::Release);
+    }
+
+    #[test]
+    fn profile_generation_change_resets_idle_state() {
+        let mut state = IdleOcState { idle_since: Some(Instant::now()), released: true, seen_gen: 4 };
+        reset_idle_oc_state(&mut state, 5, true, true);
+        assert_eq!(state.idle_since, None);
+        assert!(!state.released);
+        assert_eq!(state.seen_gen, 5);
+    }
+
+    #[test]
+    fn missing_gpu_index_defers_write_target() {
+        assert_eq!(gpu_write_target(None, true), None);
+        assert_eq!(gpu_write_target(Some(2), false), None);
+        assert_eq!(gpu_write_target(Some(2), true), Some(2));
+    }
+
+    #[test]
+    fn release_records_zero_as_last_applied_offset() {
+        let mut state = IdleOcState { idle_since: Some(Instant::now()), released: false, seen_gen: 2 };
+        let mut last = Some(125);
+        complete_idle_oc_release(&mut state, &mut last);
+        assert_eq!(last, Some(0));
+        assert!(state.released);
+        assert_eq!(state.idle_since, None);
     }
 
     use super::*;

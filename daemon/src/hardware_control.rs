@@ -4,7 +4,7 @@ use once_cell::sync::Lazy;
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use lapsphere_common::types::*;
 use crate::tuxedo_io::{TuxedoIo, HardwareInterface};
 
@@ -13,6 +13,7 @@ static CPU_LIMITS_MODIFIED: AtomicBool = AtomicBool::new(false);
 pub static GPU_PENDING: AtomicBool = AtomicBool::new(false);
 /// GPU settings of the deferred profile step, with the adapter index.
 pub static PENDING_GPU_SETTINGS: Lazy<Mutex<Option<(u32, GpuSettings)>>> = Lazy::new(|| Mutex::new(None));
+pub static GPU_APPLY_GEN: AtomicU64 = AtomicU64::new(0);
 
 /// Whether a deferred profile GPU step should be applied on this tick.
 pub fn pending_gpu_due(pending: bool, writable: bool, has_settings: bool) -> bool {
@@ -586,6 +587,7 @@ pub fn apply_profile(profile: &Profile) -> Result<()> {
         }
     }
 
+    GPU_APPLY_GEN.fetch_add(1, Ordering::SeqCst);
     log::info!(target: "hw.detect", "Applying profile: {}", profile.name);
     let result = apply_profile_inner(profile);
     match result {
@@ -995,6 +997,12 @@ pub fn get_nvml() -> Result<&'static Nvml> {
         Ok(nvml) => Ok(nvml),
         Err(e) => Err(anyhow!("Failed to initialize NVML: {}", e)),
     }
+}
+
+pub(crate) fn gpu_utilization_percent(index: u32) -> Result<f32> {
+    let nvml = get_nvml()?;
+    let device = nvml.device_by_index(index)?;
+    Ok(device.utilization_rates()?.gpu as f32)
 }
 
 pub fn set_gpu_locked_clocks(device_index: u32, min_clock: u32, max_clock: u32) -> Result<()> {
