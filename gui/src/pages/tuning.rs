@@ -1443,7 +1443,9 @@ fn create_default_profile_for_reset(is_standard: bool) -> Profile {
             name: "Standard".to_string(),
             is_default: true,
             cpu_settings: CpuSettings {
-                governor: Some("schedutil".to_string()),
+                // Same combo rule as the built-in Standard in profiles.rs:
+                // amd_pstate active offers only performance/powersave.
+                governor: Some("powersave".to_string()),
                 min_frequency: None,
                 max_frequency: None,
                 boost: Some(true),
@@ -1499,5 +1501,20 @@ fn create_default_profile_for_reset(is_standard: bool) -> Profile {
         }
     } else {
         Profile::default()
+    }
+}
+
+#[cfg(test)]
+mod reset_profile_tests {
+    #[test]
+    fn reset_to_standard_governor_is_compatible_with_its_pstate_mode() {
+        let p = super::create_default_profile_for_reset(true);
+        let governor = p.cpu_settings.governor.as_deref().expect("Standard sets a governor");
+        let mode = p.cpu_settings.amd_pstate_status.as_deref().expect("Standard sets the amd mode");
+        let compatible = match mode {
+            "active" => governor == "performance" || governor == "powersave",
+            _ => true,
+        };
+        assert!(compatible, "reset Standard requests governor {governor:?} in amd_pstate mode {mode:?}");
     }
 }

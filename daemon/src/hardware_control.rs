@@ -503,7 +503,66 @@ fn get_cpu_count() -> Result<u32> {
     Ok(count as u32)
 }
 
+/// The requested governor is not offered by the kernel in the current CPU
+/// mode (e.g. `ondemand` while amd_pstate is `active`, which offers only
+/// performance/powersave). Callers treat this as a non-fatal profile warning,
+/// not as a broken apply.
+#[derive(Debug)]
+pub struct GovernorUnavailable {
+    pub governor: String,
+    pub available: String,
+}
+
+impl std::fmt::Display for GovernorUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "governor \"{}\" is not available in the current CPU mode; available: {}",
+            self.governor, self.available
+        )
+    }
+}
+
+impl std::error::Error for GovernorUnavailable {}
+
+/// Is `governor` offered by the kernel's current list for this policy?
+fn governor_in_available_list(governor: &str, available: &str) -> bool {
+    available.split_whitespace().any(|g| g == governor)
+}
+
+/// cpu0's current scaling limits — what a pstate mode switch resets.
+fn read_scaling_limits() -> (Option<u64>, Option<u64>) {
+    let read = |path: &str| fs::read_to_string(path).ok().and_then(|s| s.trim().parse::<u64>().ok());
+    (
+        read("/sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq"),
+        read("/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq"),
+    )
+}
+
+/// Best-effort re-apply of limits captured before a pstate mode switch.
+fn restore_scaling_limits(prev: (Option<u64>, Option<u64>)) {
+    if let (Some(min), Some(max)) = prev {
+        if let Err(e) = set_cpu_frequency_limits(min, max) {
+            log::warn!(target: "hw.cpu", "re-applying frequency limits after a pstate mode switch failed: {e}");
+        }
+    }
+}
+
 pub fn set_cpu_governor(governor: &str) -> Result<()> {
+    // An unknown token stays a profile error (the guard's vocabulary check
+    // rejects it below). A sanctioned governor can still be unavailable in
+    // the current CPU mode — that must not surface as a bare EINVAL.
+    if GOVERNOR_ALLOWLIST.contains(&governor) {
+        if let Ok(available) = fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors") {
+            if !governor_in_available_list(governor, &available) {
+                return Err(anyhow::Error::new(GovernorUnavailable {
+                    governor: governor.to_string(),
+                    available: available.split_whitespace().collect::<Vec<_>>().join(" "),
+                }));
+            }
+        }
+    }
+
     let cpu_count = get_cpu_count()?;
 
     guard_sysfs_write("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor", governor)?;
@@ -625,8 +684,12 @@ pub fn set_amd_pstate_status(status: &str) -> Result<()> {
     if !["passive", "active", "guided"].contains(&status) {
         return Err(anyhow!("Invalid AMD pstate status: {}", status));
     }
-    
+
+    // The mode switch resets scaling_min/max to the kernel defaults; keep the
+    // previous limits and put them back so a flip does not silently drop them.
+    let prev_limits = read_scaling_limits();
     guard_sysfs_write(path, status)?;
+    restore_scaling_limits(prev_limits);
     log::info!(target: "hw.cpu", "set_amd_pstate_status status=\"{}\"", status);
     crate::refresh_hardware_cache();
     Ok(())
@@ -642,7 +705,10 @@ pub fn set_intel_pstate_status(status: &str) -> Result<()> {
         return Err(anyhow!("Invalid Intel pstate status: {}", status));
     }
 
+    // Same mode-switch limit reset as the AMD path.
+    let prev_limits = read_scaling_limits();
     guard_sysfs_write(path, status)?;
+    restore_scaling_limits(prev_limits);
     log::info!(target: "hw.cpu", "set_intel_pstate_status status=\"{}\"", status);
     crate::refresh_hardware_cache();
     Ok(())
@@ -859,10 +925,30 @@ pub(crate) fn apply_gpu_static(idx: u32, g: &lapsphere_common::types::GpuSetting
 }
 
 fn apply_profile_inner(profile: &Profile) -> Result<(bool, Vec<String>)> {
-    
+    let mut cpu_warnings: Vec<String> = Vec::new();
+
+    // Mode switches first: active-vs-passive changes which governors the
+    // kernel offers, so the mode must be in place before the governor write.
+    if let Some(ref amd_status) = profile.cpu_settings.amd_pstate_status {
+        set_amd_pstate_status(amd_status)?;
+    }
+
+    if let Some(ref intel_status) = profile.cpu_settings.intel_pstate_status {
+        set_intel_pstate_status(intel_status)?;
+    }
+
     // Apply CPU settings
     if let Some(ref governor) = profile.cpu_settings.governor {
-        set_cpu_governor(governor)?;
+        if let Err(e) = set_cpu_governor(governor) {
+            if e.downcast_ref::<GovernorUnavailable>().is_some() {
+                // A mode conflict, not a profile error: report it clearly and
+                // keep applying the remaining independent steps.
+                log::warn!(target: "hw.cpu", "{e}");
+                cpu_warnings.push(format!("set_cpu_governor: {e}"));
+            } else {
+                return Err(e);
+            }
+        }
     }
     
     if let Some(ref tdp_profile) = profile.cpu_settings.tdp_profile {
@@ -881,14 +967,6 @@ fn apply_profile_inner(profile: &Profile) -> Result<(bool, Vec<String>)> {
                 let _ = io.set_tdp(2, val);
             }
         }
-    }
-    
-    if let Some(ref amd_status) = profile.cpu_settings.amd_pstate_status {
-        set_amd_pstate_status(amd_status)?;
-    }
-
-    if let Some(ref intel_status) = profile.cpu_settings.intel_pstate_status {
-        set_intel_pstate_status(intel_status)?;
     }
     
     if let Some(ref epp) = profile.cpu_settings.energy_performance_preference {
@@ -960,7 +1038,8 @@ fn apply_profile_inner(profile: &Profile) -> Result<(bool, Vec<String>)> {
     // Apply fan settings - update daemon state
     apply_fan_settings(&profile.fan_settings)?;
 
-    let warnings = profile_gpu_result(&gpu_failures)?;
+    let mut warnings = cpu_warnings;
+    warnings.extend(profile_gpu_result(&gpu_failures)?);
     Ok((gpu_deferred, warnings))
 }
 
@@ -2087,8 +2166,9 @@ mod tests {
         ));
     }
 
-    /// A profile whose earliest hardware step fails: `set_cpu_governor` runs
-    /// first in `apply_profile_inner` and "invalid-governor-token" is not on
+    /// A profile whose earliest executed hardware step fails:
+    /// `set_cpu_governor` is the first step this profile runs (it sets no
+    /// pstate fields) and "invalid-governor-token" is not on
     /// GOVERNOR_ALLOWLIST, so `guard_sysfs_write` rejects it on any host.
     fn failing_profile() -> Profile {
         Profile {
@@ -2240,6 +2320,32 @@ mod tests {
             let g2 = crate::DAEMON_LOGS.lock().unwrap();
             assert!(g2.capacity() >= 500);
         }
+    }
+}
+
+#[cfg(test)]
+mod governor_availability_tests {
+    use super::{governor_in_available_list, GovernorUnavailable};
+
+    #[test]
+    fn list_check_tolerates_sysfs_whitespace() {
+        let passive = "conservative ondemand userspace powersave performance schedutil ";
+        let active = "performance powersave";
+        assert!(governor_in_available_list("ondemand", passive));
+        assert!(governor_in_available_list("powersave", active));
+        assert!(!governor_in_available_list("ondemand", active));
+        assert!(!governor_in_available_list("conservative", active));
+    }
+
+    #[test]
+    fn unavailable_governor_error_names_value_and_list() {
+        let err = GovernorUnavailable {
+            governor: "ondemand".to_string(),
+            available: "performance powersave".to_string(),
+        };
+        let text = err.to_string();
+        assert!(text.contains("ondemand"), "{text}");
+        assert!(text.contains("performance powersave"), "{text}");
     }
 }
 

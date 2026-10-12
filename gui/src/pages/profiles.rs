@@ -206,7 +206,10 @@ fn create_standard_profile() -> lapsphere_common::types::Profile {
         name: "Standard".to_string(),
         is_default: true,
         cpu_settings: CpuSettings {
-            governor: Some("schedutil".to_string()),
+            // amd_pstate active offers only performance/powersave; schedutil
+            // is not available in that mode (the apply warns on it now, but
+            // the built-in Standard must not request an incompatible combo).
+            governor: Some("powersave".to_string()),
             min_frequency: None,
             max_frequency: None,
             boost: Some(true),
@@ -259,5 +262,21 @@ fn create_standard_profile() -> lapsphere_common::types::Profile {
             control_enabled: false,
             curves: vec![],
         },
+    }
+}
+
+#[cfg(test)]
+mod standard_profile_tests {
+    #[test]
+    fn standard_profile_governor_is_compatible_with_its_pstate_mode() {
+        let p = super::create_standard_profile();
+        let governor = p.cpu_settings.governor.as_deref().expect("Standard sets a governor");
+        let mode = p.cpu_settings.amd_pstate_status.as_deref().expect("Standard sets the amd mode");
+        // Measured on the XMG: amd_pstate active offers only these two.
+        let compatible = match mode {
+            "active" => governor == "performance" || governor == "powersave",
+            _ => true,
+        };
+        assert!(compatible, "Standard requests governor {governor:?} in amd_pstate mode {mode:?}");
     }
 }
