@@ -1,15 +1,44 @@
 use anyhow::{anyhow, Result};
+use nvml_wrapper::error::NvmlError;
 use nvml_wrapper::Nvml;
 use once_cell::sync::Lazy;
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use lapsphere_common::types::*;
 use crate::tuxedo_io::{TuxedoIo, HardwareInterface};
 
 static CPU_LIMITS_MODIFIED: AtomicBool = AtomicBool::new(false);
+/// A deferred GPU step and who queued it. The origin decides whether a
+/// completion is reported to the GUI: only a profile apply's deferred step
+/// resolves the "waiting for the GPU step" state; the idle-OC restore must
+/// stay silent on success.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingGpuStep {
+    pub idx: u32,
+    pub settings: GpuSettings,
+    pub origin: PendingGpuOrigin,
+}
+
+/// Deferred GPU settings and their consumption state share one lock.
+pub static PENDING_GPU_SETTINGS: Lazy<Mutex<Option<PendingGpuStep>>> = Lazy::new(|| Mutex::new(None));
+pub static GPU_APPLY_GEN: AtomicU64 = AtomicU64::new(0);
 static LAST_APPLIED_PROFILE: Lazy<Mutex<Option<Profile>>> = Lazy::new(|| Mutex::new(None));
+
+/// Outcome of the last completed deferred GPU apply attempt, waiting for the
+/// GUI to pick it up (take-once). The `ApplyProfile` reply is sent long before
+/// a deferred attempt runs, so this slot is its delivery path. Identical
+/// repeated outcomes (e.g. the idle-OC restore re-hitting a permanently
+/// unsupported operation) are published once.
+static DEFERRED_GPU_REPORT: Lazy<Mutex<DeferredGpuReportState>> =
+    Lazy::new(|| Mutex::new(DeferredGpuReportState::default()));
+
+#[derive(Default)]
+struct DeferredGpuReportState {
+    pending: Option<DeferredGpuReport>,
+    last_published: Option<String>,
+}
 
 /// Lock a shared daemon mutex, recovering from poisoning instead of panicking.
 ///
@@ -264,6 +293,79 @@ fn read_hw_freq_bounds() -> Option<(u64, u64)> {
     Some((min, max))
 }
 
+fn normalize_cpu_frequency_request(
+    min_freq: u64,
+    max_freq: u64,
+    bounds: Option<(u64, u64)>,
+) -> Result<(u64, u64)> {
+    let (hw_min, hw_max) = bounds.ok_or_else(|| {
+        anyhow!("CPU hardware frequency bounds are unavailable; refusing unvalidated limits")
+    })?;
+    if hw_min > hw_max {
+        return Err(anyhow!(
+            "invalid CPU hardware frequency bounds: min {hw_min} exceeds max {hw_max}"
+        ));
+    }
+    let limits = normalize_freq_limits(Some(min_freq), Some(max_freq), hw_min, hw_max);
+    Ok((
+        limits
+            .min
+            .ok_or_else(|| anyhow!("normalized CPU minimum frequency is missing"))?,
+        limits
+            .max
+            .ok_or_else(|| anyhow!("normalized CPU maximum frequency is missing"))?,
+    ))
+}
+
+#[cfg(test)]
+mod cpu_frequency_normalization_tests {
+    use super::normalize_cpu_frequency_request;
+
+    const BOUNDS: (u64, u64) = (403_488, 4_465_261);
+
+    #[test]
+    fn request_below_hardware_minimum_is_raised() {
+        assert_eq!(
+            normalize_cpu_frequency_request(100_000, 2_000_000, Some(BOUNDS)).unwrap(),
+            (BOUNDS.0, 2_000_000)
+        );
+    }
+
+    #[test]
+    fn request_above_hardware_maximum_is_lowered() {
+        assert_eq!(
+            normalize_cpu_frequency_request(1_000_000, 5_000_000, Some(BOUNDS)).unwrap(),
+            (1_000_000, BOUNDS.1)
+        );
+    }
+
+    #[test]
+    fn resolves_minimum_above_maximum() {
+        assert_eq!(
+            normalize_cpu_frequency_request(3_000_000, 2_000_000, Some(BOUNDS)).unwrap(),
+            (3_000_000, 3_000_000)
+        );
+    }
+
+    #[test]
+    fn accepts_valid_in_range_limits_unchanged() {
+        assert_eq!(
+            normalize_cpu_frequency_request(1_000_000, 4_000_000, Some(BOUNDS)).unwrap(),
+            (1_000_000, 4_000_000)
+        );
+    }
+
+    #[test]
+    fn refuses_to_write_without_hardware_bounds() {
+        assert!(normalize_cpu_frequency_request(1_000_000, 4_000_000, None).is_err());
+    }
+
+    #[test]
+    fn refuses_invalid_hardware_bounds() {
+        assert!(normalize_cpu_frequency_request(1_000_000, 4_000_000, Some((4_000_000, 1_000_000))).is_err());
+    }
+}
+
 /// Maximum brightness the hardware reports (sibling of the writable attr).
 fn read_max_brightness(base: &str) -> Option<u32> {
     let s = fs::read_to_string(format!("{base}/max_brightness")).ok()?;
@@ -401,7 +503,66 @@ fn get_cpu_count() -> Result<u32> {
     Ok(count as u32)
 }
 
+/// The requested governor is not offered by the kernel in the current CPU
+/// mode (e.g. `ondemand` while amd_pstate is `active`, which offers only
+/// performance/powersave). Callers treat this as a non-fatal profile warning,
+/// not as a broken apply.
+#[derive(Debug)]
+pub struct GovernorUnavailable {
+    pub governor: String,
+    pub available: String,
+}
+
+impl std::fmt::Display for GovernorUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "governor \"{}\" is not available in the current CPU mode; available: {}",
+            self.governor, self.available
+        )
+    }
+}
+
+impl std::error::Error for GovernorUnavailable {}
+
+/// Is `governor` offered by the kernel's current list for this policy?
+fn governor_in_available_list(governor: &str, available: &str) -> bool {
+    available.split_whitespace().any(|g| g == governor)
+}
+
+/// cpu0's current scaling limits — what a pstate mode switch resets.
+fn read_scaling_limits() -> (Option<u64>, Option<u64>) {
+    let read = |path: &str| fs::read_to_string(path).ok().and_then(|s| s.trim().parse::<u64>().ok());
+    (
+        read("/sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq"),
+        read("/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq"),
+    )
+}
+
+/// Best-effort re-apply of limits captured before a pstate mode switch.
+fn restore_scaling_limits(prev: (Option<u64>, Option<u64>)) {
+    if let (Some(min), Some(max)) = prev {
+        if let Err(e) = set_cpu_frequency_limits(min, max) {
+            log::warn!(target: "hw.cpu", "re-applying frequency limits after a pstate mode switch failed: {e}");
+        }
+    }
+}
+
 pub fn set_cpu_governor(governor: &str) -> Result<()> {
+    // An unknown token stays a profile error (the guard's vocabulary check
+    // rejects it below). A sanctioned governor can still be unavailable in
+    // the current CPU mode — that must not surface as a bare EINVAL.
+    if GOVERNOR_ALLOWLIST.contains(&governor) {
+        if let Ok(available) = fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors") {
+            if !governor_in_available_list(governor, &available) {
+                return Err(anyhow::Error::new(GovernorUnavailable {
+                    governor: governor.to_string(),
+                    available: available.split_whitespace().collect::<Vec<_>>().join(" "),
+                }));
+            }
+        }
+    }
+
     let cpu_count = get_cpu_count()?;
 
     guard_sysfs_write("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor", governor)?;
@@ -417,6 +578,11 @@ pub fn set_cpu_governor(governor: &str) -> Result<()> {
 }
 
 pub fn set_cpu_frequency_limits(min_freq: u64, max_freq: u64) -> Result<()> {
+    let requested = (min_freq, max_freq);
+    let (min_freq, max_freq) = normalize_cpu_frequency_request(min_freq, max_freq, read_hw_freq_bounds())?;
+    if (min_freq, max_freq) != requested {
+        log::warn!(target: "hw.cpu", "normalized CPU frequency limits {:?} to {:?} using hardware bounds", requested, (min_freq, max_freq));
+    }
     let cpu_count = get_cpu_count()?;
     
     // IMPORTANT: Set max first, then min to avoid conflicts
@@ -518,8 +684,12 @@ pub fn set_amd_pstate_status(status: &str) -> Result<()> {
     if !["passive", "active", "guided"].contains(&status) {
         return Err(anyhow!("Invalid AMD pstate status: {}", status));
     }
-    
+
+    // The mode switch resets scaling_min/max to the kernel defaults; keep the
+    // previous limits and put them back so a flip does not silently drop them.
+    let prev_limits = read_scaling_limits();
     guard_sysfs_write(path, status)?;
+    restore_scaling_limits(prev_limits);
     log::info!(target: "hw.cpu", "set_amd_pstate_status status=\"{}\"", status);
     crate::refresh_hardware_cache();
     Ok(())
@@ -535,13 +705,128 @@ pub fn set_intel_pstate_status(status: &str) -> Result<()> {
         return Err(anyhow!("Invalid Intel pstate status: {}", status));
     }
 
+    // Same mode-switch limit reset as the AMD path.
+    let prev_limits = read_scaling_limits();
     guard_sysfs_write(path, status)?;
+    restore_scaling_limits(prev_limits);
     log::info!(target: "hw.cpu", "set_intel_pstate_status status=\"{}\"", status);
     crate::refresh_hardware_cache();
     Ok(())
 }
 
-pub fn apply_profile(profile: &Profile) -> Result<()> {
+/// Apply one pending value while preventing concurrent replacement, and
+/// consume the slot only when `apply` marks the attempt as final.
+///
+/// `apply` returns `(result, consumed)`; `consumed = false` keeps the value
+/// pending, so a transient refusal (the runtime write gate closing mid-apply)
+/// can be retried once the adapter is writable again.
+fn consume_pending_locked<T, R>(
+    slot: &Mutex<Option<T>>,
+    label: &str,
+    apply: impl FnOnce(&T) -> Option<(R, bool)>,
+) -> Option<R> {
+    let mut pending = lock_or_recover(slot, label);
+    let (result, consumed) = apply(pending.as_ref()?)?;
+    if consumed {
+        *pending = None;
+    }
+    Some(result)
+}
+
+pub fn replace_pending_gpu_settings(idx: u32, settings: GpuSettings) {
+    *lock_or_recover(&PENDING_GPU_SETTINGS, "PENDING_GPU_SETTINGS") = Some(PendingGpuStep {
+        idx,
+        settings,
+        origin: PendingGpuOrigin::IdleRestore,
+    });
+}
+
+/// Consumption rule for a deferred GPU attempt: keep the settings pending
+/// only when the runtime write gate refused an operation mid-apply. That
+/// refusal is transient (the adapter is suspending or suspended right now);
+/// permanent outcomes — unsupported operations or genuine failures — must
+/// consume the slot, because retrying those would be a loop with no exit.
+fn pending_consumed_after_attempt(failures: &[GpuOpFailure]) -> bool {
+    !failures.iter().any(|f| f.kind == GpuOpFailureKind::GateClosed)
+}
+
+/// One attempt at a profile's GPU step — shared by the immediate apply and the
+/// deferred retry. Pre-checks the runtime write gate, runs the operations and
+/// decides whether the attempt is final (`consumed`) or must be retried
+/// because the gate closed mid-apply. `None` means the pre-check refused and
+/// nothing was attempted. Gate and operations are parameters so tests can
+/// drive the exact race without hardware.
+fn attempt_gpu_step(
+    idx: u32,
+    settings: &GpuSettings,
+    writable: impl FnOnce(u32) -> bool,
+    apply: impl FnOnce(u32, &GpuSettings) -> Vec<GpuOpFailure>,
+) -> Option<(Vec<GpuOpFailure>, bool)> {
+    if !writable(idx) {
+        return None;
+    }
+    let failures = apply(idx, settings);
+    let consumed = pending_consumed_after_attempt(&failures);
+    Some((failures, consumed))
+}
+
+/// Apply the newest deferred profile GPU step once the adapter is writable.
+pub fn apply_pending_gpu() {
+    let applied = consume_pending_locked(&PENDING_GPU_SETTINGS, "PENDING_GPU_SETTINGS", |step| {
+        attempt_gpu_step(step.idx, &step.settings, crate::hardware_detection::gpu_write_allowed, apply_gpu_static)
+            .map(|(failures, consumed)| ((step.idx, step.origin, failures), consumed))
+    });
+    if let Some((idx, origin, failures)) = applied {
+        warn_gpu_failures("deferred profile GPU step", idx, &failures);
+        if pending_consumed_after_attempt(&failures) {
+            log::info!(target: "hw.gpu", "deferred profile GPU step applied gpu={idx} failures={}", failures.len());
+            publish_deferred_gpu_report(origin, &failures);
+        } else {
+            log::info!(target: "hw.gpu", "deferred profile GPU step gpu={idx} kept pending: runtime write gate closed mid-apply");
+        }
+    }
+}
+
+/// Queue the completed deferred attempt's outcome for the GUI.
+///
+/// A clean outcome is published only for a profile apply — the idle-OC
+/// restore would otherwise emit a success event on every cycle. Identical
+/// repeated outcomes are published once (a series); a clean attempt ends the
+/// series, so a later recurrence of the same problem is shown again.
+fn publish_deferred_gpu_report(origin: PendingGpuOrigin, failures: &[GpuOpFailure]) {
+    let mut state = lock_or_recover(&DEFERRED_GPU_REPORT, "DEFERRED_GPU_REPORT");
+    if failures.is_empty() {
+        state.last_published = None;
+        if origin == PendingGpuOrigin::ProfileApply {
+            state.pending = Some(DeferredGpuReport {
+                text: "Deferred GPU settings applied".to_string(),
+                outcome: DeferredGpuOutcome::Applied,
+                origin,
+            });
+        }
+        return;
+    }
+    let (warnings, fatal) = split_gpu_failures(failures);
+    let (text, outcome) = if fatal.is_empty() {
+        (format!("Deferred GPU step applied with warnings: {}", warnings.join("; ")), DeferredGpuOutcome::AppliedWithWarnings)
+    } else if warnings.is_empty() {
+        (format!("Deferred GPU step failed: {}", fatal.join("; ")), DeferredGpuOutcome::Failed)
+    } else {
+        (format!("Deferred GPU step failed: {} (unsupported: {})", fatal.join("; "), warnings.join("; ")), DeferredGpuOutcome::Failed)
+    };
+    if state.last_published.as_deref() == Some(text.as_str()) {
+        return;
+    }
+    state.last_published = Some(text.clone());
+    state.pending = Some(DeferredGpuReport { text, outcome, origin });
+}
+
+/// Take the pending deferred-GPU report, if any (take-once delivery).
+pub fn take_deferred_gpu_report() -> Option<DeferredGpuReport> {
+    lock_or_recover(&DEFERRED_GPU_REPORT, "DEFERRED_GPU_REPORT").pending.take()
+}
+
+pub fn apply_profile(profile: &Profile) -> Result<ApplyProfileResult> {
     // Check if this profile is already applied to avoid redundant hardware calls.
     //
     // IMPORTANT: the "already applied" marker is only written *after* every
@@ -555,20 +840,31 @@ pub fn apply_profile(profile: &Profile) -> Result<()> {
         if let Some(ref last) = *last_profile {
             if last == profile {
                 log::info!(target: "hw.detect", "Profile '{}' is already applied, skipping", profile.name);
-                return Ok(());
+                return Ok(ApplyProfileResult { warnings: Vec::new(), gpu_deferred: false });
             }
         }
     }
 
+    GPU_APPLY_GEN.fetch_add(1, Ordering::SeqCst);
     log::info!(target: "hw.detect", "Applying profile: {}", profile.name);
     let result = apply_profile_inner(profile);
     match result {
-        Ok(()) => {
-            // Record the profile only now that every hardware step succeeded.
-            let mut last_profile = lock_or_recover(&LAST_APPLIED_PROFILE, "LAST_APPLIED_PROFILE");
-            *last_profile = Some(profile.clone());
-            log::info!(target: "hw.detect", "Profile '{}' applied successfully", profile.name);
-            Ok(())
+        Ok((gpu_deferred, warnings)) => {
+            // A deferred GPU step means nothing is fully applied any more:
+            // clearing the marker keeps a later apply of an older profile from
+            // being skipped against stale hardware (A -> B deferred -> A).
+            *lock_or_recover(&LAST_APPLIED_PROFILE, "LAST_APPLIED_PROFILE") =
+                marker_after_apply(gpu_deferred, profile);
+            if warnings.is_empty() {
+                if gpu_deferred {
+                    log::info!(target: "hw.detect", "Profile '{}' applied; GPU step pending until the adapter is writable", profile.name);
+                } else {
+                    log::info!(target: "hw.detect", "Profile '{}' applied successfully", profile.name);
+                }
+            } else {
+                log::warn!(target: "hw.detect", "Profile '{}' applied with warnings: {}", profile.name, warnings.join("; "));
+            }
+            Ok(ApplyProfileResult { warnings, gpu_deferred })
         }
         Err(e) => {
             // A partial apply must NOT be remembered as "applied": otherwise the
@@ -584,11 +880,76 @@ pub fn apply_profile(profile: &Profile) -> Result<()> {
 
 /// All hardware steps of a profile apply, in order. The caller owns the
 /// last-applied marker so a failure never leaves a stale "already applied" state.
-fn apply_profile_inner(profile: &Profile) -> Result<()> {
-    
+/// Apply the static GPU part of a profile. Every step runs even if an earlier
+/// one failed; each failure is logged, classified and returned.
+pub(crate) fn apply_gpu_static(idx: u32, g: &lapsphere_common::types::GpuSettings) -> Vec<GpuOpFailure> {
+    let mut failures: Vec<GpuOpFailure> = Vec::new();
+    let mut record = |op: &'static str, r: Result<()>| {
+        if let Err(e) = r {
+            let kind = classify_gpu_failure(&e);
+            match kind {
+                GpuOpFailureKind::Unsupported => {
+                    log::warn!(target: "hw.gpu", "{op} gpu={idx} unsupported by this adapter: {e}");
+                }
+                GpuOpFailureKind::GateClosed => {
+                    log::warn!(target: "hw.gpu", "{op} gpu={idx} refused by the runtime write gate: {e}");
+                }
+                GpuOpFailureKind::Failed => {
+                    log::warn!(target: "hw.gpu", "{op} gpu={idx} failed: {e}");
+                }
+            }
+            failures.push(GpuOpFailure { op, message: e.to_string(), kind });
+        }
+    };
+    if let Some(limit) = g.power_limit {
+        record("set_gpu_power_limit", set_gpu_power_limit(idx, limit));
+    }
+    if let Some(core_offset) = g.core_offset {
+        record("set_gpu_core_offset", set_gpu_core_offset(idx, core_offset as f32));
+    }
+    if let Some(memory_offset) = g.memory_offset {
+        record("set_gpu_memory_offset", set_gpu_memory_offset(idx, memory_offset as f32));
+    }
+    if let (Some(min_clock), Some(max_clock)) = (g.min_gpu_clock, g.max_gpu_clock) {
+        record("set_gpu_locked_clocks", set_gpu_locked_clocks(idx, min_clock, max_clock));
+    } else {
+        record("reset_gpu_clocks", reset_gpu_clocks(idx));
+    }
+    for fan in &g.nvidia_fans {
+        if fan.manual {
+            record("set_gpu_fan_speed", set_gpu_fan_speed(fan.device_index, fan.fan_id, fan.speed));
+        } else {
+            record("set_gpu_fan_auto", set_gpu_fan_auto(fan.device_index, fan.fan_id));
+        }
+    }
+    failures
+}
+
+fn apply_profile_inner(profile: &Profile) -> Result<(bool, Vec<String>)> {
+    let mut cpu_warnings: Vec<String> = Vec::new();
+
+    // Mode switches first: active-vs-passive changes which governors the
+    // kernel offers, so the mode must be in place before the governor write.
+    if let Some(ref amd_status) = profile.cpu_settings.amd_pstate_status {
+        set_amd_pstate_status(amd_status)?;
+    }
+
+    if let Some(ref intel_status) = profile.cpu_settings.intel_pstate_status {
+        set_intel_pstate_status(intel_status)?;
+    }
+
     // Apply CPU settings
     if let Some(ref governor) = profile.cpu_settings.governor {
-        set_cpu_governor(governor)?;
+        if let Err(e) = set_cpu_governor(governor) {
+            if e.downcast_ref::<GovernorUnavailable>().is_some() {
+                // A mode conflict, not a profile error: report it clearly and
+                // keep applying the remaining independent steps.
+                log::warn!(target: "hw.cpu", "{e}");
+                cpu_warnings.push(format!("set_cpu_governor: {e}"));
+            } else {
+                return Err(e);
+            }
+        }
     }
     
     if let Some(ref tdp_profile) = profile.cpu_settings.tdp_profile {
@@ -607,14 +968,6 @@ fn apply_profile_inner(profile: &Profile) -> Result<()> {
                 let _ = io.set_tdp(2, val);
             }
         }
-    }
-    
-    if let Some(ref amd_status) = profile.cpu_settings.amd_pstate_status {
-        set_amd_pstate_status(amd_status)?;
-    }
-
-    if let Some(ref intel_status) = profile.cpu_settings.intel_pstate_status {
-        set_intel_pstate_status(intel_status)?;
     }
     
     if let Some(ref epp) = profile.cpu_settings.energy_performance_preference {
@@ -642,51 +995,160 @@ fn apply_profile_inner(profile: &Profile) -> Result<()> {
             .unwrap_or(0)
     };
 
-    if let Some(limit) = profile.gpu_settings.power_limit {
-        let _ = set_gpu_power_limit(nvidia_gpu_idx, limit);
-    }
+    let (gpu_deferred, gpu_failures) = {
+        let mut pending = lock_or_recover(&PENDING_GPU_SETTINGS, "PENDING_GPU_SETTINGS");
+        match attempt_gpu_step(nvidia_gpu_idx, &profile.gpu_settings, crate::hardware_detection::gpu_write_allowed, apply_gpu_static) {
+            Some((failures, consumed)) => {
+                // Same consumption rule as the deferred retry: a gate refusal
+                // that lands mid-apply keeps this profile's step pending so the
+                // refused operations are retried once the adapter is writable.
+                *pending = pending_after_profile_apply(consumed, PendingGpuStep {
+                    idx: nvidia_gpu_idx,
+                    settings: profile.gpu_settings.clone(),
+                    origin: PendingGpuOrigin::ProfileApply,
+                });
+                warn_gpu_failures("profile GPU apply", nvidia_gpu_idx, &failures);
+                (!consumed, failures)
+            }
+            None => {
+                log::debug!(target: "hw.gpu", "profile GPU writes deferred gpu={}", nvidia_gpu_idx);
+                *pending = pending_after_profile_apply(false, PendingGpuStep {
+                    idx: nvidia_gpu_idx,
+                    settings: profile.gpu_settings.clone(),
+                    origin: PendingGpuOrigin::ProfileApply,
+                });
+                (true, Vec::new())
+            }
+        }
+    };
 
-    if let Some(core_offset) = profile.gpu_settings.core_offset {
-        let _ = set_gpu_core_offset(nvidia_gpu_idx, core_offset as f32);
-    }
-
-    if let Some(memory_offset) = profile.gpu_settings.memory_offset {
-        let _ = set_gpu_memory_offset(nvidia_gpu_idx, memory_offset as f32);
-    }
-
-    if let (Some(min_clock), Some(max_clock)) = (profile.gpu_settings.min_gpu_clock, profile.gpu_settings.max_gpu_clock) {
-        let _ = set_gpu_locked_clocks(nvidia_gpu_idx, min_clock, max_clock);
-    } else {
-        let _ = reset_gpu_clocks(nvidia_gpu_idx);
-    }
-    
     if let Some(boost) = profile.cpu_settings.boost {
         set_cpu_boost(boost)?;
     }
-    
+
     if let Some(smt) = profile.cpu_settings.smt {
         set_smt(smt)?;
     }
-    
+
     // Apply keyboard settings
     apply_keyboard_settings(&profile.keyboard_settings)?;
-    
+
     // Apply screen settings
     apply_screen_settings(&profile.screen_settings)?;
-    
+
     // Apply fan settings - update daemon state
     apply_fan_settings(&profile.fan_settings)?;
 
-    // Apply NVIDIA fan settings
-    for fan_setting in &profile.gpu_settings.nvidia_fans {
-        if fan_setting.manual {
-            let _ = set_gpu_fan_speed(fan_setting.device_index, fan_setting.fan_id, fan_setting.speed);
-        } else {
-            let _ = set_gpu_fan_auto(fan_setting.device_index, fan_setting.fan_id);
+    let mut warnings = cpu_warnings;
+    warnings.extend(profile_gpu_result(&gpu_failures)?);
+    Ok((gpu_deferred, warnings))
+}
+
+/// Pending GPU state after a profile apply attempt. Pure so the rule is testable.
+/// A consumed attempt (every operation reached a final outcome) leaves nothing
+/// pending — this also drops a step deferred by an earlier profile. An attempt
+/// that must be retried (the write gate closed mid-apply, or the pre-check
+/// refused) stores the newest profile's step (origin ProfileApply).
+pub fn pending_after_profile_apply(consumed: bool, deferred: PendingGpuStep) -> Option<PendingGpuStep> {
+    if consumed { None } else { Some(deferred) }
+}
+
+/// What LAST_APPLIED_PROFILE becomes after an apply: the profile only when
+/// every step (including the GPU one) reached a final outcome; cleared while
+/// a GPU step is still pending, so hardware that has already moved on cannot
+/// be skipped against a stale marker (A -> B deferred -> A).
+fn marker_after_apply(gpu_deferred: bool, profile: &Profile) -> Option<Profile> {
+    if gpu_deferred { None } else { Some(profile.clone()) }
+}
+
+/// Split classified GPU failures into non-fatal warnings (operations the
+/// adapter does not support — retrying them is pointless) and fatal details
+/// (everything else). Pure so the policy is testable without hardware.
+fn split_gpu_failures(failures: &[GpuOpFailure]) -> (Vec<String>, Vec<String>) {
+    let mut warnings = Vec::new();
+    let mut fatal = Vec::new();
+    for f in failures {
+        let entry = format!("{}: {}", f.op, f.message);
+        match f.kind {
+            GpuOpFailureKind::Unsupported => warnings.push(entry),
+            _ => fatal.push(entry),
         }
     }
+    (warnings, fatal)
+}
 
-    Ok(())
+/// A profile apply fails only for genuine (non-unsupported) GPU failures;
+/// explicitly unsupported operations come back as warnings for the caller to
+/// report to the user.
+fn profile_gpu_result(failures: &[GpuOpFailure]) -> Result<Vec<String>> {
+    let (warnings, fatal) = split_gpu_failures(failures);
+    if !fatal.is_empty() {
+        return Err(anyhow!("profile GPU apply failed: {}", fatal.join("; ")));
+    }
+    Ok(warnings)
+}
+
+/// Summarise failed GPU operations from `apply_gpu_static` in one line per
+/// class: unsupported operations are warnings, everything else a failure.
+fn warn_gpu_failures(ctx: &str, idx: u32, failures: &[GpuOpFailure]) {
+    if failures.is_empty() {
+        return;
+    }
+    let (warnings, fatal) = split_gpu_failures(failures);
+    if !warnings.is_empty() {
+        log::warn!(target: "hw.gpu", "{ctx} gpu={idx}: {} unsupported operation(s) skipped: {}", warnings.len(), warnings.join("; "));
+    }
+    if !fatal.is_empty() {
+        log::warn!(target: "hw.gpu", "{ctx} gpu={idx}: {} operation(s) failed: {}", fatal.len(), fatal.join("; "));
+    }
+}
+
+#[cfg(test)]
+mod profile_gpu_result_tests {
+    use super::{profile_gpu_result, split_gpu_failures, GpuOpFailure, GpuOpFailureKind};
+
+    fn failure(op: &'static str, kind: GpuOpFailureKind) -> GpuOpFailure {
+        GpuOpFailure { op, message: format!("{op} refused"), kind }
+    }
+
+    #[test]
+    fn unsupported_only_is_a_warning_not_an_error() {
+        let failures = vec![failure("set_gpu_power_limit", GpuOpFailureKind::Unsupported)];
+        let warnings = profile_gpu_result(&failures).expect("unsupported ops must not fail the profile");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("set_gpu_power_limit"));
+    }
+
+    #[test]
+    fn unsupported_operation_beside_applied_ones_is_only_a_warning() {
+        // Operations that succeeded produce no failure entries, so a list
+        // holding only the unsupported op models the mixed case: the profile
+        // must succeed and carry exactly that warning.
+        let failures = vec![failure("set_gpu_power_limit", GpuOpFailureKind::Unsupported)];
+        let (warnings, fatal) = split_gpu_failures(&failures);
+        assert_eq!(warnings.len(), 1);
+        assert!(fatal.is_empty(), "applied operations must not become fatal");
+        assert!(profile_gpu_result(&failures).is_ok());
+    }
+
+    #[test]
+    fn genuine_failure_rejects_the_profile() {
+        let failures = vec![failure("set_gpu_core_offset", GpuOpFailureKind::Failed)];
+        let err = profile_gpu_result(&failures).unwrap_err();
+        assert!(err.to_string().contains("set_gpu_core_offset"), "error must name the failing op: {err}");
+    }
+
+    #[test]
+    fn unsupported_and_genuine_failure_together_still_reject() {
+        let failures = vec![
+            failure("set_gpu_power_limit", GpuOpFailureKind::Unsupported),
+            failure("set_gpu_core_offset", GpuOpFailureKind::Failed),
+        ];
+        let (warnings, fatal) = split_gpu_failures(&failures);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(fatal.len(), 1);
+        assert!(profile_gpu_result(&failures).is_err());
+    }
 }
 
 pub fn apply_battery_settings(settings: &BatterySettings) -> Result<()> {
@@ -906,72 +1368,218 @@ pub fn get_nvml() -> Result<&'static Nvml> {
     }
 }
 
-pub fn set_gpu_locked_clocks(device_index: u32, min_clock: u32, max_clock: u32) -> Result<()> {
+pub(crate) fn gpu_utilization_percent(index: u32) -> Result<f32> {
     let nvml = get_nvml()?;
-    let mut device = nvml.device_by_index(device_index)?;
-    device.set_gpu_locked_clocks(GpuLockedClocksSetting::Numeric {
-        min_clock_mhz: min_clock,
-        max_clock_mhz: max_clock,
-    })?;
-    Ok(())
+    let device = nvml.device_by_index(index)?;
+    Ok(device.utilization_rates()?.gpu as f32)
 }
 
+/// Typed refusal from the runtime write gate: the adapter is not writable
+/// right now. Callers distinguish this transient state from permanent
+/// failures (see `classify_gpu_failure`), so a deferred step can stay pending
+/// until the adapter wakes instead of being dropped.
+#[derive(Debug)]
+pub(crate) struct GpuGateClosed {
+    pub device_index: u32,
+}
+
+impl std::fmt::Display for GpuGateClosed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "GPU {} is not writable in its current runtime state; retry when it is active",
+            self.device_index
+        )
+    }
+}
+
+impl std::error::Error for GpuGateClosed {}
+
+fn with_gpu_write_gate<T>(
+    device_index: u32,
+    is_writable: impl FnOnce(u32) -> bool,
+    write: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    if !is_writable(device_index) {
+        return Err(anyhow::Error::new(GpuGateClosed { device_index }));
+    }
+    write()
+}
+
+/// Why one GPU operation failed. This decides retry and reporting policy:
+/// `Unsupported` is a permanent property of the adapter (warn, never retry);
+/// `GateClosed` is a transient runtime-PM refusal (retry once writable);
+/// `Failed` is anything else (report; do not retain a deferred slot for it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GpuOpFailureKind {
+    Unsupported,
+    GateClosed,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct GpuOpFailure {
+    pub op: &'static str,
+    pub message: String,
+    pub kind: GpuOpFailureKind,
+}
+
+/// Classify a GPU operation error structurally — typed marker errors and the
+/// NVML error code, never the human-readable message.
+pub(crate) fn classify_gpu_failure(error: &anyhow::Error) -> GpuOpFailureKind {
+    if error.downcast_ref::<GpuGateClosed>().is_some() {
+        return GpuOpFailureKind::GateClosed;
+    }
+    if let Some(NvmlError::NotSupported) = error.downcast_ref::<NvmlError>() {
+        return GpuOpFailureKind::Unsupported;
+    }
+    GpuOpFailureKind::Failed
+}
+
+#[cfg(test)]
+mod gpu_write_gate_tests {
+    use super::with_gpu_write_gate;
+    use std::cell::Cell;
+
+    #[test]
+    fn direct_mutation_entrypoint_does_not_write_when_gpu_is_non_writable() {
+        let writes = Cell::new(0);
+        let result = with_gpu_write_gate(0, |_| false, || {
+            writes.set(writes.get() + 1);
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert_eq!(writes.get(), 0);
+    }
+
+    #[test]
+    fn active_and_unsupported_runtime_states_remain_writable() {
+        for runtime_status in ["active", "unsupported"] {
+            let result = with_gpu_write_gate(0, |_| matches!(runtime_status, "active" | "unsupported"), || Ok(7));
+            assert_eq!(result.unwrap(), 7);
+        }
+    }
+}
+
+#[cfg(test)]
+mod gpu_failure_classification_tests {
+    use super::{apply_gpu_static, classify_gpu_failure, with_gpu_write_gate, GpuOpFailureKind};
+    use lapsphere_common::types::{GpuSettings, NvidiaFanSettings};
+
+    #[test]
+    fn gate_closure_classifies_as_gate_closed() {
+        let err = with_gpu_write_gate(0, |_| false, || Ok(())).unwrap_err();
+        assert_eq!(classify_gpu_failure(&err), GpuOpFailureKind::GateClosed);
+    }
+
+    #[test]
+    fn nvml_not_supported_classifies_as_unsupported_and_other_errors_as_failed() {
+        let unsupported = anyhow::Error::new(nvml_wrapper::error::NvmlError::NotSupported);
+        assert_eq!(classify_gpu_failure(&unsupported), GpuOpFailureKind::Unsupported);
+        let other = anyhow::anyhow!("disk exploded");
+        assert_eq!(classify_gpu_failure(&other), GpuOpFailureKind::Failed);
+    }
+
+    #[test]
+    fn every_gpu_operation_is_attempted_even_after_a_refusal() {
+        // NVML index 999 has no sysfs mapping, so the runtime gate refuses
+        // every operation deterministically, on any host and without touching
+        // NVML. All five operation groups must still be attempted and
+        // classified — proof the sequence continues past the first failure.
+        let g = GpuSettings {
+            power_limit: Some(150),
+            core_offset: Some(100.0),
+            memory_offset: Some(500.0),
+            min_gpu_clock: Some(405),
+            max_gpu_clock: Some(1750),
+            nvidia_fans: vec![NvidiaFanSettings { device_index: 999, fan_id: 0, speed: 50, manual: true }],
+            ..GpuSettings::default()
+        };
+        let failures = apply_gpu_static(999, &g);
+        assert_eq!(failures.len(), 5, "one failure per attempted operation group: {failures:?}");
+        assert!(failures.iter().all(|f| f.kind == GpuOpFailureKind::GateClosed));
+    }
+}
+
+pub fn set_gpu_locked_clocks(device_index: u32, min_clock: u32, max_clock: u32) -> Result<()> {
+    with_gpu_write_gate(device_index, crate::hardware_detection::gpu_write_allowed, || {
+        let nvml = get_nvml()?;
+        let mut device = nvml.device_by_index(device_index)?;
+        device.set_gpu_locked_clocks(GpuLockedClocksSetting::Numeric {
+            min_clock_mhz: min_clock,
+            max_clock_mhz: max_clock,
+        })?;
+        Ok(())
+    })
+}
 
 pub fn reset_gpu_clocks(device_index: u32) -> Result<()> {
-    let nvml = get_nvml()?;
-    let mut device = nvml.device_by_index(device_index)?;
-    device.reset_gpu_locked_clocks()?;
-    Ok(())
+    with_gpu_write_gate(device_index, crate::hardware_detection::gpu_write_allowed, || {
+        let nvml = get_nvml()?;
+        let mut device = nvml.device_by_index(device_index)?;
+        device.reset_gpu_locked_clocks()?;
+        Ok(())
+    })
 }
 
 pub fn set_gpu_core_offset(device_index: u32, offset: f32) -> Result<()> {
-    let nvml = get_nvml()?;
-    let mut device = nvml.device_by_index(device_index)?;
-    device.set_clock_offset(Clock::Graphics, PerformanceState::Zero, offset.round() as i32)?;
-    {
-        let mut map = lock_or_recover(&crate::MANUAL_GPU_OFFSETS, "MANUAL_GPU_OFFSETS");
-        let entry = map.entry(device_index).or_insert((0.0, 0.0));
-        entry.0 = offset;
-    }
-    log::info!(target: "hw.gpu", "set_core_offset gpu={} offset={} offset_rounded={}", device_index, offset, offset.round());
-    Ok(())
+    with_gpu_write_gate(device_index, crate::hardware_detection::gpu_write_allowed, || {
+        let nvml = get_nvml()?;
+        let mut device = nvml.device_by_index(device_index)?;
+        device.set_clock_offset(Clock::Graphics, PerformanceState::Zero, offset.round() as i32)?;
+        {
+            let mut map = lock_or_recover(&crate::MANUAL_GPU_OFFSETS, "MANUAL_GPU_OFFSETS");
+            let entry = map.entry(device_index).or_insert((0.0, 0.0));
+            entry.0 = offset;
+        }
+        log::info!(target: "hw.gpu", "set_core_offset gpu={} offset={} offset_rounded={}", device_index, offset, offset.round());
+        Ok(())
+    })
 }
 
 pub fn set_gpu_memory_offset(device_index: u32, offset: f32) -> Result<()> {
-    let nvml = get_nvml()?;
-    let mut device = nvml.device_by_index(device_index)?;
-    device.set_clock_offset(Clock::Memory, PerformanceState::Zero, offset.round() as i32)?;
-    {
-        let mut map = lock_or_recover(&crate::MANUAL_GPU_OFFSETS, "MANUAL_GPU_OFFSETS");
-        let entry = map.entry(device_index).or_insert((0.0, 0.0));
-        entry.1 = offset;
-    }
-    log::info!(target: "hw.gpu", "set_mem_offset gpu={} offset={} offset_rounded={}", device_index, offset, offset.round());
-    Ok(())
+    with_gpu_write_gate(device_index, crate::hardware_detection::gpu_write_allowed, || {
+        let nvml = get_nvml()?;
+        let mut device = nvml.device_by_index(device_index)?;
+        device.set_clock_offset(Clock::Memory, PerformanceState::Zero, offset.round() as i32)?;
+        {
+            let mut map = lock_or_recover(&crate::MANUAL_GPU_OFFSETS, "MANUAL_GPU_OFFSETS");
+            let entry = map.entry(device_index).or_insert((0.0, 0.0));
+            entry.1 = offset;
+        }
+        log::info!(target: "hw.gpu", "set_mem_offset gpu={} offset={} offset_rounded={}", device_index, offset, offset.round());
+        Ok(())
+    })
 }
 
 pub fn set_gpu_power_limit(device_index: u32, limit_watts: u32) -> Result<()> {
-    let nvml = get_nvml()?;
-    let mut device = nvml.device_by_index(device_index)?;
-    device.set_power_management_limit(limit_watts * 1000)?; // Watts to mW
-    log::info!(target: "hw.gpu", "set_power_limit gpu={} limit={}W", device_index, limit_watts);
-    Ok(())
+    with_gpu_write_gate(device_index, crate::hardware_detection::gpu_write_allowed, || {
+        let nvml = get_nvml()?;
+        let mut device = nvml.device_by_index(device_index)?;
+        device.set_power_management_limit(limit_watts * 1000)?;
+        log::info!(target: "hw.gpu", "set_power_limit gpu={} limit={}W", device_index, limit_watts);
+        Ok(())
+    })
 }
 
 pub fn set_gpu_fan_speed(device_index: u32, fan_index: u32, speed_percent: u32) -> Result<()> {
-    let nvml = get_nvml()?;
-    let mut device = nvml.device_by_index(device_index)?;
-    device.set_fan_speed(fan_index, speed_percent)?;
-    log::info!(target: "hw.gpu", "set_fan_speed gpu={} fan={} speed={}%", device_index, fan_index, speed_percent);
-    Ok(())
+    with_gpu_write_gate(device_index, crate::hardware_detection::gpu_write_allowed, || {
+        let nvml = get_nvml()?;
+        let mut device = nvml.device_by_index(device_index)?;
+        device.set_fan_speed(fan_index, speed_percent)?;
+        log::info!(target: "hw.gpu", "set_fan_speed gpu={} fan={} speed={}%", device_index, fan_index, speed_percent);
+        Ok(())
+    })
 }
 
 pub fn set_gpu_fan_auto(device_index: u32, fan_index: u32) -> Result<()> {
-    let nvml = get_nvml()?;
-    let mut device = nvml.device_by_index(device_index)?;
-    device.set_default_fan_speed(fan_index)?;
-    log::info!(target: "hw.gpu", "set_fan_auto gpu={} fan={}", device_index, fan_index);
-    Ok(())
+    with_gpu_write_gate(device_index, crate::hardware_detection::gpu_write_allowed, || {
+        let nvml = get_nvml()?;
+        let mut device = nvml.device_by_index(device_index)?;
+        device.set_default_fan_speed(fan_index)?;
+        log::info!(target: "hw.gpu", "set_fan_auto gpu={} fan={}", device_index, fan_index);
+        Ok(())
+    })
 }
 
 fn find_binary(cmd: &str) -> Option<String> {
@@ -1065,24 +1673,6 @@ pub fn set_energy_performance_preference(epp: &str) -> Result<()> {
     }
 
     log::info!(target: "hw.cpu", "set_epp preference=\"{}\"", epp);
-    Ok(())
-}
-
-/// Apply an EPP preference to every CPU/policy.
-///
-/// This is the explicit "all CPUs" entry point. It writes exactly the target set
-/// returned by [`existing_epp_paths`] — the same list
-/// `set_energy_performance_preference` uses — and nothing else, so the function
-/// and [`guard_sysfs_write`] cannot disagree about what is writable (the test
-/// `epp_write_targets_stay_inside_the_allowlist` pins that with synthetic CPU
-/// numbers). It previously also attempted
-/// `/sys/devices/system/cpu/cpufreq/energy_performance_preference`, which is not
-/// an attribute in the kernel's cpufreq layout and is not on the allowlist: that
-/// branch could only ever be skipped (path absent) or rejected by the guard.
-pub fn set_all_cpu_epp(epp: &str) -> Result<()> {
-    set_energy_performance_preference(epp)?;
-
-    log::info!(target: "hw.cpu", "set_all_cpu_epp preference={}", epp);
     Ok(())
 }
 
@@ -1512,12 +2102,8 @@ mod tests {
     /// Every target the EPP entry points can write stays inside the allowlist,
     /// and the policy-level parent path stays out.
     ///
-    /// `set_all_cpu_epp` used to write
-    /// `/sys/devices/system/cpu/cpufreq/energy_performance_preference`, which is
-    /// not an attribute in the kernel's layout (that directory holds `policyN/`
-    /// and `boost`) and is not on the allowlist — so the guard could only reject
-    /// it. The policy attribute is addressed through the per-CPU aliases, which
-    /// are symlinks into `cpufreq/policyN`.
+    /// The policy-level `cpufreq/energy_performance_preference` is not a kernel
+    /// attribute and is not on the allowlist; EPP is addressed per CPU.
     #[test]
     fn epp_write_targets_stay_inside_the_allowlist() {
         // Synthetic CPU numbers: the contract, not this machine's CPU count.
@@ -1545,31 +2131,13 @@ mod tests {
         }
     }
 
-    /// The function itself must not address a path the allowlist refuses, and
-    /// that is not observable through `Path::exists()` on a host where the
-    /// attribute is absent. Pin it at the source level instead: the old body
-    /// addressed `/sys/devices/system/cpu/cpufreq/energy_performance_preference`
-    /// (the policy parent directory, which holds `policyN/` and `boost`), so this
-    /// test fails if that branch ever comes back.
+    /// The policy-level EPP path is a directory-level attribute that does not
+    /// exist in the kernel layout, so it must stay off the allowlist.
     #[test]
-    fn epp_entry_points_never_address_the_policy_parent_directory() {
-        let offending = "/sys/devices/system/cpu/cpufreq/energy_performance_preference";
+    fn policy_parent_epp_path_is_not_allowlisted() {
         assert!(
-            !is_allowed_sysfs_path(offending),
+            !is_allowed_sysfs_path("/sys/devices/system/cpu/cpufreq/energy_performance_preference"),
             "the policy parent directory must not become writable"
-        );
-
-        let source = include_str!("hardware_control.rs");
-        let body = source
-            .split("pub fn set_all_cpu_epp")
-            .nth(1)
-            .expect("set_all_cpu_epp is missing from the source");
-        // Bound the body at the function's own closing brace (the first line that
-        // is exactly "}"), so the scan cannot run on into unrelated code.
-        let body = body.split("\n}").next().unwrap_or(body);
-        assert!(
-            !body.contains(offending),
-            "set_all_cpu_epp addresses the policy parent directory again:\n{body}"
         );
     }
 
@@ -1607,8 +2175,9 @@ mod tests {
         ));
     }
 
-    /// A profile whose earliest hardware step fails: `set_cpu_governor` runs
-    /// first in `apply_profile_inner` and "invalid-governor-token" is not on
+    /// A profile whose earliest executed hardware step fails:
+    /// `set_cpu_governor` is the first step this profile runs (it sets no
+    /// pstate fields) and "invalid-governor-token" is not on
     /// GOVERNOR_ALLOWLIST, so `guard_sysfs_write` rejects it on any host.
     fn failing_profile() -> Profile {
         Profile {
@@ -1666,6 +2235,16 @@ mod tests {
                 (if this fires only under parallel cargo test, the cause is a sibling test's \
                 write to this process-global, not a regression — rerun with --test-threads=1)");
         }
+    }
+
+    #[test]
+    fn deferred_apply_clears_the_marker_instead_of_keeping_a_stale_one() {
+        // The marker is a dedup key, not a completeness claim: while a GPU
+        // step is pending, an older profile must not stay skippable as
+        // "already applied" (A -> B deferred -> A must re-apply A).
+        let p = failing_profile();
+        assert_eq!(marker_after_apply(false, &p), Some(p.clone()));
+        assert_eq!(marker_after_apply(true, &p), None);
     }
 
     #[test]
@@ -1760,5 +2339,302 @@ mod tests {
             let g2 = crate::DAEMON_LOGS.lock().unwrap();
             assert!(g2.capacity() >= 500);
         }
+    }
+}
+
+#[cfg(test)]
+mod governor_availability_tests {
+    use super::{governor_in_available_list, GovernorUnavailable};
+
+    #[test]
+    fn list_check_tolerates_sysfs_whitespace() {
+        let passive = "conservative ondemand userspace powersave performance schedutil ";
+        let active = "performance powersave";
+        assert!(governor_in_available_list("ondemand", passive));
+        assert!(governor_in_available_list("powersave", active));
+        assert!(!governor_in_available_list("ondemand", active));
+        assert!(!governor_in_available_list("conservative", active));
+    }
+
+    #[test]
+    fn unavailable_governor_error_names_value_and_list() {
+        let err = GovernorUnavailable {
+            governor: "ondemand".to_string(),
+            available: "performance powersave".to_string(),
+        };
+        let text = err.to_string();
+        assert!(text.contains("ondemand"), "{text}");
+        assert!(text.contains("performance powersave"), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod pending_supersede_tests {
+    use super::{consume_pending_locked, pending_after_profile_apply, PendingGpuStep};
+    use lapsphere_common::types::{GpuSettings, PendingGpuOrigin};
+    use std::sync::{mpsc, Arc, Mutex};
+    use std::time::Duration;
+
+    fn settings(core: f32) -> GpuSettings {
+        GpuSettings {
+            core_offset: Some(core),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn pending_value_is_consumed_after_application() {
+        let slot = Mutex::new(Some(7));
+        assert_eq!(consume_pending_locked(&slot, "test", |value| Some((*value * 2, true))), Some(14));
+        assert_eq!(*slot.lock().unwrap(), None);
+        assert_eq!(consume_pending_locked(&slot, "test", |value| Some((*value, true))), None);
+    }
+
+    #[test]
+    fn replacing_pending_settings_keeps_the_newest_request() {
+        let slot = Mutex::new(Some((0u32, settings(-50.0))));
+        *slot.lock().unwrap() = Some((0u32, settings(-100.0)));
+        assert_eq!(slot.lock().unwrap().as_ref().unwrap().1.core_offset, Some(-100.0));
+    }
+
+    #[test]
+    fn apply_a_then_concurrent_b_replacement_leaves_b_pending() {
+        let slot = Arc::new(Mutex::new(Some('A')));
+        let (apply_started_tx, apply_started_rx) = mpsc::channel();
+        let (finish_apply_tx, finish_apply_rx) = mpsc::channel();
+        let worker_slot = Arc::clone(&slot);
+        let worker = std::thread::spawn(move || {
+            consume_pending_locked(&worker_slot, "test", |value| {
+                apply_started_tx.send(*value).unwrap();
+                finish_apply_rx.recv().unwrap();
+                Some((*value, true))
+            })
+        });
+        assert_eq!(apply_started_rx.recv_timeout(Duration::from_secs(1)).unwrap(), 'A');
+
+        let (replace_started_tx, replace_started_rx) = mpsc::channel();
+        let (replace_done_tx, replace_done_rx) = mpsc::channel();
+        let replace_slot = Arc::clone(&slot);
+        let replacer = std::thread::spawn(move || {
+            replace_started_tx.send(()).unwrap();
+            *replace_slot.lock().unwrap() = Some('B');
+            replace_done_tx.send(()).unwrap();
+        });
+        replace_started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(replace_done_rx.recv_timeout(Duration::from_millis(20)).is_err());
+
+        finish_apply_tx.send(()).unwrap();
+        assert_eq!(worker.join().unwrap(), Some('A'));
+        replace_done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        replacer.join().unwrap();
+        assert_eq!(consume_pending_locked(&slot, "test", |value| Some((*value, true))), Some('B'));
+        assert_eq!(*slot.lock().unwrap(), None);
+    }
+
+    #[test]
+    fn deferred_a_then_applied_b_leaves_only_b_and_no_pending() {
+        let step = |core: f32| PendingGpuStep {
+            idx: 0,
+            settings: settings(core),
+            origin: PendingGpuOrigin::ProfileApply,
+        };
+        let after_a = pending_after_profile_apply(false, step(-50.0));
+        assert_eq!(after_a.as_ref().map(|s| s.settings.core_offset), Some(Some(-50.0)));
+        let after_b = pending_after_profile_apply(true, step(-100.0));
+        assert_eq!(after_b, None);
+    }
+}
+
+#[cfg(test)]
+mod pending_gate_race_tests {
+    use super::{attempt_gpu_step, consume_pending_locked, pending_after_profile_apply, pending_consumed_after_attempt, GpuOpFailure, GpuOpFailureKind, PendingGpuStep};
+    use lapsphere_common::types::{GpuSettings, PendingGpuOrigin};
+    use std::sync::Mutex;
+
+    fn settings() -> GpuSettings {
+        GpuSettings {
+            core_offset: Some(-100.0),
+            ..Default::default()
+        }
+    }
+
+    fn failure(op: &'static str, kind: GpuOpFailureKind) -> GpuOpFailure {
+        GpuOpFailure { op, message: format!("{op} refused"), kind }
+    }
+
+    #[test]
+    fn gate_passing_then_denying_keeps_settings_pending_until_writable() {
+        let slot = Mutex::new(Some((0u32, settings())));
+
+        // Tick 1: the pre-check passes (the adapter looked writable), then the
+        // gate refuses an operation mid-apply. The classified failure list is
+        // what `apply_pending_gpu` builds from `apply_gpu_static`; the slot
+        // must stay pending.
+        let first = consume_pending_locked(&slot, "test", |(idx, _)| {
+            let failures = vec![failure("set_gpu_core_offset", GpuOpFailureKind::GateClosed)];
+            let consumed = pending_consumed_after_attempt(&failures);
+            Some(((*idx, failures), consumed))
+        });
+        assert!(first.is_some());
+        assert!(slot.lock().unwrap().is_some(), "a mid-apply gate refusal must keep the deferred settings pending");
+
+        // Tick 2: the adapter is writable again and every operation succeeds;
+        // the slot is consumed.
+        let second = consume_pending_locked(&slot, "test", |(idx, _)| {
+            let failures: Vec<GpuOpFailure> = Vec::new();
+            let consumed = pending_consumed_after_attempt(&failures);
+            Some(((*idx, failures), consumed))
+        });
+        assert!(second.is_some());
+        assert!(slot.lock().unwrap().is_none(), "a clean writable tick must consume the settings");
+    }
+
+    #[test]
+    fn permanent_outcomes_consume_the_pending_slot() {
+        // No failures: consumed.
+        assert!(pending_consumed_after_attempt(&[]));
+        // Unsupported only: consumed — retrying an unsupported op forever
+        // would be a loop with no exit.
+        assert!(pending_consumed_after_attempt(&[failure("set_gpu_power_limit", GpuOpFailureKind::Unsupported)]));
+        // Genuine failure: consumed — retrying does not fix it.
+        assert!(pending_consumed_after_attempt(&[failure("set_gpu_core_offset", GpuOpFailureKind::Failed)]));
+        // Transient gate refusal present: kept, even beside permanent outcomes.
+        assert!(!pending_consumed_after_attempt(&[failure("set_gpu_core_offset", GpuOpFailureKind::GateClosed)]));
+        assert!(!pending_consumed_after_attempt(&[
+            failure("set_gpu_core_offset", GpuOpFailureKind::GateClosed),
+            failure("set_gpu_power_limit", GpuOpFailureKind::Unsupported),
+        ]));
+    }
+
+    #[test]
+    fn immediate_apply_keeps_the_newest_settings_when_the_gate_closes_mid_apply() {
+        // The immediate apply's production decision path: attempt_gpu_step
+        // (shared with the deferred retry) + pending_after_profile_apply,
+        // driven with injected gate and operation functions.
+        let settings = settings();
+        let slot = Mutex::new(None::<PendingGpuStep>);
+
+        // The pre-check passes; an individual operation is then refused with
+        // the typed GpuGateClosed failure.
+        let (failures, consumed) = attempt_gpu_step(0, &settings, |_| true, |_, _| {
+            vec![failure("set_gpu_core_offset", GpuOpFailureKind::GateClosed)]
+        })
+        .expect("the pre-check passed");
+        assert!(!consumed);
+        assert_eq!(failures.len(), 1);
+
+        // The immediate-apply decision stores the step for retry instead of
+        // discarding it.
+        *slot.lock().unwrap() = pending_after_profile_apply(consumed, PendingGpuStep {
+            idx: 0,
+            settings: settings.clone(),
+            origin: PendingGpuOrigin::ProfileApply,
+        });
+        assert!(slot.lock().unwrap().is_some(), "a mid-apply gate refusal must keep the settings pending");
+
+        // The next writable attempt applies everything and consumes the slot.
+        let (failures, consumed) = attempt_gpu_step(0, &settings, |_| true, |_, _| Vec::new())
+            .expect("the pre-check passed");
+        assert!(failures.is_empty());
+        assert!(consumed);
+        *slot.lock().unwrap() = pending_after_profile_apply(consumed, PendingGpuStep {
+            idx: 0,
+            settings,
+            origin: PendingGpuOrigin::ProfileApply,
+        });
+        assert!(slot.lock().unwrap().is_none(), "a final attempt must clear the slot");
+    }
+
+    #[test]
+    fn deferred_retry_keeps_then_consumes_through_the_shared_attempt_path() {
+        // The deferred retry's production path: consume_pending_locked +
+        // attempt_gpu_step, with the same injected gate/operation functions.
+        let slot = Mutex::new(Some((0u32, settings())));
+
+        // Tick 1: pre-check passes, an operation is refused mid-apply — the
+        // slot stays pending.
+        let first = consume_pending_locked(&slot, "test", |(idx, s)| {
+            attempt_gpu_step(*idx, s, |_| true, |_, _| {
+                vec![failure("set_gpu_core_offset", GpuOpFailureKind::GateClosed)]
+            })
+            .map(|(failures, consumed)| ((*idx, failures), consumed))
+        });
+        assert!(first.is_some());
+        assert!(slot.lock().unwrap().is_some(), "a mid-apply gate refusal must keep the settings pending");
+
+        // Tick 2: the adapter is writable and every operation succeeds — the
+        // slot is consumed.
+        let second = consume_pending_locked(&slot, "test", |(idx, s)| {
+            attempt_gpu_step(*idx, s, |_| true, |_, _| Vec::new())
+                .map(|(failures, consumed)| ((*idx, failures), consumed))
+        });
+        assert!(second.is_some());
+        assert!(slot.lock().unwrap().is_none(), "a clean writable tick must consume the settings");
+    }
+
+    #[test]
+    fn gate_pre_check_refusal_keeps_settings_without_attempting() {
+        let slot = Mutex::new(Some((0u32, settings())));
+        let mut attempted = false;
+        let result = consume_pending_locked(&slot, "test", |(idx, s)| {
+            attempt_gpu_step(*idx, s, |_| false, |_, _| {
+                attempted = true;
+                Vec::new()
+            })
+            .map(|(failures, consumed)| ((*idx, failures), consumed))
+        });
+        assert!(result.is_none(), "a refused pre-check must not consume the slot");
+        assert!(!attempted, "a refused pre-check must not run operations");
+        assert!(slot.lock().unwrap().is_some());
+    }
+}
+
+#[cfg(test)]
+mod deferred_report_tests {
+    use super::{publish_deferred_gpu_report, take_deferred_gpu_report, GpuOpFailure, GpuOpFailureKind};
+    use lapsphere_common::types::{DeferredGpuOutcome, PendingGpuOrigin};
+
+    fn failure(op: &'static str, kind: GpuOpFailureKind) -> GpuOpFailure {
+        GpuOpFailure { op, message: format!("{op} refused"), kind }
+    }
+
+    #[test]
+    fn deferred_reports_are_taken_once_and_clean_completions_end_the_series() {
+        // Single test owns this process-global; drain anything a sibling left.
+        let _ = take_deferred_gpu_report();
+
+        // A profile apply that skipped an unsupported op publishes a warning
+        // tagged with its origin.
+        let unsupported = vec![failure("set_gpu_power_limit", GpuOpFailureKind::Unsupported)];
+        publish_deferred_gpu_report(PendingGpuOrigin::ProfileApply, &unsupported);
+        let report = take_deferred_gpu_report().expect("a warning outcome must be queued");
+        assert_eq!(report.outcome, DeferredGpuOutcome::AppliedWithWarnings);
+        assert_eq!(report.origin, PendingGpuOrigin::ProfileApply);
+        assert!(report.text.contains("set_gpu_power_limit"));
+        assert!(take_deferred_gpu_report().is_none(), "delivery is take-once");
+
+        // Identical outcome again: deduplicated, nothing queued.
+        publish_deferred_gpu_report(PendingGpuOrigin::ProfileApply, &unsupported);
+        assert!(take_deferred_gpu_report().is_none());
+
+        // A clean profile-apply completion publishes and ends the series...
+        publish_deferred_gpu_report(PendingGpuOrigin::ProfileApply, &[]);
+        let clean = take_deferred_gpu_report().expect("a clean profile-apply completion must be published");
+        assert_eq!(clean.outcome, DeferredGpuOutcome::Applied);
+        assert_eq!(clean.origin, PendingGpuOrigin::ProfileApply);
+        // ...so the same warning is shown again when it recurs later.
+        publish_deferred_gpu_report(PendingGpuOrigin::ProfileApply, &unsupported);
+        assert!(take_deferred_gpu_report().is_some(), "a recurrence after a clean completion must not be suppressed");
+
+        // A clean idle-OC restore stays silent: no success event per cycle.
+        let _ = take_deferred_gpu_report();
+        publish_deferred_gpu_report(PendingGpuOrigin::IdleRestore, &[]);
+        assert!(take_deferred_gpu_report().is_none(), "a clean restore must not notify");
+
+        // A failing idle-OC restore is reported with its origin.
+        publish_deferred_gpu_report(PendingGpuOrigin::IdleRestore, &[failure("set_gpu_core_offset", GpuOpFailureKind::Failed)]);
+        let report = take_deferred_gpu_report().expect("a restore failure must be queued");
+        assert_eq!(report.outcome, DeferredGpuOutcome::Failed);
+        assert_eq!(report.origin, PendingGpuOrigin::IdleRestore);
     }
 }

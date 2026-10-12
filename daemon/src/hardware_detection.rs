@@ -101,7 +101,7 @@ const QUIET_REPROBE_SECS: u64 = 45;
 /// Measured on the XMG: an idle desktop reports 0.0, while real 3D work sits
 /// well above this (5 % at P0, 26-46 % at P3/P5). The margin keeps a one-off
 /// Xorg blit from holding the live tier open.
-const GPU_WORK_UTILIZATION_PERCENT: f32 = 1.0;
+pub const GPU_WORK_UTILIZATION_PERCENT: f32 = 1.0;
 
 /// Per-GPU control state. This is NOT a telemetry store: `last_pstate` and
 /// `last_runtime_status` decide the tier only and are never published as
@@ -121,6 +121,7 @@ struct GpuPollState {
 
 static GPU_POLL_STATE: Lazy<Mutex<HashMap<String, GpuPollState>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+pub static LAST_GPU_LOAD: Lazy<Mutex<Option<f32>>> = Lazy::new(|| Mutex::new(None));
 
 /// NVML device index -> PCI BDF, learned from the driver during live passes.
 ///
@@ -1641,11 +1642,19 @@ pub fn get_system_info() -> Result<SystemInfo> {
 }
 
 pub fn get_gpu_info() -> Result<Vec<GpuInfo>> {
+    get_gpu_info_inner(true)
+}
+
+pub(crate) fn get_gpu_info_without_utilization() -> Result<Vec<GpuInfo>> {
+    get_gpu_info_inner(false)
+}
+
+fn get_gpu_info_inner(include_utilization: bool) -> Result<Vec<GpuInfo>> {
     let mut gpus = Vec::new();
     
     // First, try to get NVIDIA GPU info via NVML
     if Path::new("/sys/bus/pci/drivers/nvidia").exists() {
-        if let Ok(nvidia_gpus) = get_nvidia_gpu_info() {
+        if let Ok(nvidia_gpus) = get_nvidia_gpu_info(include_utilization) {
             for gpu in nvidia_gpus {
                 gpus.push(gpu);
             }
@@ -2801,7 +2810,7 @@ fn degraded_gpu_info(device: &SysfsNvidiaDevice) -> GpuInfo {
     }
 }
 
-fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
+fn get_nvidia_gpu_info(include_utilization: bool) -> Result<Vec<GpuInfo>> {
     let (manual_clocks_enabled, _advanced_control_enabled) = {
         let state = crate::hardware_control::lock_or_recover(&crate::GPU_DAEMON_STATE, "GPU_DAEMON_STATE");
         state.as_ref().map_or((false, false), |s| (s.manual_clocks, s.advanced_control))
@@ -3006,10 +3015,14 @@ fn get_nvidia_gpu_info() -> Result<Vec<GpuInfo>> {
             device.temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu)
                 .ok()
                 .map(|t| t as f32),
-            device.utilization_rates().ok().map(|u| u.gpu as f32),
+            if include_utilization { device.utilization_rates().ok().map(|u| u.gpu as f32) } else { None },
             device.power_usage().ok().map(|p| p as f32 / 1000.0),
         );
 
+        if include_utilization {
+            let mut guard = crate::hardware_control::lock_or_recover(&LAST_GPU_LOAD, "LAST_GPU_LOAD");
+            *guard = load;
+        }
         // Only the first pass after a suspend may wait: a successful NVML read
         // right after a D3 wake can report stale nonsense (measured 753 W on a
         // 150 W-max GPU). Ordinary ticks never acquire a retry loop.
@@ -4794,7 +4807,7 @@ mod hil_gpu_tier_tests {
         // Reset the tier state so the first call is a learning pass.
         crate::hardware_control::lock_or_recover(&GPU_POLL_STATE, "GPU_POLL_STATE").clear();
 
-        let first = get_nvidia_gpu_info().expect("first pass failed");
+        let first = get_nvidia_gpu_info(true).expect("first pass failed");
         let gpu = discrete(&first);
         println!(
             "[+] first pass: runtime_status={:?} perf={:?} freq={:?} load={:?} power={:?} hotspot={:?}",
@@ -4821,7 +4834,7 @@ mod hil_gpu_tier_tests {
         let mut saw_quiet_tick = false;
         let mut saw_live_tick = false;
         for tick in 0..40 {
-            let gpus = get_nvidia_gpu_info().unwrap();
+            let gpus = get_nvidia_gpu_info(true).unwrap();
             let g = discrete(&gpus);
             if g.performance_state.is_none() {
                 // Quiet or suspended tier: blanks only, never a value from a
@@ -4887,7 +4900,7 @@ mod hil_gpu_tier_tests {
 
         let mut p0_seen = false;
         for round in 0..6 {
-            let gpus = get_nvidia_gpu_info().expect("pass failed");
+            let gpus = get_nvidia_gpu_info(true).expect("pass failed");
             let g = discrete(&gpus);
             println!(
                 "[round {}] perf={:?} runtime={:?} freq={:?} load={:?} power={:?} hotspot={:?} memtemp={:?} volt={:?}",
@@ -4940,7 +4953,7 @@ mod hil_gpu_tier_tests {
             wait_for("suspended", 75),
             "precondition failed: dGPU did not reach \"suspended\""
         );
-        let gpus = get_nvidia_gpu_info().expect("suspended pass failed");
+        let gpus = get_nvidia_gpu_info(true).expect("suspended pass failed");
         let g = discrete(&gpus);
         assert_eq!(g.runtime_status.as_deref(), Some("suspended"));
         assert!(g.performance_state.is_none());
@@ -5023,5 +5036,83 @@ mod hil_gpu_tier_tests {
             Err(e) => println!("[-] NvidiaDriverHandle::open(0) failed: {:#}", e),
         }
         println!("[*] runtime_status after: {}", runtime_status());
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GpuWriteDecision {
+    Write,
+    Defer,
+}
+
+/// Only `active` and `unsupported` allow a GPU write; unmapped defers.
+pub(crate) fn gpu_write_gate(status: &str, known: bool) -> GpuWriteDecision {
+    if !known {
+        return GpuWriteDecision::Defer;
+    }
+    match status {
+        "active" | "unsupported" => GpuWriteDecision::Write,
+        _ => GpuWriteDecision::Defer,
+    }
+}
+
+/// Entry point for GPU write sites: reads sysfs runtime_status for `index`.
+pub(crate) fn gpu_write_allowed(index: u32) -> bool {
+    let sysfs = sysfs_nvidia_devices();
+    let bdf = bdf_for_nvml_index(index);
+    let (status, known) = match bdf.as_deref() {
+        Some(bdf) => match sysfs.iter().find(|d| d.bdf.eq_ignore_ascii_case(bdf)) {
+            Some(dev) => (dev.runtime_status.clone(), true),
+            None => (String::new(), false),
+        },
+        None => (String::new(), false),
+    };
+    match gpu_write_gate(&status, known) {
+        GpuWriteDecision::Write => {
+            clear_deferred_status(index);
+            true
+        }
+        GpuWriteDecision::Defer => {
+            note_deferred_status(index, &status, known);
+            false
+        }
+    }
+}
+
+static LAST_DEFER_LOG: std::sync::Mutex<Option<(u32, String, bool)>> =
+    std::sync::Mutex::new(None);
+
+fn note_deferred_status(index: u32, status: &str, known: bool) {
+    let mut last = crate::hardware_control::lock_or_recover(&LAST_DEFER_LOG, "LAST_DEFER_LOG");
+    let current = (index, status.to_string(), known);
+    if last.as_ref() != Some(&current) {
+        log::debug!(target: "hw.gpu",
+            "GPU write deferred index={} status={:?} mapped={}",
+            index, status, known);
+        *last = Some(current);
+    }
+}
+
+fn clear_deferred_status(_index: u32) {
+    let mut last = crate::hardware_control::lock_or_recover(&LAST_DEFER_LOG, "LAST_DEFER_LOG");
+    *last = None;
+}
+
+#[cfg(test)]
+mod gpu_write_gate_tests {
+    use super::{gpu_write_gate, GpuWriteDecision};
+
+    #[test]
+    fn active_and_unsupported_allow_write_when_mapped() {
+        assert_eq!(gpu_write_gate("active", true), GpuWriteDecision::Write);
+        assert_eq!(gpu_write_gate("unsupported", true), GpuWriteDecision::Write);
+    }
+
+    #[test]
+    fn other_status_and_unmapped_defer() {
+        for s in ["suspended", "suspending", "resuming", "", "unknown", "ACTIVE"] {
+            assert_eq!(gpu_write_gate(s, true), GpuWriteDecision::Defer, "status {:?}", s);
+        }
+        assert_eq!(gpu_write_gate("active", false), GpuWriteDecision::Defer);
     }
 }

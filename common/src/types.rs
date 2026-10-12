@@ -32,6 +32,54 @@ pub struct LogEntry {
     pub timestamp: String,
 }
 
+/// Who queued a deferred GPU step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PendingGpuOrigin {
+    /// Queued by a profile apply (the runtime write gate refused the writes).
+    ProfileApply,
+    /// Queued by the idle-OC restore.
+    IdleRestore,
+}
+
+/// Final outcome of a completed deferred GPU apply attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeferredGpuOutcome {
+    /// Every operation reached a final successful outcome.
+    Applied,
+    /// Applied, with explicitly unsupported operations skipped.
+    AppliedWithWarnings,
+    /// At least one genuine failure occurred.
+    Failed,
+}
+
+/// Outcome of the last completed deferred GPU apply attempt, delivered to the
+/// GUI on its next poll.
+///
+/// The `ApplyProfile` reply is sent before a deferred attempt runs, so this
+/// take-once report is the delivery path for the deferred outcome. Identical
+/// repeated outcomes are published once; a clean completion ends the series
+/// so a later recurrence of the same problem is shown again. The newest
+/// report replaces an unclaimed older one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DeferredGpuReport {
+    /// Human-readable summary of the deferred attempt's outcome.
+    pub text: String,
+    /// Classified outcome (clean / warnings / failure).
+    pub outcome: DeferredGpuOutcome,
+    /// Who queued the step this report belongs to.
+    pub origin: PendingGpuOrigin,
+}
+
+/// Result of an `ApplyProfile` call.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ApplyProfileResult {
+    /// Non-fatal warnings (unsupported operations skipped, etc.).
+    pub warnings: Vec<String>,
+    /// True when the GPU step could not be applied yet and stays pending
+    /// until the adapter is writable.
+    pub gpu_deferred: bool,
+}
+
 /// Complete CPU telemetry snapshot.
 ///
 /// Sourced from `/sys/devices/system/cpu/`, `/sys/class/thermal/`,
@@ -565,6 +613,8 @@ pub struct GpuSettings {
     pub max_mem_clock: Option<u32>,
     /// Whether manual clock control is active.
     pub manual_clocks: bool,
+    #[serde(default = "release_oc_default")]
+    pub release_oc_when_idle: bool,
     /// Core frequency offset in MHz.
     pub core_offset: Option<f32>,
     /// Memory frequency offset in MHz.
@@ -1067,6 +1117,8 @@ impl Default for CpuSettings {
     }
 }
 
+fn release_oc_default() -> bool { true }
+
 impl Default for GpuSettings {
     fn default() -> Self {
         Self {
@@ -1076,6 +1128,7 @@ impl Default for GpuSettings {
             min_mem_clock: None,
             max_mem_clock: None,
             manual_clocks: false,
+            release_oc_when_idle: true,
             core_offset: Some(0.0),
             memory_offset: Some(0.0),
             power_limit: None,
@@ -1152,5 +1205,129 @@ impl Default for FanSettings {
             control_enabled: false,
             curves: vec![],
         }
+    }
+}
+
+/// Result of clamping a profile's frequency limits to the hardware range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FreqLimits {
+    pub min: Option<u64>,
+    pub max: Option<u64>,
+    pub changed: bool,
+}
+
+/// Clamp min/max (kHz) into [hw_min_khz, hw_max_khz]; enforce min <= max.
+/// `None` stays `None`.
+pub fn normalize_freq_limits(
+    min_khz: Option<u64>,
+    max_khz: Option<u64>,
+    hw_min_khz: u64,
+    hw_max_khz: u64,
+) -> FreqLimits {
+    let clamp = |v: u64| v.clamp(hw_min_khz, hw_max_khz);
+    let min_c = min_khz.map(clamp);
+    let mut max_c = max_khz.map(clamp);
+    if let (Some(lo), Some(hi)) = (min_c, max_c) {
+        if lo > hi {
+            max_c = Some(lo);
+        }
+    }
+    let changed = min_c != min_khz || max_c != max_khz;
+    FreqLimits { min: min_c, max: max_c, changed }
+}
+
+/// Normalize every profile's CPU min/max against the hardware range.
+/// Returns `(name, old_min, old_max, new)` for each profile that changed.
+pub fn normalize_profiles_freq(
+    profiles: &mut [Profile],
+    hw_min_khz: u64,
+    hw_max_khz: u64,
+) -> Vec<(String, (Option<u64>, Option<u64>), FreqLimits)> {
+    let mut changed = Vec::new();
+    for p in profiles.iter_mut() {
+        let old = (p.cpu_settings.min_frequency, p.cpu_settings.max_frequency);
+        let r = normalize_freq_limits(old.0, old.1, hw_min_khz, hw_max_khz);
+        if r.changed {
+            p.cpu_settings.min_frequency = r.min;
+            p.cpu_settings.max_frequency = r.max;
+            changed.push((p.name.clone(), old, r));
+        }
+    }
+    changed
+}
+
+#[cfg(test)]
+mod freq_limit_tests {
+    #[test]
+    fn idle_oc_defaults_and_explicit_false_round_trip() {
+        let settings = super::GpuSettings::default();
+        assert!(settings.release_oc_when_idle);
+        let mut json = serde_json::to_value(settings).unwrap();
+        json.as_object_mut().unwrap().remove("release_oc_when_idle");
+        assert!(serde_json::from_value::<super::GpuSettings>(json.clone()).unwrap().release_oc_when_idle);
+        json["release_oc_when_idle"] = false.into();
+        assert!(!serde_json::from_value::<super::GpuSettings>(json).unwrap().release_oc_when_idle);
+    }
+    use super::normalize_freq_limits;
+
+    const HW_MIN: u64 = 403_488;
+    const HW_MAX: u64 = 4_465_261;
+
+    #[test]
+    fn below_hardware_minimum_is_raised() {
+        let r = normalize_freq_limits(Some(400_000), Some(3_000_000), HW_MIN, HW_MAX);
+        assert_eq!(r.min, Some(HW_MIN));
+        assert_eq!(r.max, Some(3_000_000));
+        assert!(r.changed);
+    }
+
+    #[test]
+    fn above_hardware_maximum_is_lowered() {
+        let r = normalize_freq_limits(Some(1_000_000), Some(5_000_000), HW_MIN, HW_MAX);
+        assert_eq!(r.max, Some(HW_MAX));
+        assert!(r.changed);
+    }
+
+    #[test]
+    fn min_above_max_is_resolved() {
+        let r = normalize_freq_limits(Some(3_000_000), Some(2_000_000), HW_MIN, HW_MAX);
+        assert_eq!(r.min, Some(3_000_000));
+        assert_eq!(r.max, Some(3_000_000));
+        assert!(r.changed);
+    }
+
+    #[test]
+    fn exact_hardware_boundary_is_unchanged() {
+        let r = normalize_freq_limits(Some(HW_MIN), Some(HW_MAX), HW_MIN, HW_MAX);
+        assert_eq!(r.min, Some(HW_MIN));
+        assert_eq!(r.max, Some(HW_MAX));
+        assert!(!r.changed);
+    }
+
+    #[test]
+    fn profiles_are_normalized_and_reported() {
+        use super::{normalize_profiles_freq, Profile};
+        let mut ps = vec![Profile::default(), Profile::default()];
+        ps[0].name = "a".into();
+        ps[0].cpu_settings.min_frequency = Some(400_000);
+        ps[0].cpu_settings.max_frequency = Some(3_000_000);
+        ps[1].name = "b".into();
+        ps[1].cpu_settings.min_frequency = Some(HW_MIN);
+        ps[1].cpu_settings.max_frequency = Some(HW_MAX);
+        let changed = normalize_profiles_freq(&mut ps, HW_MIN, HW_MAX);
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].0, "a");
+        assert_eq!(changed[0].1, (Some(400_000), Some(3_000_000)));
+        assert_eq!(changed[0].2.min, Some(HW_MIN));
+        assert_eq!(ps[0].cpu_settings.min_frequency, Some(HW_MIN));
+        assert_eq!(ps[1].cpu_settings.min_frequency, Some(HW_MIN));
+    }
+
+    #[test]
+    fn none_stays_none() {
+        let r = normalize_freq_limits(None, None, HW_MIN, HW_MAX);
+        assert_eq!(r.min, None);
+        assert_eq!(r.max, None);
+        assert!(!r.changed);
     }
 }

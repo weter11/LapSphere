@@ -49,7 +49,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>,
                         // Also apply to hardware
                         if let Some(client) = dbus_client {
                             let profile_clone = state.config.profiles[idx].clone();
-                            let _rx = client.apply_profile(profile_clone.clone());
+                            state.pending_profile_apply = Some(client.apply_profile(profile_clone.clone()));
 
                             // Apply GPU settings on save
                             let gpu_info = state.gpu_info.clone();
@@ -368,44 +368,44 @@ fn draw_cpu_tuning(
         ui.label(RichText::new("Frequency Limits:").strong());
 
         if let (Some(hw_min), Some(hw_max)) = (cpu_info.hw_min_freq, cpu_info.hw_max_freq) {
-            let mut min_freq = profile.cpu_settings.min_frequency
-                .unwrap_or(hw_min) as f64 / 1000.0;
-            let mut max_freq = profile.cpu_settings.max_frequency
-                .unwrap_or(hw_max) as f64 / 1000.0;
+            // Show the value that will be applied: clamp before display.
+            let clamped = lapsphere_common::types::normalize_freq_limits(
+                profile.cpu_settings.min_frequency,
+                profile.cpu_settings.max_frequency,
+                hw_min,
+                hw_max,
+            );
+            let mut min_khz = clamped.min.unwrap_or(hw_min);
+            let mut max_khz = clamped.max.unwrap_or(hw_max);
+            if clamped.changed { profile.cpu_settings.min_frequency = clamped.min; profile.cpu_settings.max_frequency = clamped.max; }
 
-            // Ensure min <= max
-            if min_freq > max_freq {
-                min_freq = max_freq;
-            }
-
+            let mut changed = false;
             ui.horizontal(|ui| {
                 ui.label("Min:");
-                if ui.add(Slider::new(&mut min_freq,
-                    (hw_min / 1000) as f64..=(hw_max / 1000) as f64)
-                    .suffix(" MHz")
-                    ).changed() {
-                    // Ensure min doesn't exceed max
-                    if min_freq > max_freq {
-                        max_freq = min_freq;
-                    }
+                let mut mhz = min_khz as f64 / 1000.0;
+                if ui.add(Slider::new(&mut mhz, hw_min as f64 / 1000.0..=hw_max as f64 / 1000.0).suffix(" MHz")).changed() {
+                    min_khz = (mhz * 1000.0).round() as u64;
+                    changed = true;
                 }
             });
 
             ui.horizontal(|ui| {
                 ui.label("Max:");
-                if ui.add(Slider::new(&mut max_freq,
-                    (hw_min / 1000) as f64..=(hw_max / 1000) as f64)
-                    .suffix(" MHz")
-                    ).changed() {
-                    // Ensure max doesn't go below min
-                    if max_freq < min_freq {
-                        min_freq = max_freq;
-                    }
+                let mut mhz = max_khz as f64 / 1000.0;
+                if ui.add(Slider::new(&mut mhz, hw_min as f64 / 1000.0..=hw_max as f64 / 1000.0).suffix(" MHz")).changed() {
+                    max_khz = (mhz * 1000.0).round() as u64;
+                    changed = true;
                 }
             });
 
-            profile.cpu_settings.min_frequency = Some((min_freq * 1000.0) as u64);
-            profile.cpu_settings.max_frequency = Some((max_freq * 1000.0) as u64);
+            // Store only on user change.
+            if changed {
+                let n = lapsphere_common::types::normalize_freq_limits(
+                    Some(min_khz), Some(max_khz), hw_min, hw_max,
+                );
+                profile.cpu_settings.min_frequency = n.min;
+                profile.cpu_settings.max_frequency = n.max;
+            }
 
         } else {
             ui.label("Could not determine hardware frequency limits. Sliders disabled.");
@@ -463,6 +463,8 @@ fn draw_gpu_tuning(
         ui.radio_value(&mut state.config.profiles[profile_idx].gpu_settings.advanced_control, false, "Standard");
         ui.radio_value(&mut state.config.profiles[profile_idx].gpu_settings.advanced_control, true, "Advanced");
     });
+    ui.checkbox(&mut state.config.profiles[profile_idx].gpu_settings.release_oc_when_idle, "Release overclock when idle")
+        .on_hover_text("Without this the GPU cannot reach its deep idle state: expect extra noise and heat");
     let tuning_mode_advanced = state.config.profiles[profile_idx].gpu_settings.advanced_control;
     ui.label(RichText::new("GPU settings will be applied when you click Save. Disabling manual control will reset to factory settings.").small().italics());
 
@@ -1441,7 +1443,9 @@ fn create_default_profile_for_reset(is_standard: bool) -> Profile {
             name: "Standard".to_string(),
             is_default: true,
             cpu_settings: CpuSettings {
-                governor: Some("schedutil".to_string()),
+                // Same combo rule as the built-in Standard in profiles.rs:
+                // amd_pstate active offers only performance/powersave.
+                governor: Some("powersave".to_string()),
                 min_frequency: None,
                 max_frequency: None,
                 boost: Some(true),
@@ -1463,6 +1467,7 @@ fn create_default_profile_for_reset(is_standard: bool) -> Profile {
                 min_mem_clock: None,
                 max_mem_clock: None,
                 manual_clocks: false,
+                release_oc_when_idle: true,
                 core_offset: Some(0.0),
                 memory_offset: Some(0.0),
                 power_limit: None,
@@ -1496,5 +1501,20 @@ fn create_default_profile_for_reset(is_standard: bool) -> Profile {
         }
     } else {
         Profile::default()
+    }
+}
+
+#[cfg(test)]
+mod reset_profile_tests {
+    #[test]
+    fn reset_to_standard_governor_is_compatible_with_its_pstate_mode() {
+        let p = super::create_default_profile_for_reset(true);
+        let governor = p.cpu_settings.governor.as_deref().expect("Standard sets a governor");
+        let mode = p.cpu_settings.amd_pstate_status.as_deref().expect("Standard sets the amd mode");
+        let compatible = match mode {
+            "active" => governor == "performance" || governor == "powersave",
+            _ => true,
+        };
+        assert!(compatible, "reset Standard requests governor {governor:?} in amd_pstate mode {mode:?}");
     }
 }

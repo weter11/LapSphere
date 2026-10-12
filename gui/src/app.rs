@@ -135,6 +135,7 @@ pub struct AppState {
     pub current_page: Page,
     pub settings_tab: SettingsTab,
     pub status_message: Option<StatusMessage>,
+    pub startup_profile_status: StartupProfileStatus,
     pub restart_confirmation_pending: bool,
     pub pending_prime_profile: Option<String>,
     pub selected_fan_curve: usize,
@@ -144,6 +145,10 @@ pub struct AppState {
     
     // Async state
     pub pending_battery_update: Option<oneshot::Receiver<Result<(), anyhow::Error>>>,
+    /// Reply of a profile apply started outside the startup flow (profile
+    /// switch/reset/delete, tray), so warnings, the deferred GPU step and
+    /// failures can be surfaced.
+    pub pending_profile_apply: Option<oneshot::Receiver<anyhow::Result<ApplyProfileResult>>>,
     
     // Refresh coordinator handle
     pub coordinator_handle: Option<CoordinatorHandle>,
@@ -151,10 +156,29 @@ pub struct AppState {
     pub keyboard_brush_color: [u8; 3],
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartupProfileStatus {
+    WaitingForCpuLimits,
+    Applying,
+    /// The profile is applied except its GPU step, which waits until the
+    /// adapter is writable; resolved by the deferred report.
+    WaitingForGpuStep,
+    AppliedWithWarnings(String),
+    Failed(String),
+    Complete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageLevel {
+    Info,
+    Warning,
+    Error,
+}
+
 #[derive(Debug, Clone)]
 pub struct StatusMessage {
     pub text: String,
-    pub is_error: bool,
+    pub level: MessageLevel,
     pub shown_at: Instant,
 }
 
@@ -198,10 +222,12 @@ impl AppState {
             current_page: Page::Statistics,
             settings_tab: SettingsTab::Main,
             status_message: None,
+            startup_profile_status: StartupProfileStatus::WaitingForCpuLimits,
             restart_confirmation_pending: false,
             pending_prime_profile: None,
             editing_profile_name: None,
             pending_battery_update: None,
+            pending_profile_apply: None,
             coordinator_handle: None,
             selected_fan_curve: 0,
             keyboard_brush_color: [255, 255, 255],
@@ -251,9 +277,20 @@ pub fn load_config(&mut self) {
     }
     
     pub fn show_message(&mut self, text: impl Into<String>, is_error: bool) {
+        let level = if is_error { MessageLevel::Error } else { MessageLevel::Info };
+        self.show_message_at_level(text, level);
+    }
+
+    /// Show a warning-styled status message: the operation completed with
+    /// caveats — neither a clean success nor an error.
+    pub fn show_warning(&mut self, text: impl Into<String>) {
+        self.show_message_at_level(text, MessageLevel::Warning);
+    }
+
+    fn show_message_at_level(&mut self, text: impl Into<String>, level: MessageLevel) {
         self.status_message = Some(StatusMessage {
             text: text.into(),
-            is_error,
+            level,
             shown_at: Instant::now(),
         });
     }
@@ -374,6 +411,39 @@ fn send_polled_update(
     }
 }
 
+fn claim_startup_apply(pending: &mut bool, has_cpu_bounds: bool) -> bool {
+    if !*pending || !has_cpu_bounds {
+        return false;
+    }
+    *pending = false;
+    true
+}
+
+fn startup_limits_warning_due(elapsed: Duration) -> bool {
+    elapsed >= Duration::from_secs(5)
+}
+
+/// Startup banner state from an ApplyProfile reply. A deferred GPU step keeps
+/// the banner in the waiting state until the deferred report resolves it.
+fn startup_status_from_reply(result: &ApplyProfileResult) -> StartupProfileStatus {
+    if result.gpu_deferred {
+        StartupProfileStatus::WaitingForGpuStep
+    } else if result.warnings.is_empty() {
+        StartupProfileStatus::Complete
+    } else {
+        StartupProfileStatus::AppliedWithWarnings(result.warnings.join("; "))
+    }
+}
+
+/// Startup banner state from a deferred profile-apply completion.
+fn startup_status_from_deferred(report: &DeferredGpuReport) -> StartupProfileStatus {
+    match report.outcome {
+        DeferredGpuOutcome::Applied => StartupProfileStatus::Complete,
+        DeferredGpuOutcome::AppliedWithWarnings => StartupProfileStatus::AppliedWithWarnings(report.text.clone()),
+        DeferredGpuOutcome::Failed => StartupProfileStatus::Failed(report.text.clone()),
+    }
+}
+
 pub struct LapSphereApp {
     state: AppState,
     dbus_client: Option<DbusClient>,
@@ -389,6 +459,13 @@ pub struct LapSphereApp {
     shortcuts: KeyboardShortcuts,
 
     startup_frames: u32,
+    startup_apply_pending: bool,
+    startup_started: std::time::Instant,
+    startup_timeout_warned: bool,
+    startup_apply_reply: Option<oneshot::Receiver<anyhow::Result<ApplyProfileResult>>>,
+    /// Set when the startup apply left its GPU step pending; the deferred
+    /// report resolves the banner once the step actually runs.
+    startup_waiting_for_gpu: bool,
 
     last_tray_profile: String,
     last_tray_profiles_count: usize,
@@ -425,6 +502,7 @@ pub enum HardwareUpdate {
     MemoryInfo(MemoryInfo),
     CpuInfo(CpuInfo),
     GpuInfo(Vec<GpuInfo>),
+    DeferredGpuReport(DeferredGpuReport),
     BatteryInfo(BatteryInfo),
     WifiInfo(Vec<WiFiInfo>),
     GamepadInfo(Vec<GamepadInfo>),
@@ -532,6 +610,14 @@ impl LapSphereApp {
                                     Ok(Ok(info)) => { send_polled_update(&tx, HardwareUpdate::GpuInfo(info), &ctx); }
                                     Ok(Err(e)) => log::error!("Failed to get GPU info: {}", e),
                                     Err(e) => log::error!("DBus error getting GPU info: {}", e),
+                                }
+                                // A deferred GPU apply finishes after its
+                                // ApplyProfile reply was sent; pick the outcome
+                                // up here (take-once, empty on almost every tick).
+                                // Lossless send: the daemon has already cleared
+                                // the report, so a full channel must wait, not drop.
+                                if let Ok(Ok(Some(report))) = client.get_deferred_gpu_report().await {
+                                    send_update(&tx, HardwareUpdate::DeferredGpuReport(report), &ctx).await;
                                 }
                             }
                             "memory" => {
@@ -716,12 +802,6 @@ impl LapSphereApp {
         );
         theme.apply_with_font_size(&cc.egui_ctx, &state.config.font_size);
 
-        // Apply current profile to daemon on startup to ensure background jobs are active
-        if let Some(profile) = state.current_profile().cloned() {
-            if let Some(ref client) = dbus_client {
-                let _ = client.apply_profile(profile);
-            }
-        }
 
         let system_tray = match SystemTray::new(&state.config.profiles, &state.config.current_profile) {
             Ok(tray) => Some(tray),
@@ -763,6 +843,11 @@ impl LapSphereApp {
             hw_update_rx,
             shortcuts: KeyboardShortcuts::new(),
             startup_frames: 10,
+            startup_apply_pending: true,
+            startup_started: std::time::Instant::now(),
+            startup_timeout_warned: false,
+            startup_apply_reply: None,
+            startup_waiting_for_gpu: false,
             last_tray_profile,
             last_tray_profiles_count,
         }
@@ -784,7 +869,54 @@ impl LapSphereApp {
                 HardwareUpdate::MemoryInfo(info) => {
                     self.state.memory_info = Some(info);
                 }
+                HardwareUpdate::DeferredGpuReport(report) => {
+                    // A profile-apply completion resolves the startup waiting
+                    // state; the idle-OC restore must not drive it.
+                    if report.origin == PendingGpuOrigin::ProfileApply && self.startup_waiting_for_gpu {
+                        self.startup_waiting_for_gpu = false;
+                        self.state.startup_profile_status = startup_status_from_deferred(&report);
+                    }
+                    match report.outcome {
+                        DeferredGpuOutcome::Applied => {
+                            self.state.show_message(report.text, false);
+                        }
+                        DeferredGpuOutcome::AppliedWithWarnings => {
+                            self.state.show_warning(report.text);
+                        }
+                        DeferredGpuOutcome::Failed => {
+                            self.state.show_message(report.text, true);
+                        }
+                    }
+                }
                 HardwareUpdate::CpuInfo(info) => {
+                    if let (Some(hw_min), Some(hw_max)) = (info.hw_min_freq, info.hw_max_freq) {
+                        let changed = lapsphere_common::types::normalize_profiles_freq(
+                            &mut self.state.config.profiles, hw_min, hw_max,
+                        );
+                        for (name, (old_min, old_max), r) in &changed {
+                            log::warn!(
+                                "profile '{}' CPU freq clamped: min {:?} -> {:?}, max {:?} -> {:?} (hw {}..{} kHz)",
+                                name, old_min, r.min, old_max, r.max, hw_min, hw_max
+                            );
+                        }
+                        if !changed.is_empty() {
+                            if let Err(e) = save_profiles_to_disk(&self.state.config) {
+                                log::warn!("failed to save normalized profiles: {}", e);
+                            }
+                        }
+                        if claim_startup_apply(&mut self.startup_apply_pending, true) {
+                            if let (Some(profile), Some(client)) =
+                                (self.state.current_profile().cloned(), &self.dbus_client)
+                            {
+                                self.startup_apply_reply = Some(client.apply_profile(profile));
+                                self.state.startup_profile_status = StartupProfileStatus::Applying;
+                            } else {
+                                let error = "Could not apply startup profile: daemon connection is unavailable".to_string();
+                                log::error!("{error}");
+                                self.state.startup_profile_status = StartupProfileStatus::Failed(error);
+                            }
+                        }
+                    }
                     self.state.cpu_info = Some(info);
                 }
                 HardwareUpdate::GpuInfo(info) => {
@@ -900,6 +1032,39 @@ impl LapSphereApp {
             }
         }
         
+        if self.startup_apply_pending {
+            let elapsed = self.startup_started.elapsed();
+            if startup_limits_warning_due(elapsed) && !self.startup_timeout_warned {
+                self.startup_timeout_warned = true;
+                log::warn!("startup profile apply is still waiting for CPU frequency limits; profile not applied");
+            }
+            if elapsed < Duration::from_secs(5) {
+                self.state.startup_profile_status = StartupProfileStatus::WaitingForCpuLimits;
+            }
+        }
+        if let Some(mut rx) = self.startup_apply_reply.take() {
+            match rx.try_recv() {
+                Ok(Ok(result)) => {
+                    self.state.startup_profile_status = startup_status_from_reply(&result);
+                    if result.gpu_deferred {
+                        // Resolved by the deferred report once the step runs.
+                        self.startup_waiting_for_gpu = true;
+                    }
+                }
+                Ok(Err(e)) => {
+                    let error = format!("Startup profile application failed: {e}");
+                    log::error!("{error}");
+                    self.state.startup_profile_status = StartupProfileStatus::Failed(error);
+                }
+                Err(oneshot::error::TryRecvError::Empty) => self.startup_apply_reply = Some(rx),
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    let error = "Startup profile application failed: daemon reply channel closed".to_string();
+                    log::error!("{error}");
+                    self.state.startup_profile_status = StartupProfileStatus::Failed(error);
+                }
+            }
+        }
+
         // Check pending battery update
         if let Some(mut rx) = self.state.pending_battery_update.take() {
             match rx.try_recv() {
@@ -915,9 +1080,52 @@ impl LapSphereApp {
                 }
             }
         }
+
+        if let Some(mut rx) = self.state.pending_profile_apply.take() {
+            match rx.try_recv() {
+                Ok(Ok(result)) if result.gpu_deferred => {
+                    self.state.show_warning("Profile applied; GPU settings pending until the adapter is writable");
+                }
+                Ok(Ok(result)) if !result.warnings.is_empty() => {
+                    self.state.show_warning(format!("Profile applied with warnings: {}", result.warnings.join("; ")));
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    self.state.show_message(format!("Profile apply failed: {e}"), true);
+                }
+                Err(oneshot::error::TryRecvError::Empty) => {
+                    self.state.pending_profile_apply = Some(rx);
+                }
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    self.state.show_message("Profile apply reply channel closed", true);
+                }
+            }
+        }
     }
     
     fn draw_top_bar(&mut self, ui: &mut egui::Ui) {
+        let startup_banner = match &self.state.startup_profile_status {
+            StartupProfileStatus::WaitingForCpuLimits if self.startup_started.elapsed() < Duration::from_secs(5) =>
+                Some(("Detecting CPU frequency limits; startup profile has not been applied yet".to_string(), egui::Color32::from_rgb(230, 190, 70))),
+            StartupProfileStatus::WaitingForCpuLimits =>
+                Some(("Warning: still waiting for CPU frequency limits; startup profile has not been applied".to_string(), egui::Color32::from_rgb(240, 120, 70))),
+            StartupProfileStatus::Applying => Some(("Applying startup profile…".to_string(), egui::Color32::from_rgb(100, 170, 240))),
+            StartupProfileStatus::WaitingForGpuStep => Some(("Profile applied; GPU settings pending until the adapter is writable".to_string(), egui::Color32::from_rgb(100, 170, 240))),
+            StartupProfileStatus::AppliedWithWarnings(warnings) => Some((
+                format!("Startup profile applied with warnings: {warnings}"),
+                egui::Color32::from_rgb(230, 190, 70),
+            )),
+            StartupProfileStatus::Failed(error) => Some((error.clone(), egui::Color32::from_rgb(240, 90, 90))),
+            StartupProfileStatus::Complete => None,
+        };
+        if let Some((message, color)) = startup_banner {
+            egui::Panel::top("startup_profile_status").show_inside(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add_space(12.0);
+                    ui.colored_label(color, message);
+                });
+            });
+        }
         let mut dismiss_update = false;
         if let Some(version) = &self.state.new_version_available {
             let version = version.clone();
@@ -1020,10 +1228,10 @@ impl LapSphereApp {
                 egui::Panel::top("status_bar").show_inside(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.add_space(12.0);
-                        let color = if msg.is_error {
-                            egui::Color32::from_rgb(220, 80, 80)
-                        } else {
-                            egui::Color32::from_rgb(80, 200, 120)
+                        let color = match msg.level {
+                            MessageLevel::Error => egui::Color32::from_rgb(220, 80, 80),
+                            MessageLevel::Warning => egui::Color32::from_rgb(230, 190, 70),
+                            MessageLevel::Info => egui::Color32::from_rgb(80, 200, 120),
                         };
                         ui.colored_label(color, &msg.text);
                     });
@@ -1279,7 +1487,7 @@ impl LapSphereApp {
                     if let Some(profile) = self.state.config.profiles.get(idx).cloned() {
                         self.state.config.current_profile = profile.name.clone();
                         if let Some(client) = &self.dbus_client {
-                            let _ = client.apply_profile(profile);
+                            self.state.pending_profile_apply = Some(client.apply_profile(profile));
                         }
                     }
                 }
@@ -1662,10 +1870,69 @@ fn save_profiles_to_disk(config: &AppConfig) -> anyhow::Result<()> {
     std::fs::create_dir_all(&config_dir)?;
     let profiles_path = format!("{}/profiles.json", config_dir);
     let json = serde_json::to_string_pretty(&ProfilesConfig::from(config))?;
+    if Path::new(&profiles_path).exists() {
+        std::fs::copy(&profiles_path, format!("{profiles_path}.bak"))?;
+    }
     std::fs::write(profiles_path, json)?;
     Ok(())
 }
 
+
+#[cfg(test)]
+mod startup_profile_feedback_tests {
+    use super::{claim_startup_apply, startup_limits_warning_due, startup_status_from_deferred, startup_status_from_reply, StartupProfileStatus};
+    use std::time::Duration;
+
+    #[test]
+    fn limits_arriving_before_warning_claim_startup_apply_once() {
+        let mut pending = true;
+        assert!(!startup_limits_warning_due(Duration::from_secs(4)));
+        assert!(claim_startup_apply(&mut pending, true));
+        assert!(!pending);
+        assert!(!claim_startup_apply(&mut pending, true));
+    }
+
+    #[test]
+    fn delayed_and_never_arriving_limits_keep_profile_pending_and_warn() {
+        let mut pending = true;
+        assert!(!claim_startup_apply(&mut pending, false));
+        assert!(pending);
+        assert!(startup_limits_warning_due(Duration::from_secs(5)));
+        assert!(startup_limits_warning_due(Duration::from_secs(3600)));
+        assert!(!claim_startup_apply(&mut pending, false));
+        assert!(pending);
+    }
+
+    #[test]
+    fn startup_apply_failure_has_persistent_user_visible_state() {
+        let error = "Startup profile application failed: daemon rejected request";
+        let status = StartupProfileStatus::Failed(error.to_string());
+        assert!(matches!(status, StartupProfileStatus::Failed(message) if message.contains("failed")));
+    }
+
+    #[test]
+    fn deferred_reply_and_completion_map_to_the_waiting_banner() {
+        use lapsphere_common::types::{ApplyProfileResult, DeferredGpuOutcome, DeferredGpuReport, PendingGpuOrigin};
+
+        // A deferred GPU step keeps the banner waiting instead of claiming
+        // completion.
+        let deferred = ApplyProfileResult { warnings: vec![], gpu_deferred: true };
+        assert_eq!(startup_status_from_reply(&deferred), StartupProfileStatus::WaitingForGpuStep);
+        // Immediate outcomes map as before.
+        let immediate = ApplyProfileResult { warnings: vec![], gpu_deferred: false };
+        assert_eq!(startup_status_from_reply(&immediate), StartupProfileStatus::Complete);
+        let warned = ApplyProfileResult { warnings: vec!["set_gpu_power_limit: nope".to_string()], gpu_deferred: false };
+        assert!(matches!(startup_status_from_reply(&warned), StartupProfileStatus::AppliedWithWarnings(w) if w.contains("set_gpu_power_limit")));
+
+        // The deferred completion resolves the waiting state per outcome.
+        let done = DeferredGpuReport { text: "Deferred GPU settings applied".to_string(), outcome: DeferredGpuOutcome::Applied, origin: PendingGpuOrigin::ProfileApply };
+        assert_eq!(startup_status_from_deferred(&done), StartupProfileStatus::Complete);
+        let warned = DeferredGpuReport { text: "Deferred GPU step applied with warnings: x".to_string(), outcome: DeferredGpuOutcome::AppliedWithWarnings, origin: PendingGpuOrigin::ProfileApply };
+        assert!(matches!(startup_status_from_deferred(&warned), StartupProfileStatus::AppliedWithWarnings(w) if w.contains("warnings")));
+        let failed = DeferredGpuReport { text: "Deferred GPU step failed: y".to_string(), outcome: DeferredGpuOutcome::Failed, origin: PendingGpuOrigin::ProfileApply };
+        assert!(matches!(startup_status_from_deferred(&failed), StartupProfileStatus::Failed(w) if w.contains("failed")));
+    }
+}
 
 #[cfg(test)]
 mod tray_migration_e2e_tests {

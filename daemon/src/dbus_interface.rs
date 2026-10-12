@@ -205,7 +205,7 @@ impl ControlInterface {
         )
     }
 
-    async fn apply_profile(&self, profile_json: &str) -> Result<(), zbus::fdo::Error> {
+    async fn apply_profile(&self, profile_json: &str) -> Result<String, zbus::fdo::Error> {
         log::debug!(target: "api.call", "ApplyProfile");
         let start = std::time::Instant::now();
         let res = (|| async {
@@ -220,10 +220,26 @@ impl ControlInterface {
 
         let duration = start.elapsed().as_millis();
         match &res {
-            Ok(_) => log::debug!(target: "api.ok", "ApplyProfile duration_ms={}", duration),
+            Ok(result) => log::debug!(target: "api.ok", "ApplyProfile duration_ms={} warnings={} gpu_deferred={}", duration, result.warnings.len(), result.gpu_deferred),
             Err(e) => log::warn!(target: "api.fail", "ApplyProfile reason=\"{}\" duration_ms={}", e, duration),
         }
-        res.map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+        res.map(|result| serde_json::to_string(&result).unwrap_or_default())
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
+
+    /// Take the outcome of the last completed deferred GPU apply attempt
+    /// (empty string when none). The GUI polls this because the ApplyProfile
+    /// reply is sent before a deferred attempt runs.
+    async fn take_deferred_gpu_report(&self) -> Result<String, zbus::fdo::Error> {
+        let report = crate::hardware_control::take_deferred_gpu_report();
+        // Only log when something was actually taken: this method is polled
+        // every GPU tick, and the ring buffers debug lines.
+        if let Some(r) = &report {
+            log::debug!(target: "api.ok", "TakeDeferredGpuReport outcome={:?}", r.outcome);
+        }
+        Ok(report
+            .map(|r| serde_json::to_string(&r).unwrap_or_default())
+            .unwrap_or_default())
     }
 
     async fn get_tdp_profiles(&self) -> Result<String, zbus::fdo::Error> {

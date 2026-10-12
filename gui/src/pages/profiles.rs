@@ -125,7 +125,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>)
                 // Apply to hardware
                 if let Some(client) = dbus_client {
                     let profile_clone = state.config.profiles[idx].clone();
-                    let _rx = client.apply_profile(profile_clone);
+                    state.pending_profile_apply = Some(client.apply_profile(profile_clone));
                     state.show_message(format!("Switched to profile '{}'", state.config.profiles[idx].name), false);
                 }
             }
@@ -139,7 +139,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>)
                 if state.config.profiles[idx].name == state.config.current_profile {
                     if let Some(client) = dbus_client {
                         let profile_clone = state.config.profiles[idx].clone();
-                        let _rx = client.apply_profile(profile_clone);
+                        state.pending_profile_apply = Some(client.apply_profile(profile_clone));
                     }
                 }
                 state.show_message("Standard profile reset to default settings", false);
@@ -154,7 +154,7 @@ pub fn draw(ui: &mut Ui, state: &mut AppState, dbus_client: Option<&DbusClient>)
                     state.config.current_profile = "Standard".to_string();
                     if let Some(standard) = state.config.profiles.iter().find(|p| p.name == "Standard") {
                         if let Some(client) = dbus_client {
-                            let _rx = client.apply_profile(standard.clone());
+                            state.pending_profile_apply = Some(client.apply_profile(standard.clone()));
                         }
                     }
                 }
@@ -206,7 +206,10 @@ fn create_standard_profile() -> lapsphere_common::types::Profile {
         name: "Standard".to_string(),
         is_default: true,
         cpu_settings: CpuSettings {
-            governor: Some("schedutil".to_string()),
+            // amd_pstate active offers only performance/powersave; schedutil
+            // is not available in that mode (the apply warns on it now, but
+            // the built-in Standard must not request an incompatible combo).
+            governor: Some("powersave".to_string()),
             min_frequency: None,
             max_frequency: None,
             boost: Some(true),
@@ -228,6 +231,7 @@ fn create_standard_profile() -> lapsphere_common::types::Profile {
             min_mem_clock: None,
             max_mem_clock: None,
             manual_clocks: false,
+            release_oc_when_idle: true,
             core_offset: Some(0.0),
             memory_offset: Some(0.0),
             power_limit: None,
@@ -258,5 +262,21 @@ fn create_standard_profile() -> lapsphere_common::types::Profile {
             control_enabled: false,
             curves: vec![],
         },
+    }
+}
+
+#[cfg(test)]
+mod standard_profile_tests {
+    #[test]
+    fn standard_profile_governor_is_compatible_with_its_pstate_mode() {
+        let p = super::create_standard_profile();
+        let governor = p.cpu_settings.governor.as_deref().expect("Standard sets a governor");
+        let mode = p.cpu_settings.amd_pstate_status.as_deref().expect("Standard sets the amd mode");
+        // Measured on the XMG: amd_pstate active offers only these two.
+        let compatible = match mode {
+            "active" => governor == "performance" || governor == "powersave",
+            _ => true,
+        };
+        assert!(compatible, "Standard requests governor {governor:?} in amd_pstate mode {mode:?}");
     }
 }

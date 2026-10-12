@@ -28,6 +28,7 @@ pub enum DbusCommand {
     GetMemoryInfo { reply: oneshot::Sender<Result<MemoryInfo>> },
     GetCpuInfo { reply: oneshot::Sender<Result<CpuInfo>> },
     GetGpuInfo { reply: oneshot::Sender<Result<Vec<GpuInfo>>> },
+    GetDeferredGpuReport { reply: oneshot::Sender<Result<Option<DeferredGpuReport>>> },
     GetFanInfo { reply: oneshot::Sender<Result<Vec<FanInfo>>> },
     GetBatteryInfo { reply: oneshot::Sender<Result<BatteryInfo>> },
     GetStorageDeviceInfo { reply: oneshot::Sender<Result<Vec<StorageDevice>>> },
@@ -37,7 +38,7 @@ pub enum DbusCommand {
     GetTdpProfiles { reply: oneshot::Sender<Result<Vec<String>>> },
     GetHardwareInterfaceInfo { reply: oneshot::Sender<Result<String>> },
     GetKeyboardCapabilities { reply: oneshot::Sender<Result<KeyboardCapabilities>> },
-    ApplyProfile { profile: Profile, reply: oneshot::Sender<Result<()>> },
+    ApplyProfile { profile: Profile, reply: oneshot::Sender<Result<ApplyProfileResult>> },
     SetAmdPstateStatus { status: String, reply: oneshot::Sender<Result<()>> },
     SetIntelPstateStatus { status: String, reply: oneshot::Sender<Result<()>> },
     PreviewKeyboard { settings: KeyboardSettings, reply: oneshot::Sender<Result<()>> },
@@ -102,6 +103,14 @@ impl DbusClient {
         let _ = self.command_tx.send(DbusCommand::GetGpuInfo { reply: tx });
         rx
     }
+
+    /// Outcome of the last completed deferred GPU apply attempt (None when
+    /// there is nothing new). Take-once: the daemon clears it on delivery.
+    pub fn get_deferred_gpu_report(&self) -> oneshot::Receiver<Result<Option<DeferredGpuReport>>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.command_tx.send(DbusCommand::GetDeferredGpuReport { reply: tx });
+        rx
+    }
     
     pub fn get_fan_info(&self) -> oneshot::Receiver<Result<Vec<FanInfo>>> {
         let (tx, rx) = oneshot::channel();
@@ -157,7 +166,7 @@ impl DbusClient {
         rx
     }
     
-    pub fn apply_profile(&self, profile: Profile) -> oneshot::Receiver<Result<()>> {
+    pub fn apply_profile(&self, profile: Profile) -> oneshot::Receiver<Result<ApplyProfileResult>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.command_tx.send(DbusCommand::ApplyProfile { 
             profile: profile.clone(), 
@@ -390,6 +399,12 @@ async fn dbus_worker(mut command_rx: mpsc::UnboundedReceiver<DbusCommand>) -> Re
                 }
                 DbusCommand::GetGpuInfo { reply } => {
                     let result = get_gpu_info_impl(&proxy).await;
+                    let is_err = result.is_err();
+                    let _ = reply.send(result);
+                    if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
+                }
+                DbusCommand::GetDeferredGpuReport { reply } => {
+                    let result = get_deferred_gpu_report_impl(&proxy).await;
                     let is_err = result.is_err();
                     let _ = reply.send(result);
                     if is_err { Err(anyhow::anyhow!("DBus call failed")) } else { Ok(()) }
@@ -675,6 +690,14 @@ async fn get_gpu_info_impl(proxy: &zbus::Proxy<'_>) -> Result<Vec<GpuInfo>> {
     Ok(serde_json::from_str(&json)?)
 }
 
+async fn get_deferred_gpu_report_impl(proxy: &zbus::Proxy<'_>) -> Result<Option<DeferredGpuReport>> {
+    let json: String = proxy.call("TakeDeferredGpuReport", &()).await?;
+    if json.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::from_str(&json)?))
+}
+
 async fn get_fan_info_impl(proxy: &zbus::Proxy<'_>) -> Result<Vec<FanInfo>> {
     let json: String = proxy.call("GetFanInfo", &()).await?;
     Ok(serde_json::from_str(&json)?)
@@ -720,10 +743,10 @@ async fn get_keyboard_capabilities_impl(proxy: &zbus::Proxy<'_>) -> Result<Keybo
     Ok(serde_json::from_str(&json)?)
 }
 
-async fn apply_profile_impl(proxy: &zbus::Proxy<'_>, profile: &Profile) -> Result<()> {
+async fn apply_profile_impl(proxy: &zbus::Proxy<'_>, profile: &Profile) -> Result<ApplyProfileResult> {
     let json = serde_json::to_string(profile)?;
-    proxy.call::<_, _, ()>("ApplyProfile", &(json.as_str(),)).await?;
-    Ok(())
+    let reply: String = proxy.call("ApplyProfile", &(json.as_str(),)).await?;
+    Ok(serde_json::from_str(&reply)?)
 }
 
 async fn preview_keyboard_impl(proxy: &zbus::Proxy<'_>, settings: &KeyboardSettings) -> Result<()> {
