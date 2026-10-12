@@ -38,7 +38,7 @@ pub enum DbusCommand {
     GetTdpProfiles { reply: oneshot::Sender<Result<Vec<String>>> },
     GetHardwareInterfaceInfo { reply: oneshot::Sender<Result<String>> },
     GetKeyboardCapabilities { reply: oneshot::Sender<Result<KeyboardCapabilities>> },
-    ApplyProfile { profile: Profile, reply: oneshot::Sender<Result<String>> },
+    ApplyProfile { profile: Profile, reply: oneshot::Sender<Result<ApplyProfileResult>> },
     SetAmdPstateStatus { status: String, reply: oneshot::Sender<Result<()>> },
     SetIntelPstateStatus { status: String, reply: oneshot::Sender<Result<()>> },
     PreviewKeyboard { settings: KeyboardSettings, reply: oneshot::Sender<Result<()>> },
@@ -166,7 +166,7 @@ impl DbusClient {
         rx
     }
     
-    pub fn apply_profile(&self, profile: Profile) -> oneshot::Receiver<Result<String>> {
+    pub fn apply_profile(&self, profile: Profile) -> oneshot::Receiver<Result<ApplyProfileResult>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.command_tx.send(DbusCommand::ApplyProfile { 
             profile: profile.clone(), 
@@ -743,10 +743,10 @@ async fn get_keyboard_capabilities_impl(proxy: &zbus::Proxy<'_>) -> Result<Keybo
     Ok(serde_json::from_str(&json)?)
 }
 
-async fn apply_profile_impl(proxy: &zbus::Proxy<'_>, profile: &Profile) -> Result<String> {
+async fn apply_profile_impl(proxy: &zbus::Proxy<'_>, profile: &Profile) -> Result<ApplyProfileResult> {
     let json = serde_json::to_string(profile)?;
-    let warnings = proxy.call::<_, _, String>("ApplyProfile", &(json.as_str(),)).await?;
-    Ok(warnings)
+    let reply: String = proxy.call("ApplyProfile", &(json.as_str(),)).await?;
+    Ok(serde_json::from_str(&reply)?)
 }
 
 async fn preview_keyboard_impl(proxy: &zbus::Proxy<'_>, settings: &KeyboardSettings) -> Result<()> {

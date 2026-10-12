@@ -146,8 +146,9 @@ pub struct AppState {
     // Async state
     pub pending_battery_update: Option<oneshot::Receiver<Result<(), anyhow::Error>>>,
     /// Reply of a profile apply started outside the startup flow (profile
-    /// switch/reset/delete, tray), so warnings and failures can be surfaced.
-    pub pending_profile_apply: Option<oneshot::Receiver<anyhow::Result<String>>>,
+    /// switch/reset/delete, tray), so warnings, the deferred GPU step and
+    /// failures can be surfaced.
+    pub pending_profile_apply: Option<oneshot::Receiver<anyhow::Result<ApplyProfileResult>>>,
     
     // Refresh coordinator handle
     pub coordinator_handle: Option<CoordinatorHandle>,
@@ -159,6 +160,9 @@ pub struct AppState {
 pub enum StartupProfileStatus {
     WaitingForCpuLimits,
     Applying,
+    /// The profile is applied except its GPU step, which waits until the
+    /// adapter is writable; resolved by the deferred report.
+    WaitingForGpuStep,
     AppliedWithWarnings(String),
     Failed(String),
     Complete,
@@ -419,6 +423,27 @@ fn startup_limits_warning_due(elapsed: Duration) -> bool {
     elapsed >= Duration::from_secs(5)
 }
 
+/// Startup banner state from an ApplyProfile reply. A deferred GPU step keeps
+/// the banner in the waiting state until the deferred report resolves it.
+fn startup_status_from_reply(result: &ApplyProfileResult) -> StartupProfileStatus {
+    if result.gpu_deferred {
+        StartupProfileStatus::WaitingForGpuStep
+    } else if result.warnings.is_empty() {
+        StartupProfileStatus::Complete
+    } else {
+        StartupProfileStatus::AppliedWithWarnings(result.warnings.join("; "))
+    }
+}
+
+/// Startup banner state from a deferred profile-apply completion.
+fn startup_status_from_deferred(report: &DeferredGpuReport) -> StartupProfileStatus {
+    match report.outcome {
+        DeferredGpuOutcome::Applied => StartupProfileStatus::Complete,
+        DeferredGpuOutcome::AppliedWithWarnings => StartupProfileStatus::AppliedWithWarnings(report.text.clone()),
+        DeferredGpuOutcome::Failed => StartupProfileStatus::Failed(report.text.clone()),
+    }
+}
+
 pub struct LapSphereApp {
     state: AppState,
     dbus_client: Option<DbusClient>,
@@ -437,7 +462,10 @@ pub struct LapSphereApp {
     startup_apply_pending: bool,
     startup_started: std::time::Instant,
     startup_timeout_warned: bool,
-    startup_apply_reply: Option<oneshot::Receiver<anyhow::Result<String>>>,
+    startup_apply_reply: Option<oneshot::Receiver<anyhow::Result<ApplyProfileResult>>>,
+    /// Set when the startup apply left its GPU step pending; the deferred
+    /// report resolves the banner once the step actually runs.
+    startup_waiting_for_gpu: bool,
 
     last_tray_profile: String,
     last_tray_profiles_count: usize,
@@ -819,6 +847,7 @@ impl LapSphereApp {
             startup_started: std::time::Instant::now(),
             startup_timeout_warned: false,
             startup_apply_reply: None,
+            startup_waiting_for_gpu: false,
             last_tray_profile,
             last_tray_profiles_count,
         }
@@ -841,10 +870,22 @@ impl LapSphereApp {
                     self.state.memory_info = Some(info);
                 }
                 HardwareUpdate::DeferredGpuReport(report) => {
-                    if report.is_failure {
-                        self.state.show_message(report.text, true);
-                    } else {
-                        self.state.show_warning(report.text);
+                    // A profile-apply completion resolves the startup waiting
+                    // state; the idle-OC restore must not drive it.
+                    if report.origin == PendingGpuOrigin::ProfileApply && self.startup_waiting_for_gpu {
+                        self.startup_waiting_for_gpu = false;
+                        self.state.startup_profile_status = startup_status_from_deferred(&report);
+                    }
+                    match report.outcome {
+                        DeferredGpuOutcome::Applied => {
+                            self.state.show_message(report.text, false);
+                        }
+                        DeferredGpuOutcome::AppliedWithWarnings => {
+                            self.state.show_warning(report.text);
+                        }
+                        DeferredGpuOutcome::Failed => {
+                            self.state.show_message(report.text, true);
+                        }
                     }
                 }
                 HardwareUpdate::CpuInfo(info) => {
@@ -1003,12 +1044,12 @@ impl LapSphereApp {
         }
         if let Some(mut rx) = self.startup_apply_reply.take() {
             match rx.try_recv() {
-                Ok(Ok(warnings)) => {
-                    self.state.startup_profile_status = if warnings.is_empty() {
-                        StartupProfileStatus::Complete
-                    } else {
-                        StartupProfileStatus::AppliedWithWarnings(warnings)
-                    };
+                Ok(Ok(result)) => {
+                    self.state.startup_profile_status = startup_status_from_reply(&result);
+                    if result.gpu_deferred {
+                        // Resolved by the deferred report once the step runs.
+                        self.startup_waiting_for_gpu = true;
+                    }
                 }
                 Ok(Err(e)) => {
                     let error = format!("Startup profile application failed: {e}");
@@ -1042,8 +1083,11 @@ impl LapSphereApp {
 
         if let Some(mut rx) = self.state.pending_profile_apply.take() {
             match rx.try_recv() {
-                Ok(Ok(warnings)) if !warnings.is_empty() => {
-                    self.state.show_warning(format!("Profile applied with warnings: {warnings}"));
+                Ok(Ok(result)) if result.gpu_deferred => {
+                    self.state.show_warning("Profile applied; GPU settings pending until the adapter is writable");
+                }
+                Ok(Ok(result)) if !result.warnings.is_empty() => {
+                    self.state.show_warning(format!("Profile applied with warnings: {}", result.warnings.join("; ")));
                 }
                 Ok(Ok(_)) => {}
                 Ok(Err(e)) => {
@@ -1066,6 +1110,7 @@ impl LapSphereApp {
             StartupProfileStatus::WaitingForCpuLimits =>
                 Some(("Warning: still waiting for CPU frequency limits; startup profile has not been applied".to_string(), egui::Color32::from_rgb(240, 120, 70))),
             StartupProfileStatus::Applying => Some(("Applying startup profile…".to_string(), egui::Color32::from_rgb(100, 170, 240))),
+            StartupProfileStatus::WaitingForGpuStep => Some(("Profile applied; GPU settings pending until the adapter is writable".to_string(), egui::Color32::from_rgb(100, 170, 240))),
             StartupProfileStatus::AppliedWithWarnings(warnings) => Some((
                 format!("Startup profile applied with warnings: {warnings}"),
                 egui::Color32::from_rgb(230, 190, 70),
@@ -1835,7 +1880,7 @@ fn save_profiles_to_disk(config: &AppConfig) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod startup_profile_feedback_tests {
-    use super::{claim_startup_apply, startup_limits_warning_due, StartupProfileStatus};
+    use super::{claim_startup_apply, startup_limits_warning_due, startup_status_from_deferred, startup_status_from_reply, StartupProfileStatus};
     use std::time::Duration;
 
     #[test]
@@ -1863,6 +1908,29 @@ mod startup_profile_feedback_tests {
         let error = "Startup profile application failed: daemon rejected request";
         let status = StartupProfileStatus::Failed(error.to_string());
         assert!(matches!(status, StartupProfileStatus::Failed(message) if message.contains("failed")));
+    }
+
+    #[test]
+    fn deferred_reply_and_completion_map_to_the_waiting_banner() {
+        use lapsphere_common::types::{ApplyProfileResult, DeferredGpuOutcome, DeferredGpuReport, PendingGpuOrigin};
+
+        // A deferred GPU step keeps the banner waiting instead of claiming
+        // completion.
+        let deferred = ApplyProfileResult { warnings: vec![], gpu_deferred: true };
+        assert_eq!(startup_status_from_reply(&deferred), StartupProfileStatus::WaitingForGpuStep);
+        // Immediate outcomes map as before.
+        let immediate = ApplyProfileResult { warnings: vec![], gpu_deferred: false };
+        assert_eq!(startup_status_from_reply(&immediate), StartupProfileStatus::Complete);
+        let warned = ApplyProfileResult { warnings: vec!["set_gpu_power_limit: nope".to_string()], gpu_deferred: false };
+        assert!(matches!(startup_status_from_reply(&warned), StartupProfileStatus::AppliedWithWarnings(w) if w.contains("set_gpu_power_limit")));
+
+        // The deferred completion resolves the waiting state per outcome.
+        let done = DeferredGpuReport { text: "Deferred GPU settings applied".to_string(), outcome: DeferredGpuOutcome::Applied, origin: PendingGpuOrigin::ProfileApply };
+        assert_eq!(startup_status_from_deferred(&done), StartupProfileStatus::Complete);
+        let warned = DeferredGpuReport { text: "Deferred GPU step applied with warnings: x".to_string(), outcome: DeferredGpuOutcome::AppliedWithWarnings, origin: PendingGpuOrigin::ProfileApply };
+        assert!(matches!(startup_status_from_deferred(&warned), StartupProfileStatus::AppliedWithWarnings(w) if w.contains("warnings")));
+        let failed = DeferredGpuReport { text: "Deferred GPU step failed: y".to_string(), outcome: DeferredGpuOutcome::Failed, origin: PendingGpuOrigin::ProfileApply };
+        assert!(matches!(startup_status_from_deferred(&failed), StartupProfileStatus::Failed(w) if w.contains("failed")));
     }
 }
 

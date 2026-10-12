@@ -32,19 +32,52 @@ pub struct LogEntry {
     pub timestamp: String,
 }
 
+/// Who queued a deferred GPU step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PendingGpuOrigin {
+    /// Queued by a profile apply (the runtime write gate refused the writes).
+    ProfileApply,
+    /// Queued by the idle-OC restore.
+    IdleRestore,
+}
+
+/// Final outcome of a completed deferred GPU apply attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeferredGpuOutcome {
+    /// Every operation reached a final successful outcome.
+    Applied,
+    /// Applied, with explicitly unsupported operations skipped.
+    AppliedWithWarnings,
+    /// At least one genuine failure occurred.
+    Failed,
+}
+
 /// Outcome of the last completed deferred GPU apply attempt, delivered to the
 /// GUI on its next poll.
 ///
 /// The `ApplyProfile` reply is sent before a deferred attempt runs, so this
 /// take-once report is the delivery path for the deferred outcome. Identical
-/// repeated outcomes are published once; the newest report replaces an
-/// unclaimed older one.
+/// repeated outcomes are published once; a clean completion ends the series
+/// so a later recurrence of the same problem is shown again. The newest
+/// report replaces an unclaimed older one.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DeferredGpuReport {
     /// Human-readable summary of the deferred attempt's outcome.
     pub text: String,
-    /// True when a genuine failure occurred; false for an unsupported-op warning.
-    pub is_failure: bool,
+    /// Classified outcome (clean / warnings / failure).
+    pub outcome: DeferredGpuOutcome,
+    /// Who queued the step this report belongs to.
+    pub origin: PendingGpuOrigin,
+}
+
+/// Result of an `ApplyProfile` call.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ApplyProfileResult {
+    /// Non-fatal warnings (unsupported operations skipped, etc.).
+    pub warnings: Vec<String>,
+    /// True when the GPU step could not be applied yet and stays pending
+    /// until the adapter is writable.
+    pub gpu_deferred: bool,
 }
 
 /// Complete CPU telemetry snapshot.

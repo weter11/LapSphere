@@ -10,8 +10,19 @@ use lapsphere_common::types::*;
 use crate::tuxedo_io::{TuxedoIo, HardwareInterface};
 
 static CPU_LIMITS_MODIFIED: AtomicBool = AtomicBool::new(false);
+/// A deferred GPU step and who queued it. The origin decides whether a
+/// completion is reported to the GUI: only a profile apply's deferred step
+/// resolves the "waiting for the GPU step" state; the idle-OC restore must
+/// stay silent on success.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingGpuStep {
+    pub idx: u32,
+    pub settings: GpuSettings,
+    pub origin: PendingGpuOrigin,
+}
+
 /// Deferred GPU settings and their consumption state share one lock.
-pub static PENDING_GPU_SETTINGS: Lazy<Mutex<Option<(u32, GpuSettings)>>> = Lazy::new(|| Mutex::new(None));
+pub static PENDING_GPU_SETTINGS: Lazy<Mutex<Option<PendingGpuStep>>> = Lazy::new(|| Mutex::new(None));
 pub static GPU_APPLY_GEN: AtomicU64 = AtomicU64::new(0);
 static LAST_APPLIED_PROFILE: Lazy<Mutex<Option<Profile>>> = Lazy::new(|| Mutex::new(None));
 
@@ -657,7 +668,11 @@ fn consume_pending_locked<T, R>(
 }
 
 pub fn replace_pending_gpu_settings(idx: u32, settings: GpuSettings) {
-    *lock_or_recover(&PENDING_GPU_SETTINGS, "PENDING_GPU_SETTINGS") = Some((idx, settings));
+    *lock_or_recover(&PENDING_GPU_SETTINGS, "PENDING_GPU_SETTINGS") = Some(PendingGpuStep {
+        idx,
+        settings,
+        origin: PendingGpuOrigin::IdleRestore,
+    });
 }
 
 /// Consumption rule for a deferred GPU attempt: keep the settings pending
@@ -691,41 +706,53 @@ fn attempt_gpu_step(
 
 /// Apply the newest deferred profile GPU step once the adapter is writable.
 pub fn apply_pending_gpu() {
-    let applied = consume_pending_locked(&PENDING_GPU_SETTINGS, "PENDING_GPU_SETTINGS", |(idx, settings)| {
-        attempt_gpu_step(*idx, settings, crate::hardware_detection::gpu_write_allowed, apply_gpu_static)
-            .map(|(failures, consumed)| ((*idx, failures), consumed))
+    let applied = consume_pending_locked(&PENDING_GPU_SETTINGS, "PENDING_GPU_SETTINGS", |step| {
+        attempt_gpu_step(step.idx, &step.settings, crate::hardware_detection::gpu_write_allowed, apply_gpu_static)
+            .map(|(failures, consumed)| ((step.idx, step.origin, failures), consumed))
     });
-    if let Some((idx, failures)) = applied {
+    if let Some((idx, origin, failures)) = applied {
         warn_gpu_failures("deferred profile GPU step", idx, &failures);
         if pending_consumed_after_attempt(&failures) {
             log::info!(target: "hw.gpu", "deferred profile GPU step applied gpu={idx} failures={}", failures.len());
-            publish_deferred_gpu_report(&failures);
+            publish_deferred_gpu_report(origin, &failures);
         } else {
             log::info!(target: "hw.gpu", "deferred profile GPU step gpu={idx} kept pending: runtime write gate closed mid-apply");
         }
     }
 }
 
-/// Queue the completed deferred attempt's outcome for the GUI. Silent for a
-/// clean attempt; identical repeated outcomes are published once.
-fn publish_deferred_gpu_report(failures: &[GpuOpFailure]) {
+/// Queue the completed deferred attempt's outcome for the GUI.
+///
+/// A clean outcome is published only for a profile apply — the idle-OC
+/// restore would otherwise emit a success event on every cycle. Identical
+/// repeated outcomes are published once (a series); a clean attempt ends the
+/// series, so a later recurrence of the same problem is shown again.
+fn publish_deferred_gpu_report(origin: PendingGpuOrigin, failures: &[GpuOpFailure]) {
+    let mut state = lock_or_recover(&DEFERRED_GPU_REPORT, "DEFERRED_GPU_REPORT");
     if failures.is_empty() {
+        state.last_published = None;
+        if origin == PendingGpuOrigin::ProfileApply {
+            state.pending = Some(DeferredGpuReport {
+                text: "Deferred GPU settings applied".to_string(),
+                outcome: DeferredGpuOutcome::Applied,
+                origin,
+            });
+        }
         return;
     }
     let (warnings, fatal) = split_gpu_failures(failures);
-    let (text, is_failure) = if fatal.is_empty() {
-        (format!("Deferred GPU step applied with warnings: {}", warnings.join("; ")), false)
+    let (text, outcome) = if fatal.is_empty() {
+        (format!("Deferred GPU step applied with warnings: {}", warnings.join("; ")), DeferredGpuOutcome::AppliedWithWarnings)
     } else if warnings.is_empty() {
-        (format!("Deferred GPU step failed: {}", fatal.join("; ")), true)
+        (format!("Deferred GPU step failed: {}", fatal.join("; ")), DeferredGpuOutcome::Failed)
     } else {
-        (format!("Deferred GPU step failed: {} (unsupported: {})", fatal.join("; "), warnings.join("; ")), true)
+        (format!("Deferred GPU step failed: {} (unsupported: {})", fatal.join("; "), warnings.join("; ")), DeferredGpuOutcome::Failed)
     };
-    let mut state = lock_or_recover(&DEFERRED_GPU_REPORT, "DEFERRED_GPU_REPORT");
     if state.last_published.as_deref() == Some(text.as_str()) {
         return;
     }
     state.last_published = Some(text.clone());
-    state.pending = Some(DeferredGpuReport { text, is_failure });
+    state.pending = Some(DeferredGpuReport { text, outcome, origin });
 }
 
 /// Take the pending deferred-GPU report, if any (take-once delivery).
@@ -733,7 +760,7 @@ pub fn take_deferred_gpu_report() -> Option<DeferredGpuReport> {
     lock_or_recover(&DEFERRED_GPU_REPORT, "DEFERRED_GPU_REPORT").pending.take()
 }
 
-pub fn apply_profile(profile: &Profile) -> Result<Vec<String>> {
+pub fn apply_profile(profile: &Profile) -> Result<ApplyProfileResult> {
     // Check if this profile is already applied to avoid redundant hardware calls.
     //
     // IMPORTANT: the "already applied" marker is only written *after* every
@@ -747,7 +774,7 @@ pub fn apply_profile(profile: &Profile) -> Result<Vec<String>> {
         if let Some(ref last) = *last_profile {
             if last == profile {
                 log::info!(target: "hw.detect", "Profile '{}' is already applied, skipping", profile.name);
-                return Ok(Vec::new());
+                return Ok(ApplyProfileResult { warnings: Vec::new(), gpu_deferred: false });
             }
         }
     }
@@ -766,7 +793,7 @@ pub fn apply_profile(profile: &Profile) -> Result<Vec<String>> {
             } else {
                 log::warn!(target: "hw.detect", "Profile '{}' applied with warnings: {}", profile.name, warnings.join("; "));
             }
-            Ok(warnings)
+            Ok(ApplyProfileResult { warnings, gpu_deferred })
         }
         Err(e) => {
             // A partial apply must NOT be remembered as "applied": otherwise the
@@ -892,13 +919,21 @@ fn apply_profile_inner(profile: &Profile) -> Result<(bool, Vec<String>)> {
                 // Same consumption rule as the deferred retry: a gate refusal
                 // that lands mid-apply keeps this profile's step pending so the
                 // refused operations are retried once the adapter is writable.
-                *pending = pending_after_profile_apply(consumed, (nvidia_gpu_idx, profile.gpu_settings.clone()));
+                *pending = pending_after_profile_apply(consumed, PendingGpuStep {
+                    idx: nvidia_gpu_idx,
+                    settings: profile.gpu_settings.clone(),
+                    origin: PendingGpuOrigin::ProfileApply,
+                });
                 warn_gpu_failures("profile GPU apply", nvidia_gpu_idx, &failures);
                 (!consumed, failures)
             }
             None => {
                 log::debug!(target: "hw.gpu", "profile GPU writes deferred gpu={}", nvidia_gpu_idx);
-                *pending = pending_after_profile_apply(false, (nvidia_gpu_idx, profile.gpu_settings.clone()));
+                *pending = pending_after_profile_apply(false, PendingGpuStep {
+                    idx: nvidia_gpu_idx,
+                    settings: profile.gpu_settings.clone(),
+                    origin: PendingGpuOrigin::ProfileApply,
+                });
                 (true, Vec::new())
             }
         }
@@ -929,8 +964,8 @@ fn apply_profile_inner(profile: &Profile) -> Result<(bool, Vec<String>)> {
 /// A consumed attempt (every operation reached a final outcome) leaves nothing
 /// pending — this also drops a step deferred by an earlier profile. An attempt
 /// that must be retried (the write gate closed mid-apply, or the pre-check
-/// refused) stores the newest profile's step.
-pub fn pending_after_profile_apply(consumed: bool, deferred: (u32, GpuSettings)) -> Option<(u32, GpuSettings)> {
+/// refused) stores the newest profile's step (origin ProfileApply).
+pub fn pending_after_profile_apply(consumed: bool, deferred: PendingGpuStep) -> Option<PendingGpuStep> {
     if consumed { None } else { Some(deferred) }
 }
 
@@ -2206,8 +2241,8 @@ mod tests {
 
 #[cfg(test)]
 mod pending_supersede_tests {
-    use super::{consume_pending_locked, pending_after_profile_apply};
-    use lapsphere_common::types::GpuSettings;
+    use super::{consume_pending_locked, pending_after_profile_apply, PendingGpuStep};
+    use lapsphere_common::types::{GpuSettings, PendingGpuOrigin};
     use std::sync::{mpsc, Arc, Mutex};
     use std::time::Duration;
 
@@ -2269,19 +2304,22 @@ mod pending_supersede_tests {
 
     #[test]
     fn deferred_a_then_applied_b_leaves_only_b_and_no_pending() {
-        let a = (0u32, settings(-50.0));
-        let b = (0u32, settings(-100.0));
-        let after_a = pending_after_profile_apply(false, a.clone());
-        assert_eq!(after_a, Some(a));
-        let after_b = pending_after_profile_apply(true, b);
+        let step = |core: f32| PendingGpuStep {
+            idx: 0,
+            settings: settings(core),
+            origin: PendingGpuOrigin::ProfileApply,
+        };
+        let after_a = pending_after_profile_apply(false, step(-50.0));
+        assert_eq!(after_a.as_ref().map(|s| s.settings.core_offset), Some(Some(-50.0)));
+        let after_b = pending_after_profile_apply(true, step(-100.0));
         assert_eq!(after_b, None);
     }
 }
 
 #[cfg(test)]
 mod pending_gate_race_tests {
-    use super::{attempt_gpu_step, consume_pending_locked, pending_after_profile_apply, pending_consumed_after_attempt, GpuOpFailure, GpuOpFailureKind};
-    use lapsphere_common::types::GpuSettings;
+    use super::{attempt_gpu_step, consume_pending_locked, pending_after_profile_apply, pending_consumed_after_attempt, GpuOpFailure, GpuOpFailureKind, PendingGpuStep};
+    use lapsphere_common::types::{GpuSettings, PendingGpuOrigin};
     use std::sync::Mutex;
 
     fn settings() -> GpuSettings {
@@ -2345,7 +2383,7 @@ mod pending_gate_race_tests {
         // (shared with the deferred retry) + pending_after_profile_apply,
         // driven with injected gate and operation functions.
         let settings = settings();
-        let slot = Mutex::new(None::<(u32, GpuSettings)>);
+        let slot = Mutex::new(None::<PendingGpuStep>);
 
         // The pre-check passes; an individual operation is then refused with
         // the typed GpuGateClosed failure.
@@ -2358,7 +2396,11 @@ mod pending_gate_race_tests {
 
         // The immediate-apply decision stores the step for retry instead of
         // discarding it.
-        *slot.lock().unwrap() = pending_after_profile_apply(consumed, (0u32, settings.clone()));
+        *slot.lock().unwrap() = pending_after_profile_apply(consumed, PendingGpuStep {
+            idx: 0,
+            settings: settings.clone(),
+            origin: PendingGpuOrigin::ProfileApply,
+        });
         assert!(slot.lock().unwrap().is_some(), "a mid-apply gate refusal must keep the settings pending");
 
         // The next writable attempt applies everything and consumes the slot.
@@ -2366,7 +2408,11 @@ mod pending_gate_race_tests {
             .expect("the pre-check passed");
         assert!(failures.is_empty());
         assert!(consumed);
-        *slot.lock().unwrap() = pending_after_profile_apply(consumed, (0u32, settings));
+        *slot.lock().unwrap() = pending_after_profile_apply(consumed, PendingGpuStep {
+            idx: 0,
+            settings,
+            origin: PendingGpuOrigin::ProfileApply,
+        });
         assert!(slot.lock().unwrap().is_none(), "a final attempt must clear the slot");
     }
 
@@ -2417,35 +2463,49 @@ mod pending_gate_race_tests {
 #[cfg(test)]
 mod deferred_report_tests {
     use super::{publish_deferred_gpu_report, take_deferred_gpu_report, GpuOpFailure, GpuOpFailureKind};
+    use lapsphere_common::types::{DeferredGpuOutcome, PendingGpuOrigin};
 
     fn failure(op: &'static str, kind: GpuOpFailureKind) -> GpuOpFailure {
         GpuOpFailure { op, message: format!("{op} refused"), kind }
     }
 
     #[test]
-    fn deferred_reports_are_taken_once_and_identical_outcomes_publish_once() {
+    fn deferred_reports_are_taken_once_and_clean_completions_end_the_series() {
         // Single test owns this process-global; drain anything a sibling left.
         let _ = take_deferred_gpu_report();
 
+        // A profile apply that skipped an unsupported op publishes a warning
+        // tagged with its origin.
         let unsupported = vec![failure("set_gpu_power_limit", GpuOpFailureKind::Unsupported)];
-        publish_deferred_gpu_report(&unsupported);
+        publish_deferred_gpu_report(PendingGpuOrigin::ProfileApply, &unsupported);
         let report = take_deferred_gpu_report().expect("a warning outcome must be queued");
-        assert!(!report.is_failure);
+        assert_eq!(report.outcome, DeferredGpuOutcome::AppliedWithWarnings);
+        assert_eq!(report.origin, PendingGpuOrigin::ProfileApply);
         assert!(report.text.contains("set_gpu_power_limit"));
         assert!(take_deferred_gpu_report().is_none(), "delivery is take-once");
 
         // Identical outcome again: deduplicated, nothing queued.
-        publish_deferred_gpu_report(&unsupported);
+        publish_deferred_gpu_report(PendingGpuOrigin::ProfileApply, &unsupported);
         assert!(take_deferred_gpu_report().is_none());
 
-        // A different (failing) outcome publishes and is flagged.
-        publish_deferred_gpu_report(&[failure("set_gpu_core_offset", GpuOpFailureKind::Failed)]);
-        let report = take_deferred_gpu_report().expect("a failure outcome must be queued");
-        assert!(report.is_failure);
-        assert!(report.text.contains("set_gpu_core_offset"));
+        // A clean profile-apply completion publishes and ends the series...
+        publish_deferred_gpu_report(PendingGpuOrigin::ProfileApply, &[]);
+        let clean = take_deferred_gpu_report().expect("a clean profile-apply completion must be published");
+        assert_eq!(clean.outcome, DeferredGpuOutcome::Applied);
+        assert_eq!(clean.origin, PendingGpuOrigin::ProfileApply);
+        // ...so the same warning is shown again when it recurs later.
+        publish_deferred_gpu_report(PendingGpuOrigin::ProfileApply, &unsupported);
+        assert!(take_deferred_gpu_report().is_some(), "a recurrence after a clean completion must not be suppressed");
 
-        // A clean attempt queues nothing.
-        publish_deferred_gpu_report(&[]);
-        assert!(take_deferred_gpu_report().is_none());
+        // A clean idle-OC restore stays silent: no success event per cycle.
+        let _ = take_deferred_gpu_report();
+        publish_deferred_gpu_report(PendingGpuOrigin::IdleRestore, &[]);
+        assert!(take_deferred_gpu_report().is_none(), "a clean restore must not notify");
+
+        // A failing idle-OC restore is reported with its origin.
+        publish_deferred_gpu_report(PendingGpuOrigin::IdleRestore, &[failure("set_gpu_core_offset", GpuOpFailureKind::Failed)]);
+        let report = take_deferred_gpu_report().expect("a restore failure must be queued");
+        assert_eq!(report.outcome, DeferredGpuOutcome::Failed);
+        assert_eq!(report.origin, PendingGpuOrigin::IdleRestore);
     }
 }

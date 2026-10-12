@@ -220,10 +220,10 @@ impl ControlInterface {
 
         let duration = start.elapsed().as_millis();
         match &res {
-            Ok(warnings) => log::debug!(target: "api.ok", "ApplyProfile duration_ms={} warnings={}", duration, warnings.len()),
+            Ok(result) => log::debug!(target: "api.ok", "ApplyProfile duration_ms={} warnings={} gpu_deferred={}", duration, result.warnings.len(), result.gpu_deferred),
             Err(e) => log::warn!(target: "api.fail", "ApplyProfile reason=\"{}\" duration_ms={}", e, duration),
         }
-        res.map(|warnings| warnings.join("; "))
+        res.map(|result| serde_json::to_string(&result).unwrap_or_default())
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
 
@@ -235,7 +235,7 @@ impl ControlInterface {
         // Only log when something was actually taken: this method is polled
         // every GPU tick, and the ring buffers debug lines.
         if let Some(r) = &report {
-            log::debug!(target: "api.ok", "TakeDeferredGpuReport failure={}", r.is_failure);
+            log::debug!(target: "api.ok", "TakeDeferredGpuReport outcome={:?}", r.outcome);
         }
         Ok(report
             .map(|r| serde_json::to_string(&r).unwrap_or_default())
