@@ -850,10 +850,11 @@ pub fn apply_profile(profile: &Profile) -> Result<ApplyProfileResult> {
     let result = apply_profile_inner(profile);
     match result {
         Ok((gpu_deferred, warnings)) => {
-            if !gpu_deferred {
-                let mut last_profile = lock_or_recover(&LAST_APPLIED_PROFILE, "LAST_APPLIED_PROFILE");
-                *last_profile = Some(profile.clone());
-            }
+            // A deferred GPU step means nothing is fully applied any more:
+            // clearing the marker keeps a later apply of an older profile from
+            // being skipped against stale hardware (A -> B deferred -> A).
+            *lock_or_recover(&LAST_APPLIED_PROFILE, "LAST_APPLIED_PROFILE") =
+                marker_after_apply(gpu_deferred, profile);
             if warnings.is_empty() {
                 if gpu_deferred {
                     log::info!(target: "hw.detect", "Profile '{}' applied; GPU step pending until the adapter is writable", profile.name);
@@ -1050,6 +1051,14 @@ fn apply_profile_inner(profile: &Profile) -> Result<(bool, Vec<String>)> {
 /// refused) stores the newest profile's step (origin ProfileApply).
 pub fn pending_after_profile_apply(consumed: bool, deferred: PendingGpuStep) -> Option<PendingGpuStep> {
     if consumed { None } else { Some(deferred) }
+}
+
+/// What LAST_APPLIED_PROFILE becomes after an apply: the profile only when
+/// every step (including the GPU one) reached a final outcome; cleared while
+/// a GPU step is still pending, so hardware that has already moved on cannot
+/// be skipped against a stale marker (A -> B deferred -> A).
+fn marker_after_apply(gpu_deferred: bool, profile: &Profile) -> Option<Profile> {
+    if gpu_deferred { None } else { Some(profile.clone()) }
 }
 
 /// Split classified GPU failures into non-fatal warnings (operations the
@@ -2226,6 +2235,16 @@ mod tests {
                 (if this fires only under parallel cargo test, the cause is a sibling test's \
                 write to this process-global, not a regression — rerun with --test-threads=1)");
         }
+    }
+
+    #[test]
+    fn deferred_apply_clears_the_marker_instead_of_keeping_a_stale_one() {
+        // The marker is a dedup key, not a completeness claim: while a GPU
+        // step is pending, an older profile must not stay skippable as
+        // "already applied" (A -> B deferred -> A must re-apply A).
+        let p = failing_profile();
+        assert_eq!(marker_after_apply(false, &p), Some(p.clone()));
+        assert_eq!(marker_after_apply(true, &p), None);
     }
 
     #[test]
