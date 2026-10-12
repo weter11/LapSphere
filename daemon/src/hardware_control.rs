@@ -789,7 +789,11 @@ pub fn apply_profile(profile: &Profile) -> Result<ApplyProfileResult> {
                 *last_profile = Some(profile.clone());
             }
             if warnings.is_empty() {
-                log::info!(target: "hw.detect", "Profile '{}' applied successfully", profile.name);
+                if gpu_deferred {
+                    log::info!(target: "hw.detect", "Profile '{}' applied; GPU step pending until the adapter is writable", profile.name);
+                } else {
+                    log::info!(target: "hw.detect", "Profile '{}' applied successfully", profile.name);
+                }
             } else {
                 log::warn!(target: "hw.detect", "Profile '{}' applied with warnings: {}", profile.name, warnings.join("; "));
             }
