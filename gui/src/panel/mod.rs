@@ -32,9 +32,13 @@
 //!   `background_opacity` are stored and normalized, but nothing here claims they
 //!   are applied.
 //! * Wayland. The panel uses only `ViewportCommand`s, which is the portable
-//!   subset; the X11-specific work is PR 2's and is not tested on Wayland.
-//! * Multi-monitor placement. The panel is not positioned by this code, so no
-//!   second-monitor claim is made.
+//!   subset; the X11-specific work is PR 2's and is not tested on Wayland. The
+//!   stored position is X11-only for the same reason: `outer_rect` is not
+//!   reported on Wayland, so there is nothing to read back there.
+//! * Multi-monitor placement. The stored position IS restored and clamped, but
+//!   only against the monitor the panel is already on — a monitor's origin is not
+//!   available (`ViewportInfo` reports a size) — so no second-monitor claim is
+//!   made.
 //!
 //! # A scope question this code does not settle
 //!

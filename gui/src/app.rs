@@ -494,6 +494,9 @@ pub struct LapSphereApp {
     settings_outcome: crate::panel::menu::SettingsOutcome,
     /// The panel's settings, from `panel.json`.
     panel_config: crate::panel::PanelConfig,
+    /// Follows where the panel window actually is, and decides when the stored
+    /// position is out of date. See `panel::window::PositionWatch`.
+    panel_position_watch: crate::panel::window::PositionWatch,
 }
 
 #[derive(Debug)]
@@ -830,6 +833,7 @@ impl LapSphereApp {
             panel_spec_applied: false,
             normal_geometry: None,
             panel_config,
+            panel_position_watch: Default::default(),
             last_poll_set: Vec::new(),
             panel_menu_open: false,
             settings_open: false,
@@ -1283,6 +1287,22 @@ impl LapSphereApp {
             if response.clicked() {
                 self.panel_menu_open = false;
             }
+
+            // Dragging the panel moves the window. The panel has no titlebar, so
+            // this is the only way to move it.
+            //
+            // The move is handed to the WINDOW MANAGER (`StartDrag`, which on X11
+            // is `_NET_WM_MOVERESIZE`) rather than done by sending
+            // `OuterPosition` from the pointer delta each frame: the pointer
+            // position egui sees is window-relative, so a window that moves under
+            // a stationary pointer stops producing a delta and such a drag stalls
+            // after the first frame. The window manager instead takes the pointer
+            // for the whole gesture and moves the window itself.
+            //
+            // Primary button only, so that a right-drag stays a menu gesture.
+            if response.drag_started_by(egui::PointerButton::Primary) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
         });
 
         self.panel_menu_open = self.panel_menu_open || menu_action != crate::panel::menu::ContextAction::None;
@@ -1440,14 +1460,132 @@ impl LapSphereApp {
         let spec = match target {
             Mode::Panel => {
                 let font_row_height = self.panel_font_row_height(ctx);
-                crate::panel::window::panel_spec(&self.panel_config, font_row_height)
+                let monitor = self.panel_monitor_size(ctx);
+                let spec =
+                    crate::panel::window::panel_spec(&self.panel_config, font_row_height, monitor);
+
+                // A stored corner that the clamp moved is worth a line: it is the
+                // difference between "the panel came back where it was" and "the
+                // panel came back where it fits", and neither is visible from the
+                // request alone.
+                if let (Some(stored), Some(placed), Some(monitor)) =
+                    (self.panel_config.position, spec.position, monitor)
+                {
+                    if stored.as_array() != placed {
+                        log::info!(
+                            "panel position: stored {:.0},{:.0} clamped to {:.0},{:.0} for a \
+                             {}x{} monitor",
+                            stored.x,
+                            stored.y,
+                            placed[0],
+                            placed[1],
+                            monitor[0],
+                            monitor[1]
+                        );
+                    }
+                }
+                spec
             }
             Mode::Normal => crate::panel::window::normal_spec(self.normal_geometry),
         };
 
+        if let Some(position) = spec.position {
+            // The position the window is at right now is the one being replaced,
+            // so restart the settle window: otherwise a still panel could be
+            // persisted as settled before the request has even landed.
+            self.panel_position_watch
+                .requested(position, std::time::Instant::now());
+        }
+
         crate::panel::window::apply_spec(ctx, spec);
         self.mode = target;
         self.panel_spec_applied = true;
+    }
+
+    /// The monitor's size in points, as the viewport reports it.
+    ///
+    /// `ViewportInfo` carries a monitor SIZE and no monitor rect, so there is no
+    /// origin to place a second monitor against. That is what limits the stored
+    /// position to single-monitor placement; see
+    /// `panel::window::clamp_to_monitor`.
+    fn panel_monitor_size(&self, ctx: &Context) -> Option<[f32; 2]> {
+        ctx.input(|input| input.viewport().monitor_size)
+            .map(|size| [size.x, size.y])
+    }
+
+    /// Read the panel window's actual position back, and persist it once it has
+    /// settled.
+    ///
+    /// The position comes from the WINDOW (`ViewportInfo::outer_rect`, in points)
+    /// and never from what was requested: `OuterPosition` is a request, and a
+    /// window manager may clamp it, apply it late or place the window itself, so
+    /// the value worth keeping is the one the window is actually at. Reading it
+    /// back is also the only way to report whether a request landed — which is
+    /// what the lines below do, and why they distinguish "applied as requested"
+    /// from "the window manager put it somewhere else".
+    ///
+    /// One write per settled position, not one per frame (`PositionWatch`), and a
+    /// drag resets the settle window on every move it produces.
+    fn track_panel_position(&mut self, ctx: &Context) {
+        let actual = ctx
+            .input(|input| input.viewport().outer_rect)
+            .map(|rect| [rect.min.x, rect.min.y]);
+
+        let now = std::time::Instant::now();
+        self.panel_position_watch.observe(actual, now);
+
+        let crate::panel::window::PositionStep::Settled {
+            position,
+            requested,
+        } = self.panel_position_watch.step(now)
+        else {
+            return;
+        };
+
+        match requested {
+            Some(requested) if !crate::panel::window::position_matches(requested, position) => {
+                log::warn!(
+                    "panel position: the window is at {:.0},{:.0}, not the requested {:.0},{:.0} \
+                     (clamped or overruled by the window manager)",
+                    position[0],
+                    position[1],
+                    requested[0],
+                    requested[1]
+                )
+            }
+            Some(_) => log::info!(
+                "panel position: {:.0},{:.0} applied as requested",
+                position[0],
+                position[1]
+            ),
+            // Moved by the user's drag, or placed by the window manager: nothing
+            // was requested, so there is nothing to compare it against.
+            None => log::info!(
+                "panel position: settled at {:.0},{:.0}",
+                position[0],
+                position[1]
+            ),
+        }
+
+        if let Some(stored) = self.panel_config.position {
+            if crate::panel::window::position_matches(stored.as_array(), position) {
+                return;
+            }
+        }
+        self.panel_config.position = Some(crate::panel::config::PanelPosition::new(
+            position[0],
+            position[1],
+        ));
+
+        match crate::panel::save_panel_config(&self.panel_config) {
+            Ok(()) => log::info!(
+                "panel position {:.0},{:.0} written to {}",
+                position[0],
+                position[1],
+                crate::panel::PANEL_CONFIG_FILE
+            ),
+            Err(err) => log::warn!("could not write {}: {err}", crate::panel::PANEL_CONFIG_FILE),
+        }
     }
 
     /// The font row height the panel layout is computed against.
@@ -1551,6 +1689,7 @@ impl eframe::App for LapSphereApp {
         }
 
         if self.mode.is_panel() {
+            self.track_panel_position(&ctx);
             self.draw_panel(ui, &ctx);
             ctx.request_repaint_after(Duration::from_millis(500));
             return;

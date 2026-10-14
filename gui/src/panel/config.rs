@@ -23,9 +23,11 @@
 //! * **No frame-time / fps rows and no ring buffer.** Out of scope by decision;
 //!   the reserved-slot idea that would have needed them is not carried over.
 //! * **No click-through.** Out of scope by decision.
-//! * **No position.** The panel is placed by the window manager / desktop for
-//!   now; a stored corner is the second-monitor question, which is explicitly
-//!   NOT claimed.
+//! * **No multi-monitor position.** [`PanelConfig::position`] stores where the
+//!   panel was last seen and is clamped into the monitor on load, but only
+//!   against the monitor the panel is already on: the monitor's ORIGIN is not
+//!   available (`ViewportInfo` reports a size, not a rect), so a position on a
+//!   second monitor is NOT claimed to work. See [`PanelPosition`].
 //! * **No hotkey or D-Bus fields.** Those arrive with the visibility work
 //!   (PR 3) and belong with the code that implements them, not ahead of it.
 
@@ -179,6 +181,68 @@ impl RowConfig {
     }
 }
 
+/// Where the panel's outer top-left corner was last seen, in points.
+///
+/// Points and not device pixels: the window APIs take points
+/// (`ViewportCommand::OuterPosition`), every other panel dimension is in points,
+/// and the value is written from what the window reports back, which is already
+/// in points (`ViewportInfo::outer_rect`).
+///
+/// **Single monitor only.** The stored corner is clamped into the monitor before
+/// it is applied, but the clamp needs the monitor's own origin to be correct for
+/// anything else, and `ViewportInfo` carries a monitor SIZE and no origin. A
+/// position on a second monitor is therefore NOT claimed to be restored to that
+/// monitor.
+///
+/// `None` (the default, and what an older `panel.json` loads as) means "no
+/// stored position": the window manager places the panel, exactly as it did
+/// before this field existed.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct PanelPosition {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl PanelPosition {
+    pub fn new(x: f32, y: f32) -> Self {
+        Self { x, y }
+    }
+
+    pub fn as_array(self) -> [f32; 2] {
+        [self.x, self.y]
+    }
+}
+
+/// A stored `{"x": …, "y": …}` pair, or `None` for anything else.
+///
+/// Written as a total function over the parsed JSON value rather than derived,
+/// so that an unusable entry degrades to "not set" instead of failing the whole
+/// file -- the same policy as [`Stacking::from_stored`]. A position that is not
+/// two finite numbers cannot be handed to a window at all, and refusing to parse
+/// would throw away the user's row selection and width to correct it.
+pub fn parse_position(raw: &serde_json::Value) -> Option<PanelPosition> {
+    let object = raw.as_object()?;
+    let x = object.get("x")?.as_f64()? as f32;
+    let y = object.get("y")?.as_f64()? as f32;
+    if !x.is_finite() || !y.is_finite() {
+        return None;
+    }
+    Some(PanelPosition { x, y })
+}
+
+/// The `deserialize_with` half of [`parse_position`].
+fn deserialize_position<'de, D>(deserializer: D) -> Result<Option<PanelPosition>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = serde_json::Value::deserialize(deserializer).map_err(serde::de::Error::custom)?;
+    let position = parse_position(&raw);
+    if position.is_none() && !raw.is_null() {
+        log::warn!("{PANEL_CONFIG_FILE} has an unusable position {raw}; treating it as unset");
+    }
+    Ok(position)
+}
+
 /// The whole of `panel.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -192,6 +256,11 @@ pub struct PanelConfig {
     pub stacking: Stacking,
     /// In `always_on_top` stacking: keep the panel out of the taskbar.
     pub hide_from_taskbar: bool,
+    /// Where the panel was last seen, or `None` to let the window manager place
+    /// it. Written from the window's ACTUAL position, not from what was asked
+    /// for: a request the window manager declined is not where the panel is.
+    #[serde(deserialize_with = "deserialize_position")]
+    pub position: Option<PanelPosition>,
     pub rows: Vec<RowConfig>,
 }
 
@@ -203,6 +272,10 @@ impl Default for PanelConfig {
             background_opacity: DEFAULT_BACKGROUND_OPACITY,
             stacking: Stacking::default(),
             hide_from_taskbar: true,
+            // No stored position by default: the panel starts wherever the
+            // window manager puts it, which is what every version before this
+            // field did.
+            position: None,
             rows: rows::all_ids().into_iter().map(RowConfig::new).collect(),
         }
     }
@@ -272,6 +345,17 @@ pub fn normalize(mut config: PanelConfig) -> PanelConfig {
     );
 
     config.rows = normalize_rows(&config.rows);
+
+    // A non-finite corner is not a position: a NaN would be an `OuterPosition`
+    // request with no defined meaning, and an infinity always lands outside the
+    // monitor. Forgetting it falls back to window-manager placement, the same
+    // "unusable value costs one field" policy the width and opacity get.
+    if let Some(position) = config.position {
+        if !position.x.is_finite() || !position.y.is_finite() {
+            log::warn!("panel.json has a non-finite position, forgetting it");
+            config.position = None;
+        }
+    }
     config
 }
 
@@ -488,6 +572,88 @@ mod tests {
                 !json.contains(forbidden),
                 "panel.json must not carry `{forbidden}`"
             );
+        }
+    }
+
+    // ---- the stored position ----
+
+    #[test]
+    fn a_fresh_config_has_no_position_so_the_window_manager_places_the_panel() {
+        // The safe default: every `panel.json` written before this field existed,
+        // and every fresh install, keeps the old behaviour of being placed by the
+        // window manager rather than being told a corner.
+        assert_eq!(PanelConfig::fresh().position, None);
+        assert_eq!(normalize(PanelConfig::default()).position, None);
+    }
+
+    #[test]
+    fn a_file_from_before_this_field_existed_still_loads() {
+        // Exactly an older `panel.json`: no `position` key at all.
+        let parsed: PanelConfig =
+            serde_json::from_str(r#"{"version": 1, "width": 410.0, "background_opacity": 0.5}"#)
+                .expect("an older file decodes");
+        let config = normalize(parsed);
+        assert_eq!(config.position, None, "no key means no stored position");
+        assert_eq!(config.width, 410.0, "and nothing else is disturbed");
+    }
+
+    #[test]
+    fn a_stored_position_survives_a_round_trip_through_json() {
+        let config = PanelConfig {
+            position: Some(PanelPosition::new(24.0, 36.0)),
+            ..PanelConfig::fresh()
+        };
+        let json = serde_json::to_string_pretty(&config).expect("serialize");
+        assert!(json.contains("\"position\""), "got {json}");
+        let back: PanelConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.position, Some(PanelPosition::new(24.0, 36.0)));
+        assert_eq!(normalize(back), normalize(config));
+    }
+
+    #[test]
+    fn an_unusable_position_costs_only_itself() {
+        // The policy is `Stacking`'s: degrade the field, not the file. A file
+        // that fails to parse is moved aside, which would take the user's row
+        // selection and width with it.
+        for raw in [
+            "\"left\"",
+            "{}",
+            "{\"x\": \"1\", \"y\": 2}",
+            "{\"x\": 1}",
+            "{\"x\": null, \"y\": 2}",
+            "{\"x\": true, \"y\": 2}",
+            "[1, 2]",
+            "17",
+            "true",
+            "null",
+        ] {
+            let json = format!("{{\"width\": 355.0, \"position\": {raw}}}");
+            let parsed: PanelConfig = serde_json::from_str(&json)
+                .unwrap_or_else(|err| panic!("{json} must still decode, got {err}"));
+            assert_eq!(parsed.position, None, "{raw} must not become a position");
+            assert_eq!(parsed.width, 355.0, "{raw} must not cost the width");
+        }
+    }
+
+    #[test]
+    fn a_non_finite_position_is_forgotten_by_normalize() {
+        // Nothing reaches the window with a NaN corner: `OuterPosition(NaN)` is a
+        // move request with no defined meaning.
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let config = normalize(PanelConfig {
+                position: Some(PanelPosition::new(bad, 0.0)),
+                ..PanelConfig::fresh()
+            });
+            assert_eq!(
+                config.position, None,
+                "{bad} must not survive normalization"
+            );
+
+            let config = normalize(PanelConfig {
+                position: Some(PanelPosition::new(0.0, bad)),
+                ..PanelConfig::fresh()
+            });
+            assert_eq!(config.position, None);
         }
     }
 }
