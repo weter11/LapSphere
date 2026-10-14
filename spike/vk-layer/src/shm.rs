@@ -191,36 +191,50 @@ impl Writer {
         !self.pass_through
     }
 
-    /// Frames recorded so far (including the origin frame that writes no
-    /// interval). Used by the layer's own periodic log line; a reader takes
-    /// this from the header instead, which is the whole point of the segment.
+    /// Intervals recorded so far, i.e. **presents − 1** within the current
+    /// cadence: the first present only establishes the origin and writes no
+    /// interval, and `reset_origin` starts a new count the same way. Used by
+    /// the layer's own log lines; a reader takes this from the header instead,
+    /// which is the whole point of the segment.
     #[inline]
     pub fn frames(&self) -> u64 {
         self.frames
     }
 
-    /// Record one present. `t1` is the `CLOCK_MONOTONIC` timestamp taken
-    /// immediately after the call into the next layer returned — the frame
-    /// boundary the layer observes. `work_start` is the same moment from the
-    /// layer's point of view: the overhead sample is measured from there to
-    /// the end of this function, so it contains **only this layer's own work**
-    /// (the mutex, the clock-free stores, the ring write) and none of the
-    /// downstream present, which would otherwise dominate it by orders of
-    /// magnitude.
+    /// Presents dropped because the gap since the previous one exceeded 10 s
+    /// (a suspend or a breakpoint, not a frame).
     #[inline]
-    pub fn record(&mut self, t1: u64, work_start: u64) {
+    pub fn dropped(&self) -> u64 {
+        self.dropped
+    }
+
+    /// Record one present. `present_ns` is the `CLOCK_MONOTONIC` timestamp the
+    /// hook takes **on entry**, before the call into the next layer — so an
+    /// interval written here is present-to-present as the application issues
+    /// it, which is the boundary `fps` is normally computed from. (Taking the
+    /// stamp after the call down returned measures the same boundary shifted by
+    /// one layer's work; the two are not comparable, and this file implements
+    /// only the entry-time convention.)
+    ///
+    /// `work_start` is the same moment from the layer's point of view: the
+    /// overhead sample is measured from there to the end of this function, so
+    /// it contains **only this layer's own work** (the mutex, the clock-free
+    /// stores, the ring write) and none of the downstream present, which would
+    /// otherwise dominate it by orders of magnitude.
+    #[inline]
+    pub fn record(&mut self, present_ns: u64, work_start: u64) {
         if self.pass_through {
             return;
         }
         if self.last_ns == 0 {
             // First present establishes the origin; there is no interval for
             // the gap between process start and the first frame.
-            self.last_ns = t1;
+            self.last_ns = present_ns;
             self.flush_header();
             return;
         }
-        let interval = t1.saturating_sub(self.last_ns).max(1);
-        self.last_ns = t1;
+        let interval = present_ns.saturating_sub(self.last_ns).max(1);
+        self.last_ns = present_ns;
         if interval > 10_000_000_000 {
             // >10 s gap: not a frame, a suspend or a breakpoint. Dropping it
             // keeps it out of p99.9 and out of the graph.
@@ -239,7 +253,7 @@ impl Writer {
             let idx = (self.frames % RING_CAPACITY as u64) as usize;
             std::ptr::write_volatile(self.ring.add(idx), interval);
             self.frames += 1;
-            (*self.header).last_present_ns.store(t1, Ordering::Relaxed);
+            (*self.header).last_present_ns.store(present_ns, Ordering::Relaxed);
             (*self.header)
                 .frame_count
                 .store(self.frames, Ordering::Relaxed);
