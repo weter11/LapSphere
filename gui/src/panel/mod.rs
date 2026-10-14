@@ -12,9 +12,13 @@
 //!   font row height. Never measured, so there is no measure/resize/measure loop.
 //! * [`render`] — the vertical `Label: value` column, one fixed-height line per
 //!   row, an em dash where hardware reported nothing.
-//! * [`menu`] — the right-click context menu: row checkboxes, the width slider,
-//!   the opacity slider, the stacking choice and the way back to the normal
-//!   window. No separate settings window.
+//! * [`menu`] — two surfaces, and the split between them. The two-entry
+//!   right-click context menu ("Panel settings...", "< Back to normal mode") is
+//!   drawn in the panel window; everything else lives in a SEPARATE viewport the
+//!   menu opens — an ordinary window, not tied to panel mode. That settings body
+//!   holds the per-row checkboxes, one collapsible section per registry group, and
+//!   the width slider. Neither surface offers an opacity or a stacking control:
+//!   those fields are stored and normalized only.
 //! * [`window`] — the Normal↔Panel switch and the poll narrowing that keeps the
 //!   panel from polling what it does not draw.
 //!
@@ -24,12 +28,24 @@
 //!   the F8 interactivity key. No reserved slots for them either: a slot with no
 //!   producer is a permanent row of dashes.
 //! * The hotkey and the D-Bus toggle (PR 3), and the X11 stacking / taskbar atoms
-//!   and real transparency (PR 2). `stacking` and `hide_from_taskbar` are stored
-//!   and normalized, but nothing here claims they are applied.
+//!   and real transparency (PR 2). `stacking`, `hide_from_taskbar` and
+//!   `background_opacity` are stored and normalized, but nothing here claims they
+//!   are applied.
 //! * Wayland. The panel uses only `ViewportCommand`s, which is the portable
 //!   subset; the X11-specific work is PR 2's and is not tested on Wayland.
 //! * Multi-monitor placement. The panel is not positioned by this code, so no
 //!   second-monitor claim is made.
+//!
+//! # A scope question this code does not settle
+//!
+//! Whether the FIRST release carries fps, frame time, a frame-time graph, 1 % low,
+//! 0.1 % low and the game name is NOT decided by the merged code, and must not be
+//! read off it. The history states both: PR #111 (open, unmerged) records an owner
+//! decision dated 2026-10-03 that those are first-release panel elements, while the
+//! merged change that introduced this module describes them as later work. This
+//! note records the disagreement and does not choose a side -- the decision is the
+//! owner's and is not made here. Nothing in this module implements any of those
+//! elements, and no placeholder row exists for them.
 
 pub mod config;
 pub mod layout;
