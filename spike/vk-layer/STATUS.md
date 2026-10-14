@@ -1,147 +1,161 @@
-# STATUS — Vulkan frames layer, stage 1: **WORKING** (presents are intercepted)
+# STATUS — Vulkan frames layer: **WORKING**, and now measured
 
-Last updated: 2026-10-14, branch `spike/vk-layer-stage1`, base
-`origin/lapsphere` = `22c14a182b319ed33be9466951162898c526101d`.
+Last updated: 2026-10-14, branch `spike/vk-layer-stage1b`, base
+`origin/lapsphere` = `ec7a359254113988cd728120a5f4a47fa9e46aed`.
 
-Round 1 of this spike (PR #111, branch `feat/mini-panel`, its own
-`spike/vk-layer/STATUS.md`) ended at "the segment is created but `frame_count`
-stays 0; the loader never routes anything through the layer after instance
-creation". **That is now closed, and the round-1 diagnosis was wrong in a way
-worth recording**: the blocker was in the layer's use of the loader's dispatch
-chain, and one of the three "facts" it rested on was a measurement taken at a
-point where only zero is possible.
+Stage 1 (branch `spike/vk-layer-stage1`, PR #124, merged) proved that
+`vkQueuePresentKHR` is intercepted on a real application. This stage answers the
+three questions stage 1 explicitly left open: what the interception costs, whether
+its numbers agree with MangoHud's, and what happens to it under the things that
+happen to a game. **Nothing here is a frame time**, and no number below is
+derived on paper: every one is read back out of a live segment, out of
+MangoHud's own log, or out of the kernel's view of a process, and the commands
+and raw files are in `TESTING.md`.
 
 ## One-line state
 
-`vkQueuePresentKHR` is intercepted on a real Vulkan application: 900 presents
-counted for `vkcube --c 900`, **899** intervals written into the shared-memory
-ring (the first present of a cadence only establishes the origin — the layer's
-final line reads `writer_final: intervals=899 dropped=0 presents=900`), read
-back by an independent second process, and the application exits 0.
+The present hook's own work measures **0.070 µs median** in a hot unthrottled
+present loop and **0.140 µs median** under vsync at 165 Hz (3 of 3 runs each,
+samples == intervals in every run). The unthrottled present rate cannot see the
+layer at all — the throughput A/B scatters by ±3.7 µs per present — so the
+measurement rests on the in-band samples plus out-of-band floors for the parts
+they exclude, not on throughput. MangoHud and this layer, running on the same
+presents, agree on the frame-time distribution to **0.006-0.007 % at p50** and on
+per-frame durations to ±5 µs median, with the *timestamps* in MangoHud's log
+carrying ~100-170 µs of its own jitter. The layer survives clean exit, `kill -9`,
+three live resizes, two simultaneous instances, no reader, `SIGSTOP` and a
+writer that cannot be created; three checks stay **NOT TESTED** and are named as
+such below.
 
-## The exact counters from the recorded run
+## The numbers, and what each one is
 
-```
-destroy_instance: GetInstanceProcAddr=104 CreateInstance=1 CreateDevice=1
-  GetDeviceProcAddr=631 DestroyDevice=1 CreateSwapchainKHR=1
-  DestroySwapchainKHR=1 QueuePresentKHR=900 DestroyInstance=1
-  GetPhysicalDeviceProcAddr=0 GetDeviceQueue=1 GetDeviceQueue2=0
-writer_final: intervals=899 dropped=0 presents=900
-```
+| What | Value | What it is exactly |
+| --- | --- | --- |
+| In-band hook work, unthrottled | median 0.050 / 0.070 / 0.101 µs, p99 0.15-0.19 µs, max ≤ 0.83 µs | the layer's own sample of one present: `record()` plus the lock and the closure around it, from entry-clock-read to end of the ring write. Excludes the call down, `next_present_for`, and the unlock. |
+| In-band hook work, vsync 165 Hz | median 0.120 / 0.140 / 0.141 µs, p99 0.84-1.18 µs, p99.9 13-19 µs, max 15-21 µs | same window; the long tail is the process being descheduled inside it (it is 20x smaller unthrottled, where the loop never sleeps) |
+| In-band hook work, vsync with MangoHud | median 0.120 / 0.140 / 0.151 µs, p99 0.67-1.04 µs, p99.9 12-13.5 µs | same window with MangoHud below this layer in the chain |
+| Out-of-band floors (same host, same session) | clock pair 20 ns, writer mutex 10-30 ns, `record()` body 20 ns, mmap+copy of a 64 KiB segment 6.722 µs, `read_dir` 2.355 µs | `primitive_bench`: what the instrument and the reader's primitives cost when nothing else is running. These are the numbers that stop the clock read being read as the layer. |
+| Throughput A/B (unthrottled, per present) | C−A +0.72 / −0.26 µs, D−A +0.49 / +1.36 µs (paired medians of two 3-rep batteries); single reps scatter ±3.7 µs | a rate delta, not a frame time. It contains the *whole* hook (call down included) and it is too coarse to resolve it: see "M3 cannot resolve the layer" below. |
+| Agreement with MangoHud | p50 6.0664 vs 6.0657 ms (164.84 vs 164.86 fps); p99 9.5757 vs 9.5589 ms; paired durations median −4.85 µs, +0.59 µs | the same presents, both layers live, limiter off and limiter 120 |
+| Reader poll cost at 60 / 240 Hz | 29-98 µs median per poll; 0.125-3.0 % of one core | one `--watch` snapshot: directory scan + one mmap+copy per segment + selection, at the rate the panel would poll |
+| Data age the reader sees | 0.000-0.016 s at a 60 Hz writer, 0.000-0.004 s at 240 Hz | `last_present_ns` age, sampled 15x with `--list` |
 
-The last line is emitted just before the segment is unlinked (nothing can read
-it afterwards), and `verify.sh` asserts `intervals == presents - 1` rather than
-leaving the relation as an inference.
+## Two reader defects found by measuring, and the checks that now hold them
 
-With the layer unset, the same application runs unchanged and creates no
-segment (`verify.sh` check C3).
+1. **`--watch` reported a "read cost" that did not contain the read.** The
+   timestamps sat on either side of `pick_active`, so the mmap + copy of every
+   segment — 64 KiB, the dominant cost — was outside the window: the measured
+   value was `median 0.0 us` while the code was copying 64 KiB per sample. The
+   window now opens before the read, and check `D1` asserts the reported median
+   is at least the out-of-band mmap+copy floor for the same 64 KiB **on the same
+   host in the same session** (measured: 103.0 µs vs a 6.722 µs floor; the
+   old code could not pass this check on any host).
+2. **A reader started before the application never saw its segment.** The
+   segment list was scanned once, before the `--watch` loop, so the reader
+   reported `max_frame_count=0` for its whole life while the segment file
+   existed (measured: 65664 bytes on disk, reader reporting 0). It re-scans per
+   sample, and check `D2` starts the reader two seconds before the app and
+   requires a non-zero count (measured: 407).
 
-## Why round 1 stalled — three causes, all in the layer
+A third, smaller change came out of the same work: `--list` now prints
+`pid_alive=` next to `alive=`, because the header's `WRITER_ALIVE` flag survives
+a `SIGKILL` and a consumer reading only `alive=` would trust a dead writer. R2
+measures exactly that: `alive=true  pid_alive=false` on the orphan, and
+`--prune` (pid liveness + age) as the authority. That is a protocol property,
+not a defect, and the flag is unchanged.
 
-The loader source is the authority here: `Vulkan-Loader`
-`vulkan-sdk-1.4.341.0` (the version this host runs,
-`/usr/lib/x86_64-linux-gnu/libvulkan.so.1.4.341`), `loader/loader.c`.
-
-1. **The counters were printed too early to mean anything.** Round 1 printed
-   them at the end of `vkCreateInstance`. The loader calls the layer's
-   `vkGetInstanceProcAddr` at `loader.c:5283`
-   (`loader_init_instance_core_dispatch_table`) — *after* `vkCreateInstance`
-   returns — and again at `:5504`
-   (`nextGIPA(inst->instance, "vkCreateDevice")`) while building the device
-   chain. So `gipa=0 create_device=0` was true by construction at the moment it
-   was sampled, and the conclusion drawn from it ("the loader never routes
-   anything through the layer") did not follow. Counters in this round are
-   printed at `vkDestroyDevice`, at `vkDestroyInstance`, and every 600 presents.
-2. **The chain link was never consumed, and that is what hung the app.** The
-   loader creates **one** `VkLayerInstanceCreateInfo` node
-   (`function == VK_LAYER_LINK_INFO`, `loader.c:5004-5009`) and threads the
-   layers through it as a LIFO chain: `layer_instance_link_info[i].pNext =
-   chain_info.u.pLayerInfo`, then `chain_info.u.pLayerInfo =
-   &layer_instance_link_info[i]` (`:5113-5128`). The head is therefore *this*
-   layer's link, and a layer must consume it
-   (`u.pLayerInfo = u.pLayerInfo->pNext`) before calling down. Round 1 did not,
-   so `VK_LAYER_MESA_device_select` saw its own link as "next" and called
-   itself with a real instance handle — a user-space spin with no syscalls,
-   which is exactly what round 1 observed and attributed to MESA. The device
-   chain works the same way (`:5480-5483`).
-3. **"Next" must be the link's gipa, not the loader terminator's.** Round 1
-   walked the link chain to its last entry (`libvulkan.so`) and used *that* as
-   "next". The terminator returns bottom-of-chain (ICD-level) functions, so
-   everything routed through the layer afterwards bypassed the layer below it
-   and the application stopped making progress. With the link consumed, the
-   link's own `pfnNextGetInstanceProcAddr` works — it is the documented route.
-
-**The manifest `functions` map was a red herring.** `loader.c:5043-5110`
-consults it only when negotiation did not supply `vkGetInstanceProcAddr`; the
-two deprecation warnings it prints are cosmetic. Both manifest variants are run
-by `verify.sh` (checks C4) and intercept 900 presents each —
-`manifests/VK_LAYER_LAPSPHERE_frames.functions.json` exists so that this is
-tested rather than argued.
-
-**One real bug in the round-1 reader, found because it was now exercised:** the
-ring index was computed as `cap - n` (the last `n` slots) instead of
-`frame_count - cap` (slot 0 until the ring has wrapped). On the first live
-reader run every interval read back was `0.000 ms` — the reader was reading
-slots the writer had not reached. Fixed in `src/bin/frames_reader.rs`; the
-harness check C5 covers the wrapped case too.
+Checks `D3` are new invariants rather than regressions: an instrumented run must
+yield one overhead sample per recorded interval (`samples=1179 intervals=1179`
+measured) and no sample may be smaller than the clock pair it contains.
 
 ## What is proven, and by what
 
 | Claim | Evidence |
 | --- | --- |
-| Real present interception | `QueuePresentKHR=900` for `vkcube --c 900`, exit 0 |
-| `frame_count` increases | reader samples 3 s apart: 45 → 286, and 5965 in the 50 s wrap run |
-| Intervals are recorded | reader dumped 285→4096 intervals, p50 8.334 ms (120 fps), zero zero-slots; final count 899 for 900 presents, asserted by the harness |
-| An independent process reads them | `frames_reader` is a separate binary/process over the same shm segment |
-| Inert when not enabled | no segment, no layer log, loader never activates it, app exit 0 |
-| Works across both WSIs and both GPUs | xlib and Wayland WSI, iGPU (RADV RENOIR) and dGPU (RTX 3070), 300 presents each |
-| Coexists with MangoHud | `MANGOHUD=1` on this host: MangoHud is below this layer in the chain and presents still flow |
-
-Commands and the full acceptance table: `TESTING.md`. Raw material from the
-recorded run: `results/` (untracked; `verify.sh` regenerates it).
+| Real present interception (stage 1) | `QueuePresentKHR=900` for `vkcube --c 900`, exit 0, `intervals=899 = presents-1` |
+| The layer's per-present work is sub-microsecond | in-band samples, 3 reps x 3 configurations, samples == intervals every run |
+| It is not the instrument's own cost | `primitive_bench` floors for the same primitives on the same host: clock pair 20 ns, mmap+copy 6.722 µs |
+| The measurement does not change the layer's behaviour | `intervals == presents - 1` holds in every instrumented run, from the writer's own final line |
+| MangoHud and this layer measure the same frame times | same presents, both live: p50 within 0.1 µs (0.007 %), p99 within 0.2 %, paired durations ±5 µs median, 4 runs over 2 cadences |
+| Clean exit | exit 0, `intervals == presents-1`, segment unlinked (R1, R5) |
+| `kill -9` | status 137, orphan segment 65664 bytes readable, no `writer_final`, `--prune` removes it, next run exit 0 (R2) |
+| Window resize / swapchain recreation | 3 resizes under Xvfb: 2500 presents, 4 swapchains, `intervals = 2500-1-3 = 2496` **HOLDS**, zero intervals above 3x p50 (R3); Wayland WSI recreates once: `798 = 800-1-1` **HOLDS** (R3b) |
+| Two instances at once | 2 segments, 2 pids, reader picks the freshest; killing one leaves the other running to exit 0 (R4) |
+| No reader required | exit 0, presents counted, segment unlinked at exit, no reader ever started (R5) |
+| Freeze/resume | `SIGSTOP` freezes the count and the age grows; `SIGCONT` continues; exit 0 (R8) |
+| A writer that cannot be created is not fatal | unwritable segment dir: app exit 0, no segment created, error text captured from a process that prints it (R7) |
+| Reader cost at 60 and 240 Hz | 29-98 µs per poll, 0.125-3.0 % of one core, zero seqlock retries except in the 240 Hz case against a full ring (10 retries in one run of 1920) |
 
 ## What is NOT proven (do not read the above as more than it is)
 
-* **No overhead measurement.** `LAPSPHERE_FRAMES_OVERHEAD` and the reader's
-  `--overhead` path exist but were not measured in this stage; the present hook
-  takes a mutex and two clock reads, and no number in this document is an
-  overhead number.
-* **No agreement measurement against MangoHud** (that is a later stage).
-* **No DXVK/Proton/Wine, no OpenGL, no 32-bit, no anti-cheat, no GPU-bound
-  title** — the only application exercised is `vkcube`.
-* **No Wayland-native *claim*:** the layer contains no WSI code at all, and the
-  Wayland runs here went through `vkcube`'s Wayland WSI on this host's
-  `xfwl4` + Xwayland session. Wayland presentation *timing* was not studied.
-* **One device, one queue, one swapchain per process** is the tested shape.
-  Two devices in one process, or two games at once, are untested; the state
-  tables are keyed by handle and a second device would be handled, but that is
-  an argument, not a measurement.
+* **No real game, no DXVK/Proton/Wine, no OpenGL, no 32-bit, no anti-cheat.**
+  The only application exercised is still `vkcube`, plus a synthetic writer that
+  drives the same `shm::Writer` without Vulkan.
+* **No 240 Hz *present* load.** The panel is 165 Hz. "240 Hz" below always means
+  either the reader's poll rate or a synthetic writer's cadence, and the two are
+  labelled separately every time.
+* **No interactive host resize.** The host session exposes no window control to
+  this session (`wmctrl -l` 0 lines, `xdotool search --all --class .` 0 windows
+  while an xlib `vkcube` was running), so the resize was measured under
+  Xvfb+lavapipe, where the frame rate is software-bound and the resize is a
+  ConfigureWindow from the client rather than a compositor drag.
+* **The pid-reuse `O_EXCL` variant of R7 is NOT TESTED.** Producing it needs a
+  pid namespace and unprivileged ones are unavailable here (`unshare -p -f
+  --mount-proc` → Operation not permitted; `unshare -U -p -f` → cannot change
+  root filesystem propagation). What *is* tested is the neighbouring failure:
+  an unwritable segment directory.
+* **The throughput A/B cannot resolve the layer.** Its single-rep scatter is
+  ±3.7 µs, i.e. ±1.8 % of a ~208 µs unthrottled present, while the layer's own
+  work is 0.05-0.15 µs. It is reported as a bound and as a check that nothing
+  large is hidden — not as the overhead.
+* **Overhead was measured on one GPU and one WSI** (`--gpu_number 0`, `--wsi
+  xlib`, NVIDIA dGPU, 165 Hz vsync or IMMEDIATE) and on one host with
+  `schedutil`. The reader-cost numbers are likewise host-specific.
+* **Agreement does not cover a non-vsync cadence under a real game**, and it is
+  agreement about the *same present hook boundary*, not about the compositor's
+  scanout timing. MangoHud's own `fps_limit` shapes the cadence it measures.
+* **The in-band number excludes** the unlock, `next_present_for` (two mutex
+  lookups plus scans), the periodic log line every 600 presents, `bump()`, and
+  the call down into the next layer. Those are priced out-of-band in
+  `primitives.txt`, not measured in place.
+* **Two devices in one process** is still untested; two *processes* with one
+  device each is what R4 covers.
+* **The layer's own diagnostic log is unreadable when the segment directory is
+  unwritable** — `log_line` writes into that directory. R7 shows the failure
+  path with its message taken from a process that prints it to stderr.
 * **Nothing was changed outside `spike/vk-layer/`.** No GUI, panel, layout,
-  settings, daemon or FPS-in-UI work; the diff is confined to this directory.
+  settings, daemon or FPS-in-UI work; PRs #111 and #115 untouched.
 
 ## Layout
 
 | Path | Purpose |
 | --- | --- |
 | `src/vkraw.rs` | raw Vulkan + loader declarations, `#[repr(C)]` with compile-time offset/size assertions against `vulkan-sdk-1.4.341.0` `vk_layer.h` |
-| `src/lib.rs` | negotiation, chain handling, instance/device dispatch, the `vkQueuePresentKHR` hook; the header comment lists the three round-1 causes with loader line numbers |
-| `src/shm.rs` | shm protocol v1 writer (128-byte header, 4096-slot `u64` ns ring, seqlock) — unchanged from round 1 |
-| `src/bin/frames_reader.rs` | independent reader (`--list`, `--dump`, `--watch`, `--overhead`, `--prune`); ring indexing fixed |
+| `src/lib.rs` | negotiation, chain handling, instance/device dispatch, the `vkQueuePresentKHR` hook |
+| `src/shm.rs` | shm protocol v1 writer (128-byte header, 4096-slot ring, 4096-slot overhead buffer, seqlock) |
+| `src/bin/frames_reader.rs` | independent reader (`--list`, `--dump`, `--watch`, `--overhead`, `--prune`); read-cost window and per-sample rescan fixed in 1b |
+| `src/bin/primitive_bench.rs` | **new**: out-of-band floors — clock pair, writer mutex, real `record()`, mmap+copy, `read_dir` — the control that separates instrument cost from layer cost |
+| `src/bin/frames_synth.rs` | **new**: a synthetic writer at an exact 60/240 Hz over the same `shm::Writer`, for reproducible reader loads |
 | `manifests/` | implicit-layer manifest, plain and with the legacy `functions` map (the A/B) |
-| `build.sh` | builds with a build id (git HEAD + source hash + dirty count) compiled in |
-| `install.sh` | installs the manifest into `~/.local/share/vulkan/implicit_layer.d/`, no root |
-| `run.sh` | one instrumented run, printing the mapped `.so` and its hash |
-| `verify.sh` | the acceptance harness: 22 checks, `VERIFY_LONG=1` adds the ring-wrap run |
-| `TESTING.md` | reproduction recipe, expected output, results table, limitations |
+| `build.sh` / `install.sh` / `run.sh` | build with a compiled-in build id, install the manifest, one instrumented run |
+| `bench.sh` | **new**: records the floors with the environment they were taken in |
+| `overhead.sh` | **new**: experiment 1 — arms A/B/C/D, in-band samples (M1) and throughput (M3) |
+| `agreement.sh` | **new**: experiment 2 — MangoHud's per-frame log against this layer's intervals on the same presents |
+| `robustness.sh` | **new**: experiment 3 — R1..R8 |
+| `run-battery.sh` | **new**: runs every experiment once, serially, on a committed tree |
+| `verify.sh` | the acceptance harness: stage-1 checks C1-C5 plus D1-D3 |
+| `TESTING.md` | reproduction recipe, expected output, every result table, limitations |
 
-Own `[workspace]`, so `cargo build --all` / `cargo test` at the repository root
-do not pick it up (verified: the root `Cargo.toml` members are unchanged).
+Own `[workspace]`, so root `cargo test` / `cargo build --all` never pick it up
+(verified: the root `Cargo.toml` members are unchanged). The crate has no unit
+tests: its acceptance is `verify.sh`, which needs a display, a GPU and the
+loader, so CI cannot run it — CI staying green is not evidence about this crate.
 
 ## Next, when this is taken further
 
-Whatever comes next starts from `verify.sh`: overhead (median/p99 in µs, A/B
-against `LAPSPHERE_FRAMES` unset), MangoHud agreement, robustness (kill -9,
-resize, two instances, no reader), and only after that any question of what the
-panel does with the numbers. The layer still has to be *installed* on a host;
-whether the product ships an implicit layer at all remains the owner's open
+Overhead under DXVK/Proton and a real title; agreement at a non-vsync cadence;
+an interactive resize on the real session; 32-bit and OpenGL; two devices in one
+process; and the reader's 32-95 µs poll cost is worth a look on its own before
+anything polls it at 60 Hz in a UI. The layer still has to be *installed* on a
+host; whether the product ships an implicit layer at all remains the owner's open
 question (round-1 `panel-design.md` Q13), and this stage does not decide it.
