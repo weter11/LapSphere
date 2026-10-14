@@ -68,11 +68,12 @@ so_sha256=<sha256 of the .so>
 
 The `dirty` suffix is deliberate and load-bearing: a result must never be quoted
 without saying whether the tree it came from was clean. The whole stage-1b
-battery was re-run after the harness fix so that every figure below comes from
-one revision with **0 dirty paths** (`git HEAD 2b6b534…`, build id
-`2b6b534….718336e1a120`). The layer's *source* hash is the interesting half of
-the id — if a later revision of the docs quotes the same `718336e1a120` with a
-different HEAD, the code that ran is the same code.
+battery was re-run twice after harness fixes so that every figure below comes
+from one revision with **0 dirty paths** (`git status 0 dirty path(s)`, git HEAD
+`514bba3ce7ed…`, build id `514bba3ce7ed/718336e1a120`). The layer's *source* hash
+is the interesting half of the id — if a later revision of the docs quotes the
+same `718336e1a120` with a different HEAD, the code that ran is the same code.
+Three batteries of M1/M3 exist; where they differ the text says so.
 
 ## Stage 1: what the output proves (unchanged, re-run)
 
@@ -126,23 +127,26 @@ out-of-band instead of being assumed small.
 ### Out-of-band floors (`results/primitives.txt`, same session, `iters=1e6 io=2e4`)
 
 ```
-clock_pair         n=1000000  median=      20 ns  p99=      30 ns  max=    30127 ns   (0.020 us)
-mutex_lock         n=1000000  median=      30 ns  p99=      31 ns  max=    17403 ns   (0.030 us)
-record_full        n=1000000  median=      40 ns  p99=      51 ns  max=    19276 ns   (0.040 us)
-hook_recording     n=1000000  median=      50 ns  p99=      51 ns  max=     2936 ns   (0.050 us)
-mmap_read          n=20000    median=    6722 ns  p99=   10079 ns  max=    36479 ns   (6.722 us)
-readdir            n=20000    median=    2355 ns  p99=    2465 ns  max=    19106 ns   (2.355 us)
-record_overhead    n=1000000  median=      61 ns  p99=      71 ns  max=     5651 ns   (0.061 us)
-hook_passthrough   n=1000000  median=      50 ns  p99=      51 ns  max=    19637 ns   (0.050 us)
+clock_pair         n=1000000  median=      30 ns  p99=      41 ns  max=    21281 ns   (0.030 us)
+mutex_lock         n=1000000  median=      30 ns  p99=      31 ns  max=     5340 ns   (0.030 us)
+record_full        n=1000000  median=      40 ns  p99=      51 ns  max=    13226 ns   (0.040 us)
+hook_recording     n=1000000  median=      50 ns  p99=      51 ns  max=     3126 ns   (0.050 us)
+mmap_read          n=20000    median=    6792 ns  p99=   10551 ns  max=    50826 ns   (6.792 us)
+readdir            n=20000    median=    2365 ns  p99=    2455 ns  max=    19016 ns   (2.365 us)
+record_overhead    n=1000000  median=      60 ns  p99=      71 ns  max=    15590 ns   (0.060 us)
+hook_passthrough   n=1000000  median=      50 ns  p99=      51 ns  max=    17944 ns   (0.050 us)
 ```
 
-Read it as: every window above contains one clock pair (20 ns) on top of the body
-it names, so `record_full`'s 40 ns window is a ~20 ns body, and the *whole*
-present hook's shape without the call down (`hook_recording` = clock read + lock +
-release) is a 50 ns window. `record_overhead - record_full` (61 vs 40) is what
-being measured costs the writer. `hook_passthrough` is the "loaded but doing
-nothing" cost. The 10 ns quantisation of the small values is the clock's
-resolution here, not a rounding choice.
+Read it as: every window above contains one clock pair (30 ns in this session;
+two other batteries of the same build measured 20 and 21 ns — the floor is
+session-dependent, which is exactly why it is measured in the same session as
+whatever it is compared against) on top of the body it names, so `record_full`'s
+40 ns window is a ~10-20 ns body, and the *whole* present hook's shape without the
+call down (`hook_recording` = clock read + lock + release) is a 50 ns window.
+`record_overhead - record_full` (60 vs 40) is what being measured costs the
+writer. `hook_passthrough` is the "loaded but doing nothing" cost. The 10 ns
+quantisation of the small values is the clock's resolution here, not a rounding
+choice.
 
 `mmap_read` is the same operation `frames_reader` performs per snapshot — open,
 mmap a real 65664-byte segment, copy both rings (4096 + 4096 `u64`), munmap — and
@@ -156,28 +160,30 @@ segment by `frames_reader --overhead` while the application is alive:
 
 | Regime, MangoHud | samples / intervals | median | p99 | p99.9 | max |
 | --- | --- | --- | --- | --- | --- |
-| vsync 165 Hz, off (r1) | 1933 / 1933 | 0.141 µs | 0.841 µs | 19.107 µs | 20.449 µs |
-| vsync 165 Hz, off (r2) | 1892 / 1892 | 0.120 µs | 1.182 µs | 13.035 µs | 15.389 µs |
-| vsync 165 Hz, off (r3) | 1897 / 1897 | 0.140 µs | 1.132 µs | 16.191 µs | 21.181 µs |
-| unthrottled, off (r1) | 4096 / 4096 | 0.050 µs | 0.190 µs | 0.421 µs | 0.501 µs |
-| unthrottled, off (r2) | 4096 / 4096 | 0.070 µs | 0.150 µs | 0.341 µs | 0.832 µs |
-| unthrottled, off (r3) | 4096 / 4096 | 0.101 µs | 0.161 µs | 0.331 µs | 0.731 µs |
-| vsync 165 Hz, on (r1) | 1904 / 1904 | 0.151 µs | 1.042 µs | 12.022 µs | 13.586 µs |
-| vsync 165 Hz, on (r2) | 1905 / 1906 | 0.140 µs | 1.002 µs | 12.734 µs | 13.996 µs |
-| vsync 165 Hz, on (r3) | 1909 / 1909 | 0.120 µs | 0.671 µs | 13.526 µs | 14.257 µs |
+| vsync 165 Hz, off (r1) | 1928 / 1928 | 0.120 µs | 0.811 µs | 14.918 µs | 17.322 µs |
+| vsync 165 Hz, off (r2) | 1931 / 1931 | 0.130 µs | 0.881 µs | 15.579 µs | 16.692 µs |
+| vsync 165 Hz, off (r3) | 1931 / 1931 | 0.141 µs | 0.862 µs | 18.104 µs | 20.589 µs |
+| unthrottled, off (r1) | 4096 / 4096 | 0.061 µs | 0.120 µs | 0.250 µs | 5.921 µs |
+| unthrottled, off (r2) | 4096 / 4096 | 0.050 µs | 0.130 µs | 0.320 µs | 1.142 µs |
+| unthrottled, off (r3) | 4096 / 4096 | 0.090 µs | 0.150 µs | 0.491 µs | 1.403 µs |
+| vsync 165 Hz, on (r1) | 1908 / 1908 | 0.130 µs | 0.621 µs | 13.746 µs | 23.063 µs |
+| vsync 165 Hz, on (r2) | 1908 / 1909 | 0.121 µs | 0.702 µs | 12.944 µs | 26.480 µs |
+| vsync 165 Hz, on (r3) | 1907 / 1907 | 0.120 µs | 0.732 µs | 12.143 µs | 12.233 µs |
 
-(unthrottled = `--present_mode 0`, ~4.7-4.9 k presents/s; "samples / intervals"
+(unthrottled = `--present_mode 0`, ~4.8 k presents/s; "samples / intervals"
 are the reader's sample count and the interval count from the same snapshot, so a
-one-frame difference is the gap between the two reader calls and nothing else.)
+one-frame difference is the gap between the two reader calls and nothing else.
+The r1 unthrottled `max` of 5.9 µs is a single outlier in 4096 samples; the other
+two reps stay under 1.5 µs.)
 
 Three things to take from this table:
 
-* The median sits 2.5-7x above the out-of-band `hook_recording` window (50 ns) —
+* The median sits 2.5-5x above the out-of-band `hook_recording` window (50 ns) —
   consistent with the window also containing `catch_unwind` and a real
   application's cache state, and inconsistent with the instrument being the whole
   story.
-* The median is *smaller* unthrottled (0.05-0.10 µs) than under vsync
-  (0.12-0.14 µs), and the tail is 20x shorter. The vsync tail is the process
+* The median is *smaller* unthrottled (0.05-0.09 µs) than under vsync
+  (0.12-0.14 µs), and the tail is ~20x shorter. The vsync tail is the process
   being descheduled inside the window (the present blocks in the driver, the
   layer's code runs cold afterwards); it is a property of the regime, not of the
   layer's instructions.
@@ -192,30 +198,30 @@ layer's own present counter is quoted live as a check that `--c N` produced N
 presents.
 
 ```
-arm A rates 4857 4818 4809 fps  (median 4817.7, spread 1.01%)
-arm B rates 4841 4853 4843 fps  (median 4843.3, spread 0.25%)   presents_seen=150000
-arm C rates 4838 4824 4835 fps  (median 4835.2, spread 0.29%)   presents_seen=150000
-arm D rates 4826 4807 4725 fps  (median 4806.7, spread 2.09%)   presents_seen=150000
+arm A rates 4849 4787 4813 fps  (median 4812.7, spread 1.30%)
+arm B rates 4855 4805 4819 fps  (median 4818.5, spread 1.03%)   presents_seen=150000
+arm C rates 4841 4844 4843 fps  (median 4843.5, spread 0.08%)   presents_seen=150000
+arm D rates 4803 4745 4823 fps  (median 4802.8, spread 1.62%)   presents_seen=150000
 
 paired per-rep deltas vs arm A               median
-B - A: +0.71  -1.51  -1.49 us per present    -1.488 us
-C - A: +0.84  -0.26  -1.14 us per present    -0.257 us
-D - A: +1.36  +0.48  +3.67 us per present    +1.358 us
+B - A: -0.23  -0.79  -0.25 us per present    -0.250 us
+C - A: +0.38  -2.47  -1.32 us per present    -1.320 us
+D - A: +2.00  +1.87  -0.43 us per present    +1.871 us
 ```
 
 **M3 cannot resolve the layer, and it is reported as such.** A single rep
-scatters by ±3.7 µs on a ~208 µs present, and the *paired* medians move between
-batteries: a first battery of the same three reps put them at B−A −0.118, C−A
-+0.719, D−A +0.487 µs, this one at −1.488, −0.257, +1.358 — including negative
-values, where pass-through would have to be *faster* than no layer at all. That
-is the method's floor, not a measurement. Meanwhile the in-band measurement puts
-the layer's work at 0.05-0.15 µs, i.e. a factor of ~10-30 below the paired
-medians. What M3 therefore bounds is the *whole* hook — including everything M1
-excludes, notably the two mutex lookups in `next_present_for` and the call down —
-at below about 1-2 µs, and it is a check that nothing large is hidden. It is a
-rate delta: **not** a frame time, and not the overhead. The `presents_seen=150000`
-column is the independent confirmation that the frame counts are what they claim
-to be (arm A has no layer, so no counter).
+scatters by ±2.5 µs here (±3.7 µs in another battery) on a ~208 µs present, and
+the *paired* medians move between the three batteries that were run: B−A −0.118,
+−1.488, −0.250 µs; C−A +0.719, −0.257, −1.320; D−A +0.487, +1.358, +1.871 —
+including negative values, where pass-through would have to be *faster* than no
+layer at all. That is the method's floor, not a measurement. Meanwhile the in-band
+measurement puts the layer's work at 0.05-0.14 µs, i.e. a factor of ~10-40 below
+the paired medians. What M3 therefore bounds is the *whole* hook — including
+everything M1 excludes, notably the two mutex lookups in `next_present_for` and
+the call down — at below about 1-2 µs, and it is a check that nothing large is
+hidden. It is a rate delta: **not** a frame time, and not the overhead. The
+`presents_seen=150000` column is the independent confirmation that the frame
+counts are what they claim to be (arm A has no layer, so no counter).
 
 ## Experiment 2 — agreement with MangoHud
 
@@ -244,24 +250,26 @@ written to `pairs.csv` per run.
 
 | | limiter off r1 | limiter off r2 | limiter 120 r1 | limiter 120 r2 |
 | --- | --- | --- | --- | --- |
-| MangoHud rows | 2440 | 2437 | 1799 | 1799 |
-| our intervals in the segment | 2778 | 2772 | 2778 | 2780 |
-| frames compared / outside our window | 2440 / 0 | 2437 / 0 | 1799 / 0 | 1715 / 84 |
-| MangoHud p50 | 6.0657 ms (164.86 fps) | 6.0649 ms | 8.3331 ms (120.00 fps) | 8.3329 ms |
-| layer p50 | 6.0664 ms (164.84 fps) | 6.0651 ms | 8.3337 ms (120.00 fps) | 8.3335 ms |
-| MangoHud p99 / p99.9 | 9.5589 / 10.4607 ms | 9.7746 / 10.4445 ms | 8.3944 / 8.4608 ms | 8.3964 / 8.4308 ms |
-| layer p99 / p99.9 | 9.5757 / 10.4614 ms | 9.7350 / 10.4453 ms | 8.3979 / 8.7951 ms | 8.3969 / 8.7241 ms |
-| paired duration difference, median | −4.85 µs | −4.22 µs | +0.59 µs | +0.47 µs |
-| p50 difference | −0.080 % of the frame | −0.070 % | +0.007 % | +0.006 % |
-| per-frame timestamp residual | median 164 µs, p99 3285 µs | median 172 µs | median 102 µs, p99 301 µs | median 112 µs, p99 336 µs |
+| MangoHud rows | 2438 | 2434 | 1799 | 1799 |
+| our intervals in the segment | 2777 | 2768 | 2777 | 2775 |
+| frames compared / outside our window | 2438 / 0 | 2434 / 0 | 1792 / 7 | 1799 / 0 |
+| MangoHud p50 | 6.0661 ms (164.85 fps) | 6.0645 ms | 8.3329 ms (120.01 fps) | 8.3330 ms |
+| layer p50 | 6.0662 ms (164.85 fps) | 6.0652 ms | 8.3335 ms (120.00 fps) | 8.3336 ms |
+| MangoHud p99 / p99.9 | 9.8243 / 10.5128 ms | 9.9441 / 10.6442 ms | 8.3875 / 8.9109 ms | 8.4052 / 9.0646 ms |
+| layer p99 / p99.9 | 9.8543 / 10.5179 ms | 9.9141 / 10.6448 ms | 8.3921 / 8.9115 ms | 8.4008 / 8.8962 ms |
+| paired duration difference, median | +0.54 µs | −3.61 µs | +0.67 µs | +0.51 µs |
+| p50 difference | +0.009 % of the frame | −0.060 % | +0.008 % | +0.006 % |
+| per-frame timestamp residual | median 106 µs, p99 290 µs | median 202 µs | median 97 µs, p99 276 µs | median 98 µs, p99 257 µs |
 
 How to read it:
 
-* **The frame-time agreement is real**: p50 within 1 µs (0.007 %) and p99 within
-  0.2 % in all four runs, on both cadences, with the two instruments running
+* **The frame-time agreement is real**: p50 within 1 µs (0.009 %) and p99 within
+  0.3 % in all four runs, on both cadences, with the two instruments running
   simultaneously. The paired per-frame durations agree to ±5 µs median. That is
   not "both layers loaded without crashing" — it is the two numbers being the
-  same number.
+  same number. The paired *p99* varies between runs (3 µs in limiter-off r1 to
+  1.8 ms in limiter-off r2): a single frame-index slip makes one large
+  difference, which is the aliasing point below showing up in the data.
 * **The residual is the log's own timestamping, not the frame times.** A median
   residual of ~110-160 µs against a 6.06 ms cadence means MangoHud's `elapsed`
   column is stamped ~0.1-0.2 ms away from the present instant it nominally
@@ -299,12 +307,12 @@ zero even in principle.
 | R2 `kill -9` | wait status **137**; the writer's segment survives (65664 bytes, `alive=true pid_alive=false`, no `writer_final` line because there was no clean shutdown); `--prune` removes it (`pid_alive=false, too_old=false`); the next run exits 0 with 600 presents and its own segment |
 | R3 resize | Xvfb+lavapipe `vkcube --wsi xlib --width 640 --height 480 --c 2500`, resized to 1000x700, 500x400, 900x600 by window id: exit 0, **2500 presents, 4 swapchain creations**, `intervals = 2496 = 2500-1-3` **HOLDS**, 0 intervals above 3x p50, 0 dropped |
 | R3b second swapchain, no resize | host Wayland WSI, `vkcube --c 800`: exit 0, 800 presents, 2 creations, `intervals = 798 = 800-1-1` **HOLDS** |
-| R4 two instances | 2 segments, 2 pids (xlib/dGPU and wayland/iGPU); `--dump` reads the freshest; `SIGKILL` of the second leaves the first running to exit 0 with 567 intervals dumped afterwards; the killed writer's orphan stays until `--prune` |
+| R4 two instances | 2 segments, 2 pids (xlib/dGPU and wayland/iGPU); `--dump` reads the freshest; `SIGKILL` of the second leaves the first running to exit 0 with 573 intervals dumped afterwards; the killed writer's orphan stays until `--prune` |
 | R5 no reader | exit 0, 900 presents, `intervals=899`, segment unlinked — no reader ever started |
 | R6 reader cost/CPU | table below |
-| R6b read-cost decomposition | no segment 37.6 µs; static segment, 599-slot ring 82.8 µs; static segment, full ring (4319 slots) 107.8 µs; live 60 Hz writer 80.6 µs (298 frames); live `vkcube` 165 Hz 37.0 µs (404 frames) |
+| R6b read-cost decomposition | no segment 38.0 µs; static segment, 599-slot ring 118.9 µs; static segment, full ring (4319 slots) 143.3 µs; live 60 Hz writer 81.6 µs (298 frames); live `vkcube` 165 Hz 30.7 µs (402 frames) |
 | R7 writer creation failure | segment dir made unwritable: `vkcube` exit **0**, no segment created; the error text (`frames_synth: Writer::create failed: open …/lapsphere/frames-N: Permission denied (os error 13)`) taken from `frames_synth`, which prints it, because the layer's own log lives in that same directory |
-| R8 `SIGSTOP`/`SIGCONT` | frames frozen at 325 while stopped and the reported age grows to 2.008 s; after `SIGCONT` the count continues (686) and the run exits 0 with `intervals=1999` |
+| R8 `SIGSTOP`/`SIGCONT` | frames frozen at 326 while stopped and the reported age grows to 2.008 s; after `SIGCONT` the count continues (687) and the run exits 0 with `intervals=1999` |
 
 ### R6 — reader cost and CPU at 60 and 240 Hz
 
@@ -316,22 +324,20 @@ the writer's cadence — it is a synthetic writer, not a present load; the panel
 
 | Writer (cadence, frames seen) | reader 60 Hz | reader 240 Hz |
 | --- | --- | --- |
-| `vkcube` 165 Hz (1165-2129) | 39.8 / 42.9 µs, cpu 0.125-0.25 % | 39.5 / 32.0 µs, cpu 0.875-1.0 % |
-| `frames_synth` 60 Hz (598-1079) | 93.9 / 87.4 µs, cpu 0.625-0.75 % | 84.2 / 90.8 µs, cpu 2.5-3.0 % |
-| `frames_synth` 240 Hz (2395-4321) | 86.2 / 92.3 µs, cpu 0.5-0.75 % | 96.9 / 97.7 µs, cpu 2.75-2.875 % |
-| `vkcube` unthrottled ~4.8 k/s (884-1846) | 37.8 µs, cpu 0.25 % | 29.1 µs, cpu 0.875 % |
+| `vkcube` 165 Hz (1165-2129) | 38.3 / 37.6 µs, cpu 0.25 % | 31.6 / 30.5 µs, cpu 0.875 % |
+| `frames_synth` 60 Hz (598-1079) | 51.7 / 90.4 µs, cpu 0.375-0.75 % | 73.1 / 84.9 µs, cpu 2.125-2.625 % |
+| `frames_synth` 240 Hz (2395-4321) | 88.1 / 91.4 µs, cpu 0.625 % | 98.4 / 97.3 µs, cpu 2.75-2.875 % |
+| `vkcube` unthrottled ~4.8 k/s (884-1846) | 36.6 µs, cpu 0.25 % | 26.6 µs, cpu 0.75 % |
 
-Seqlock retries: 0 in every run of this battery; the earlier battery of the same
-configuration saw 10 retries in one 240 Hz run of 1920 samples against a full
-ring, which is the mechanism working rather than a failure. Actual poll rates were
-60.0 and 240.0 Hz in every run.
+Seqlock retries: 0 in every run of this battery. Actual poll rates were 60.0 and
+240.0 Hz in every run.
 
 `R6b` is the reason this number is not quoted as a copy cost: with no segment at
-all it is already 37.6 µs, while the hot-loop floors for the same operations are
-6.722 µs (mmap+copy) and 2.355 µs (`read_dir`). The 60/240 Hz reader pays a cold
+all it is already 38.0 µs, while the hot-loop floors for the same operations are
+6.792 µs (mmap+copy) and 2.365 µs (`read_dir`). The 60/240 Hz reader pays a cold
 path (it wakes from a sleep and is the first thing to touch those pages), and the
 ring's live size adds on top of that. **This is the number a panel would pay per
-poll on this host (0.125-3 % of a core); it is not the cost of the copy.** The
+poll on this host (0.25-2.875 % of a core); it is not the cost of the copy.** The
 layer's own hot path is unaffected by any of it (arm D's samples above).
 
 ### Freshness
@@ -349,10 +355,10 @@ Stage-1 checks C1-C5 as recorded in the stage-1 revision of this file, plus:
 
 | Check | Result |
 | --- | --- |
-| `D1.read_cost_includes_the_read` | PASS — reader median **103.0 µs** vs the out-of-band hot mmap+copy floor **6.722 µs** (the pre-fix code reported ~0.0 µs and cannot pass this on any host) |
-| `D2.watch_sees_late_segment` | PASS — reader started 2 s before the app, `max_frame_count=407` (the pre-fix code reported 0) |
+| `D1.read_cost_includes_the_read` | PASS — reader median **101.6 µs** vs the out-of-band hot mmap+copy floor **6.792 µs** (the pre-fix code reported ~0.0 µs and cannot pass this on any host) |
+| `D2.watch_sees_late_segment` | PASS — reader started 2 s before the app, `max_frame_count=406` (the pre-fix code reported 0) |
 | `D3.one_overhead_sample_per_interval` | PASS — `samples=1179 intervals=1179` from one instrumented run |
-| `D3.samples_above_the_clock_floor` | PASS — median sample 0.120 µs vs the 0.020 µs clock pair it contains |
+| `D3.samples_above_the_clock_floor` | PASS — median sample 0.110 µs vs the 0.030 µs clock pair it contains |
 
 Raw material, regenerated by every run and **not** committed: `results/`
 (app output, layer logs, reader output, dumped intervals, benchmark output, the

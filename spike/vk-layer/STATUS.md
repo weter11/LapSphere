@@ -14,15 +14,17 @@ and raw files are in `TESTING.md`.
 
 ## One-line state
 
-The present hook's own work measures **0.070 µs median** in a hot unthrottled
-present loop and **0.140 µs median** under vsync at 165 Hz (3 of 3 runs each,
-samples == intervals in every run). The unthrottled present rate cannot see the
-layer at all — the throughput A/B scatters by ±3.7 µs per present — so the
+The present hook's own work measures **0.061 µs median** in a hot unthrottled
+present loop and **0.130 µs median** under vsync at 165 Hz (3 of 3 runs each;
+the reader's sample count equals the interval count in 8 of the 9 runs, the ninth
+off by a single frame because the two counts come from two reader calls ~5 ms
+apart). The unthrottled present rate cannot see the
+layer at all — the throughput A/B scatters by ±2.5 µs per present — so the
 measurement rests on the in-band samples plus out-of-band floors for the parts
 they exclude, not on throughput. MangoHud and this layer, running on the same
-presents, agree on the frame-time distribution to **0.006-0.007 % at p50** and on
+presents, agree on the frame-time distribution to **0.006-0.009 % at p50** and on
 per-frame durations to ±5 µs median, with the *timestamps* in MangoHud's log
-carrying ~100-170 µs of its own jitter. The layer survives clean exit, `kill -9`,
+carrying ~100-200 µs of its own jitter. The layer survives clean exit, `kill -9`,
 three live resizes, two simultaneous instances, no reader, `SIGSTOP` and a
 writer that cannot be created; three checks stay **NOT TESTED** and are named as
 such below.
@@ -31,14 +33,14 @@ such below.
 
 | What | Value | What it is exactly |
 | --- | --- | --- |
-| In-band hook work, unthrottled | median 0.050 / 0.070 / 0.101 µs, p99 0.15-0.19 µs, max ≤ 0.83 µs | the layer's own sample of one present: `record()` plus the lock and the closure around it, from entry-clock-read to end of the ring write. Excludes the call down, `next_present_for`, and the unlock. |
-| In-band hook work, vsync 165 Hz | median 0.120 / 0.140 / 0.141 µs, p99 0.84-1.18 µs, p99.9 13-19 µs, max 15-21 µs | same window; the long tail is the process being descheduled inside it (it is 20x smaller unthrottled, where the loop never sleeps) |
-| In-band hook work, vsync with MangoHud | median 0.120 / 0.140 / 0.151 µs, p99 0.67-1.04 µs, p99.9 12-13.5 µs | same window with MangoHud below this layer in the chain |
-| Out-of-band floors (same host, same session) | clock pair 20 ns, writer mutex 10-30 ns, `record()` body 20 ns, mmap+copy of a 64 KiB segment 6.722 µs, `read_dir` 2.355 µs | `primitive_bench`: what the instrument and the reader's primitives cost when nothing else is running. These are the numbers that stop the clock read being read as the layer. |
-| Throughput A/B (unthrottled, per present) | C−A +0.72 / −0.26 µs, D−A +0.49 / +1.36 µs (paired medians of two 3-rep batteries); single reps scatter ±3.7 µs | a rate delta, not a frame time. It contains the *whole* hook (call down included) and it is too coarse to resolve it: see "M3 cannot resolve the layer" below. |
-| Agreement with MangoHud | p50 6.0664 vs 6.0657 ms (164.84 vs 164.86 fps); p99 9.5757 vs 9.5589 ms; paired durations median −4.85 µs, +0.59 µs | the same presents, both layers live, limiter off and limiter 120 |
-| Reader poll cost at 60 / 240 Hz | 29-98 µs median per poll; 0.125-3.0 % of one core | one `--watch` snapshot: directory scan + one mmap+copy per segment + selection, at the rate the panel would poll |
-| Data age the reader sees | 0.000-0.016 s at a 60 Hz writer, 0.000-0.004 s at 240 Hz | `last_present_ns` age, sampled 15x with `--list` |
+| In-band hook work, unthrottled | median 0.050 / 0.061 / 0.090 µs, p99 0.12-0.15 µs, max ≤ 1.4 µs (one 5.9 µs outlier in 4096) | the layer's own sample of one present: `record()` plus the lock and the closure around it, from entry-clock-read to end of the ring write. Excludes the call down, `next_present_for`, and the unlock. |
+| In-band hook work, vsync 165 Hz | median 0.120 / 0.130 / 0.141 µs, p99 0.81-0.88 µs, p99.9 15-18 µs, max 16.7-20.6 µs | same window; the long tail is the process being descheduled inside it (it is ~20x smaller unthrottled, where the loop never sleeps) |
+| In-band hook work, vsync with MangoHud | median 0.120 / 0.121 / 0.130 µs, p99 0.62-0.73 µs, p99.9 12.1-13.7 µs, max 12.2-26.5 µs | same window with MangoHud below this layer in the chain |
+| Out-of-band floors (same host, same session) | clock pair 30 ns (20-30 ns across sessions), writer mutex 10-30 ns, `record()` body 10-20 ns, mmap+copy of a 64 KiB segment 6.792 µs, `read_dir` 2.365 µs | `primitive_bench`: what the instrument and the reader's primitives cost when nothing else is running. These are the numbers that stop the clock read being read as the layer. |
+| Throughput A/B (unthrottled, per present) | B−A −0.25 / −1.49 / −0.12 µs, C−A −1.32 / −0.26 / +0.72, D−A +1.87 / +1.36 / +0.49 (paired medians of three 3-rep batteries); single reps scatter ±2.5 to ±3.7 µs | a rate delta, not a frame time. It contains the *whole* hook (call down included) and it is too coarse to resolve it: see "M3 cannot resolve the layer" below. |
+| Agreement with MangoHud | p50 6.0662 vs 6.0661 ms (164.85 fps both); p99 9.8543 vs 9.8243 ms; paired durations median +0.54 µs (limiter off) and +0.67 µs (limiter 120) | the same presents, both layers live, limiter off and limiter 120 |
+| Reader poll cost at 60 / 240 Hz | 27-98 µs median per poll; 0.25-2.875 % of one core | one `--watch` snapshot: directory scan + one mmap+copy per segment + selection, at the rate the panel would poll |
+| Data age the reader sees | 0.001-0.016 s at a 60 Hz writer, 0.000-0.003 s at 240 Hz | `last_present_ns` age, sampled 15x with `--list` |
 
 ## Two reader defects found by measuring, and the checks that now hold them
 
@@ -48,14 +50,14 @@ such below.
    value was `median 0.0 us` while the code was copying 64 KiB per sample. The
    window now opens before the read, and check `D1` asserts the reported median
    is at least the out-of-band mmap+copy floor for the same 64 KiB **on the same
-   host in the same session** (measured: 103.0 µs vs a 6.722 µs floor; the
+   host in the same session** (measured: 101.6 µs vs a 6.792 µs floor; the
    old code could not pass this check on any host).
 2. **A reader started before the application never saw its segment.** The
    segment list was scanned once, before the `--watch` loop, so the reader
    reported `max_frame_count=0` for its whole life while the segment file
    existed (measured: 65664 bytes on disk, reader reporting 0). It re-scans per
-   sample, and check `D2` starts the reader two seconds before the app and
-   requires a non-zero count (measured: 407).
+   sample now, and check `D2` starts the reader two seconds before the app and
+   requires a non-zero count (measured: 406).
 
 A third, smaller change came out of the same work: `--list` now prints
 `pid_alive=` next to `alive=`, because the header's `WRITER_ALIVE` flag survives
@@ -73,10 +75,10 @@ measured) and no sample may be smaller than the clock pair it contains.
 | Claim | Evidence |
 | --- | --- |
 | Real present interception (stage 1) | `QueuePresentKHR=900` for `vkcube --c 900`, exit 0, `intervals=899 = presents-1` |
-| The layer's per-present work is sub-microsecond | in-band samples, 3 reps x 3 configurations, samples == intervals every run |
-| It is not the instrument's own cost | `primitive_bench` floors for the same primitives on the same host: clock pair 20 ns, mmap+copy 6.722 µs |
+| The layer's per-present work is sub-microsecond | in-band samples, 3 reps x 3 configurations; sample count == interval count in 8 of 9 runs (the ninth off by one frame, two reader calls apart) |
+| It is not the instrument's own cost | `primitive_bench` floors for the same primitives on the same host: clock pair 30 ns (20-30 ns across sessions), mmap+copy 6.792 µs |
 | The measurement does not change the layer's behaviour | `intervals == presents - 1` holds in every instrumented run, from the writer's own final line |
-| MangoHud and this layer measure the same frame times | same presents, both live: p50 within 0.1 µs (0.007 %), p99 within 0.2 %, paired durations ±5 µs median, 4 runs over 2 cadences |
+| MangoHud and this layer measure the same frame times | same presents, both live: p50 within 1 µs (0.009 %), p99 within 0.3 %, paired durations ±5 µs median, 4 runs over 2 cadences |
 | Clean exit | exit 0, `intervals == presents-1`, segment unlinked (R1, R5) |
 | `kill -9` | status 137, orphan segment 65664 bytes readable, no `writer_final`, `--prune` removes it, next run exit 0 (R2) |
 | Window resize / swapchain recreation | 3 resizes under Xvfb: 2500 presents, 4 swapchains, `intervals = 2500-1-3 = 2496` **HOLDS**, zero intervals above 3x p50 (R3); Wayland WSI recreates once: `798 = 800-1-1` **HOLDS** (R3b) |
@@ -84,7 +86,7 @@ measured) and no sample may be smaller than the clock pair it contains.
 | No reader required | exit 0, presents counted, segment unlinked at exit, no reader ever started (R5) |
 | Freeze/resume | `SIGSTOP` freezes the count and the age grows; `SIGCONT` continues; exit 0 (R8) |
 | A writer that cannot be created is not fatal | unwritable segment dir: app exit 0, no segment created, error text captured from a process that prints it (R7) |
-| Reader cost at 60 and 240 Hz | 29-98 µs per poll, 0.125-3.0 % of one core, zero seqlock retries except in the 240 Hz case against a full ring (10 retries in one run of 1920) |
+| Reader cost at 60 and 240 Hz | 27-98 µs per poll, 0.25-2.875 % of one core, zero seqlock retries in the quoted battery (one run of an earlier battery saw 10 in 1920 samples against a full ring) |
 
 ## What is NOT proven (do not read the above as more than it is)
 
@@ -105,9 +107,9 @@ measured) and no sample may be smaller than the clock pair it contains.
   root filesystem propagation). What *is* tested is the neighbouring failure:
   an unwritable segment directory.
 * **The throughput A/B cannot resolve the layer.** Its single-rep scatter is
-  ±3.7 µs, i.e. ±1.8 % of a ~208 µs unthrottled present, while the layer's own
-  work is 0.05-0.15 µs. It is reported as a bound and as a check that nothing
-  large is hidden — not as the overhead.
+  ±2.5 to ±3.7 µs across three batteries, i.e. ±1.2-1.8 % of a ~208 µs
+  unthrottled present, while the layer's own work is 0.05-0.14 µs. It is reported
+  as a bound and as a check that nothing large is hidden — not as the overhead.
 * **Overhead was measured on one GPU and one WSI** (`--gpu_number 0`, `--wsi
   xlib`, NVIDIA dGPU, 165 Hz vsync or IMMEDIATE) and on one host with
   `schedutil`. The reader-cost numbers are likewise host-specific.
