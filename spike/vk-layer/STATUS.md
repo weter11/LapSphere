@@ -83,8 +83,8 @@ harness check C5 covers the wrapped case too.
 | Claim | Evidence |
 | --- | --- |
 | Real present interception | `QueuePresentKHR=900` for `vkcube --c 900`, exit 0 |
-| `frame_count` increases | reader samples 3 s apart: 44 → 285, and 5447 in the 50 s wrap run |
-| Intervals are recorded | reader dumped 284→4096 intervals, p50 8.334 ms (120 fps), zero zero-slots |
+| `frame_count` increases | reader samples 3 s apart: 46 → 286, and 5963 in the 50 s wrap run |
+| Intervals are recorded | reader dumped 286→4096 intervals, p50 8.334 ms (120 fps), zero zero-slots |
 | An independent process reads them | `frames_reader` is a separate binary/process over the same shm segment |
 | Inert when not enabled | no segment, no layer log, loader never activates it, app exit 0 |
 | Works across both WSIs and both GPUs | xlib and Wayland WSI, iGPU (RADV RENOIR) and dGPU (RTX 3070), 300 presents each |
