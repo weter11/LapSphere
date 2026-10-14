@@ -103,6 +103,12 @@ ck "C1.segment_during_run" "$([ "${seg_during:-0}" -gt 0 ] && echo 0 || echo 1)"
    "segment files present while the app ran: $seg_during"
 ck "C2.frame_count_known_to_reader" "$([ -n "${reader_frames:-}" ] && echo 0 || echo 1)" \
    "authoritative reader read frame_count=$reader_frames from the segment"
+# The interval count is asserted against the present count, both read from the
+# layer's own final line: exactly one present per cadence writes no interval.
+writer_final=$(sed 's/^\[[0-9]* [0-9]*\] //' "$res/c1_plain.layer.log" 2>/dev/null | grep -o 'writer_final: intervals=[0-9]*' | tail -1 | cut -d= -f2)
+ck "C2.intervals_are_presents_minus_one" \
+   "$([ -n "${writer_final:-}" ] && [ "${writer_final}" -eq "$((present_n - 1))" ] && echo 0 || echo 1)" \
+   "final intervals=${writer_final:-<no writer_final line>} for ${present_n} presents (the first present of the cadence writes no interval)"
 ck "C2.frame_count_increases" \
    "$([ "${reader_frames2:-0}" -gt "${reader_frames:-0}" ] && echo 0 || echo 1)" \
    "reader samples 3 s apart: $reader_frames -> $reader_frames2"

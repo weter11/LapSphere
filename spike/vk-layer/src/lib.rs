@@ -658,6 +658,17 @@ pub unsafe extern "system" fn vk_destroy_instance(
         log_line(&format!("destroy_instance: {}", counters_line()));
         if let Ok(mut slot) = writer_slot().lock() {
             if let Some(w) = slot.as_mut() {
+                // The final interval count, measured rather than derived: the
+                // segment is unlinked a few lines below, so this is the only
+                // point at which it can be read from the writer itself. It must
+                // equal QueuePresentKHR − 1 (the first present of the cadence
+                // writes no interval), and verify.sh asserts that.
+                log_line(&format!(
+                    "writer_final: intervals={} dropped={} presents={}",
+                    w.frames(),
+                    w.dropped(),
+                    HOOK_CALLS[IDX_PRESENT].load(Ordering::Relaxed)
+                ));
                 w.destroy();
             }
             *slot = None;
