@@ -86,11 +86,19 @@ fn elide(ui: &egui::Ui, text: &str, font: &FontId, width: f32) -> String {
     out
 }
 
-/// Draw the panel body into `ui` and return the rect it painted, which is the
-/// right-click target for the context menu.
+/// Draw the panel body into `ui` and return the rect it painted.
 ///
 /// `ui` is expected to be a `CentralPanel` sized to the computed panel window, so
 /// painting here cannot itself change the window.
+///
+/// **The returned rect is not the right-click target.** The panel registers its
+/// interaction rect as `ui.max_rect()` in `App::draw_panel`, so the target is the
+/// panel's whole content area and takes no part in the paint order. The two rects
+/// are equal at the call site — `draw` is the caller's first layout in the panel,
+/// so `min_rect().min` and `available_size()` at that moment describe exactly the
+/// panel's `max_rect()` — and the test below holds that equality, which is what
+/// makes either choice harmless today. A caller that wants to know what was
+/// painted reads this return value; a caller that wants a click target must not.
 pub fn draw(ui: &mut egui::Ui, state: &crate::app::AppState, config: &PanelConfig) -> Rect {
     let font = row_font_id(ui);
     let line = layout::row_height(font_row_height(ui));
@@ -185,6 +193,53 @@ mod tests {
         }
     }
 
+    /// The panel's right-click target is `ui.max_rect()`, registered by the caller
+    /// (`App::draw_panel`) — not the rect [`draw`] returns. The two are the same
+    /// rect at the call site, and that is what makes the caller's choice harmless;
+    /// this test holds the equality so it cannot lapse unnoticed.
+    ///
+    /// Both halves of it are egui-layout facts rather than promises. The
+    /// `CentralPanel` frame expands the ui to its own `max_rect()` before the body
+    /// runs (`Ui::expand_to_include_rect`), so `min_rect().min` is the panel's
+    /// origin; and `draw` is the panel's first layout, so the size it can take is
+    /// still the whole panel. Lay anything out before `draw` in that panel and this
+    /// module's rect shrinks while the interaction target stays put — which is
+    /// exactly why the target is not taken from here.
+    ///
+    /// Rendered in the call-site shape: `App::update`'s ui, the panel's
+    /// `CentralPanel` shown inside it.
+    #[test]
+    fn the_interaction_rect_matches_the_painted_rect_at_the_call_site() {
+        let state = AppState::new();
+        let config = config_with(&["cpu_processor", "gpu_name", "ram_usage"]);
+        let ctx = Context::default();
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(300.0, 198.0),
+        ));
+
+        let mut painted = Rect::NOTHING;
+        let mut target = Rect::NOTHING;
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::no_frame().show(ctx, |ui| {
+                egui::CentralPanel::default().show_inside(ui, |ui| {
+                    painted = draw(ui, &state, &config);
+                    target = ui.max_rect();
+                });
+            });
+        });
+
+        assert!(painted.width() > 0.0 && painted.height() > 0.0);
+        assert_eq!(
+            painted, target,
+            "the painted rect ({painted:?}) and the panel's interaction rect \
+             ({target:?}) have diverged: something now lays out before `draw` in \
+             the panel. The right-click target must stay `ui.max_rect()`; decide \
+             deliberately what `draw`'s return value means now."
+        );
+    }
+
     #[test]
     fn an_empty_state_paints_every_visible_row_without_panicking() {
         // The absence path: every reader hits `None` and must produce `—`.
@@ -204,8 +259,8 @@ mod tests {
 
         with_ui(300.0, 40.0, |ui| {
             let rect = draw(ui, &state, &config);
-            // The surface is returned whatever it holds, so the caller has a
-            // right-click target even with no rows on. The exact height is the
+            // What was painted is returned whatever it holds, so a caller can see
+            // the surface even with no rows on. The exact height is the
             // CentralPanel's, not this module's — `layout::height_for` is what
             // sizes the window.
             assert!(
