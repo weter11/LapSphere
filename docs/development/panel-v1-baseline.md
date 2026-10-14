@@ -21,6 +21,11 @@ section were stages of the first version. Everything else from revision 1 — th
 baseline, the credibility limits, the scope boundaries and the documentation-only
 character of this work — is unchanged.*
 
+*Revision 3 (third commit on PR #123): stage 6 is stated as `FAIL` for the current
+implementation, with the reservation conflict called out separately as a **blocking
+non-conformance**, and the dependency note no longer reads work on stages 2–5 as a
+plan. No technical conclusion, criterion or piece of evidence changed.*
+
 Companion pages: [`panel-measurements.md`](./panel-measurements.md) holds the
 measurements taken for the merged panel (PR 1) and their own limits.
 
@@ -56,8 +61,8 @@ $ git cherry -v origin/lapsphere origin/feat/panel-ui | head -3
 
 All 18 commits are marked `+` — **not in the upstream branch, and not
 patch-equivalent to anything there either**. Nothing from `feat/panel-ui` has
-landed in any form. What overlaps is *capability*, implemented independently by
-#116:
+landed in any form. What overlaps is *capability*, implemented independently by the
+merged PR #116:
 
 | Capability | `feat/panel-ui` (#115) | `lapsphere` today (#116) | Verdict |
 |---|---|---|---|
@@ -264,13 +269,28 @@ requirement itself is undecided, or the merged scope contradicts it.
 | 3 | **Window flags and behaviour over other windows**: runtime always-on-top, no taskbar/switcher entry, no-op-tolerant where the platform cannot do it | **FAIL** | Provably absent in the merged tree: `apply_spec` sends only `MinInnerSize`, `Resizable`, `Decorations`, `InnerSize` (`gui/src/panel/window.rs:124-131`); no `WindowLevel` anywhere in `gui/src`; no `ClientMessage`, no `_NET_WM_STATE`, no X11 code at all; `stacking` and `hide_from_taskbar` are parsed, clamped and normalized only. `gui/src/panel/mod.rs:30-33` assigns the atoms to a later PR and states that nothing claims they are applied. Historical (not evidence about the merged tree), from #111's overlay tests on xfwm4 4.20 with **no compositor**: the **runtime** `WindowLevel(AlwaysOnTop)` is honoured where the startup builder hint is ignored (B9/B14), and ADD of `SKIP_TASKBAR`+`SKIP_PAGER` by EWMH `ClientMessage` is honoured on a `Normal` window once the message arrives after the window settles (0 ms and 50 ms fail, 100 ms+ works — B18/B18d) | Implement, then measure the **combination** — one window that is both always-on-top *and* skip-taskbar, over a borderless-fullscreen game — which is **NOT TESTED anywhere**; each half was proven separately. No claim about another WM, about a compositor-on session, or about Wayland (`_NET_WM_STATE` is X11-only, and a Wayland client may not set it) |
 | 4 | **Real transparency** (an actual translucent surface, not a drawn rectangle) | **FAIL** | `background_opacity` exists as a config field only: defined with `MIN_BACKGROUND_OPACITY = 0.25`, clamped and normalized (`gui/src/panel/config.rs`), and **nothing applies it** — no `with_transparent`, no ARGB or alpha path anywhere in `gui/src`, and the panel's frame is left at egui's default opaque `CentralPanel` because "the opaque background and its transparency are PR 2's work" (`gui/src/app.rs:1252`). Historical: #111's B8 measured that a transparent window shows the root window's black rather than the desktop **when no compositor is present**, and B8 *with* a compositor is NOT TESTED | Implement. Note that the criterion cannot currently be passed on this host at all: xfwm4 refuses to composite under llvmpipe and no standalone compositor is installed (§3.4), so an evaluation needs a session that actually composites, which has to exist before this stage can be judged |
 | 5 | **Hotkey and D-Bus** control (mode toggle by key and over the bus, with the hide-safety rule) | **FAIL** | Absent from the merged tree: no hotkey handling (no `F8`/`Shift_R` code; `gui/src/panel/mod.rs:30-31` assigns it to a later PR), no panel D-Bus method in `daemon/src` or the GUI, no `--toggle-panel`; mode is switched by restarting with `--panel` or from the in-window button and menu. `gui/src/panel/config.rs:29-30`: "**No hotkey or D-Bus fields.** Those arrive with the visibility work (PR 3)". Historical, branch-only: #115 recorded 20/20 `--toggle-panel` runs and the hotkey firing under XTEST with NumLock/CapsLock/ScrollLock, and found three defects that exist **only** as its fixes — the D-Bus object exported on a second connection (the toggle hung), the key grabbed on one X connection and polled on another, and a function-key keysym/keycode error | Implement; carry those three fixes instead of rediscovering them. NOT TESTED anywhere: the "key already taken" (`BadAccess`) path, keyboard pass-through, and every Wayland claim |
-| 6 | **Integration of the metrics into the panel** (the six frame elements, their config block, the shm reader) | **FAIL**, and **UNRESOLVED** as a requirement | Not implemented: the merged registry has 23 ids and **no frame row** (`gui/src/panel/rows.rs`), and the merged layout decision explicitly refuses what this stage needs — `gui/src/panel/mod.rs:27-29`: "No reserved slots for them either: a slot with no producer is a permanent row of dashes" — while the design required the six frame rows' **reserved widths** from the start so that landing the data cannot reflow the panel (its criterion 4). The owner's decision (§4) therefore has nowhere to land in the merged layout, and `gui/src/panel/mod.rs:39-49` still describes the question as open. On the unmerged branch the registry did carry `fps`, `fps_graph` and `frametime_graph` ids — with no producer, which is exactly what the merged decision rejects | Settle the reservation question — the one place where the merged layout decision and the owner's decision cannot both hold, and it has to be settled **before** stage 1 lands, because the width table is what the data needs. Then: reader selection by `STALE_AFTER = 2 s`, the statistics window for 1 %/0.1 % low, the fixed-height graph strip, `—` when there is no source. Blocked on stage 1: with `frame_count = 0` there is no value to integrate |
+| 6 | **Integration of the metrics into the panel** (the six frame elements, their config block, the shm reader) | **FAIL** for the current implementation — and the integration is blocked by a non-conformance in the merged layout (see **Blocking non-conformance** below the table) | Not implemented: the merged registry has 23 ids and **no frame row** (`gui/src/panel/rows.rs`), and the merged layout decision explicitly refuses what this stage needs — `gui/src/panel/mod.rs:27-29`: "No reserved slots for them either: a slot with no producer is a permanent row of dashes" — while the design required the six frame rows' **reserved widths** from the start so that landing the data cannot reflow the panel (its criterion 4). The owner's decision (§4) therefore has nowhere to land in the merged layout, and `gui/src/panel/mod.rs:39-49` still describes the question as open. On the unmerged branch the registry did carry `fps`, `fps_graph` and `frametime_graph` ids — with no producer, which is exactly what the merged decision rejects | Settle the reservation question for the integration: the layout decision this stage needs is required **after** frame capture is confirmed, not before it, and stage 1 does not depend on it. Then: reader selection by `STALE_AFTER = 2 s`, the statistics window for 1 %/0.1 % low, the fixed-height graph strip, `—` when there is no source. Blocked on stage 1: with `frame_count = 0` there is no value to integrate |
 | 7 | **Final acceptance of the first version** | **NOT TESTED** — cannot start | No end-to-end acceptance run exists on any commit. The evidence behind stages 1–6 is either absent from the merged tree (2–5), contradicted by it (6), or a failure on an unmerged branch with no commit identity (1). No acceptance criteria for the agreed stages existed in the merged tree before this page, and no environment matrix has been recorded for an acceptance run | Close stages 1–6 first. The run must name the commit and the build, state per-criterion evidence, name the environment it ran in (WM, compositing state, GPU, X11 or Wayland), and keep its `NOT TESTED` items visible instead of summarising them away. A pass in one of the three independent areas (transparency / window behaviour / fps) says nothing about the others |
 
-**The dependency chain this table encodes:** stage 1 gates stage 6 (there is no
-`frame_count` to integrate), stage 6's layout question blocks stage 1's landing, and
-stage 7 gates on all of them. Stages 2–5 are independent of the frame work and can
-proceed in parallel with it.
+**Blocking non-conformance (stage 6).** The merged layout decision and the owner's
+decision cannot both hold: the panel refuses to reserve space for the frame rows
+(`gui/src/panel/mod.rs:27-29`), while the design requires the six frame rows'
+**reserved widths** from the start, so that landing the data cannot reflow the panel
+(its criterion 4). This is what blocks the *integration* — a reserved slot is where
+the metrics are meant to live, and today there is nowhere for them to land. It blocks
+nothing else: it is not a defect in the layout as it stands, and it is no reason to
+change the panel before there is data to put in it. Settling the reservation, and
+removing the four contradicting statements listed in §4, belong to the implementation
+of stages 1 and 6.
+
+**The dependency chain this table encodes.** Stage 1 is independent research into
+whether real frames can be captured at all: the layer and its reader live outside the
+UI, and nothing in the panel — the layout included — may block it. Stage 6 is what
+needs the layout decision, and it needs it **after** frame capture is confirmed: with
+`frame_count = 0` there is no data for a reserved slot to hold, so the non-conformance
+above blocks the integration, not the research. Stage 7 gates on stages 1–6. The order
+of work stays the one already agreed; this table records status against it and does
+not re-plan it.
 
 ## 6. Already-merged infrastructure (context, not a stage)
 
