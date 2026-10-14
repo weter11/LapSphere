@@ -18,7 +18,96 @@ in, the numbers, and what is **not** claimed. Companion to
   frame's fill. A translucent *fill* over an opaque *clear* would still be an
   opaque window, because the composited alpha is `src + dst * (1 - src.a)`.
 
+## The acceptance run — merge commit `565930e`
+
+Stage 4's acceptance was run on the merge commit, not on the branch: `565930e`
+(merge of PR #128 into `lapsphere`, 2026-10-14), checked out detached in a clean
+worktree (`git status --porcelain` empty), built with
+`cargo build -p lapsphere --bin lapsphere` and unit-tested with
+`cargo test -p lapsphere --bin lapsphere` — **163 passed, 0 failed**. The binary
+measured is `target/debug/lapsphere`, sha256
+`81ab06c76f03adac7957efc4a3feaaecc1464e3e14d9e29971ed66ada77f6896`.
+
+* **Session:** the same host and session as the branch measurement — xfwl4
+  (Wayland) with Xwayland on `:0`, 2560x1440. The app was started with
+  `WAYLAND_DISPLAY` unset so that winit takes the **X11** backend, which is the
+  session this page's procedure describes.
+* **Backdrop:** one `xterm` painted solid `#00c800` (fg = bg), sized to cover the
+  panel's whole area, so every sample point inside the panel has the green client
+  behind it. The compositor's offset was re-measured rather than reused: a client
+  at X origin `(0,65)` maps to screen `(6,108)`, i.e. the surface sits **6 px
+  right and 43 px below** the client's X origin, and the green client's screen
+  rect equals its X size (904x524 → 904x524) — X coordinates and screen pixels are
+  1:1 on this session.
+* **The slider was driven live**, in one process: pointer input injected with
+  `xdotool` (XTEST). Details and the numbers are below the table.
+
+| Criterion | Result | Evidence |
+|---|---|---|
+| the panel's surface carries an alpha channel | **PASS** | `xwininfo -id 0xa00003`: `Depth: 32`, `Visual Class: TrueColor`; `xwd` returns 885x393 at 32 bits per pixel |
+| at 100 % the background is opaque | **PASS** | surface alpha `255` for all 347 805 pixels; of 87 271 sampled screen pixels inside the panel **0** showed the green client; screen == surface exactly for 81 005 of them, within ±2 for a further 5 426, and 840 further apart — the values the panel repainted between the surface dump and the screenshot |
+| at 0.48 the background lets the window behind through, the text does not fade | **PASS** | surface: fill `(13,14,15)` at alpha `122` (0.48 premultiplied), glyph pixels alpha `255`; screen over the green backdrop `(1,200,1)` reads `(13,92,15)`, giving `B_eff`/backdrop = **0.748**; a glyph at `(220,220,220)` reads `(219,220,219)` on screen, where text sharing the background's opacity would read `(105,183,105)` |
+| the slider changes the opacity without a restart, and 100 % makes the panel solid again | **PASS** | one drag (settings window, track x 166 → 58) → the same pid `2475744` repainted its surface at alpha `122` and wrote `"background_opacity": 0.48` to `panel.json` itself; a second drag back to the right end → alpha `255` for all 347 805 pixels, `panel.json` `1.0`, pid unchanged |
+| the context menu stays opaque | **PASS** | with the background at alpha `122`, the menu opened by a right click is alpha `255` over 30 163 of 31 832 sampled pixels of its rectangle; the remainder are its rounded corners and border, where the panel shows through |
+| the ordinary window gets no transparency | **PASS** | without `--panel`: 1009x1098, `Depth 32`, all 1 107 882 surface pixels alpha `255`; over the green client (120 646 of 123 342 sampled points green behind it) **0** pixels showed it through; screen == surface for 110 980, within ±2 for the other 12 362 |
+
+### Driven by the slider
+
+Four steps, all in the process started at `pid 2475744`, which was checked before
+and after every one of them and never changed:
+
+1. right click on the panel (XTEST) → the two-entry context menu, drawn inside the
+   panel window;
+2. click **Panel settings...** → the settings viewport opens as a second X window
+   (638x1133);
+3. drag the **Background opacity** handle from x 166 to x 58 of its track → the
+   panel's surface is at alpha `122` on the next frame, and `panel.json` on disk
+   reads `"background_opacity": 0.48` — written by the app;
+4. drag it back to the right end → alpha `255` again, `panel.json` `1.0`.
+
+A **click** on the track is not enough: egui's slider senses `drag()`, so a press
+and release without movement only highlights the handle. The value moves on a
+press-and-move — which is what the procedure's "drag it down" says.
+
+### The input route — what had to be true
+
+The branch measurement recorded that the slider could not be driven on this
+session: XTEST-injected pointer motion moved the X server's pointer
+(`xdotool getmouselocation` agreed) but no event reached the client. That is
+reproducible, and conditional, and the condition is now named.
+
+With a 904x654 backdrop, `xdotool mousemove 1000 200` produced **0** events in an
+`xev` window that selected pointer events, and reported the *root* window as the
+pointer's window; an XTEST button-3 click produced none either. With the backdrop
+grown to 2500x1300 — an X11 client covering the screen, so the compositor's
+pointer is over Xwayland's surface region — the same injection produced
+`EnterNotify`, `MotionNotify` and `ButtonPress` (`synthetic NO`) in the same
+`xev`, and reported the `xev` window as the pointer's window. The panel then took
+the menu click and the slider drag. The compositor's pointer was never moved by
+us; nothing here creates a virtual input device — only XTEST and `XSendEvent`.
+The compositor's pointer position was not read directly and no mechanism inside
+Xwayland is claimed: what is measured is the difference between the two states.
+
+Two further facts about the route, both measured:
+
+* A synthetic **core** event (`XSendEvent`, `xdotool click --window`) *is*
+  delivered to the client — `xev` logs `ButtonPress ... synthetic YES` — but the
+  app ignores it: winit 0.30.13's X11 backend takes pointer input from XInput2
+  only (`event_processor.rs`, the `x11::GenericEvent` branch: `XI_ButtonPress`,
+  `XI_ButtonRelease`, `XI_Motion`, `XI_Enter`, `XI_Leave`; its core-event branch
+  carries `KeyPress`/`KeyRelease` and no pointer event). A synthetic click is
+  therefore not a route into this UI.
+* **Keyboard** injection arrives in *both* states: with the window focused through
+  `XSetInputFocus`, an XTEST `F1` reached the running app
+  (`lapsphere::keyboard_shortcuts: F1 key pressed, toggling help`) even in the
+  state where pointer injection did not. The failure is specific to the pointer,
+  not to injection as such.
+
 ## What was measured, and on what
+
+*This is the branch measurement, taken before the merge. Stage 4's status rests
+on the acceptance run above; the numbers here are its own and are not re-measured
+by it.*
 
 * **Build:** debug, branch `feat/panel-transparency` (base `7262c5b`), the commit
   that adds this page; `target/debug/lapsphere`, clean tree at the time.
@@ -94,16 +183,14 @@ Same window, started without `--panel`, over the green backdrop:
 
 ## Not verified, and not claimed
 
-* **The opacity slider was not driven live.** On this session the compositor does
-  not deliver XTEST-injected pointer motion to the X11 client, so no click can
-  reach the panel's surface: with the app logging its own input state,
-  `xdotool mousemove` moved the X server's pointer (`xdotool getmouselocation`
-  agrees) while the app's view of the pointer stayed at the last position it had
-  seen, and a right click never reached the surface's `Response`. The reduced
-  opacity was therefore produced by writing `background_opacity: 0.5` to
-  `panel.json` and restarting — the same field the slider writes. That the slider
-  applies **without** a restart rests on the panel reading the config every frame
-  and on the control's own test, not on this measurement.
+* **The slider was not driven live in this measurement.** It *was* driven live in
+  the acceptance run on the merge commit (above), and that run is what stage 4's
+  status rests on; here it could not be, because the compositor's pointer was
+  outside Xwayland's surfaces and the injection never reached the client (see
+  "The input route"). The reduced opacity on this run was therefore produced by
+  writing `background_opacity: 0.5` to `panel.json` and restarting — the same
+  field the slider writes. That the slider applies **without** a restart is the
+  acceptance run's result, not this run's.
 * **One compositor.** xfwl4 over Xwayland is the only environment measured.
   Nothing here is claimed for xfwm4+compositor, mutter, kwin, a bare X server, or
   native Wayland.
