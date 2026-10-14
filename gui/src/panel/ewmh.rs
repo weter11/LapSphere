@@ -20,13 +20,18 @@
 //!   with the state read back from the X server between attempts, and nothing is
 //!   sent until the window is managed.
 //!
-//! # Non-blocking
+//! # Non-blocking, and serialised where it matters
 //!
 //! The retry loop waits between attempts, so it runs on a worker thread: the UI
 //! thread only hands the wanted state over and returns. Each request claims a
 //! generation number from a counter shared with its worker, and the worker checks
-//! it before every attempt — so a request the user has already replaced can never
-//! finish last and win.
+//! it before every attempt.
+//!
+//! That check is not enough on its own: a round that has already passed it is free
+//! to send, so a worker for a request the user has replaced could still land after
+//! the newer one applied its state. The rounds themselves are therefore serialised
+//! ([`RoundLock`]) and the claim is re-checked INSIDE the lock, which is what makes
+//! "the last request wins" true rather than likely.
 //!
 //! # The level is in this set, and is also sent by the toolkit
 //!
@@ -47,6 +52,8 @@
 //! behaviour across window managers, or on a composited session. Where the state
 //! cannot be applied it is logged and the window is left as it is.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 
 /// One `_NET_WM_STATE` atom the panel can ask for.
@@ -293,6 +300,64 @@ where
     LoopOutcome::Exhausted { attempts }
 }
 
+/// Serialises a change round across workers, and refuses one that has been
+/// superseded while it waited.
+///
+/// Two workers can be sending at once, and the generation check at the top of
+/// each round does not prevent it: a round that has ALREADY passed that check is
+/// free to send while a newer request claims and applies its own state, so the
+/// older request can land last and leave the window in a state nobody asked for.
+/// There is one window manager and one property, so a round — the send and the
+/// read-back that follows it — is one critical section, and a worker that had to
+/// wait for it is re-checked before it is allowed to touch anything.
+///
+/// What this does NOT do, deliberately: a round that is already running is not
+/// interrupted. It cannot be, and it does not need to be — what matters is that
+/// the newer request runs AFTER it, so the last state applied is the last state
+/// asked for.
+#[derive(Debug, Default)]
+pub struct RoundLock {
+    /// The newest claim. Bumped by [`RoundLock::claim`], read by every worker.
+    generation: AtomicU64,
+    /// Held for the whole of one round.
+    round: Mutex<()>,
+}
+
+impl RoundLock {
+    /// Claim the newest generation. The claim is the worker's identity for its
+    /// whole life: it stops being allowed to send as soon as a newer one exists.
+    pub fn claim(&self) -> u64 {
+        self.generation.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// Is `claim` still the newest?
+    pub fn is_current(&self, claim: u64) -> bool {
+        self.generation.load(Ordering::SeqCst) == claim
+    }
+
+    /// Run one change round, or refuse it because a newer claim has taken over.
+    ///
+    /// `None` means nothing was sent: either a newer request already existed, or
+    /// this one was superseded while it waited for a round that was in flight.
+    pub fn round<T>(&self, claim: u64, change: impl FnOnce() -> T) -> Option<T> {
+        let _round = self
+            .round
+            .lock()
+            // A worker that panicked inside the round leaves the lock poisoned;
+            // the state it guards is "someone is mid-round", which a panic
+            // releases just like a normal return, so the poison is recovered
+            // rather than turning one bad round into a permanent outage.
+            .unwrap_or_else(|poison| poison.into_inner());
+        // The re-check is the whole point of the lock: a worker that queued
+        // behind an in-flight round must not send for a request the user has
+        // already replaced.
+        if !self.is_current(claim) {
+            return None;
+        }
+        Some(change())
+    }
+}
+
 /// Which window this is, as far as the EWMH work is concerned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PanelWindow {
@@ -342,7 +407,6 @@ pub fn window_of(_frame: &eframe::Frame) -> PanelWindow {
 #[cfg(target_os = "linux")]
 mod platform {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use x11rb::connection::Connection;
     use x11rb::protocol::xproto::{AtomEnum, ClientMessageEvent, ConnectionExt, EventMask, Window};
@@ -355,11 +419,13 @@ mod platform {
     /// Hands the wanted state to a worker thread. Never blocks the caller.
     ///
     /// Requests are serialised by a generation counter: `request` claims one and
-    /// the worker stops as soon as it is no longer the newest, so a burst of
-    /// changes cannot leave an older state applied last.
+    /// the worker stops as soon as it is no longer the newest. The claim is not
+    /// enough on its own — a round already in flight cannot be recalled, so the
+    /// rounds themselves are serialised too (see [`RoundLock`]) and the newest
+    /// request is always the one that runs last.
     #[derive(Default)]
     pub struct AtomsController {
-        generation: Arc<AtomicU64>,
+        rounds: Arc<RoundLock>,
     }
 
     impl AtomsController {
@@ -386,11 +452,11 @@ mod platform {
                 }
             };
 
-            let claim = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-            let current = Arc::clone(&self.generation);
+            let claim = self.rounds.claim();
+            let rounds = Arc::clone(&self.rounds);
             let spawned = std::thread::Builder::new()
                 .name("panel-ewmh".to_string())
-                .spawn(move || worker(id, wanted, claim, current));
+                .spawn(move || worker(id, wanted, claim, rounds));
             if let Err(err) = spawned {
                 log::warn!(
                     "panel EWMH state: could not start the worker ({err}); {} not applied",
@@ -445,7 +511,7 @@ mod platform {
     }
 
     /// A detached worker: connect, then run the bounded loop.
-    fn worker(window: u32, wanted: WantedState, claim: u64, current: Arc<AtomicU64>) {
+    fn worker(window: u32, wanted: WantedState, claim: u64, rounds: Arc<RoundLock>) {
         // `ConnectError` is not a `std::error::Error` in x11rb 0.13, so it is
         // formatted rather than propagated with `?`.
         let conn = match x11rb::connect(None) {
@@ -473,8 +539,16 @@ mod platform {
         let outcome = retry_loop(
             wanted,
             ATOM_ATTEMPTS,
-            || current.load(Ordering::SeqCst) != claim,
-            |wanted| apply(&conn, root, window, &atoms, wanted),
+            || !rounds.is_current(claim),
+            |wanted| {
+                // The send and the read-back are one critical section, re-checked
+                // inside it: a worker that queued behind an in-flight round sends
+                // nothing once it finds itself superseded, so the state the window
+                // keeps is the one the last request asked for. See [`RoundLock`].
+                rounds
+                    .round(claim, || apply(&conn, root, window, &atoms, wanted))
+                    .flatten()
+            },
             || std::thread::sleep(ATOM_RETRY_DELAY),
         );
 
@@ -660,7 +734,7 @@ pub use platform::AtomsController;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier};
 
     use super::super::config::Stacking;
@@ -933,13 +1007,14 @@ mod tests {
         // Real threads, because the property under test is the interleaving: the
         // other thread stands in for the UI claiming a newer generation while the
         // worker is between rounds. Arithmetic on the counter would prove nothing.
-        let claimed = Arc::new(AtomicU64::new(1));
+        let rounds = Arc::new(RoundLock::default());
+        let claim = rounds.claim();
         let applies = Arc::new(AtomicUsize::new(0));
         let first_round = Arc::new(Barrier::new(2));
         let supersede = Arc::new(Barrier::new(2));
 
         let worker = {
-            let claimed = Arc::clone(&claimed);
+            let rounds = Arc::clone(&rounds);
             let applies = Arc::clone(&applies);
             let first_round = Arc::clone(&first_round);
             let supersede = Arc::clone(&supersede);
@@ -947,7 +1022,7 @@ mod tests {
                 retry_loop(
                     all_set(),
                     ATOM_ATTEMPTS,
-                    || claimed.load(Ordering::SeqCst) != 1,
+                    || !rounds.is_current(claim),
                     move |_| {
                         applies.fetch_add(1, Ordering::SeqCst);
                         // Hold the first round open until the UI thread has
@@ -963,7 +1038,7 @@ mod tests {
         };
 
         first_round.wait();
-        claimed.store(2, Ordering::SeqCst); // the UI thread's newer request
+        rounds.claim(); // the UI thread's newer request
         supersede.wait();
 
         assert_eq!(
@@ -1000,5 +1075,185 @@ mod tests {
             state.set(atom, false);
             assert!(!state.get(atom));
         }
+    }
+
+    // ---- the round lock: two workers, one window manager ----
+
+    /// Stands in for the X server's `_NET_WM_STATE`: the state the last round left
+    /// behind, and the record of every round that actually sent something.
+    #[derive(Default)]
+    struct FakeServer {
+        state: Mutex<WantedState>,
+        sent: Mutex<Vec<WantedState>>,
+    }
+
+    impl FakeServer {
+        /// One round of the real transport, minus the X connection.
+        fn round(&self, wanted: WantedState) -> Option<WantedState> {
+            self.sent.lock().unwrap().push(wanted);
+            *self.state.lock().unwrap() = wanted;
+            Some(wanted)
+        }
+
+        fn state(&self) -> WantedState {
+            *self.state.lock().unwrap()
+        }
+
+        fn sent(&self) -> Vec<WantedState> {
+            self.sent.lock().unwrap().clone()
+        }
+    }
+
+    #[test]
+    fn the_last_request_wins_when_two_rounds_overlap() {
+        // The race: a round that has ALREADY passed its generation check is free
+        // to send, so without a serialised round the older request could land after
+        // the newer one had applied its state, leaving the window in a state nobody
+        // asked for. Real threads and real barriers, because the property under
+        // test IS the interleaving — and the assertions below are about the state
+        // the window ends up in, not about where a worker stops.
+        let rounds = Arc::new(RoundLock::default());
+        let server = Arc::new(FakeServer::default());
+        let older = all_set();
+        let newer = WantedState::NONE;
+
+        // Each barrier is awaited exactly once by each side: one awaited a
+        // different number of times by the two threads hangs the suite instead of
+        // failing it.
+        let older_in_round = Arc::new(Barrier::new(2));
+        let newer_claimed = Arc::new(Barrier::new(2));
+
+        let older_claim = rounds.claim();
+        let older_worker = {
+            let rounds = Arc::clone(&rounds);
+            let server = Arc::clone(&server);
+            let older_in_round = Arc::clone(&older_in_round);
+            let newer_claimed = Arc::clone(&newer_claimed);
+            std::thread::spawn(move || {
+                // The check closure needs its own handle on the lock, or borrowing
+                // it here and moving it into the round closure below does not
+                // compile (E0505).
+                let check = Arc::clone(&rounds);
+                retry_loop(
+                    older,
+                    ATOM_ATTEMPTS,
+                    move || !check.is_current(older_claim),
+                    move |wanted| {
+                        rounds
+                            .round(older_claim, || {
+                                // Hold the round open until the newer request has
+                                // claimed. This is exactly the window in which the
+                                // older round used to be able to send last.
+                                older_in_round.wait();
+                                newer_claimed.wait();
+                                // A pause, so that WITHOUT the round lock the newer
+                                // request's round has demonstrably run before this
+                                // one sends — which is the hazard being guarded.
+                                // With the lock it changes nothing: the newer round
+                                // cannot start until this one has returned.
+                                std::thread::sleep(Duration::from_millis(100));
+                                server.round(wanted)
+                            })
+                            .flatten()
+                    },
+                    || {},
+                )
+            })
+        };
+
+        older_in_round.wait(); // the older round is in flight, past its generation check
+
+        let newer_claim = rounds.claim(); // the user changes their mind
+        let newer_worker = {
+            let rounds = Arc::clone(&rounds);
+            let server = Arc::clone(&server);
+            std::thread::spawn(move || {
+                let check = Arc::clone(&rounds);
+                retry_loop(
+                    newer,
+                    ATOM_ATTEMPTS,
+                    move || !check.is_current(newer_claim),
+                    move |wanted| rounds.round(newer_claim, || server.round(wanted)).flatten(),
+                    || {},
+                )
+            })
+        };
+        // The newer request is committed; the in-flight round may now finish.
+        newer_claimed.wait();
+
+        assert_eq!(
+            older_worker.join().expect("the worker must not panic"),
+            LoopOutcome::Confirmed { attempts: 1 },
+            "a round already in flight cannot be recalled, and this one did land"
+        );
+        assert_eq!(
+            newer_worker.join().expect("the worker must not panic"),
+            LoopOutcome::Confirmed { attempts: 1 },
+            "the newer request must still get to apply its own state"
+        );
+
+        assert_eq!(
+            server.sent(),
+            vec![older, newer],
+            "the rounds are serialised, so the older one cannot land after the newer"
+        );
+        assert_eq!(
+            server.state(),
+            newer,
+            "the window must end in the state of the LAST request"
+        );
+
+        // The other half of the same race, and the one the re-check inside the lock
+        // exists for: a worker that has to wait for an in-flight round must send
+        // NOTHING. Held open by the current claim, so the waiter is refused whether
+        // it queues behind the lock or arrives just after it is released.
+        let waiter_claim = rounds.claim();
+        let holder_claim = rounds.claim();
+        let held = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let holder = {
+            let rounds = Arc::clone(&rounds);
+            let held = Arc::clone(&held);
+            let release = Arc::clone(&release);
+            std::thread::spawn(move || {
+                rounds.round(holder_claim, || {
+                    held.wait();
+                    release.wait();
+                })
+            })
+        };
+        held.wait(); // the round lock is held, by the current request
+
+        let sent_before = server.sent().len();
+        let waiter_ran = Arc::new(AtomicBool::new(false));
+        let waiter = {
+            let rounds = Arc::clone(&rounds);
+            let waiter_ran = Arc::clone(&waiter_ran);
+            std::thread::spawn(move || {
+                rounds.round(waiter_claim, || waiter_ran.store(true, Ordering::SeqCst))
+            })
+        };
+        release.wait();
+
+        assert!(
+            holder.join().expect("the holder must not panic").is_some(),
+            "the current claim's round runs"
+        );
+        assert_eq!(
+            waiter
+                .join()
+                .expect("a refused round returns None, it does not panic"),
+            None,
+            "a superseded round is refused"
+        );
+        assert!(
+            !waiter_ran.load(Ordering::SeqCst),
+            "and it sends nothing at all"
+        );
+        assert_eq!(
+            server.sent().len(),
+            sent_before,
+            "nothing was sent after the window was already in the newer state"
+        );
     }
 }
