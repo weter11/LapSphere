@@ -26,8 +26,20 @@ implementation, with the reservation conflict called out separately as a **block
 non-conformance**, and the dependency note no longer reads work on stages 2–5 as a
 plan. No technical conclusion, criterion or piece of evidence changed.*
 
+*Revision 4 (a commit on PR #128, the transparency implementation): the
+**environment** statements are corrected. This host now runs a **Wayland** session
+(xfwl4) with **Xwayland** on `:0`, and that session **composites** — so "no session
+on this host could carry a transparency verdict" is withdrawn, and "no Wayland
+session exists on this host" is withdrawn with it (§3.4, §8). The stage-4 row keeps
+`FAIL` and gains the implementation's own measurement as evidence, which is **not**
+`PASS`: it is on an unmerged branch, and the acceptance run on the merge commit is
+still outstanding. No other row, criterion or conclusion changed, and the page's own
+base and every line number below are unchanged — still as of `17ece90`.*
+
 Companion pages: [`panel-measurements.md`](./panel-measurements.md) holds the
-measurements taken for the merged panel (PR 1) and their own limits.
+measurements taken for the merged panel (PR 1) and their own limits;
+[`panel-transparency.md`](./panel-transparency.md) holds the stage-4 transparency
+measurement, its session and its limits.
 
 **This work is documentation only.** It changes no runtime code, no Vulkan layer,
 no UI, no settings and no panel behaviour; the problems it records are recorded as
@@ -73,7 +85,7 @@ merged PR #116:
 | Mode switching on one window | `3aee0a9` — reshape **plus** X11 atoms confirmed by read-back and retry, position, hide-safety | `window.rs` — size, decorations, resizable only | **main is missing the X11 half** (stages 2–3) |
 | Panel menu / settings window | `b5183e0`, `72bceef`, `settings_window.rs` (503) | `menu.rs` (378) + `app.rs::draw_settings_window` (own viewport) | both, independent |
 | Hotkey, D-Bus toggle, `--toggle-panel`, hide-safety | `d88c1a3`, `8c77593`, `bf7945d`, `fead23e`, `0bec93d`, `visibility.rs` (1209), `bus_connection.rs` | absent (`--panel` exists; no hotkey, no panel D-Bus method, no F8) | **branch-only — stage 5** |
-| Stacking / taskbar atoms / transparency / position / drag | `b018d25`, `36267b9`, `x11.rs` (425) | config fields `stacking`, `hide_from_taskbar`, `background_opacity` **stored and normalized only**; nothing applies them | **config surface only — stages 2–4** |
+| Stacking / taskbar atoms / transparency / position / drag | `b018d25`, `36267b9`, `x11.rs` (425) | config fields `stacking`, `hide_from_taskbar`, `background_opacity` **stored and normalized only**; nothing applies them | **config surface only — stages 2–4** (transparency is implemented and measured on PR #128, unmerged — §5 row 4) |
 | Design, overlay tests, tools | `panel-design.md` (1335), `panel-overlay-tests.md` (808), `panel.md` (246), `tools/frametime_stats.py` | only `docs/development/panel-measurements.md`; no `tools/` | **branch-only** |
 | Overlay evidence media, owner check script | PR #111: `docs/development/panel-overlay-tests/` (15 PNG + 2 MP4 at the branch head; the PR body says 14 PNG, the tree has 15), `panel-owner-check.sh` | none | **branch-only** |
 
@@ -189,7 +201,11 @@ Reused from the reconciling PR (#121) and its page, not restated as findings:
 * the numbers are tied to a **branch, not a commit SHA**;
 * the environment's **compositing state is UNRESOLVED** — a fresh check on the same
   host reproduced `Unsupported GL renderer (llvmpipe …)` and `_NET_WM_COMPOSITING`
-  absent, so "compositor on" was removed rather than flipped;
+  absent, so "compositor on" was removed rather than flipped. **That host state has
+  since changed** (revision 4): the desktop now runs xfwl4 (Wayland) with Xwayland on
+  `:0`, and that session does composite. This does not re-confirm the historical
+  Xvfb/xfwm4 sessions — their compositing state stays UNRESOLVED — and the new
+  session's evidence belongs to the transparency measurement on its own page (§8);
 * the earlier panel-mode CPU figure came from a binary matching no single commit;
 * the **right-click diagnosis was retracted**: the conclusion that a `Response`
   never receives egui's click flag came from reading two probe values from
@@ -267,7 +283,7 @@ requirement itself is undecided, or the merged scope contradicts it.
 | 1 | **Research: real fps / frametime from inside the game process** (Vulkan implicit layer + shared-memory protocol) | **FAIL** — in progress, no frames recorded | Branch `feat/mini-panel` (PR #111), `spike/vk-layer/STATUS.md`: the layer enumerates and loads, `vkCreateInstance` completes, `frames-<pid>` is created with mode 0600 and the protocol-v1 size — but the counters read `gipa=0 create_instance=1 create_device=0 gdpa=0 destroy_device=0 create_swapchain=0 destroy_swapchain=0 queue_present=0`, so **`frame_count = 0`** and **`gipa = 0`**: our `vkGetInstanceProcAddr` is never called, no device is registered, and `vkQueuePresentKHR` is never intercepted. STATUS.md: "NOT WORKING … nothing here has produced a measurement yet". The blocker is an **interface question with the Vulkan loader**, not frame timing. The design's GO gate has no result (tests 1–6 outstanding), and `frametime-layer-spike.md` does not exist, so criteria 9–12 are UNRESOLVED. **PR #112's repaint work is not frame capture**: it requests a frame when *polled daemon data* arrives, observes no presents, and the merged tree contains no fps/frametime code at all (`gui/src/panel/rows.rs` has no frame row) | Answer the loader-interface question (the manifest's `functions`/negotiation route, or a working reference layer for this loader), then run the four spike tests (agreement with MangoHud, per-hook overhead, robustness, reader latency and CPU at 60 and 240 Hz), then criterion 13's Rust-vs-`frametime_stats.py` parity test. Until `frame_count > 0` no fps element may be claimed, and stage 6 cannot start |
 | 2 | **Position: save and restore**, clamped against the monitor size and confirmed by read-back | **FAIL** | The merged tree has **no position code at all**: no `OuterPosition` / `ViewportCommand::OuterPosition`, no monitor clamp anywhere in `gui/src`, and no position field in `PanelConfig` (`gui/src/panel/config.rs:185-196`). `gui/src/panel/config.rs:26-28`: "**No position.** The panel is placed by the window manager / desktop for now; a stored corner is the second-monitor question, which is explicitly NOT claimed"; `gui/src/panel/mod.rs:36-37` repeats it for multi-monitor. The only attempt is on the unmerged branch: #115's historical result — stored `top_left, offset 24,24`, the panel came up at `0,43` after a restart — recorded there as a real defect, tied to no single commit, and therefore **not** a verification of anything in the merged tree | Implement (with the stacking work), apply, and confirm the applied position by read-back (`xwininfo`/`xprop`) rather than trusting the request — a request that is sent is not a request that landed (§3.4). Multi-monitor placement stays out of the first version unless the owner decides otherwise |
 | 3 | **Window flags and behaviour over other windows**: runtime always-on-top, no taskbar/switcher entry, no-op-tolerant where the platform cannot do it | **FAIL** | Provably absent in the merged tree: `apply_spec` sends only `MinInnerSize`, `Resizable`, `Decorations`, `InnerSize` (`gui/src/panel/window.rs:124-131`); no `WindowLevel` anywhere in `gui/src`; no `ClientMessage`, no `_NET_WM_STATE`, no X11 code at all; `stacking` and `hide_from_taskbar` are parsed, clamped and normalized only. `gui/src/panel/mod.rs:30-33` assigns the atoms to a later PR and states that nothing claims they are applied. Historical (not evidence about the merged tree), from #111's overlay tests on xfwm4 4.20 with **no compositor**: the **runtime** `WindowLevel(AlwaysOnTop)` is honoured where the startup builder hint is ignored (B9/B14), and ADD of `SKIP_TASKBAR`+`SKIP_PAGER` by EWMH `ClientMessage` is honoured on a `Normal` window once the message arrives after the window settles (0 ms and 50 ms fail, 100 ms+ works — B18/B18d) | Implement, then measure the **combination** — one window that is both always-on-top *and* skip-taskbar, over a borderless-fullscreen game — which is **NOT TESTED anywhere**; each half was proven separately. No claim about another WM, about a compositor-on session, or about Wayland (`_NET_WM_STATE` is X11-only, and a Wayland client may not set it) |
-| 4 | **Real transparency** (an actual translucent surface, not a drawn rectangle) | **FAIL** | `background_opacity` exists as a config field only: defined with `MIN_BACKGROUND_OPACITY = 0.25`, clamped and normalized (`gui/src/panel/config.rs`), and **nothing applies it** — no `with_transparent`, no ARGB or alpha path anywhere in `gui/src`, and the panel's frame is left at egui's default opaque `CentralPanel` because "the opaque background and its transparency are PR 2's work" (`gui/src/app.rs:1252`). Historical: #111's B8 measured that a transparent window shows the root window's black rather than the desktop **when no compositor is present**, and B8 *with* a compositor is NOT TESTED | Implement. Note that the criterion cannot currently be passed on this host at all: xfwm4 refuses to composite under llvmpipe and no standalone compositor is installed (§3.4), so an evaluation needs a session that actually composites, which has to exist before this stage can be judged |
+| 4 | **Real transparency** (an actual translucent surface, not a drawn rectangle) | **FAIL** for the merged tree | In the merged tree `background_opacity` is a config field only: defined with `MIN_BACKGROUND_OPACITY = 0.25`, clamped and normalized (`gui/src/panel/config.rs`), and **nothing applies it** — no `with_transparent`, no ARGB or alpha path anywhere in `gui/src`, and the panel's frame is left at egui's default opaque `CentralPanel` because "the opaque background and its transparency are PR 2's work" (`gui/src/app.rs:1252`). Historical: #111's B8 measured that a transparent window shows the root window's black rather than the desktop **when no compositor is present**. Implemented and measured on **PR #128 (unmerged, head `098c740`)**, in a session that composites — X11 on Xwayland under xfwl4: the window holds an ARGB visual (`Depth 32`), its own surface carries the configured alpha (one value `255` at 1.0; `128` at 0.5 with the glyph pixels still `255`), the screen at 50 % blends the fill with the measured backdrop (which is not visible through it at 100 %) while the text does not fade, and the ordinary window's surface is alpha `255` in every sampled pixel. Numbers, session and limits: [`panel-transparency.md`](./panel-transparency.md). **Not `PASS` here**: the evidence is on an unmerged branch | Merge, then run the acceptance on the **merge commit**, following the procedure on the transparency page. The earlier note that the criterion "cannot currently be passed on this host at all" is **withdrawn** — a compositing session now exists on it (§3.4, §8). Still NOT TESTED anywhere: a compositor other than xfwl4, a session without a compositor, and native Wayland |
 | 5 | **Hotkey and D-Bus** control (mode toggle by key and over the bus, with the hide-safety rule) | **FAIL** | Absent from the merged tree: no hotkey handling (no `F8`/`Shift_R` code; `gui/src/panel/mod.rs:30-31` assigns it to a later PR), no panel D-Bus method in `daemon/src` or the GUI, no `--toggle-panel`; mode is switched by restarting with `--panel` or from the in-window button and menu. `gui/src/panel/config.rs:29-30`: "**No hotkey or D-Bus fields.** Those arrive with the visibility work (PR 3)". Historical, branch-only: #115 recorded 20/20 `--toggle-panel` runs and the hotkey firing under XTEST with NumLock/CapsLock/ScrollLock, and found three defects that exist **only** as its fixes — the D-Bus object exported on a second connection (the toggle hung), the key grabbed on one X connection and polled on another, and a function-key keysym/keycode error | Implement; carry those three fixes instead of rediscovering them. NOT TESTED anywhere: the "key already taken" (`BadAccess`) path, keyboard pass-through, and every Wayland claim |
 | 6 | **Integration of the metrics into the panel** (the six frame elements, their config block, the shm reader) | **FAIL** for the current implementation — and the integration is blocked by a non-conformance in the merged layout (see **Blocking non-conformance** below the table) | Not implemented: the merged registry has 23 ids and **no frame row** (`gui/src/panel/rows.rs`), and the merged layout decision explicitly refuses what this stage needs — `gui/src/panel/mod.rs:27-29`: "No reserved slots for them either: a slot with no producer is a permanent row of dashes" — while the design required the six frame rows' **reserved widths** from the start so that landing the data cannot reflow the panel (its criterion 4). The owner's decision (§4) therefore has nowhere to land in the merged layout, and `gui/src/panel/mod.rs:39-49` still describes the question as open. On the unmerged branch the registry did carry `fps`, `fps_graph` and `frametime_graph` ids — with no producer, which is exactly what the merged decision rejects | Settle the reservation question for the integration: the layout decision this stage needs is required **after** frame capture is confirmed, not before it, and stage 1 does not depend on it. Then: reader selection by `STALE_AFTER = 2 s`, the statistics window for 1 %/0.1 % low, the fixed-height graph strip, `—` when there is no source. Blocked on stage 1: with `frame_count = 0` there is no value to integrate |
 | 7 | **Final acceptance of the first version** | **NOT TESTED** — cannot start | No end-to-end acceptance run exists on any commit. The evidence behind stages 1–6 is either absent from the merged tree (2–5), contradicted by it (6), or a failure on an unmerged branch with no commit identity (1). No acceptance criteria for the agreed stages existed in the merged tree before this page, and no environment matrix has been recorded for an acceptance run | Close stages 1–6 first. The run must name the commit and the build, state per-criterion evidence, name the environment it ran in (WM, compositing state, GPU, X11 or Wayland), and keep its `NOT TESTED` items visible instead of summarising them away. A pass in one of the three independent areas (transparency / window behaviour / fps) says nothing about the others |
@@ -330,22 +346,35 @@ the first version, and none of them may be counted as one:
   poorly behaved with modern desktop environments, no measured fps benefit, and
   most games do not use it by default. The target is windowed, borderless
   fullscreen, or a second monitor.
-* **Wayland is not supported and is not to be declared supported.** No Wayland
-  session exists on this host and the owner's does not start. The merged panel uses
-  only `ViewportCommand`s; the X11 work of stages 2–3 is untested on Wayland. On the
-  available evidence, `_NET_WM_STATE`-based switcher exclusion is X11-only and not
-  achievable the same way there.
-* **Unverified environments stay unclaimed:** GNOME/mutter, KDE/kwin, XWayland,
-  and any session with a compositor running. xfwm4 4.20.0 on X11 **without** a
-  compositor is the only environment with any evidence, and the compositing state
-  of the historical sessions is UNRESOLVED.
+* **The host's session is Wayland now, and the panel is not claimed on Wayland.**
+  The desktop runs **xfwl4 (Wayland) with Xwayland on `:0`**; that is the session the
+  stage-4 measurement was taken in, and it is an **X11 window on Xwayland**, not a
+  native Wayland surface. The merged panel uses only `ViewportCommand`s, which is the
+  portable subset, but the X11 work of stages 2–3 is untested on Wayland, and on the
+  available evidence `_NET_WM_STATE`-based switcher exclusion is X11-only and not
+  achievable the same way there. Revision 4 **withdraws** the earlier statement that
+  no Wayland session exists on this host.
+* **A pure X11 session without Wayland is no longer what this host runs.** X11
+  access is through Xwayland under the Wayland compositor. An Xvfb/X11 session can
+  still be started, but it is software-rendered and xfwm4 refuses to composite under
+  llvmpipe (§3.4), so it cannot carry the transparency criterion; tests in an X11
+  session **without** Wayland are deferred and are not evidence for any row above.
+  The compositing criterion has to be judged on a session that is shown to composite
+  — here, the Wayland session's Xwayland.
+* **Unverified environments stay unclaimed:** GNOME/mutter, KDE/kwin, and any
+  compositor other than xfwl4. xfwm4 4.20.0 on X11 **without** a compositor is the
+  only environment with evidence for **window behaviour** (stage 3), and the
+  compositing state of those historical sessions is UNRESOLVED. **Transparency**
+  (stage 4) has evidence in one environment only — X11 on Xwayland under xfwl4, on
+  the unmerged PR #128 — so XWayland with a compositor is claimed for that stage and
+  for nothing else.
 * **Three areas need three separate verdicts, on separate evidence:**
-  *transparency* (stage 4 — which currently has no environment on this host in
-  which it could pass), *window behaviour* (stage 3: stacking, taskbar/switcher,
-  position, drag, multi-monitor placement), and *fps/frametime* (stages 1 and 6:
-  layer, reader, elements, statistics). None of them can be carried by the panel's
-  geometry or idle-CPU measurements, and a pass in one says nothing about the
-  others.
+  *transparency* (stage 4 — a compositing session now exists on this host, and the
+  unmerged measurement is its only evidence), *window behaviour* (stage 3: stacking,
+  taskbar/switcher, position, drag, multi-monitor placement), and *fps/frametime*
+  (stages 1 and 6: layer, reader, elements, statistics). None of them can be carried
+  by the panel's geometry or idle-CPU measurements, and a pass in one says nothing
+  about the others.
 * **Multi-monitor placement** is not implemented and not claimed.
 
 ## 9. Sources
@@ -362,6 +391,8 @@ the first version, and none of them may be counted as one:
 | Layer not working, `frame_count = 0`, `gipa = 0`, GO gate outstanding | `spike/vk-layer/STATUS.md` on `feat/mini-panel`, PR #111 body |
 | `frametime-layer-spike.md` absent | `git ls-tree -r --name-only <branch> -- docs/development/` on both branches |
 | Transparency record (B8: black without a compositor) | `docs/development/panel-overlay-tests.md` on `feat/mini-panel` |
+| Transparency measured on a compositing session (stage 4) | `docs/development/panel-transparency.md` (PR #128, head `098c740`), PR #128 body |
+| Host session is Wayland now: xfwl4 + Xwayland, compositing | `ps -eo pid,args` (`xfwl4 --backend=tty`, `Xwayland :0`), `xdpyinfo -display :0` (a depth-32 visual), `docs/development/panel-transparency.md` |
 | No position / no hotkey / no transparency in the merged tree | `gui/src/panel/config.rs:23`, `:26-28`, `:29-30`; `gui/src/panel/mod.rs:27-29`, `:30-33`, `:36-37`; `gui/src/app.rs:1252`; `grep` over `gui/src` for `OuterPosition`/`WindowLevel`/`ClientMessage`/`with_transparent` |
 | Owner decision (composition of the first version), non-goals, "no demo metrics" | PR #111 body |
 | Agreed first-version stages 1–7 (this table's rows) | the owner-agreement recorded on PR #123; distinct from `panel-design.md`'s staged plan (PR A/D/C/E) |
