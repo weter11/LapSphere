@@ -13,6 +13,11 @@ one machine, tied to a branch rather than to a commit SHA (see "What these numbe
 are tied to"), with no compositing state established for them, and nothing here
 has been re-measured since it was written.
 
+For what is **merged** today and what still has to be done before the panel's first
+version can be called accepted, see
+[`panel-v1-baseline.md`](./panel-v1-baseline.md). That page records status and
+re-uses the credibility limits below; it does not re-confirm any number on this one.
+
 Everything is read from outside the process: `/proc/<pid>/stat` for CPU jiffies,
 `xwininfo` for window geometry, `xwd` + OCR for what was painted. No telemetry
 was added to the app for the measurement.
