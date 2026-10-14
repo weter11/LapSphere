@@ -22,15 +22,34 @@
 //! # Applying the spec
 //!
 //! Four things change between the modes: the inner size, the minimum size,
-//! whether the window is resizable and whether it is decorated. Stacking and the
-//! taskbar atoms are PR 2's work; they are configured but not claimed here.
+//! whether the window is resizable and whether it is decorated. Panel mode also
+//! carries a position ([`WindowSpec::position`]): the panel is undecorated, so
+//! dragging it is the only way to move it, and where it ended up is restored on
+//! the next start. Stacking, the taskbar atoms and transparency are later work;
+//! they are configured but not claimed here.
 //!
 //! The size sent is [`layout::panel_size`] — computed from the visible row count
 //! and the font row height, never measured — so there is no measure/resize/
 //! measure loop. The width is the configured width, so moving the width slider
 //! resizes the window on the very next frame.
+//!
+//! # Position: request, then read back
+//!
+//! `OuterPosition` is a request, not a result. A window manager may clamp it,
+//! apply it late, or place the window itself, and nothing about sending it proves
+//! the window moved. So the position that gets *persisted* is never the one that
+//! was asked for: [`PositionWatch`] follows the position the window reports back
+//! (`ViewportInfo::outer_rect`) and offers it for saving only once it has held
+//! still — which is also what keeps a drag from writing the file on every frame
+//! of the gesture.
+//!
+//! The clamp ([`clamp_to_monitor`]) keeps a stored corner from putting the panel
+//! where it cannot be grabbed back from. It is applied on the way IN only
+//! (restore): what is saved is what the window is actually at.
 
-use super::config::PanelConfig;
+use std::time::{Duration, Instant};
+
+use super::config::{PanelConfig, PanelPosition};
 use super::layout::{self, Size};
 
 /// Which surface the app is showing.
@@ -62,6 +81,13 @@ pub struct WindowSpec {
     /// desynchronise the window from the computed layout.
     pub resizable: bool,
     pub decorations: bool,
+    /// Where the window's outer top-left corner must go, in points, or `None`
+    /// to leave placement to the window manager.
+    ///
+    /// Only panel mode sets this. Normal mode leaves it `None`: the panel and the
+    /// normal window are the SAME window, so a mode switch does not re-place it
+    /// and this code makes no claim about a normal window's position.
+    pub position: Option<[f32; 2]>,
 }
 
 /// Decide whether this frame must send the window spec, and for which mode.
@@ -83,7 +109,15 @@ pub fn mode_to_apply(mode: Mode, pending: Option<Mode>, spec_applied: bool) -> O
 }
 
 /// The panel's window spec, computed from the config and the font metrics.
-pub fn panel_spec(config: &PanelConfig, font_row_height: f32) -> WindowSpec {
+///
+/// `monitor` is the current monitor's size in points, or `None` when the platform
+/// does not report one. It is what the stored position is clamped against; see
+/// [`restore_position`] for why an unknown monitor means "no position request".
+pub fn panel_spec(
+    config: &PanelConfig,
+    font_row_height: f32,
+    monitor: Option<[f32; 2]>,
+) -> WindowSpec {
     let row_count = super::render::visible_row_count(config);
     let size: Size = layout::panel_size(config, row_count, font_row_height);
 
@@ -94,6 +128,7 @@ pub fn panel_spec(config: &PanelConfig, font_row_height: f32) -> WindowSpec {
         min_inner: [size.width, size.height],
         resizable: false,
         decorations: false,
+        position: restore_position(config.position, [size.width, size.height], monitor),
     }
 }
 
@@ -106,7 +141,86 @@ pub fn normal_spec(previous: Option<[f32; 2]>) -> WindowSpec {
         min_inner: NORMAL_MIN_INNER,
         resizable: true,
         decorations: true,
+        // The normal window is placed by the window manager, as it always was.
+        position: None,
     }
+}
+
+/// The position to restore, or `None` when the window manager should place the
+/// panel itself.
+///
+/// `None` in two cases, both of them a refusal to guess:
+///
+/// * **Nothing stored.** A fresh install, or a `panel.json` written before the
+///   field existed: the panel is placed exactly as it was before this change.
+/// * **The monitor size is unknown.** An unclamped corner cannot be shown to be on
+///   screen, and a panel past the edge of the monitor cannot be dragged back. The
+///   window manager's own placement is always reachable, so it is the safe answer.
+///
+/// A stored position that is *out of bounds* is clamped rather than refused, so a
+/// smaller monitor moves the panel back into view instead of discarding where the
+/// user put it.
+pub fn restore_position(
+    stored: Option<PanelPosition>,
+    panel: [f32; 2],
+    monitor: Option<[f32; 2]>,
+) -> Option<[f32; 2]> {
+    let stored = stored?;
+    let monitor = monitor?;
+    Some(clamp_to_monitor(stored.as_array(), panel, monitor))
+}
+
+/// Clamp a panel position so the whole panel stays inside the monitor.
+///
+/// `panel` is the panel's size in points and `monitor` the monitor's size, so the
+/// result is the nearest corner at which no part of the panel is outside
+/// `0..=monitor - panel` on either axis.
+///
+/// **Single monitor only.** The monitor's ORIGIN is not available: `ViewportInfo`
+/// reports a monitor *size* and has no monitor rect, so there is nothing to
+/// offset a second monitor by. This assumes the monitor starts at `(0, 0)`, which
+/// is true for the only-monitor case and wrong for a second monitor placed to the
+/// left of or above the first. That is why the stored position is documented as
+/// single-monitor.
+pub fn clamp_to_monitor(position: [f32; 2], panel: [f32; 2], monitor: [f32; 2]) -> [f32; 2] {
+    [
+        clamp_axis(position[0], panel[0], monitor[0]),
+        clamp_axis(position[1], panel[1], monitor[1]),
+    ]
+}
+
+/// One axis of [`clamp_to_monitor`].
+///
+/// A panel larger than the monitor has no corner that shows all of it, so the
+/// range collapses to `0` — the top-left of the monitor — rather than to a
+/// negative left overhang. A non-finite input also lands at `0`: `f32::clamp`
+/// propagates NaN, and a NaN corner would be sent to the window untouched.
+fn clamp_axis(value: f32, panel: f32, monitor: f32) -> f32 {
+    if !value.is_finite() || !panel.is_finite() || !monitor.is_finite() {
+        return 0.0;
+    }
+    value.clamp(0.0, (monitor - panel).max(0.0))
+}
+
+/// The commands a spec produces, in the order they must be sent.
+///
+/// Split out from [`apply_spec`] so the ORDER is testable without a display: it
+/// is load-bearing (see `apply_spec`), and a `Vec` of the real command type is
+/// the only form of it a unit test can see.
+pub fn spec_commands(spec: &WindowSpec) -> Vec<egui::ViewportCommand> {
+    let mut commands = vec![
+        egui::ViewportCommand::MinInnerSize(egui::vec2(spec.min_inner[0], spec.min_inner[1])),
+        egui::ViewportCommand::Resizable(spec.resizable),
+        egui::ViewportCommand::Decorations(spec.decorations),
+        egui::ViewportCommand::InnerSize(egui::vec2(spec.inner[0], spec.inner[1])),
+    ];
+    if let Some(position) = spec.position {
+        commands.push(egui::ViewportCommand::OuterPosition(egui::pos2(
+            position[0],
+            position[1],
+        )));
+    }
+    commands
 }
 
 /// Send `spec` to the window.
@@ -121,13 +235,140 @@ pub fn normal_spec(previous: Option<[f32; 2]>) -> WindowSpec {
 /// clamped straight back up to 440x470 and the panel never shrinks — which is
 /// exactly what a first attempt did. Lowering the minimum first lets the size
 /// through.
+///
+/// **The position goes LAST**, after both sizes, for the same reason: a position
+/// sent in the same batch as a size the window manager is still clamping to its
+/// old minimum is applied against the old geometry. It is also the reason
+/// `OuterPosition` is read back ([`PositionWatch`]) instead of trusted.
 pub fn apply_spec(ctx: &egui::Context, spec: WindowSpec) {
-    let inner = egui::vec2(spec.inner[0], spec.inner[1]);
-    let min_inner = egui::vec2(spec.min_inner[0], spec.min_inner[1]);
-    ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(min_inner));
-    ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(spec.resizable));
-    ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(spec.decorations));
-    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(inner));
+    match spec.position {
+        Some(position) => log::info!(
+            "window spec: {:.0}x{:.0}, min {:.0}x{:.0}, decorations {}, position {:.0},{:.0}",
+            spec.inner[0],
+            spec.inner[1],
+            spec.min_inner[0],
+            spec.min_inner[1],
+            spec.decorations,
+            position[0],
+            position[1]
+        ),
+        None => log::info!(
+            "window spec: {:.0}x{:.0}, min {:.0}x{:.0}, decorations {}, position: window manager",
+            spec.inner[0],
+            spec.inner[1],
+            spec.min_inner[0],
+            spec.min_inner[1],
+            spec.decorations
+        ),
+    }
+    for command in spec_commands(&spec) {
+        ctx.send_viewport_cmd(command);
+    }
+}
+
+/// How far a window's reported position may differ from the one requested and
+/// still count as "the request landed".
+///
+/// Window geometry comes back in whole pixels while the panel's size is computed
+/// in fractional points — a ten-row panel is 198.25 points tall, so the lowest
+/// position that still shows all of it is `monitor_height - 198.25`, and the
+/// window manager rounds that to a whole pixel. Measured on xfwm4/X11 at
+/// `pixels_per_point = 1`: requested `980,521.75`, window at `980,522`. Printed
+/// at no decimal places both read `980,522`, which is why an exact comparison
+/// reported a mismatch that did not exist.
+///
+/// One point is the right size for it: a position a window manager actually
+/// clamped or overruled differs by much more than a pixel, unclamped.
+pub const POSITION_MATCH_TOLERANCE: f32 = 1.0;
+
+/// Did the window land where it was asked to?
+pub fn position_matches(requested: [f32; 2], observed: [f32; 2]) -> bool {
+    (requested[0] - observed[0]).abs() <= POSITION_MATCH_TOLERANCE
+        && (requested[1] - observed[1]).abs() <= POSITION_MATCH_TOLERANCE
+}
+
+/// How long the panel's observed position must hold still before it is saved.
+///
+/// Longer than the panel's 500 ms repaint cadence, so a still position is seen
+/// stable on two consecutive frames before it is written; and long enough that a
+/// drag's move events restart the timer instead of landing a write mid-gesture.
+pub const POSITION_SETTLE: Duration = Duration::from_millis(700);
+
+/// What to do about the panel's position this frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PositionStep {
+    /// Nothing to do: no usable position yet, or this one has been dealt with.
+    Idle,
+    /// The window has held this position long enough to be worth persisting.
+    Settled {
+        /// Where the window actually is, read back from it.
+        position: [f32; 2],
+        /// What was asked for, when anything was. A mismatch here is the window
+        /// manager having clamped, delayed or overruled the request.
+        requested: Option<[f32; 2]>,
+    },
+}
+
+/// Follows where the panel window actually is, and decides when to persist it.
+///
+/// Fed from `ViewportInfo::outer_rect` — the window server's answer, in points —
+/// and never from the value that was requested, so a request the window manager
+/// declined cannot be saved as if it were where the panel is.
+///
+/// The "once per position" part is what makes a per-frame caller safe: a still
+/// position reports [`PositionStep::Settled`] once and then `Idle` until the
+/// window moves again, so a stationary panel is not written to once per frame.
+#[derive(Debug, Default)]
+pub struct PositionWatch {
+    observed: Option<[f32; 2]>,
+    stable_since: Option<Instant>,
+    requested: Option<[f32; 2]>,
+    reported: Option<[f32; 2]>,
+}
+
+impl PositionWatch {
+    /// Record where the window is. `None` means the platform does not report a
+    /// position at all (Wayland reports no outer rect), which leaves any settle
+    /// window running rather than resetting it.
+    pub fn observe(&mut self, position: Option<[f32; 2]>, now: Instant) {
+        let Some(position) = position else {
+            return;
+        };
+        if self.observed != Some(position) {
+            self.observed = Some(position);
+            self.stable_since = Some(now);
+        }
+    }
+
+    /// Note that a position was just requested of the window manager.
+    ///
+    /// Restarts the settle window, so a position that has not been applied yet
+    /// cannot settle as the final one.
+    pub fn requested(&mut self, position: [f32; 2], now: Instant) {
+        self.requested = Some(position);
+        self.stable_since = Some(now);
+    }
+
+    /// The settled position, offered once per position.
+    pub fn step(&mut self, now: Instant) -> PositionStep {
+        let Some(position) = self.observed else {
+            return PositionStep::Idle;
+        };
+        if self.reported == Some(position) {
+            return PositionStep::Idle;
+        }
+        let Some(since) = self.stable_since else {
+            return PositionStep::Idle;
+        };
+        if now.duration_since(since) < POSITION_SETTLE {
+            return PositionStep::Idle;
+        }
+        self.reported = Some(position);
+        PositionStep::Settled {
+            position,
+            requested: self.requested.take(),
+        }
+    }
 }
 
 /// Which coordinator components a config's visible rows need polled.
@@ -169,6 +410,12 @@ mod tests {
     use super::*;
     use crate::panel::config::{PanelConfig, RowConfig};
     use crate::panel::rows;
+
+    /// The monitor the size tests are stated against: 1280x720, the size of the
+    /// X11 test screen (`references/x11-gui-test-isolation.md`).
+    const TEST_MONITOR: Option<[f32; 2]> = Some([1280.0, 720.0]);
+    /// The font row height the specs below are computed against.
+    const TEST_ROW_HEIGHT: f32 = 14.0;
 
     fn config_with(ids: &[&str]) -> PanelConfig {
         PanelConfig {
@@ -229,8 +476,8 @@ mod tests {
     #[test]
     fn the_panel_spec_matches_the_computed_layout_size() {
         let config = config_with(&["cpu_processor", "cpu_average_load", "ram_usage"]);
-        let spec = panel_spec(&config, 14.0);
-        let expected = layout::panel_size(&config, 3, 14.0);
+        let spec = panel_spec(&config, TEST_ROW_HEIGHT, TEST_MONITOR);
+        let expected = layout::panel_size(&config, 3, TEST_ROW_HEIGHT);
 
         assert_eq!(spec.inner[0], expected.width);
         assert_eq!(spec.inner[1], expected.height);
@@ -243,11 +490,14 @@ mod tests {
     fn the_panel_width_follows_the_config_so_the_slider_applies_at_once() {
         let mut config = config_with(&["ram_usage"]);
         config.width = 420.0;
-        assert_eq!(panel_spec(&config, 14.0).inner[0], 420.0);
+        assert_eq!(
+            panel_spec(&config, TEST_ROW_HEIGHT, TEST_MONITOR).inner[0],
+            420.0
+        );
 
         config.width = 240.0;
         assert_eq!(
-            panel_spec(&config, 14.0).inner[0],
+            panel_spec(&config, TEST_ROW_HEIGHT, TEST_MONITOR).inner[0],
             240.0,
             "the width must be read fresh each time, not cached"
         );
@@ -259,18 +509,18 @@ mod tests {
         let two = config_with(&["ram_usage", "ram_used"]);
         let three = config_with(&["ram_usage", "ram_used", "ram_total"]);
 
-        let h1 = panel_spec(&one, 14.0).inner[1];
-        let h2 = panel_spec(&two, 14.0).inner[1];
-        let h3 = panel_spec(&three, 14.0).inner[1];
+        let h1 = panel_spec(&one, TEST_ROW_HEIGHT, TEST_MONITOR).inner[1];
+        let h2 = panel_spec(&two, TEST_ROW_HEIGHT, TEST_MONITOR).inner[1];
+        let h3 = panel_spec(&three, TEST_ROW_HEIGHT, TEST_MONITOR).inner[1];
 
-        let row = layout::row_height(14.0);
+        let row = layout::row_height(TEST_ROW_HEIGHT);
         assert!((h2 - h1 - row).abs() < 1e-4, "{h2} - {h1} != {row}");
         assert!((h3 - h2 - row).abs() < 1e-4, "{h3} - {h2} != {row}");
     }
 
     #[test]
     fn a_panel_with_no_visible_rows_is_still_a_valid_window() {
-        let spec = panel_spec(&config_with(&[]), 14.0);
+        let spec = panel_spec(&config_with(&[]), TEST_ROW_HEIGHT, TEST_MONITOR);
         assert!(spec.inner[1] > 0.0, "must not collapse to zero height");
         assert!(spec.inner[0] > 0.0, "must not collapse to zero width");
     }
@@ -324,5 +574,295 @@ mod tests {
         // `normalize` drops these, but `required_components` must not panic on
         // one if it is ever called before normalization.
         assert_eq!(component_for("not_a_row"), None);
+    }
+
+    // ---- the stored position ----
+
+    #[test]
+    fn a_panel_with_nothing_stored_is_placed_by_the_window_manager() {
+        // The behaviour before this field existed, and the behaviour for every
+        // `panel.json` written before it: no position request at all.
+        let spec = panel_spec(&config_with(&["ram_usage"]), TEST_ROW_HEIGHT, TEST_MONITOR);
+        assert_eq!(spec.position, None);
+        assert!(
+            !spec_commands(&spec)
+                .iter()
+                .any(|command| matches!(command, egui::ViewportCommand::OuterPosition(_))),
+            "nothing stored must not move the window"
+        );
+    }
+
+    #[test]
+    fn a_stored_position_is_restored_and_clamped_into_the_monitor() {
+        let mut config = config_with(&["ram_usage"]);
+        let monitor = [1280.0, 720.0];
+        let panel = panel_spec(&config, TEST_ROW_HEIGHT, Some(monitor)).inner;
+
+        // Inside the monitor: restored exactly, so the panel comes back where the
+        // user left it.
+        config.position = Some(PanelPosition::new(64.0, 96.0));
+        assert_eq!(
+            panel_spec(&config, TEST_ROW_HEIGHT, Some(monitor)).position,
+            Some([64.0, 96.0])
+        );
+
+        // Past the bottom-right: the last corner that still shows the whole panel.
+        config.position = Some(PanelPosition::new(5000.0, 5000.0));
+        assert_eq!(
+            panel_spec(&config, TEST_ROW_HEIGHT, Some(monitor)).position,
+            Some([monitor[0] - panel[0], monitor[1] - panel[1]])
+        );
+
+        // Past the top-left.
+        config.position = Some(PanelPosition::new(-100.0, -100.0));
+        assert_eq!(
+            panel_spec(&config, TEST_ROW_HEIGHT, Some(monitor)).position,
+            Some([0.0, 0.0])
+        );
+    }
+
+    #[test]
+    fn the_clamp_keeps_the_whole_panel_inside_the_monitor() {
+        let panel = [300.0, 200.0];
+        let monitor = [1280.0, 720.0];
+        for (requested, expected) in [
+            ([100.0, 50.0], [100.0, 50.0]),
+            ([0.0, 0.0], [0.0, 0.0]),
+            ([-40.0, -5.0], [0.0, 0.0]),
+            ([980.0, 520.0], [980.0, 520.0]),
+            ([981.0, 521.0], [980.0, 520.0]),
+            ([5000.0, 5000.0], [980.0, 520.0]),
+            ([5000.0, 10.0], [980.0, 10.0]),
+            ([10.0, -5000.0], [10.0, 0.0]),
+        ] {
+            assert_eq!(
+                clamp_to_monitor(requested, panel, monitor),
+                expected,
+                "clamping {requested:?} against a {monitor:?} monitor"
+            );
+        }
+    }
+
+    #[test]
+    fn a_panel_larger_than_the_monitor_lands_at_the_monitor_origin() {
+        // No corner shows all of a 300x200 panel on a 200x100 monitor. The top
+        // left is at least on screen; a negative overhang would hide the panel's
+        // own left edge and the value column with it.
+        assert_eq!(
+            clamp_to_monitor([50.0, 50.0], [300.0, 200.0], [200.0, 100.0]),
+            [0.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn a_non_finite_corner_or_monitor_never_reaches_the_window() {
+        // `f32::clamp` propagates NaN, and `OuterPosition(NaN)` is a move request
+        // with no defined meaning.
+        let panel = [300.0, 200.0];
+        let monitor = [1280.0, 720.0];
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(clamp_to_monitor([bad, 10.0], panel, monitor), [0.0, 10.0]);
+            assert_eq!(clamp_to_monitor([10.0, bad], panel, monitor), [10.0, 0.0]);
+            assert_eq!(
+                clamp_to_monitor([10.0, 10.0], [bad, 200.0], monitor),
+                [0.0, 10.0]
+            );
+            assert_eq!(
+                clamp_to_monitor([10.0, 10.0], panel, [bad, 720.0]),
+                [0.0, 10.0]
+            );
+        }
+    }
+
+    #[test]
+    fn a_position_that_landed_within_a_pixel_counts_as_applied() {
+        // The measured case: the panel's computed height is 198.25 points, so the
+        // lowest corner that shows all of it is 521.75, and xfwm4 put the window
+        // at 522. An exact comparison called that a window-manager overrule.
+        assert!(position_matches([980.0, 521.75], [980.0, 522.0]));
+        assert!(position_matches([980.0, 522.0], [980.0, 522.0]));
+        assert!(position_matches([980.0, 522.0], [979.5, 522.5]));
+        assert!(position_matches([980.0, 522.0], [979.0, 521.0]));
+
+        // A position the window manager actually overruled or clamped is off by
+        // far more than a pixel, and must not read as applied.
+        assert!(!position_matches([5000.0, 5000.0], [980.0, 522.0]));
+        assert!(!position_matches([980.0, 522.0], [980.0, 523.5]));
+        assert!(!position_matches([980.0, 522.0], [978.0, 522.0]));
+    }
+
+    #[test]
+    fn an_unknown_monitor_size_means_no_position_request() {
+        // Nothing to clamp against, so nothing can be shown to be on screen. The
+        // window manager's own placement is always reachable, so it is the answer.
+        let config = PanelConfig {
+            position: Some(PanelPosition::new(40.0, 60.0)),
+            ..config_with(&["ram_usage"])
+        };
+        assert_eq!(panel_spec(&config, TEST_ROW_HEIGHT, None).position, None);
+        assert_eq!(
+            restore_position(config.position, [300.0, 200.0], None),
+            None
+        );
+    }
+
+    #[test]
+    fn the_position_is_sent_after_the_size_and_the_minimum() {
+        // The order is load-bearing, not cosmetic: a window manager clamps a size
+        // request to the minimum it currently holds, so the minimum must be
+        // lowered first -- and a position sent alongside a size that is still
+        // being clamped is applied against the old geometry. This is the only
+        // form of that order a display-free test can see.
+        let config = PanelConfig {
+            position: Some(PanelPosition::new(24.0, 36.0)),
+            ..config_with(&["ram_usage"])
+        };
+        let spec = panel_spec(&config, TEST_ROW_HEIGHT, TEST_MONITOR);
+        let commands = spec_commands(&spec);
+
+        assert_eq!(
+            commands,
+            vec![
+                egui::ViewportCommand::MinInnerSize(egui::vec2(
+                    spec.min_inner[0],
+                    spec.min_inner[1]
+                )),
+                egui::ViewportCommand::Resizable(false),
+                egui::ViewportCommand::Decorations(false),
+                egui::ViewportCommand::InnerSize(egui::vec2(spec.inner[0], spec.inner[1])),
+                egui::ViewportCommand::OuterPosition(egui::pos2(24.0, 36.0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_normal_spec_asks_for_no_position() {
+        // The panel and the normal window are the same window: normal mode leaves
+        // placement to the window manager and makes no claim about it.
+        assert_eq!(normal_spec(None).position, None);
+        assert_eq!(normal_spec(Some([800.0, 900.0])).position, None);
+    }
+
+    // ---- the settle window ----
+
+    #[test]
+    fn a_position_that_holds_still_is_offered_once_and_then_not_again() {
+        let t0 = Instant::now();
+        let mut watch = PositionWatch::default();
+        watch.observe(Some([10.0, 20.0]), t0);
+
+        assert_eq!(watch.step(t0), PositionStep::Idle, "not settled yet");
+        assert_eq!(
+            watch.step(t0 + POSITION_SETTLE - Duration::from_millis(1)),
+            PositionStep::Idle,
+            "one millisecond short of settled is not settled"
+        );
+        assert_eq!(
+            watch.step(t0 + POSITION_SETTLE),
+            PositionStep::Settled {
+                position: [10.0, 20.0],
+                requested: None,
+            }
+        );
+        assert_eq!(
+            watch.step(t0 + POSITION_SETTLE + Duration::from_secs(60)),
+            PositionStep::Idle,
+            "a still window must not be persisted once per frame"
+        );
+    }
+
+    #[test]
+    fn a_moving_window_never_settles_in_the_middle_of_a_drag() {
+        let mut now = Instant::now();
+        let mut watch = PositionWatch::default();
+        watch.observe(Some([0.0, 0.0]), now);
+
+        for step in 1..=50 {
+            now += Duration::from_millis(100);
+            watch.observe(Some([step as f32 * 5.0, 0.0]), now);
+            assert_eq!(
+                watch.step(now),
+                PositionStep::Idle,
+                "a drag must not write the file while it is still moving"
+            );
+        }
+
+        // And it settles once the pointer stops.
+        now += POSITION_SETTLE;
+        assert_eq!(
+            watch.step(now),
+            PositionStep::Settled {
+                position: [250.0, 0.0],
+                requested: None,
+            }
+        );
+    }
+
+    #[test]
+    fn a_request_restarts_the_settle_window() {
+        let t0 = Instant::now();
+        let mut watch = PositionWatch::default();
+        watch.observe(Some([10.0, 20.0]), t0);
+
+        let at_settle = t0 + POSITION_SETTLE;
+        watch.requested([300.0, 400.0], at_settle);
+        assert_eq!(
+            watch.step(at_settle),
+            PositionStep::Idle,
+            "a request restarts the window, so the old position cannot settle under it"
+        );
+
+        watch.observe(Some([300.0, 400.0]), at_settle + Duration::from_millis(20));
+        assert_eq!(
+            watch.step(at_settle + POSITION_SETTLE + Duration::from_millis(19)),
+            PositionStep::Idle
+        );
+        assert_eq!(
+            watch.step(at_settle + POSITION_SETTLE + Duration::from_millis(20)),
+            PositionStep::Settled {
+                position: [300.0, 400.0],
+                requested: Some([300.0, 400.0]),
+            }
+        );
+    }
+
+    #[test]
+    fn the_settled_position_is_what_the_window_reports_not_what_was_asked_for() {
+        // The failure this exists to prevent: persisting the request, so a panel
+        // the window manager clamped comes back at a corner it was never at.
+        let t0 = Instant::now();
+        let mut watch = PositionWatch::default();
+        watch.requested([5000.0, 5000.0], t0);
+        watch.observe(Some([980.0, 520.0]), t0 + Duration::from_millis(16));
+
+        assert_eq!(
+            watch.step(t0 + POSITION_SETTLE + Duration::from_millis(16)),
+            PositionStep::Settled {
+                position: [980.0, 520.0],
+                requested: Some([5000.0, 5000.0]),
+            },
+            "the observed corner is what gets saved, with the request alongside it \
+             so the caller can report that the two disagree"
+        );
+    }
+
+    #[test]
+    fn an_unreported_position_neither_settles_nor_cancels_one() {
+        // Wayland reports no outer rect. That is "unknown", not "at 0,0", and it
+        // must not restart a settle window that is already running.
+        let t0 = Instant::now();
+        let mut watch = PositionWatch::default();
+        assert_eq!(watch.step(t0 + POSITION_SETTLE), PositionStep::Idle);
+
+        watch.observe(Some([1.0, 2.0]), t0);
+        watch.observe(None, t0 + Duration::from_millis(600));
+        assert_eq!(
+            watch.step(t0 + POSITION_SETTLE),
+            PositionStep::Settled {
+                position: [1.0, 2.0],
+                requested: None,
+            },
+            "an unknown position leaves the settle window where it was"
+        );
     }
 }
