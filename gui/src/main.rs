@@ -251,6 +251,21 @@ fn main() -> Result<(), eframe::Error> {
             .with_inner_size([570.0, 620.0])
             .with_min_inner_size([440.0, 470.0])
             .with_icon(load_icon())
+            // The root window gets an alpha channel, unconditionally.
+            //
+            // The panel is a translucent surface, and this is the only place its
+            // alpha can be obtained: winit picks the visual (X11) or the buffer
+            // format (Wayland) WHILE CREATING THE WINDOW, and neither can be
+            // swapped on a live window. The panel is entered at runtime — from the
+            // tray, the in-window button or `--panel` — so a request made only
+            // when the user asks for it could never be honoured, and the panel
+            // would be stuck painting opaque rectangles.
+            //
+            // It does not make the ordinary window translucent: the app clears
+            // that window to an opaque colour and the panel to nothing, so the
+            // two modes differ by what they paint. See
+            // `panel::window::clear_color`.
+            .with_transparent(true)
             .with_visible(!start_minimized),
         ..Default::default()
     };

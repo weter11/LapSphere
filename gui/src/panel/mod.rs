@@ -16,13 +16,17 @@
 //!   right-click context menu ("Panel settings...", "< Back to normal mode") is
 //!   drawn in the panel window; everything else lives in a SEPARATE viewport the
 //!   menu opens — an ordinary window, not tied to panel mode. That settings body
-//!   holds the per-row checkboxes, one collapsible section per registry group, and
-//!   the width slider. The settings surface also carries the window controls —
-//!   the stacking choice and "hide from the taskbar and pager". It offers no
-//!   opacity control: that field is stored and normalized only.
+//!   holds the per-row checkboxes, one collapsible section per registry group, the
+//!   width slider and the background-opacity slider. The settings surface also
+//!   carries the window controls — the stacking choice and "hide from the taskbar
+//!   and pager". Both sliders apply to the running panel: the panel reads the
+//!   config afresh every frame.
 //! * [`window`] — the Normal↔Panel switch and the poll narrowing that keeps the
 //!   panel from polling what it does not draw. It also carries the window's
-//!   level, which is sent at runtime when the mode spec is applied.
+//!   level, which is sent at runtime when the mode spec is applied, and the
+//!   transparent surface: what each mode clears to, and the panel's own background
+//!   fill at the configured opacity. The window's alpha channel itself is
+//!   requested in `main.rs`, where the window is created.
 //! * [`ewmh`] — the X11 taskbar/pager state (`_NET_WM_STATE_SKIP_TASKBAR` /
 //!   `_NET_WM_STATE_SKIP_PAGER`), asked of the window manager with a
 //!   boundedly-retried, non-blocking EWMH message and confirmed by reading the
@@ -33,13 +37,14 @@
 //! * fps, frame time, graphs, ring buffers, the Vulkan layer, click-through and
 //!   the F8 interactivity key. No reserved slots for them either: a slot with no
 //!   producer is a permanent row of dashes.
-//! * The hotkey and the D-Bus toggle (PR 3), and real transparency.
-//!   `background_opacity` is stored and normalized, but nothing here claims it is
-//!   applied.
+//! * The hotkey and the D-Bus toggle (PR 3). Nothing here implements either.
 //! * Wayland. The panel uses only `ViewportCommand`s, which is the portable
 //!   subset; the X11-specific work is PR 2's and is not tested on Wayland. The
 //!   stored position is X11-only for the same reason: `outer_rect` is not
-//!   reported on Wayland, so there is nothing to read back there.
+//!   reported on Wayland, so there is nothing to read back there. The alpha
+//!   channel the panel paints into is requested through winit on every platform,
+//!   but the transparency itself is verified on X11 only (see
+//!   `docs/development/panel-transparency.md`).
 //! * Multi-monitor placement. The stored position IS restored and clamped, but
 //!   only against the monitor the panel is already on — a monitor's origin is not
 //!   available (`ViewportInfo` reports a size) — so no second-monitor claim is

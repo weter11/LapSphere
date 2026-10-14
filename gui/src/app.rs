@@ -1264,9 +1264,13 @@ impl LapSphereApp {
     /// wherever the user clicks inside it. The target is the panel's own content
     /// area (`ui.max_rect()`), not the rect `render::draw` returns: the target must
     /// not depend on the paint order (see that function's contract).
-    /// `CentralPanel::frame` is left at its default here: the
-    /// opaque background and its transparency are PR 2's work, and adding a
-    /// `Frame` now would only make the later change harder to read.
+    ///
+    /// The `CentralPanel` frame is egui's own `central_panel` frame with one
+    /// change: its fill carries the configured background opacity, where the
+    /// default fill is opaque. That fill is the panel's background — the window
+    /// itself is transparent where nothing is painted (see
+    /// `panel::window::clear_color`), and the frame's margins are left exactly as
+    /// egui sets them, so the rows sit where they always did.
     fn draw_panel(&mut self, ui: &mut egui::Ui, ctx: &Context) {
         // The interactive area is the whole panel surface, registered with the
         // ordinary egui path so the menu opens from the Response.
@@ -1283,7 +1287,13 @@ impl LapSphereApp {
         // would behave identically for a right click.
         let mut menu_action = crate::panel::menu::ContextAction::None;
 
-        CentralPanel::default().show_inside(ui, |ui| {
+        let background = crate::panel::window::background_fill(
+            ui.visuals(),
+            self.panel_config.background_opacity,
+        );
+        let frame = egui::Frame::central_panel(ui.style()).fill(background);
+
+        CentralPanel::default().frame(frame).show_inside(ui, |ui| {
             crate::panel::render::draw(ui, &self.state, &self.panel_config);
             let response = ui.interact(
                 ui.max_rect(),
@@ -1694,6 +1704,17 @@ impl LapSphereApp {
 }
 
 impl eframe::App for LapSphereApp {
+    /// What the window is cleared to before anything is painted.
+    ///
+    /// The root window holds an ARGB visual from the moment it is created (see
+    /// `main.rs`), so this is what decides whether the window is see-through at
+    /// all: the ordinary window clears opaque and stays exactly as it was, and
+    /// the panel clears to nothing so that its own translucent background fill is
+    /// what the compositor blends. See `panel::window::clear_color`.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        crate::panel::window::clear_color(self.mode)
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 

@@ -52,10 +52,36 @@
 //! The clamp ([`clamp_to_monitor`]) keeps a stored corner from putting the panel
 //! where it cannot be grabbed back from. It is applied on the way IN only
 //! (restore): what is saved is what the window is actually at.
+//!
+//! # Transparency: the surface, and the half that is easy to omit
+//!
+//! The root window is created with `with_transparent(true)` (`main.rs`). That is
+//! what obtains an ARGB visual on X11 and an alpha buffer format on Wayland, and
+//! it is UNCONDITIONAL: winit picks the visual while creating the window and a
+//! visual cannot be swapped on a live window, so a request made only when the
+//! user asks for the panel could never be honoured.
+//!
+//! The two modes therefore differ by what they PAINT, not by what visual the
+//! window holds:
+//!
+//! * [`clear_color`] — opaque in normal mode, so the ordinary window stays
+//!   opaque, and transparent black in panel mode.
+//! * [`background_fill`] — the panel's own background: `visuals.panel_fill` at
+//!   the configured opacity.
+//!
+//! A translucent FILL over an opaque CLEAR is still an opaque window: the
+//! composited alpha is `src + dst * (1 - src.a)`, so an opaque `dst` keeps it at
+//! 1 whatever is painted over it. The clear is the half that decides whether the
+//! window is see-through at all, and it is the half that is easy to omit.
+//!
+//! Only the background is translucent. Every row's text is painted with an opaque
+//! colour on top of it, so text and values stay readable at any opacity.
 
 use std::time::{Duration, Instant};
 
-use super::config::{PanelConfig, PanelPosition};
+use super::config::{
+    PanelConfig, PanelPosition, MAX_BACKGROUND_OPACITY, MIN_BACKGROUND_OPACITY,
+};
 use super::layout::{self, Size};
 
 /// Which surface the app is showing.
@@ -166,6 +192,64 @@ pub fn normal_spec(previous: Option<[f32; 2]>) -> WindowSpec {
         // The normal window is placed by the window manager, as it always was.
         position: None,
     }
+}
+
+/// The colour the window's surface is cleared to before anything is drawn.
+///
+/// Premultiplied, gamma-space RGBA — the form `eframe::App::clear_color` hands to
+/// the renderer (see `Color32::to_normalized_gamma_f32`), and the form the X11
+/// ARGB and Wayland alpha buffers expect.
+///
+/// **Normal mode is opaque.** The colour is eframe's own default clear with its
+/// alpha forced to 1.0, so the ordinary window looks exactly as it did before the
+/// root window gained an alpha channel: the channel is present and never used.
+/// Inheriting eframe's default instead would make the ordinary window 30 %
+/// see-through the moment the visual changed, because that default carries an
+/// alpha of 180.
+///
+/// **Panel mode clears to transparent black**, so the clear contributes no colour
+/// of its own and the composited alpha comes from the panel's own fill
+/// ([`background_fill`]). Transparent black specifically, not "the panel colour
+/// with a zero alpha": premultiplied data with a channel above its alpha is
+/// invalid, and a compositor applying `src + dst * (1 - src.a)` to it would add
+/// that channel to everything behind the window.
+pub fn clear_color(mode: Mode) -> [f32; 4] {
+    match mode {
+        Mode::Normal => NORMAL_CLEAR.to_normalized_gamma_f32(),
+        Mode::Panel => [0.0, 0.0, 0.0, 0.0],
+    }
+}
+
+/// eframe's default clear colour, premultiplied and opaque.
+///
+/// `eframe::App::clear_color`'s default is
+/// `Color32::from_rgba_unmultiplied(12, 12, 12, 180)`, whose premultiplied form is
+/// `(8, 8, 8)`. That is the colour the ordinary window has always shown wherever
+/// the app paints nothing, so it is restated here — at full alpha — rather than
+/// inherited, and a test holds the two together.
+const NORMAL_CLEAR: egui::Color32 = egui::Color32::from_rgba_premultiplied(8, 8, 8, 255);
+
+/// The colour the panel paints its own background in.
+///
+/// At the default opacity of 1.0 this is exactly the `visuals.panel_fill` that
+/// egui's default `CentralPanel` frame painted before this change, so the default
+/// panel is unchanged; below it, the fill carries the configured alpha and the
+/// window behind it shows through.
+///
+/// Non-finite opacity is rejected BEFORE the clamp, deliberately. Clamping first
+/// and checking finiteness afterwards lets `-inf` through as the one value the
+/// check exists to prevent: `-inf` clamps cleanly to `MIN_BACKGROUND_OPACITY` and
+/// so passes a post-clamp `is_finite` check, while `NaN as u8` is 0 — either way
+/// an invisible panel, silently. A normaliser that maps out-of-range inputs onto
+/// legal ones destroys the evidence a validator needs, so validate first.
+pub fn background_fill(visuals: &egui::Visuals, opacity: f32) -> egui::Color32 {
+    if !opacity.is_finite() {
+        log::warn!("panel background opacity {opacity} is not finite; using an opaque background");
+        return visuals.panel_fill;
+    }
+    let opacity = opacity.clamp(MIN_BACKGROUND_OPACITY, MAX_BACKGROUND_OPACITY);
+    let [red, green, blue, _] = visuals.panel_fill.to_srgba_unmultiplied();
+    egui::Color32::from_rgba_unmultiplied(red, green, blue, (opacity * 255.0).round() as u8)
 }
 
 /// The position to restore, or `None` when the window manager should place the
@@ -611,6 +695,109 @@ mod tests {
             )),
             "leaving panel mode must clear the level, not just stop refreshing it"
         );
+    }
+
+    // ---- the transparent surface ----
+
+    /// The ordinary window must not become translucent just because the root
+    /// window now holds an alpha channel: eframe's own default clear carries an
+    /// alpha of 180, so inheriting it would make the whole app 30 % see-through.
+    #[test]
+    fn the_normal_window_clears_fully_opaque() {
+        let [red, green, blue, alpha] = clear_color(Mode::Normal);
+        assert_eq!(alpha, 1.0, "the ordinary window must stay opaque");
+
+        // And it is eframe's own default colour, not a new one: the same
+        // premultiplied RGB the window showed before the visual changed.
+        let eframe_default = egui::Color32::from_rgba_unmultiplied(12, 12, 12, 180);
+        assert_eq!((red * 255.0).round() as u8, eframe_default.r());
+        assert_eq!((green * 255.0).round() as u8, eframe_default.g());
+        assert_eq!((blue * 255.0).round() as u8, eframe_default.b());
+    }
+
+    /// A translucent fill over an opaque clear is still an opaque window, so the
+    /// panel's clear must contribute nothing at all.
+    #[test]
+    fn the_panel_clears_to_nothing_so_its_own_fill_carries_the_alpha() {
+        assert_eq!(
+            clear_color(Mode::Panel),
+            [0.0, 0.0, 0.0, 0.0],
+            "any colour here would either keep the window opaque or be added to \
+             whatever is behind it"
+        );
+    }
+
+    /// At the default opacity the panel looks exactly as it did before this
+    /// change — the fill is the frame's own `panel_fill`, opaque.
+    #[test]
+    fn the_panel_background_at_full_opacity_is_the_panel_fill_unchanged() {
+        for visuals in [egui::Visuals::dark(), egui::Visuals::light()] {
+            let fill = background_fill(&visuals, 1.0);
+            assert_eq!(fill, visuals.panel_fill);
+            assert_eq!(fill.a(), 255);
+        }
+    }
+
+    /// Below full opacity only the ALPHA changes: the colour stays the theme's
+    /// panel fill, and the fill never becomes brighter than the panel behind it.
+    #[test]
+    fn a_lower_opacity_keeps_the_colour_and_drops_only_the_alpha() {
+        let visuals = egui::Visuals::dark();
+        let [red, green, blue, _] = visuals.panel_fill.to_srgba_unmultiplied();
+
+        for (opacity, expected_alpha) in [(1.0, 255), (0.75, 191), (0.5, 128), (0.25, 64)] {
+            let fill = background_fill(&visuals, opacity);
+            assert_eq!(
+                fill.a(),
+                expected_alpha,
+                "alpha for opacity {opacity} must be {expected_alpha}"
+            );
+
+            let recovered = fill.to_srgba_unmultiplied();
+            for (got, want) in [
+                (recovered[0], red),
+                (recovered[1], green),
+                (recovered[2], blue),
+            ] {
+                assert!(
+                    (got as i32 - want as i32).abs() <= 1,
+                    "{opacity}: colour drifted to {got} from {want}"
+                );
+            }
+
+            // Premultiplied, so the fill can never add light of its own.
+            assert!(fill.r() <= visuals.panel_fill.r());
+            assert!(fill.g() <= visuals.panel_fill.g());
+            assert!(fill.b() <= visuals.panel_fill.b());
+        }
+    }
+
+    /// The range `config::normalize` enforces, enforced again where the value
+    /// becomes a pixel — a panel that cannot be seen is worse than an opaque one.
+    #[test]
+    fn the_background_alpha_is_clamped_to_the_configured_range() {
+        let visuals = egui::Visuals::dark();
+        assert_eq!(
+            background_fill(&visuals, 0.0).a(),
+            (MIN_BACKGROUND_OPACITY * 255.0).round() as u8,
+            "below the minimum must not mean invisible"
+        );
+        assert_eq!(background_fill(&visuals, -1.0).a(), background_fill(&visuals, 0.25).a());
+        assert_eq!(background_fill(&visuals, 5.0), visuals.panel_fill);
+    }
+
+    /// A non-finite opacity is not a value a compositor can be handed. `-inf`
+    /// clamps cleanly to the minimum and `NaN` becomes alpha 0, so both would
+    /// survive a post-clamp finiteness check while producing an invisible panel:
+    /// the check has to come first.
+    #[test]
+    fn a_non_finite_opacity_falls_back_to_an_opaque_background() {
+        let visuals = egui::Visuals::dark();
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let fill = background_fill(&visuals, bad);
+            assert_eq!(fill, visuals.panel_fill, "{bad} must not be painted");
+            assert_eq!(fill.a(), 255, "{bad} must not make the panel invisible");
+        }
     }
 
     // ---- the poll set ----
