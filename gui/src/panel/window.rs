@@ -21,12 +21,18 @@
 //!
 //! # Applying the spec
 //!
-//! Four things change between the modes: the inner size, the minimum size,
-//! whether the window is resizable and whether it is decorated. Panel mode also
-//! carries a position ([`WindowSpec::position`]): the panel is undecorated, so
-//! dragging it is the only way to move it, and where it ended up is restored on
-//! the next start. Stacking, the taskbar atoms and transparency are later work;
-//! they are configured but not claimed here.
+//! Five things change between the modes: the inner size, the minimum size,
+//! whether the window is resizable, whether it is decorated, and how it stacks
+//! ([`WindowSpec::level`]). Panel mode also carries a position
+//! ([`WindowSpec::position`]): the panel is undecorated, so dragging it is the
+//! only way to move it, and where it ended up is restored on the next start.
+//!
+//! The level is set HERE, on a frame where the window already exists, rather than
+//! with an initial `ViewportBuilder::with_window_level` hint: measured on xfwm4
+//! 4.20, the builder hint is silently ignored and the panel comes up underneath a
+//! fullscreen game, while the same level sent at runtime holds
+//! (`docs/development/panel-overlay-tests.md`, B2 and B9 in PR #111). The taskbar
+//! atoms are a separate, EWMH-specific path — see [`super::ewmh`].
 //!
 //! The size sent is [`layout::panel_size`] — computed from the visible row count
 //! and the font row height, never measured — so there is no measure/resize/
@@ -81,6 +87,15 @@ pub struct WindowSpec {
     /// desynchronise the window from the computed layout.
     pub resizable: bool,
     pub decorations: bool,
+    /// How the window stacks against other windows.
+    ///
+    /// A RUNTIME request, and it has to be one: an initial `ViewportBuilder`
+    /// `with_window_level` hint is silently ignored by xfwm4 4.20, which leaves
+    /// the panel underneath a fullscreen game while every calculation above is
+    /// correct. The level therefore travels as a `ViewportCommand` on the frame
+    /// the mode is applied — after the window exists — and never as a builder
+    /// attribute.
+    pub level: egui::WindowLevel,
     /// Where the window's outer top-left corner must go, in points, or `None`
     /// to leave placement to the window manager.
     ///
@@ -128,6 +143,7 @@ pub fn panel_spec(
         min_inner: [size.width, size.height],
         resizable: false,
         decorations: false,
+        level: config.stacking.window_level(),
         position: restore_position(config.position, [size.width, size.height], monitor),
     }
 }
@@ -141,6 +157,12 @@ pub fn normal_spec(previous: Option<[f32; 2]>) -> WindowSpec {
         min_inner: NORMAL_MIN_INNER,
         resizable: true,
         decorations: true,
+        // An ordinary window, explicitly: the panel and this window are the same
+        // X11 window, so the level has to be cleared rather than merely no longer
+        // requested. Living here and not in a mode check is what makes "the
+        // normal window never inherits the panel's stacking" a property of the
+        // spec rather than of the order the code happens to run in.
+        level: egui::WindowLevel::Normal,
         // The normal window is placed by the window manager, as it always was.
         position: None,
     }
@@ -213,6 +235,10 @@ pub fn spec_commands(spec: &WindowSpec) -> Vec<egui::ViewportCommand> {
         egui::ViewportCommand::Resizable(spec.resizable),
         egui::ViewportCommand::Decorations(spec.decorations),
         egui::ViewportCommand::InnerSize(egui::vec2(spec.inner[0], spec.inner[1])),
+        // Before the position, which must stay last (see `apply_spec`). The level
+        // is an independent EWMH request that nothing else in this batch depends
+        // on, so its order against the sizes is not load-bearing.
+        egui::ViewportCommand::WindowLevel(spec.level),
     ];
     if let Some(position) = spec.position {
         commands.push(egui::ViewportCommand::OuterPosition(egui::pos2(
@@ -484,6 +510,11 @@ mod tests {
         assert_eq!(spec.min_inner, spec.inner, "a panel is exactly its size");
         assert!(!spec.resizable);
         assert!(!spec.decorations);
+        assert_eq!(
+            spec.level,
+            egui::WindowLevel::AlwaysOnTop,
+            "a fresh panel is an overlay"
+        );
     }
 
     #[test]
@@ -532,9 +563,54 @@ mod tests {
         assert_eq!(spec.min_inner, NORMAL_MIN_INNER);
         assert!(spec.resizable);
         assert!(spec.decorations);
+        assert_eq!(
+            spec.level,
+            egui::WindowLevel::Normal,
+            "the ordinary window must not inherit the panel's level"
+        );
 
         // And falls back to the compiled-in default when nothing was captured.
         assert_eq!(normal_spec(None).inner, NORMAL_INNER);
+    }
+
+    #[test]
+    fn the_level_travels_as_a_runtime_command_and_normal_mode_clears_it() {
+        // An initial `ViewportBuilder` level hint is not a route this code can
+        // rely on (xfwm4 4.20 ignores it, leaving the panel under a fullscreen
+        // game), so the level must be carried by the spec that is sent once the
+        // window exists -- and returning to normal must actively ask for `Normal`
+        // rather than merely stop asking for `AlwaysOnTop`.
+        let mut config = config_with(&["ram_usage"]);
+        config.stacking = crate::panel::config::Stacking::AlwaysOnTop;
+        let panel = panel_spec(&config, TEST_ROW_HEIGHT, TEST_MONITOR);
+        assert_eq!(panel.level, egui::WindowLevel::AlwaysOnTop);
+        assert!(
+            spec_commands(&panel).iter().any(|command| matches!(
+                command,
+                egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop)
+            )),
+            "the level must be in the commands the spec sends, not a builder hint"
+        );
+
+        config.stacking = crate::panel::config::Stacking::Normal;
+        let panel = panel_spec(&config, TEST_ROW_HEIGHT, TEST_MONITOR);
+        assert_eq!(panel.level, egui::WindowLevel::Normal);
+        assert!(
+            spec_commands(&panel).iter().any(|command| matches!(
+                command,
+                egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal)
+            )),
+            "switching the setting back must ask for an ordinary level"
+        );
+
+        let normal = normal_spec(Some([800.0, 900.0]));
+        assert!(
+            spec_commands(&normal).iter().any(|command| matches!(
+                command,
+                egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal)
+            )),
+            "leaving panel mode must clear the level, not just stop refreshing it"
+        );
     }
 
     // ---- the poll set ----
@@ -730,6 +806,7 @@ mod tests {
                 egui::ViewportCommand::Resizable(false),
                 egui::ViewportCommand::Decorations(false),
                 egui::ViewportCommand::InnerSize(egui::vec2(spec.inner[0], spec.inner[1])),
+                egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop),
                 egui::ViewportCommand::OuterPosition(egui::pos2(24.0, 36.0)),
             ]
         );

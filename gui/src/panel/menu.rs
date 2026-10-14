@@ -24,8 +24,9 @@
 //!
 //! One copy of every control: the context menu only routes to the settings window.
 //! The settings body holds the per-row checkboxes -- one collapsible section per
-//! registry group -- and the width slider. It offers NO opacity and NO stacking
-//! control: those fields are stored and normalized only (see `config`).
+//! registry group -- the width slider, and the window controls (the stacking
+//! choice and "hide from the taskbar and pager"). It offers NO opacity control:
+//! that field is stored and normalized only (see `config`).
 //!
 //! # Opening the popup: through the surface Response
 //!
@@ -43,7 +44,7 @@
 //! correct behaviour from both sides: a right click must reach the response, and a
 //! left click must never register as a secondary one.
 
-use super::config::{PanelConfig, MAX_WIDTH, MIN_WIDTH};
+use super::config::{PanelConfig, Stacking, MAX_WIDTH, MIN_WIDTH};
 use super::rows::{self, Group};
 
 /// Viewport id of the settings window, stable so it is reused rather than
@@ -53,8 +54,8 @@ pub fn settings_viewport() -> egui::ViewportId {
 }
 
 /// The size the settings window opens at: tall enough for four collapsed groups
-/// plus the width slider without scrolling.
-pub const SETTINGS_SIZE: [f32; 2] = [360.0, 520.0];
+/// plus the width slider and the window controls without scrolling.
+pub const SETTINGS_SIZE: [f32; 2] = [360.0, 640.0];
 
 /// What a settings interaction wants done, applied by the caller outside the UI
 /// pass.
@@ -63,8 +64,10 @@ pub struct SettingsOutcome {
     pub back_to_normal: bool,
     /// The config changed and must be written to `panel.json`.
     pub config_changed: bool,
-    /// The width changed, so the panel window must be re-specified this frame.
-    pub width_changed: bool,
+    /// Something the window SPEC carries changed (the width, or the stacking
+    /// level), so the spec must be re-sent this frame rather than at the next
+    /// mode switch.
+    pub window_spec_changed: bool,
     /// The user asked to close the settings window.
     pub close_requested: bool,
 }
@@ -100,7 +103,7 @@ pub fn draw_settings_body(
     outcome: &mut SettingsOutcome,
 ) {
     egui::ScrollArea::vertical()
-        .max_height((ui.available_height() - 90.0).max(60.0))
+        .max_height((ui.available_height() - 220.0).max(60.0))
         .show(ui, |ui| {
             ui.label(egui::RichText::new("Rows").strong());
             for group in Group::ALL {
@@ -121,13 +124,42 @@ pub fn draw_settings_body(
     {
         config.width = width;
         outcome.config_changed = true;
-        outcome.width_changed = true;
+        outcome.window_spec_changed = true;
     }
 
-    // stacking / hide_from_taskbar / background_opacity: schema only, UI arrives
-    // with PR 2. The fields stay in `PanelConfig` -- clamped, persisted, tested
-    // -- so PR 2 only has to act on them, but offering controls here that change
-    // nothing would be a lie about what this PR does.
+    // background_opacity: still schema only -- stored, clamped and persisted, but
+    // no control and no claim that it is painted. Its UI arrives with the
+    // transparency change.
+
+    ui.separator();
+
+    // The window controls. Both act on the RUNNING window: the stacking level is
+    // part of the window spec (re-sent below), and the taskbar state is dispatched
+    // by the caller from the config, so neither needs a restart or an apply step.
+    ui.label(egui::RichText::new("Window").strong());
+
+    for (option, response) in stacking_controls(ui, config.stacking) {
+        if response.clicked() && option != config.stacking {
+            config.stacking = option;
+            outcome.config_changed = true;
+            // The level rides on the spec, so the spec is what has to be re-sent.
+            outcome.window_spec_changed = true;
+        }
+    }
+
+    let (taskbar, hide) = taskbar_control(ui, config.hide_from_taskbar);
+    if taskbar.changed() && hide != config.hide_from_taskbar {
+        config.hide_from_taskbar = hide;
+        outcome.config_changed = true;
+    }
+    ui.label(
+        egui::RichText::new(
+            "Taskbar and pager visibility is X11 (EWMH) only; a window manager \
+                             that does not honour it leaves the panel listed.",
+        )
+        .weak()
+        .small(),
+    );
 
     ui.separator();
     ui.horizontal(|ui| {
@@ -138,6 +170,33 @@ pub fn draw_settings_body(
             outcome.close_requested = true;
         }
     });
+}
+
+/// The stacking choice, one selectable entry per option.
+///
+/// Split out and returning its own responses for the same reason the row groups
+/// are: the test that proves a click on it reaches the config has to be able to
+/// aim at it, and a control whose rect a test cannot obtain is a control the
+/// suite can only assume works.
+fn stacking_controls(ui: &mut egui::Ui, current: Stacking) -> Vec<(Stacking, egui::Response)> {
+    ui.horizontal(|ui| {
+        Stacking::ALL
+            .iter()
+            .copied()
+            .map(|option| {
+                let response = ui.selectable_label(current == option, option.label());
+                (option, response)
+            })
+            .collect()
+    })
+    .inner
+}
+
+/// The "hide from the taskbar and pager" checkbox, and the value it now holds.
+fn taskbar_control(ui: &mut egui::Ui, current: bool) -> (egui::Response, bool) {
+    let mut value = current;
+    let response = ui.checkbox(&mut value, "Hide from the taskbar and pager");
+    (response, value)
 }
 
 /// One collapsible group of row checkboxes.
@@ -359,6 +418,123 @@ mod tests {
     fn the_settings_window_is_an_ordinary_sized_window() {
         assert!(SETTINGS_SIZE[1] >= 400.0, "tall enough for four groups");
         assert!(SETTINGS_SIZE[0] >= 320.0, "wide enough for a row label");
+    }
+
+    // ---- the window controls ----
+
+    /// Click the control `draw` lays out, and report what it produced on the frame
+    /// the click was released.
+    ///
+    /// The frame ORDER is the part that matters: egui evaluates a click against the
+    /// pointer state as it was when the move was processed, so the pointer has to
+    /// arrive in a frame of its own before the press, and the press and the release
+    /// have to be in separate frames. Get that wrong and nothing registers, which
+    /// reads exactly like a control that is not wired up.
+    ///
+    /// Aiming at the response's own rect is deliberate: coordinates typed into the
+    /// test would keep passing after a layout change moved the control out of the
+    /// window, which is the one way a settings control becomes unreachable.
+    fn click_control<T, F>(draw: F) -> T
+    where
+        F: Fn(&mut egui::Ui) -> (egui::Response, T),
+        T: Default,
+    {
+        let ctx = Context::default();
+        let screen = Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(SETTINGS_SIZE[0], SETTINGS_SIZE[1]),
+        );
+        let mut at = egui::pos2(0.0, 0.0);
+        let mut produced = T::default();
+
+        for frame in 0..4 {
+            let mut input = egui::RawInput::default();
+            input.screen_rect = Some(screen);
+            // egui discards pointer input for an unfocused viewport.
+            input.focused = true;
+            input.events = match frame {
+                0 => Vec::new(),
+                1 => vec![egui::Event::PointerMoved(at)],
+                2 => vec![pointer(true, at)],
+                _ => vec![pointer(false, at)],
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let (response, value) = draw(ui);
+                    if frame == 0 {
+                        at = response.rect.center();
+                    }
+                    produced = value;
+                });
+            });
+        }
+        produced
+    }
+
+    fn pointer(pressed: bool, at: egui::Pos2) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        }
+    }
+
+    /// The stacking option a click on `target` asks for, or `None` when clicking it
+    /// changed nothing.
+    fn click_stacking(current: Stacking, target: Stacking) -> Option<Stacking> {
+        click_control(|ui| {
+            let controls = stacking_controls(ui, current);
+            let aim = controls
+                .iter()
+                .find(|(option, _)| *option == target)
+                .expect("every stacking option has a control")
+                .1
+                .clone();
+            let chosen = controls
+                .iter()
+                .find(|(option, response)| response.clicked() && *option != current)
+                .map(|(option, _)| *option);
+            (aim, chosen)
+        })
+    }
+
+    #[test]
+    fn choosing_a_stacking_option_reports_a_change_so_the_window_spec_is_re_sent() {
+        // The level rides on the window spec, so a stacking change is not just a
+        // config write: without the re-send the setting would only take effect at
+        // the next mode switch, which is exactly the "restart to apply" behaviour
+        // the control must not have.
+        assert_eq!(
+            click_stacking(Stacking::AlwaysOnTop, Stacking::Normal),
+            Some(Stacking::Normal)
+        );
+        assert_eq!(
+            click_stacking(Stacking::Normal, Stacking::AlwaysOnTop),
+            Some(Stacking::AlwaysOnTop)
+        );
+        // Clicking the option that is already chosen is not a change, so nothing is
+        // rewritten and nothing is re-sent.
+        assert_eq!(
+            click_stacking(Stacking::AlwaysOnTop, Stacking::AlwaysOnTop),
+            None
+        );
+    }
+
+    /// The taskbar value a click on the checkbox asks for, or `None` when the click
+    /// changed nothing.
+    fn click_taskbar(current: bool) -> Option<bool> {
+        click_control(|ui| {
+            let (response, value) = taskbar_control(ui, current);
+            let changed = response.changed().then_some(value);
+            (response, changed)
+        })
+    }
+
+    #[test]
+    fn the_taskbar_control_reports_the_value_the_click_asked_for() {
+        assert_eq!(click_taskbar(true), Some(false), "unchecking it");
+        assert_eq!(click_taskbar(false), Some(true), "checking it");
     }
 
     #[test]

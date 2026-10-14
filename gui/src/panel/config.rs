@@ -78,9 +78,10 @@ pub const MAX_BACKGROUND_OPACITY: f32 = 1.0;
 /// `Normal` exists because an always-on-top window that covers a fullscreen
 /// game is not always what the user wants.
 ///
-/// Applying these is PR 2's work (the X11 atoms). The setting and its
-/// normalization live here now so the file schema is settled; nothing in PR 1
-/// claims the behaviour works.
+/// Both are applied at runtime, on the frame the mode spec is sent: the level
+/// travels as a `ViewportCommand` and the taskbar visibility as an EWMH message
+/// to the window manager (see [`super::ewmh`]). An initial window-builder hint is
+/// not used for the level, because xfwm4 4.20 silently ignores one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Stacking {
@@ -131,6 +132,17 @@ impl Stacking {
         match raw.trim() {
             "normal" => Stacking::Normal,
             _ => Stacking::AlwaysOnTop,
+        }
+    }
+
+    /// The window level this stacking asks for.
+    ///
+    /// `AlwaysOnTop` is a request the window manager may decline, and it is only
+    /// ever sent at runtime — see the enum's own documentation.
+    pub fn window_level(self) -> egui::WindowLevel {
+        match self {
+            Stacking::AlwaysOnTop => egui::WindowLevel::AlwaysOnTop,
+            Stacking::Normal => egui::WindowLevel::Normal,
         }
     }
 }
@@ -254,7 +266,12 @@ pub struct PanelConfig {
     /// `MIN_BACKGROUND_OPACITY..=MAX_BACKGROUND_OPACITY`.
     pub background_opacity: f32,
     pub stacking: Stacking,
-    /// In `always_on_top` stacking: keep the panel out of the taskbar.
+    /// In panel mode: keep the panel out of the taskbar and the pager.
+    ///
+    /// X11 only, and it depends on the window manager honouring the EWMH
+    /// `SKIP_TASKBAR` / `SKIP_PAGER` state — see [`super::ewmh`]. It has no effect
+    /// on the ordinary window: leaving panel mode clears the state whatever this
+    /// is set to.
     pub hide_from_taskbar: bool,
     /// Where the panel was last seen, or `None` to let the window manager place
     /// it. Written from the window's ACTUAL position, not from what was asked
