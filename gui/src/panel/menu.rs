@@ -14,24 +14,34 @@
 //!
 //! So the controls are split by where they can physically live:
 //!
-//! * [`draw_context_menu`] -- two entries, about 80 px, drawn in the panel window:
-//!   "Panel settings..." and "Back to the normal window". Both fit.
+//! * [`draw_context_menu`] -- two entries, drawn in the panel window: "Panel
+//!   settings..." and "< Back to normal mode". They fit; the menu geometry as
+//!   measured is on the measurement page (`docs/development/panel-measurements.md`).
 //! * [`draw_settings_body`] -- everything else, in a SEPARATE viewport opened by
 //!   the caller, so it is a real OS window with its own size and is never clipped
 //!   by the panel. Deliberately an ordinary window: not always-on-top, not
 //!   skip-taskbar, not tied to panel mode.
 //!
 //! One copy of every control: the context menu only routes to the settings window.
+//! The settings body holds the per-row checkboxes -- one collapsible section per
+//! registry group -- and the width slider. It offers NO opacity and NO stacking
+//! control: those fields are stored and normalized only (see `config`).
 //!
-//! # Opening the popup without a widget Response
+//! # Opening the popup: through the surface Response
 //!
-//! The popup is opened from the CONTEXT's pointer state, not from
-//! `Response::secondary_clicked()`. Measured on :77: `i.pointer.secondary_clicked()`
-//! is true in the frame the right button is released, while the `ui.interact(...)`
-//! response covering the whole panel reports false. The click reaches the
-//! application -- proven by a temporary log on both values -- but that response
-//! never receives egui's CLICKED flag, so a `Response::context_menu` never opens.
-//! Reading the pointer directly is what actually works.
+//! The menu opens through the ordinary egui path: the caller registers the whole
+//! panel surface with `ui.interact(...)` and calls `Response::context_menu` on the
+//! response. The pointer is NOT read directly, and `Sense::click_and_drag()` (not
+//! `click()`) is the sense the surface is declared with, so the drag that PR 2
+//! needs does not have to be retrofitted underneath the code that uses it.
+//!
+//! An earlier version of this module documented the opposite: that the pointer had
+//! to be read off the context because the response never receives egui's CLICKED
+//! flag. That diagnosis came from reading two probe values out of SEPARATE frames
+//! and is retracted -- `docs/development/panel-measurements.md` records both the
+//! wrong turn and the single-frame probe that refuted it. The tests below pin the
+//! correct behaviour from both sides: a right click must reach the response, and a
+//! left click must never register as a secondary one.
 
 use super::config::{PanelConfig, MAX_WIDTH, MIN_WIDTH};
 use super::rows::{self, Group};
@@ -43,7 +53,7 @@ pub fn settings_viewport() -> egui::ViewportId {
 }
 
 /// The size the settings window opens at: tall enough for four collapsed groups
-/// plus the sliders and the stacking row without scrolling.
+/// plus the width slider without scrolling.
 pub const SETTINGS_SIZE: [f32; 2] = [360.0, 520.0];
 
 /// What a settings interaction wants done, applied by the caller outside the UI

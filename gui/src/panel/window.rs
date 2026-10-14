@@ -10,7 +10,7 @@
 //! # The first-frame problem
 //!
 //! A process started with `--panel` sets `mode = Panel` directly in `new()`:
-////! there is no transition, so nothing ever writes `pending_mode`. An
+//! there is no transition, so nothing ever writes `pending_mode`. An
 //! `apply_mode` that begins with `pending_mode.take()?` therefore returns on
 //! every frame including the first, and the panel renders in the normal window's
 //! 570x620 geometry forever — the bug commit `8057834` on the archived branch
@@ -21,9 +21,9 @@
 //!
 //! # Applying the spec
 //!
-//! Only three things change between the modes in this PR: the inner size, the
-//! minimum size and whether the window is resizable. Stacking and the taskbar
-//! atoms are PR 2's work; they are configured but not claimed here.
+//! Four things change between the modes: the inner size, the minimum size,
+//! whether the window is resizable and whether it is decorated. Stacking and the
+//! taskbar atoms are PR 2's work; they are configured but not claimed here.
 //!
 //! The size sent is [`layout::panel_size`] — computed from the visible row count
 //! and the font row height, never measured — so there is no measure/resize/

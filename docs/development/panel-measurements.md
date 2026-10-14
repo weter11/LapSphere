@@ -2,11 +2,74 @@
 
 Measurements for the vertical panel (branch `feat/panel-column`), taken on the
 **debug** build against the live system daemon on **X11 / Xvfb :77 / xfwm4 4.20,
-compositor on, software rendering (llvmpipe)**.
+software rendering (llvmpipe)**.
+
+**The compositing state of that session is UNRESOLVED.** This page previously
+stated "compositor on"; no record supports that, and the records that survive point
+the other way. Read "Compositing: unresolved" below before quoting anything here.
+
+**Nothing on this page is a release gate.** These are single-session readings on
+one machine, tied to a branch rather than to a commit SHA (see "What these numbers
+are tied to"), with no compositing state established for them, and nothing here
+has been re-measured since it was written.
 
 Everything is read from outside the process: `/proc/<pid>/stat` for CPU jiffies,
 `xwininfo` for window geometry, `xwd` + OCR for what was painted. No telemetry
 was added to the app for the measurement.
+
+## What these numbers are tied to
+
+* **A named branch, not a commit SHA.** The numbers below are associated with the
+  branch `feat/panel-column` — the branch that became PR #116, merged as
+  `e296679`. The run did not record the SHA of the binary it measured, so the
+  method can be re-run from that branch but the exact tree that produced these
+  readings cannot be identified.
+* **The older number is weaker still.** The 9x figure quoted from `feat/panel-ui`
+  was recorded against a binary that corresponded to no single named commit at
+  all, as that page states itself.
+* **One machine, one session, debug build, software rendering.** Absolute jiffies
+  under llvmpipe say nothing about the owner's hardware; only the ratios within a
+  table carry meaning, and only on the machine that produced them.
+* **Not a gate.** None of this is a release gate, and none of it has been
+  re-measured since it was written.
+
+## Compositing: unresolved
+
+The environment line above used to read "compositor on". That is not established,
+and neither is its opposite, so the state is recorded as **UNRESOLVED**: no log of
+the measurement session survives in this repository, and the session's state
+cannot be recovered from anything else in it.
+
+The records disagree. Both are quoted rather than one being silently chosen:
+
+| Record | What it states |
+|---|---|
+| This page as written for `feat/panel-column` (merged via PR #116) | xfwm4 4.20 with the **compositor on** |
+| PR #111 (open, unmerged) — finding **B21** and open question **10** | xfwm4 **refuses** to composite under llvmpipe (`Unsupported GL renderer (llvmpipe (LLVM 21.1.8, 256 bits))`), so its results are the *harder* no-compositor case and "compositor-on cases" are listed there as **NOT TESTED**, the host having none |
+| `feat/panel-ui` (the superseded branch), this same page | xfwm4 4.20.0, **compositor off** |
+
+A fresh check was made while reconciling this page (2026-10-14, same host; **it is
+not a re-measurement of any result below, and no result below was repeated**):
+xfwm4 4.20.0 on a new `Xvfb` display with llvmpipe, started with
+`--compositor=on`, logs the identical warning —
+
+```
+(xfwm4:PID): xfwm4-WARNING **: Unsupported GL renderer (llvmpipe (LLVM 21.1.8, 256 bits)).
+```
+
+— then manages the display (`_NET_SUPPORTING_WM_CHECK` is set) but leaves
+`_NET_WM_COMPOSITING` **absent**: the request is refused. No standalone compositor
+(`picom`, `compton`, `xcompmgr`) is installed on this host. On the live session
+`xfconf-query -c xfwm4 -p /general/use_compositing` reads `true` while
+`_NET_WM_COMPOSITING` is absent, and the value only applies at the next WM start —
+so it is not evidence in either direction.
+
+What this settles and what it does not. A compositing session in the environment
+named in the header is **not reproducible here**, and no evidence supports the
+"compositor on" line, so that claim has been removed rather than restated. That is
+not proof of what the original session had — no log of it survives — which is
+exactly why the state is left UNRESOLVED rather than flipped to "off". **Every
+number on this page is therefore quoted without a known compositing state.**
 
 ## Method, and what it cannot show
 
@@ -153,9 +216,14 @@ Two things to take from it, both about ordering:
    (`xwininfo` / `xprop`) after the request, the same way the stacking atoms are
    confirmed by read-back — a request that is sent is not a request that landed.
 
-The archived branch also recorded that its own measurement run was taken against
-a binary that did not correspond to a single named commit. The numbers on this
-page are from one named tree: `feat/panel-column` as committed.
+The archived branch also recorded that its own measurement run was taken against a
+binary that did not correspond to a single named commit. The numbers on this page
+are one step better and no more: they belong to one named BRANCH,
+`feat/panel-column`, at whatever its tip was when they were taken, and the run
+recorded no commit SHA — so they describe that branch's behaviour, but no reader
+can identify the exact tree that produced them. See "What these numbers are tied
+to" and "Compositing: unresolved" above for the two limits that apply to every
+number here.
 
 The CPU table above and the geometry table below were both re-taken after the
 menu and close-path fixes; none of them depend on either.
@@ -224,9 +292,10 @@ reading, not by a live click — see "Not verified".
 
 | Item | Why |
 |---|---|
+| fps, frametime, frametime graph, 1 % low, 0.1 % low, game name | Not implemented anywhere, and **not measured here**. Whether they belong in the FIRST release is an **unresolved owner decision**: PR #111 (open, unmerged) records an owner decision dated 2026-10-03 that they do, while the merged change that introduced the panel describes them as later work. Recorded as an open question in `gui/src/panel/mod.rs`; this page does not decide it. |
 | The in-window Close button | Takes the same path as WM_DELETE, which is verified, but the click itself was not confirmed. |
 | A row checkbox changing the panel height | Covered by unit tests on the layout function; the live click was not performed. |
-| Compositing transparency | PR 2. The owner checks this by hand; nothing is claimed here. |
+| Compositing transparency | PR 2. The owner checks this by hand; nothing is claimed here. The environment's own compositing state is **UNRESOLVED** — see "Compositing: unresolved". |
 | Stacking / taskbar atoms | PR 2. `stacking` and `hide_from_taskbar` are stored and normalized only. |
 | Wayland | No Wayland session on this host, and the owner's does not start. The panel uses only `ViewportCommand`s; nothing here claims Wayland support. |
 | Multi-monitor placement | Not implemented and not claimed. |
