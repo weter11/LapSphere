@@ -16,6 +16,10 @@
 #   C3  with the layer not enabled: the app runs normally and no segment exists
 #   C4  the manifest's legacy `functions` map changes nothing (the round-1
 #       hypothesis); both manifest variants are run
+#   D   regressions found while measuring stage 1b: the reader's read cost must
+#       contain the read it names (D1), a reader started before the application
+#       must see its segment (D2), and an instrumented run must yield one
+#       overhead sample per interval (D3)
 #
 # No GUI, panel, daemon or settings file is touched.
 set -u
@@ -191,6 +195,76 @@ deprecated=$(grep -c "using deprecated" "$res/c4_functions.layer.log" 2>/dev/nul
 ck "C4.app_exit0_functions_manifest" "$app_rc" "vkcube exit=$app_rc"
 ck "C4.present_intercepted_too" "$([ "$present_n4" -gt 0 ] && echo 0 || echo 1)" \
    "vkQueuePresentKHR entered ${present_n4}x with the legacy functions map installed"
+
+say ""
+say "--- check D: reader regressions found in stage 1b"
+# D1: the read cost must include the read. `--watch` timestamps used to sit on
+# either side of `pick_active` only, so the mmap+copy of every segment was
+# outside the window and the reported cost was ~0.0 us. The floor comes from
+# primitive_bench on this host in this session (a hot-loop mmap+copy of the
+# same 64 KiB), so the comparison is not against a constant.
+if [ ! -s "$res/primitives.txt" ]; then
+    "$here/target/release/primitive_bench" --iters 200000 --io-iters 3000 > "$res/primitives.txt" 2>&1
+fi
+floor_us=$(grep '^mmap_read ' "$res/primitives.txt" | sed 's/.*median= *//; s/ ns.*//')
+floor_us=$(python3 -c "print('%.3f'%(${floor_us:-6700}/1000.0))")
+segs_dir="${XDG_RUNTIME_DIR:-/tmp}/lapsphere"
+rm -f "$segs_dir"/frames-* "$segs_dir"/spike.log
+# a writer whose ring is full, so the reader copies the same 64 KiB the floor did
+( "$here/target/release/frames_synth" --hz 240 --seconds 22 --label d1 > "$res/d1.synth.out" 2>&1 ) &
+syn=$!
+sleep 18
+"$reader" --watch --hz 60 --seconds 3 > "$res/d1.watch.txt" 2>&1
+read_us=$(grep -o 'read cost: median [0-9.]*' "$res/d1.watch.txt" | awk '{print $4}')
+read_us=${read_us:-0}
+wait $syn 2>/dev/null
+ck "D1.read_cost_includes_the_read" \
+   "$(python3 -c "print(0 if ${read_us} >= ${floor_us} else 1)")" \
+   "reader median ${read_us} us vs primitive_bench hot mmap_read floor ${floor_us} us (a window that excludes the copy reads ~0 us)"
+# D2: a reader started before the application must see the segment that appears
+# later. The segment list used to be cached before the loop, so --watch reported
+# max_frame_count=0 for its whole life when it was started first.
+rm -f "$segs_dir"/frames-* "$segs_dir"/spike.log
+( "$reader" --watch --hz 60 --seconds 10 > "$res/d2.watch.txt" 2>&1 ) &
+rpid=$!
+sleep 2
+( env LAPSPHERE_FRAMES=1 timeout 6 $app > "$res/d2.app.out" 2>&1 ) &
+apid=$!
+wait $apid
+wait $rpid
+seen=$(sed -n '1p' "$res/d2.watch.txt" | sed 's/.*max_frame_count=//')
+ck "D2.watch_sees_late_segment" "$([ "${seen:-0}" -gt 0 ] && echo 0 || echo 1)" \
+   "reader started 2 s before the app, max_frame_count it saw: ${seen:-0}"
+# D3: an instrumented run must produce one overhead sample per recorded
+# interval (both are indexed by the same frame counter and both are bounded by
+# the same ring), and the samples cannot be smaller than the clock pair they
+# are made of. Tolerates the few frames that pass between two reader calls.
+rm -f "$segs_dir"/frames-* "$segs_dir"/spike.log
+( env LAPSPHERE_FRAMES=1 LAPSPHERE_FRAMES_OVERHEAD=1 timeout 40 vkcube --gpu_number "$gpu" --wsi xlib --c 1200 > "$res/d3.app.out" 2>&1 ) &
+ap=$!
+sleep 2
+while kill -0 "$ap" 2>/dev/null; do
+    "$reader" --overhead > "$res/d3.overhead.tmp" 2>&1 || true
+    "$reader" --dump "$res/d3.frames.csv.tmp" > "$res/d3.dump.tmp" 2>&1 || true
+    if grep -q samples "$res/d3.overhead.tmp" 2>/dev/null; then
+        mv "$res/d3.overhead.tmp" "$res/d3.overhead"
+        mv "$res/d3.frames.csv.tmp" "$res/d3.frames.csv"
+    fi
+    sleep 1
+done
+wait $ap; rc3=$?
+n_samp=$(grep -o 'samples [0-9]*' "$res/d3.overhead" 2>/dev/null | awk '{print $2}')
+n_iv=$(($(wc -l < "$res/d3.frames.csv" 2>/dev/null || echo 1) - 1))
+med_us=$(grep -o 'median [0-9.]* us' "$res/d3.overhead" 2>/dev/null | awk '{print $2}')
+clock_ns=$(grep '^clock_pair ' "$res/primitives.txt" | sed 's/.*median= *//; s/ ns.*//')
+clock_us=$(python3 -c "print('%.3f'%(${clock_ns:-20}/1000.0))")
+ck "D3.one_overhead_sample_per_interval" \
+   "$(python3 -c "s=${n_samp:-0}; i=${n_iv:-0}; print(0 if s > 0 and abs(s-i) <= 8 else 1)")" \
+   "exit=$rc3 samples=${n_samp:-0} intervals=${n_iv:-0} (same ring, same index; a mismatch of a few frames is the gap between the two reader calls)"
+ck "D3.samples_above_the_clock_floor" \
+   "$(python3 -c "print(0 if ${med_us:-0} >= ${clock_us} else 1)")" \
+   "median sample ${med_us:-0} us vs the clock pair it contains (${clock_us} us, primitive_bench)"
+say ""
 
 say ""
 if [ "${VERIFY_LONG:-0}" = "1" ]; then

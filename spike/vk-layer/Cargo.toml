@@ -17,6 +17,14 @@ crate-type = ["cdylib", "rlib"]
 name = "frames_reader"
 path = "src/bin/frames_reader.rs"
 
+[[bin]]
+name = "frames_synth"
+path = "src/bin/frames_synth.rs"
+
+[[bin]]
+name = "primitive_bench"
+path = "src/bin/primitive_bench.rs"
+
 [dependencies]
 libc = "0.2"
 

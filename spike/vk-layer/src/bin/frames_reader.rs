@@ -11,6 +11,11 @@
 //!   frames_reader --overhead            overhead-sample statistics
 //!   frames_reader --prune
 //!
+//! The `read cost` printed by `--watch` is the cost of one full snapshot: the
+//! directory scan, one mmap + copy per segment, and the selection. It is the
+//! only such number in this crate, and it is compared against a bare
+//! mmap+copy+munmap floor (`primitive_bench`, check D1 in `verify.sh`).
+//!
 //! It uses the seqlock exactly as ADR-5 specifies: read seq, copy, re-read
 //! seq, discard on change. No locks, no syscalls per frame.
 
@@ -195,15 +200,21 @@ fn main() {
         let now = now_ns();
         println!("{} segment(s) in $XDG_RUNTIME_DIR/lapsphere", all.len());
         for (pid, path) in &all {
+            // `alive=` is the header flag WRITER_ALIVE, which the writer clears
+            // in destroy(). A writer that died of SIGKILL never gets there, so
+            // the flag can be stale; `pid_alive=` is the check that is not.
+            // --prune (pid liveness + age, the ADR-5 rule) is the authority.
+            let pid_alive = unsafe { libc::kill(*pid as i32, 0) == 0 };
             match read_segment(path, 1) {
                 Some(s) => println!(
-                    "  pid {:<8} exe {:<20} frames {:<9} dropped {:<6} last_present {:>8.3} s ago  alive={}  size={}",
+                    "  pid {:<8} exe {:<20} frames {:<9} dropped {:<6} last_present {:>8.3} s ago  alive={}  pid_alive={}  size={}",
                     s.pid,
                     s.exe,
                     s.frame_count,
                     s.dropped,
                     (now.saturating_sub(s.last_present_ns)) as f64 / 1e9,
                     s.alive,
+                    pid_alive,
                     fs::metadata(path).map(|m| m.len()).unwrap_or(0)
                 ),
                 None => println!("  pid {:<8} (unreadable: stale magic or truncated) {}", pid, path),
@@ -343,11 +354,22 @@ fn main() {
         }
         next += period_ns;
 
-        let segs: Vec<Snapshot> = all
+        // The window opens *before* the read, not after it: what this number
+        // is for is the cost of producing one snapshot, and until 2026-10-14
+        // the timestamps sat on either side of `pick_active` only, so the
+        // mmap+copy of every segment -- the dominant cost -- was outside the
+        // measured window and the reported "read cost" was ~0.0 us.
+        //
+        // The list is re-scanned every sample for the same reason: a reader
+        // started before the application must see the segment that appears
+        // later. Caching `all` made `--watch` report max_frame_count=0 for its
+        // whole life when it was started first (measured).
+        let t0 = now_ns();
+        let list = segments();
+        let segs: Vec<Snapshot> = list
             .iter()
             .filter_map(|(_, p)| read_segment(p, usize::MAX))
             .collect();
-        let t0 = now_ns();
         let active = pick_active(&segs, t0, 2_000_000_000);
         let t1 = now_ns();
         read_ns.push(t1 - t0);
