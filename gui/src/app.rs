@@ -1244,13 +1244,22 @@ impl LapSphereApp {
 
     /// Draw the panel body and its right-click menu.
     ///
-    /// The whole surface is the right-click target, so the menu opens wherever
-    /// the user clicks. `CentralPanel::frame` is left at its default here: the
+    /// The panel's whole surface is the right-click target, so the menu opens
+    /// wherever the user clicks inside it. The target is the panel's own content
+    /// area (`ui.max_rect()`), not the rect `render::draw` returns: the target must
+    /// not depend on the paint order (see that function's contract).
+    /// `CentralPanel::frame` is left at its default here: the
     /// opaque background and its transparency are PR 2's work, and adding a
     /// `Frame` now would only make the later change harder to read.
     fn draw_panel(&mut self, ui: &mut egui::Ui, ctx: &Context) {
         // The interactive area is the whole panel surface, registered with the
         // ordinary egui path so the menu opens from the Response.
+        //
+        // It is `ui.max_rect()` and not `render::draw`'s return value: `draw`
+        // returns what it painted, and the target is taken from the layout so that
+        // laying anything out above the rows later cannot shrink the click area.
+        // The two rects coincide today -- see
+        // `render::the_interaction_rect_matches_the_painted_rect_at_the_call_site`.
         //
         // `Sense::click_and_drag()` rather than `click()`: dragging the panel
         // around is PR 2's work, and the sense has to be declared before the
