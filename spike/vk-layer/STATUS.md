@@ -14,8 +14,10 @@ point where only zero is possible.
 ## One-line state
 
 `vkQueuePresentKHR` is intercepted on a real Vulkan application: 900 presents
-counted for `vkcube --c 900`, 900 intervals written into the shared-memory
-ring, read back by an independent second process, and the application exits 0.
+counted for `vkcube --c 900`, **899** intervals written into the shared-memory
+ring (the first present of a cadence only establishes the origin — the layer's
+final line reads `writer_final: intervals=899 dropped=0 presents=900`), read
+back by an independent second process, and the application exits 0.
 
 ## The exact counters from the recorded run
 
@@ -24,7 +26,12 @@ destroy_instance: GetInstanceProcAddr=104 CreateInstance=1 CreateDevice=1
   GetDeviceProcAddr=631 DestroyDevice=1 CreateSwapchainKHR=1
   DestroySwapchainKHR=1 QueuePresentKHR=900 DestroyInstance=1
   GetPhysicalDeviceProcAddr=0 GetDeviceQueue=1 GetDeviceQueue2=0
+writer_final: intervals=899 dropped=0 presents=900
 ```
+
+The last line is emitted just before the segment is unlinked (nothing can read
+it afterwards), and `verify.sh` asserts `intervals == presents - 1` rather than
+leaving the relation as an inference.
 
 With the layer unset, the same application runs unchanged and creates no
 segment (`verify.sh` check C3).
@@ -83,8 +90,8 @@ harness check C5 covers the wrapped case too.
 | Claim | Evidence |
 | --- | --- |
 | Real present interception | `QueuePresentKHR=900` for `vkcube --c 900`, exit 0 |
-| `frame_count` increases | reader samples 3 s apart: 46 → 286, and 5963 in the 50 s wrap run |
-| Intervals are recorded | reader dumped 286→4096 intervals, p50 8.334 ms (120 fps), zero zero-slots |
+| `frame_count` increases | reader samples 3 s apart: 45 → 286, and 5965 in the 50 s wrap run |
+| Intervals are recorded | reader dumped 285→4096 intervals, p50 8.334 ms (120 fps), zero zero-slots; final count 899 for 900 presents, asserted by the harness |
 | An independent process reads them | `frames_reader` is a separate binary/process over the same shm segment |
 | Inert when not enabled | no segment, no layer log, loader never activates it, app exit 0 |
 | Works across both WSIs and both GPUs | xlib and Wayland WSI, iGPU (RADV RENOIR) and dGPU (RTX 3070), 300 presents each |
@@ -124,7 +131,7 @@ recorded run: `results/` (untracked; `verify.sh` regenerates it).
 | `build.sh` | builds with a build id (git HEAD + source hash + dirty count) compiled in |
 | `install.sh` | installs the manifest into `~/.local/share/vulkan/implicit_layer.d/`, no root |
 | `run.sh` | one instrumented run, printing the mapped `.so` and its hash |
-| `verify.sh` | the acceptance harness: 21 checks, `VERIFY_LONG=1` adds the ring-wrap run |
+| `verify.sh` | the acceptance harness: 22 checks, `VERIFY_LONG=1` adds the ring-wrap run |
 | `TESTING.md` | reproduction recipe, expected output, results table, limitations |
 
 Own `[workspace]`, so `cargo build --all` / `cargo test` at the repository root

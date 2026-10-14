@@ -33,7 +33,7 @@ cd spike/vk-layer
 ./run.sh 60                     # one instrumented run + mapped .so + layer log
 LAPSPHERE_FRAMES=1 vkcube --gpu_number 0 --wsi xlib --c 900      # manual
 
-./verify.sh [gpu_index]         # the acceptance harness (21 checks, ~35 s)
+./verify.sh [gpu_index]         # the acceptance harness (22 checks, ~35 s)
 VERIFY_LONG=1 ./verify.sh 0     # + the ~50 s ring-wraparound run
 
 ./target/release/frames_reader --list
@@ -45,8 +45,8 @@ VERIFY_LONG=1 ./verify.sh 0     # + the ~50 s ring-wraparound run
 example:
 
 ```
-build_id=df38d9bb3f0c/1fd2c4c74aae
-so_sha256=fd937f5230f3f6953704fde9139383f91bff1fabd9c31a0e48a2de354ee59916
+build_id=0b427ef7e79b/718336e1a120
+so_sha256=41a441bbfd7b4f3b2d34f8b6a0349daa6e0b984e98a94708a392dcf4db2ff1b2
 ```
 
 `build_id` is `<git HEAD short>/<sha256 of src/{lib,shm,vkraw}.rs>[+dirty<N>]`.
@@ -59,21 +59,22 @@ The layer's own log (`$XDG_RUNTIME_DIR/lapsphere/spike.log`) for the recorded
 `vkcube --c 900` run, verbatim and abridged:
 
 ```
-negotiate: loader offered v2, answering v2, build df38d9bb3f0c/1fd2c4c74aae
-  mtime 2026-10-14T08:32:55 so=.../target/release/liblapsphere_frames_layer.so
-create_instance: chain=0x7ffe85bc61c0 link=0x7ffe85bc6130
-  next_gipa=0x706e6c04a560 (libVkLayer_MESA_device_select.so offset+0x2560)
-  next_gpdpa=0x706e77951080 link.pNext=0x7ffe85bc6118 enabled=true
+negotiate: loader offered v2, answering v2, build 0b427ef7e79b/718336e1a120
+  mtime 2026-10-14T08:57:29 so=.../target/release/liblapsphere_frames_layer.so
+create_instance: chain=0x7fff1242c800 link=0x7fff1242c770
+  next_gipa=0x7895c7c47560 (libVkLayer_MESA_device_select.so offset+0x2560)
+  next_gpdpa=0x7895d3195080 link.pNext=0x7fff1242c758 enabled=true
 gipa[0](instance=..., "vkCreateInstance") -> ours (name string in libvulkan.so.1.4.341)
 gipa[1..63](instance=..., "vkDestroyInstance" | "vkEnumeratePhysicalDevices" | ...) -> ...
-create_device: chain=... link=... next_gipa=... next_gdpa=0x7cb307e5dae0
-  (libMangoHud.so offset+0x3eae0) instance=0x5f96a752a650
-create_device: device=0x5f96a79dd990 next_present=0x7cb307e580d0
+create_device: chain=... link=... next_gipa=... next_gdpa=0x7895b905dae0
+  (libMangoHud.so offset+0x3eae0) instance=0x635cff068650
+create_device: device=0x635cff51b990 next_present=0x7895b90580d0
   (libMangoHud.so offset+0x390d0) next_queue=... next_swapchain=...
-get_device_queue: queue 0x5f96a7bfd560 -> device 0x5f96a79dd990
-create_swapchain: device 0x5f96a79dd990 -> swapchain 105100665421824
+get_device_queue: queue 0x635cff73b560 -> device 0x635cff51b990
+create_swapchain: device 0x635cff51b990 -> swapchain 109251075235840
 destroy_device: ... QueuePresentKHR=900 ...
 destroy_instance: ... QueuePresentKHR=900 DestroyInstance=1
+writer_final: intervals=899 dropped=0 presents=900
 ```
 
 Read it as: the loader calls **our** `vkGetInstanceProcAddr` 64 times while
@@ -84,21 +85,22 @@ happened), then our `vkCreateDevice`, then our `vkGetDeviceQueue`, then our
 ## The acceptance harness
 
 `./verify.sh 0` prints one PASS/FAIL line per check with the value it read. The
-recorded run (`VERIFY_LONG=1`, 2026-10-14T10:42:15Z, code commit
-`df38d9bb3f0caa143fb31ea69fec59787be4c444`, 0 dirty paths under
-`spike/vk-layer`, build id `df38d9bb3f0c/1fd2c4c74aae`):
+recorded run (`VERIFY_LONG=1`, 2026-10-14T10:57:41Z, code commit
+`0b427ef7e79b47ec0970da963966476ca5112fc5`, 0 dirty paths under
+`spike/vk-layer`, build id `0b427ef7e79b/718336e1a120`):
 
 | Check | Result |
 | --- | --- |
-| `build` | PASS — `build_id=df38d9bb3f0c/1fd2c4c74aae` (clean tree), exit 0 |
+| `build` | PASS — `build_id=0b427ef7e79b/718336e1a120` (clean tree), exit 0 |
 | `C1.app_exit0` | PASS — `vkcube` exit 0 |
 | `C1.present_intercepted` | PASS — `QueuePresentKHR=900` (log counter) |
 | `C1.segment_during_run` | PASS — 1 segment file while the app ran |
-| `C2.frame_count_known_to_reader` | PASS — reader read `frame_count=46` |
-| `C2.frame_count_increases` | PASS — 46 → 286 across two samples 3 s apart |
+| `C2.frame_count_known_to_reader` | PASS — reader read `frame_count=45` |
+| `C2.intervals_are_presents_minus_one` | PASS — `writer_final: intervals=899 presents=900` |
+| `C2.frame_count_increases` | PASS — 45 → 286 across two samples 3 s apart |
 | `C2.segment_gone_after_exit` | PASS — 0 left (unlinked at `vkDestroyInstance`) |
-| `C2.intervals_recorded` | PASS — 286 intervals dumped by the reader |
-| `C2.intervals_plausible` | PASS — `n=286 min=0.568ms p50=8.334ms p99=8.404ms max=8.793ms fps_p50=120.0` |
+| `C2.intervals_recorded` | PASS — 285 intervals dumped by the reader |
+| `C2.intervals_plausible` | PASS — `n=285 min=0.688ms p50=8.334ms p99=8.646ms max=11.771ms fps_p50=120.0` |
 | `C2.reader_is_a_separate_process` | PASS — second process, same segment |
 | `C3.app_exit0_unset` | PASS — exit 0 with `LAPSPHERE_FRAMES` unset |
 | `C3.no_segment` | PASS — 0 segments during and after |
@@ -110,7 +112,7 @@ recorded run (`VERIFY_LONG=1`, 2026-10-14T10:42:15Z, code commit
 | `C4.present_intercepted_too` | PASS — `QueuePresentKHR=900` there as well |
 | `C5.ring_full` | PASS — 4096 intervals returned once the ring wrapped |
 | `C5.no_zero_slots` | PASS — 0 zero-valued slots |
-| `C5.still_plausible` | PASS — p50 8.334 ms after wraparound (5963 frames recorded) |
+| `C5.still_plausible` | PASS — p50 8.334 ms after wraparound (5965 frames recorded) |
 
 Raw material, regenerated by every harness run and **not** committed:
 `results/verify.txt`, `results/*.app.out`, `results/*.layer.log`,
@@ -123,7 +125,7 @@ Raw material, regenerated by every harness run and **not** committed:
 | `vkcube --gpu_number 1 --wsi xlib --c 300` (AMD iGPU) | exit 0, `QueuePresentKHR=300`, 1 swapchain |
 | `vkcube --gpu_number 0 --c 300` (default Wayland WSI, AMD iGPU) | exit 0, `QueuePresentKHR=300`, 2 swapchains |
 | `vkcube --gpu_number 1 --c 300` (Wayland WSI, NVIDIA) | exit 0, `QueuePresentKHR=300`, 2 swapchains |
-| `vkcube --wsi xlib` for 50 s, no `--c` | 5963 frames recorded, reader returned the full 4096-slot ring with 0 zero slots |
+| `vkcube --wsi xlib` for 50 s, no `--c` | 5965 frames recorded, reader returned the full 4096-slot ring with 0 zero slots |
 | `vkcube --c 5200` | `QueuePresentKHR=5200`; the periodic log lines reach `present: 4800`, i.e. past the ring capacity |
 
 The two-swapchain Wayland runs are the reason `vkCreateSwapchainKHR` resets the
@@ -137,8 +139,12 @@ without the reset the first interval after it would appear as a spike.
   down returned; the numbers from the two conventions are not comparable.
 * **`frame_count` counts intervals, i.e. presents − 1.** The first present of a
   cadence establishes the origin and writes no interval; `last_present_ns` is
-  what proves the writer is alive at that moment. The reader's `--list` prints
-  this number, so `900` presents show as `frame_count=899` in a finished run.
+  what proves the writer is alive at that moment. So a finished `vkcube --c 900`
+  run reads `intervals=899` for `presents=900` — measured, not derived: the
+  layer prints `writer_final: intervals=… dropped=… presents=…` immediately
+  before it unlinks the segment (the only moment at which it can still be read),
+  and check `C2.intervals_are_presents_minus_one` asserts the relation. The
+  reader's `--list` prints the header's `frame_count`, which is the same number.
 
 ## Reproducing the round-1 failure, if it is ever in doubt
 
