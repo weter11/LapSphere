@@ -1,0 +1,17 @@
+{
+    "file_format_version": "1.2.0",
+    "layer": {
+        "name": "VK_LAYER_LAPSPHERE_frames",
+        "type": "GLOBAL",
+        "library_path": "./liblapsphere_frames_layer.so",
+        "api_version": "1.4",
+        "implementation_version": "1",
+        "description": "LapSphere frame-time layer (stage 1 spike): timestamps vkQueuePresentKHR into shared memory",
+        "enable_environment": {
+            "LAPSPHERE_FRAMES": "1"
+        },
+        "disable_environment": {
+            "LAPSPHERE_FRAMES_DISABLE": "1"
+        }
+    }
+}
