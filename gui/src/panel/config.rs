@@ -28,8 +28,11 @@
 //!   against the monitor the panel is already on: the monitor's ORIGIN is not
 //!   available (`ViewportInfo` reports a size, not a rect), so a position on a
 //!   second monitor is NOT claimed to work. See [`PanelPosition`].
-//! * **No hotkey or D-Bus fields.** Those arrive with the visibility work
-//!   (PR 3) and belong with the code that implements them, not ahead of it.
+//! * **No hotkey for click-through and no D-Bus fields of their own.** The one
+//!   key this file carries is [`PanelConfig::hotkey`], the global show/hide key;
+//!   the D-Bus method needs no configuration (it is exported on the name the
+//!   single-instance guard already owns) and click-through is out of scope by
+//!   decision.
 
 use serde::{Deserialize, Serialize};
 
@@ -64,6 +67,14 @@ pub const MAX_WIDTH: f32 = 640.0;
 /// starts translucent on a compositor that may not be running is a worse
 /// default than a solid one.
 pub const DEFAULT_BACKGROUND_OPACITY: f32 = 1.0;
+
+/// Default global show/hide hotkey.
+///
+/// `Shift_R+F9`: a right-hand modifier and a function key no ordinary
+/// application claims, and on this host F9 is keycode 75 / keysym 0xffc6
+/// (`xmodmap -pke`). X11/Xwayland only — see [`super::visibility`] — and the
+/// stored string is the spec that module parses.
+pub const DEFAULT_HOTKEY: &str = "Shift_R+F9";
 
 /// Least opaque the background may be set to.
 ///
@@ -278,6 +289,15 @@ pub struct PanelConfig {
     /// for: a request the window manager declined is not where the panel is.
     #[serde(deserialize_with = "deserialize_position")]
     pub position: Option<PanelPosition>,
+    /// Global show/hide hotkey, as a spec such as `Shift_R+F9`.
+    ///
+    /// Stored verbatim, never silently replaced: a spec this build cannot parse
+    /// is exactly what the user has to see in order to fix it, and rewriting it
+    /// to the default would quietly take the default key back. An empty string is
+    /// the user turning the key off, which is a legal choice — the tray and
+    /// `--toggle-panel` remain. See [`super::visibility`] for what is claimed
+    /// about the key and where it is available.
+    pub hotkey: String,
     pub rows: Vec<RowConfig>,
 }
 
@@ -293,6 +313,7 @@ impl Default for PanelConfig {
             // window manager puts it, which is what every version before this
             // field did.
             position: None,
+            hotkey: DEFAULT_HOTKEY.to_string(),
             rows: rows::all_ids().into_iter().map(RowConfig::new).collect(),
         }
     }
@@ -572,10 +593,15 @@ mod tests {
     }
 
     #[test]
-    fn panel_json_carries_no_tray_or_settings_keys() {
+    fn panel_json_carries_the_hotkey_and_no_tray_or_settings_keys() {
         // The owner's separation decision, asserted against the schema so a
-        // future field cannot quietly reintroduce the coupling.
+        // future field cannot quietly reintroduce the coupling. `hotkey` is the
+        // one key this file owns, so it is asserted present rather than absent.
         let json = serde_json::to_string(&PanelConfig::fresh()).expect("serialize");
+        assert!(
+            json.contains("\"hotkey\""),
+            "the global show/hide key is this file's: {json}"
+        );
         for forbidden in [
             "tray",
             "theme",
@@ -583,12 +609,56 @@ mod tests {
             "statistics_sections",
             "battery_settings",
             "click_through",
-            "hotkey",
         ] {
             assert!(
                 !json.contains(forbidden),
                 "panel.json must not carry `{forbidden}`"
             );
+        }
+    }
+
+    // ---- the hotkey ----
+
+    #[test]
+    fn a_fresh_config_carries_the_default_hotkey() {
+        assert_eq!(PanelConfig::fresh().hotkey, DEFAULT_HOTKEY);
+        assert_eq!(normalize(PanelConfig::default()).hotkey, DEFAULT_HOTKEY);
+    }
+
+    #[test]
+    fn a_file_from_before_this_field_existed_gets_the_default_hotkey() {
+        let parsed: PanelConfig =
+            serde_json::from_str(r#"{"version": 1, "width": 410.0}"#).expect("decodes");
+        assert_eq!(normalize(parsed).hotkey, DEFAULT_HOTKEY);
+    }
+
+    #[test]
+    fn a_configured_hotkey_survives_a_round_trip() {
+        let config = PanelConfig {
+            hotkey: "Control+Alt+F5".to_string(),
+            ..PanelConfig::fresh()
+        };
+        let json = serde_json::to_string_pretty(&config).expect("serialize");
+        let back: PanelConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.hotkey, "Control+Alt+F5");
+        assert_eq!(normalize(back), normalize(config));
+    }
+
+    #[test]
+    fn an_unusable_hotkey_is_kept_verbatim_rather_than_replaced() {
+        // The value has to survive so the user can SEE what they typed and fix
+        // it; normalizing it back to the default would silently take the default
+        // key, and an empty spec is a legitimate "key off", not an error.
+        for raw in ["Shift+Nope", "not a hotkey", "", "Shift_R+"] {
+            let config = PanelConfig {
+                hotkey: raw.to_string(),
+                ..PanelConfig::fresh()
+            };
+            let normalized = normalize(config.clone());
+            assert_eq!(normalized.hotkey, raw, "{raw:?} must be stored as written");
+            let json = serde_json::to_string(&normalized).expect("serialize");
+            let back: PanelConfig = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back.hotkey, raw);
         }
     }
 
