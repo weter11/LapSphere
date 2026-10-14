@@ -17,20 +17,25 @@
 //!   drawn in the panel window; everything else lives in a SEPARATE viewport the
 //!   menu opens — an ordinary window, not tied to panel mode. That settings body
 //!   holds the per-row checkboxes, one collapsible section per registry group, and
-//!   the width slider. Neither surface offers an opacity or a stacking control:
-//!   those fields are stored and normalized only.
+//!   the width slider. The settings surface also carries the window controls —
+//!   the stacking choice and "hide from the taskbar and pager". It offers no
+//!   opacity control: that field is stored and normalized only.
 //! * [`window`] — the Normal↔Panel switch and the poll narrowing that keeps the
-//!   panel from polling what it does not draw.
+//!   panel from polling what it does not draw. It also carries the window's
+//!   level, which is sent at runtime when the mode spec is applied.
+//! * [`ewmh`] — the X11 taskbar/pager state (`_NET_WM_STATE_SKIP_TASKBAR` /
+//!   `_NET_WM_STATE_SKIP_PAGER`), asked of the window manager with a
+//!   boundedly-retried, non-blocking EWMH message and confirmed by reading the
+//!   state back. A logged no-op off X11 and on a Wayland window.
 //!
 //! # What is NOT in this PR, by decision
 //!
 //! * fps, frame time, graphs, ring buffers, the Vulkan layer, click-through and
 //!   the F8 interactivity key. No reserved slots for them either: a slot with no
 //!   producer is a permanent row of dashes.
-//! * The hotkey and the D-Bus toggle (PR 3), and the X11 stacking / taskbar atoms
-//!   and real transparency (PR 2). `stacking`, `hide_from_taskbar` and
-//!   `background_opacity` are stored and normalized, but nothing here claims they
-//!   are applied.
+//! * The hotkey and the D-Bus toggle (PR 3), and real transparency.
+//!   `background_opacity` is stored and normalized, but nothing here claims it is
+//!   applied.
 //! * Wayland. The panel uses only `ViewportCommand`s, which is the portable
 //!   subset; the X11-specific work is PR 2's and is not tested on Wayland. The
 //!   stored position is X11-only for the same reason: `outer_rect` is not
@@ -52,6 +57,7 @@
 //! elements, and no placeholder row exists for them.
 
 pub mod config;
+pub mod ewmh;
 pub mod layout;
 pub mod menu;
 pub mod render;

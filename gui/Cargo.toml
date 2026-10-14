@@ -65,6 +65,16 @@ ksni = { version = "0.3.3", features = ["blocking"] }
 # System statistics
 systemstat.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# The panel's EWMH state (`_NET_WM_STATE`): "keep out of the taskbar and pager"
+# is not expressible through egui's viewport commands on X11, and writing the
+# property directly is a false positive -- the request has to go to the window
+# manager as a ClientMessage. Both crates are already in the lock file via winit
+# (x11rb) and eframe (raw-window-handle), so this adds no new crate to the build
+# and works offline.
+x11rb = "0.13"
+raw-window-handle = "0.6"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
 

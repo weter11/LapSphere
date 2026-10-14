@@ -497,6 +497,15 @@ pub struct LapSphereApp {
     /// Follows where the panel window actually is, and decides when the stored
     /// position is out of date. See `panel::window::PositionWatch`.
     panel_position_watch: crate::panel::window::PositionWatch,
+    /// The one window's EWMH state, applied on a worker thread. See
+    /// `panel::ewmh`.
+    panel_atoms: crate::panel::ewmh::AtomsController,
+    /// The EWMH state last handed to `panel_atoms`, so a steady panel dispatches
+    /// nothing. `None` until the first dispatch, so the first frame always asks.
+    panel_atoms_wanted: Option<crate::panel::ewmh::WantedState>,
+    /// The one window's X11 id, resolved once from the frame. `NotX11` on a
+    /// Wayland window, where `_NET_WM_STATE` is not a protocol a client may send.
+    panel_window: crate::panel::ewmh::PanelWindow,
 }
 
 #[derive(Debug)]
@@ -834,6 +843,9 @@ impl LapSphereApp {
             normal_geometry: None,
             panel_config,
             panel_position_watch: Default::default(),
+            panel_atoms: Default::default(),
+            panel_atoms_wanted: None,
+            panel_window: Default::default(),
             last_poll_set: Vec::new(),
             panel_menu_open: false,
             settings_open: false,
@@ -1384,10 +1396,11 @@ impl LapSphereApp {
                 log::warn!("could not write {}: {err}", crate::panel::PANEL_CONFIG_FILE);
             }
         }
-        if outcome.width_changed {
-            // The width is read fresh from the config every frame, so
-            // re-sending the spec is all "applies immediately" needs -- and it
-            // happens while the settings window is still open.
+        if outcome.window_spec_changed {
+            // The width and the stacking level are both read fresh from the
+            // config every frame, so re-sending the spec is all "applies
+            // immediately" needs -- and it happens while the settings window is
+            // still open, with the panel visible behind it.
             self.panel_spec_applied = false;
             ctx.request_repaint();
         }
@@ -1500,6 +1513,39 @@ impl LapSphereApp {
         crate::panel::window::apply_spec(ctx, spec);
         self.mode = target;
         self.panel_spec_applied = true;
+    }
+
+    /// Keep the one window's EWMH state in step with the mode and the settings.
+    ///
+    /// The wanted state is a pure function of `(mode, stacking,
+    /// hide_from_taskbar)`, so this is a per-frame comparison with no bookkeeping
+    /// of its own: entering panel mode asks for the atoms, LEAVING it asks for
+    /// them to be cleared, and either setting moving asks for the new state.
+    /// Nothing is dispatched while the wanted state is unchanged.
+    ///
+    /// The dispatch itself never blocks. Waiting on a window manager that ignored
+    /// a request made too early is the worker's job, not this thread's — see
+    /// `panel::ewmh`.
+    fn apply_panel_atoms(&mut self, frame: &mut eframe::Frame) {
+        if self.panel_window == crate::panel::ewmh::PanelWindow::Unknown {
+            self.panel_window = crate::panel::ewmh::window_of(frame);
+        }
+        if self.panel_window == crate::panel::ewmh::PanelWindow::Unknown {
+            // No handle yet. The wanted state stays unclaimed, so the next frame
+            // asks again instead of settling on a window that was never found.
+            return;
+        }
+
+        let wanted = crate::panel::ewmh::wanted_state(
+            self.mode.is_panel(),
+            self.panel_config.stacking,
+            self.panel_config.hide_from_taskbar,
+        );
+        if self.panel_atoms_wanted == Some(wanted) {
+            return;
+        }
+        self.panel_atoms_wanted = Some(wanted);
+        self.panel_atoms.request(self.panel_window, wanted);
     }
 
     /// The monitor's size in points, as the viewport reports it.
@@ -1648,7 +1694,7 @@ impl LapSphereApp {
 }
 
 impl eframe::App for LapSphereApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
         // Tell the log-ring poll gate what is actually on screen (see
@@ -1675,6 +1721,10 @@ impl eframe::App for LapSphereApp {
         // body must be laid out in a window that already has the panel's size.
         self.apply_mode(&ctx);
         self.sync_poll_set();
+        // After `apply_mode`: the EWMH state depends on the mode this frame is
+        // in, so entering or leaving panel mode and the state change are decided
+        // on the same frame.
+        self.apply_panel_atoms(frame);
 
         self.state.clamp_fan_selection();
 
