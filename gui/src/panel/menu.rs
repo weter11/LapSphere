@@ -24,9 +24,16 @@
 //!
 //! One copy of every control: the context menu only routes to the settings window.
 //! The settings body holds the per-row checkboxes -- one collapsible section per
-//! registry group -- the width slider, and the window controls (the stacking
-//! choice and "hide from the taskbar and pager"). It offers NO opacity control:
-//! that field is stored and normalized only (see `config`).
+//! registry group -- the width slider, the background-opacity slider, and the
+//! window controls (the stacking choice and "hide from the taskbar and pager").
+//!
+//! # The opacity slider acts on the running panel
+//!
+//! It writes `PanelConfig::background_opacity`, which the panel reads afresh every
+//! frame (`panel::window::background_fill`), so the background changes on the next
+//! frame with no restart and no re-send of the window spec: neither the window's
+//! size, its level nor its decorations depend on the opacity. Only the background
+//! is affected — the rows' text is painted opaque on top of it.
 //!
 //! # Opening the popup: through the surface Response
 //!
@@ -44,7 +51,9 @@
 //! correct behaviour from both sides: a right click must reach the response, and a
 //! left click must never register as a secondary one.
 
-use super::config::{PanelConfig, Stacking, MAX_WIDTH, MIN_WIDTH};
+use super::config::{
+    PanelConfig, Stacking, MAX_BACKGROUND_OPACITY, MAX_WIDTH, MIN_BACKGROUND_OPACITY, MIN_WIDTH,
+};
 use super::rows::{self, Group};
 
 /// Viewport id of the settings window, stable so it is reused rather than
@@ -127,9 +136,27 @@ pub fn draw_settings_body(
         outcome.window_spec_changed = true;
     }
 
-    // background_opacity: still schema only -- stored, clamped and persisted, but
-    // no control and no claim that it is painted. Its UI arrives with the
-    // transparency change.
+    // The opacity goes straight into the config, exactly as the width does, and
+    // is clamped to the range `normalize` enforces so a drag cannot write an
+    // unusable value. The panel reads it fresh every frame, so there is no apply
+    // step and no restart. It is NOT part of the window spec: nothing about the
+    // window's size, level or decorations depends on it, so no re-send is needed.
+    ui.label(egui::RichText::new("Background opacity").strong());
+    let (opacity_response, opacity) = opacity_control(ui, config.background_opacity);
+    if opacity_response.changed() {
+        config.background_opacity = opacity;
+        outcome.config_changed = true;
+    }
+    ui.label(
+        egui::RichText::new(
+            "Only the background becomes translucent — text and values stay opaque. \
+             What is behind the panel shows through only under a compositing window \
+             manager; without one nothing blends, so a reduced opacity darkens the \
+             background instead of making it see-through.",
+        )
+        .weak()
+        .small(),
+    );
 
     ui.separator();
 
@@ -196,6 +223,20 @@ fn stacking_controls(ui: &mut egui::Ui, current: Stacking) -> Vec<(Stacking, egu
 fn taskbar_control(ui: &mut egui::Ui, current: bool) -> (egui::Response, bool) {
     let mut value = current;
     let response = ui.checkbox(&mut value, "Hide from the taskbar and pager");
+    (response, value)
+}
+
+/// The background-opacity slider, and the value it now holds.
+///
+/// Split out and returning its own response for the same reason the stacking
+/// control is: the test that proves a drag on it reaches the config has to be able
+/// to aim at it.
+fn opacity_control(ui: &mut egui::Ui, current: f32) -> (egui::Response, f32) {
+    let mut value = current.clamp(MIN_BACKGROUND_OPACITY, MAX_BACKGROUND_OPACITY);
+    let response = ui.add(
+        egui::Slider::new(&mut value, MIN_BACKGROUND_OPACITY..=MAX_BACKGROUND_OPACITY)
+            .fixed_decimals(2),
+    );
     (response, value)
 }
 
@@ -434,6 +475,11 @@ mod tests {
     /// Aiming at the response's own rect is deliberate: coordinates typed into the
     /// test would keep passing after a layout change moved the control out of the
     /// window, which is the one way a settings control becomes unreachable.
+    ///
+    /// The value is collected on the frame the control reported the interaction,
+    /// not read off the last frame: a slider takes its value from the pointer on
+    /// the PRESS frame while a checkbox reports on release, so a driver that read
+    /// only the final frame would report a slider drag as "nothing happened".
     fn click_control<T, F>(draw: F) -> T
     where
         F: Fn(&mut egui::Ui) -> (egui::Response, T),
@@ -464,7 +510,9 @@ mod tests {
                     if frame == 0 {
                         at = response.rect.center();
                     }
-                    produced = value;
+                    if response.changed() || response.clicked() {
+                        produced = value;
+                    }
                 });
             });
         }
@@ -535,6 +583,51 @@ mod tests {
     fn the_taskbar_control_reports_the_value_the_click_asked_for() {
         assert_eq!(click_taskbar(true), Some(false), "unchecking it");
         assert_eq!(click_taskbar(false), Some(true), "checking it");
+    }
+
+    // ---- the background-opacity control ----
+
+    /// The opacity a click at the slider's own centre asks for, or `None` when the
+    /// click changed nothing.
+    fn click_opacity(current: f32) -> Option<f32> {
+        click_control(|ui| {
+            let (response, value) = opacity_control(ui, current);
+            let changed = response.changed().then_some(value);
+            (response, changed)
+        })
+    }
+
+    #[test]
+    fn the_opacity_control_reports_the_value_the_click_asked_for() {
+        // Aimed at the slider's own centre, so the click lands mid-track: the
+        // value must move off both ends and stay inside the range, which is what
+        // "the control is wired to the config" means for a slider.
+        let from_opaque = click_opacity(1.0).expect("a click on the slider must change the opacity");
+        assert!(
+            (MIN_BACKGROUND_OPACITY..1.0).contains(&from_opaque),
+            "clicking mid-track from 1.0 gave {from_opaque}"
+        );
+
+        let from_translucent =
+            click_opacity(MIN_BACKGROUND_OPACITY).expect("a click must change the opacity");
+        assert!(
+            (MIN_BACKGROUND_OPACITY..=1.0).contains(&from_translucent)
+                && from_translucent > MIN_BACKGROUND_OPACITY,
+            "clicking mid-track from the minimum gave {from_translucent}"
+        );
+    }
+
+    /// A config value outside the range — a hand-edited `panel.json`, or one from
+    /// a build with a different range — must not be shown as a handle past the end
+    /// of the track, and must not be written back out of range.
+    #[test]
+    fn the_opacity_control_clamps_what_it_is_given() {
+        with_ui(|ui, _config, _outcome| {
+            let (_, high) = opacity_control(ui, 5.0);
+            assert_eq!(high, MAX_BACKGROUND_OPACITY);
+            let (_, low) = opacity_control(ui, 0.0);
+            assert_eq!(low, MIN_BACKGROUND_OPACITY);
+        });
     }
 
     #[test]

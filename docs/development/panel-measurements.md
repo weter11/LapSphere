@@ -18,6 +18,12 @@ version can be called accepted, see
 [`panel-v1-baseline.md`](./panel-v1-baseline.md). That page records status and
 re-uses the credibility limits below; it does not re-confirm any number on this one.
 
+Real transparency (stage 4) is measured on its own page,
+[`panel-transparency.md`](./panel-transparency.md). It is a different session — X11
+on Xwayland under the xfwl4 compositor, which the sessions below did not have — so
+its numbers are not mixed into these, and the compositing state of the sessions
+below stays exactly what this page says it is.
+
 Everything is read from outside the process: `/proc/<pid>/stat` for CPU jiffies,
 `xwininfo` for window geometry, `xwd` + OCR for what was painted. No telemetry
 was added to the app for the measurement.

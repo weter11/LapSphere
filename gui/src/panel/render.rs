@@ -207,7 +207,10 @@ mod tests {
     /// exactly why the target is not taken from here.
     ///
     /// Rendered in the call-site shape: `App::update`'s ui, the panel's
-    /// `CentralPanel` shown inside it.
+    /// `CentralPanel` shown inside it, carrying the frame the call site builds.
+    /// The frame's FILL is what the call site changed (the panel's background at
+    /// the configured opacity), and it takes no part in either rect; the frame's
+    /// margins are the part that does, and they are egui's own.
     #[test]
     fn the_interaction_rect_matches_the_painted_rect_at_the_call_site() {
         let state = AppState::new();
@@ -223,10 +226,15 @@ mod tests {
         let mut target = Rect::NOTHING;
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::no_frame().show(ctx, |ui| {
-                egui::CentralPanel::default().show_inside(ui, |ui| {
-                    painted = draw(ui, &state, &config);
-                    target = ui.max_rect();
-                });
+                let frame = egui::Frame::central_panel(ui.style()).fill(
+                    crate::panel::window::background_fill(ui.visuals(), config.background_opacity),
+                );
+                egui::CentralPanel::default()
+                    .frame(frame)
+                    .show_inside(ui, |ui| {
+                        painted = draw(ui, &state, &config);
+                        target = ui.max_rect();
+                    });
             });
         });
 
