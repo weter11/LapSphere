@@ -1,0 +1,29 @@
+[package]
+name = "lapsphere-frames-layer"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0"
+description = "Spike: Vulkan implicit layer that timestamps vkQueuePresentKHR into shared memory"
+
+# Own workspace so that `cargo build --all` in the repository root does not
+# pick this crate up. Verified: the root Cargo.toml members are unchanged.
+[workspace]
+
+[lib]
+name = "lapsphere_frames_layer"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "frames_reader"
+path = "src/bin/frames_reader.rs"
+
+[dependencies]
+
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "unwind"   # catch_unwind must work; panic=abort would break it
+debug = true       # keep symbols so the spike can read line numbers from profiles

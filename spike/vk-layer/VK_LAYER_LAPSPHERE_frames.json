@@ -1,0 +1,28 @@
+{
+    "file_format_version": "1.2.0",
+    "layer": {
+        "name": "VK_LAYER_LAPSPHERE_frames",
+        "type": "GLOBAL",
+        "library_path": "./liblapsphere_frames_layer.so",
+        "api_version": "1.3",
+        "implementation_version": "0",
+        "description": "LapSphere frame-time layer (spike): timestamps vkQueuePresentKHR into shared memory",
+        "enable_environment": {
+            "LAPSPHERE_FRAMES": "1"
+        },
+        "disable_environment": {
+            "LAPSPHERE_FRAMES_DISABLE": "1"
+        },
+        "functions": {
+            "vkGetInstanceProcAddr": "vk_get_instance_proc_addr",
+            "vkCreateInstance": "vk_create_instance",
+            "vkDestroyInstance": "vk_destroy_instance",
+            "vkCreateDevice": "vk_create_device",
+            "vkGetDeviceProcAddr": "vk_get_device_proc_addr",
+            "vkDestroyDevice": "vk_destroy_device",
+            "vkQueuePresentKHR": "vk_queue_present_khr",
+            "vkCreateSwapchainKHR": "vk_create_swapchain_khr",
+            "vkDestroySwapchainKHR": "vk_destroy_swapchain_khr"
+        }
+    }
+}
