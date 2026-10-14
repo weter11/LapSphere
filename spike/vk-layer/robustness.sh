@@ -325,10 +325,17 @@ mkdir -p "$run"
 chmod 555 "$run"
 env LAPSPHERE_FRAMES=1 timeout 30 $app --c 600 > "$res/r7.app.out" 2>&1
 rc=$?
+# The same failure through frames_synth, which prints the error to stderr: the
+# layer's own log_line writes into the very directory that is unwritable here
+# (measured: the message is absent from the app's stderr, and log_line only
+# writes $XDG_RUNTIME_DIR/lapsphere/spike.log), so the app-level evidence is
+# "ran anyway, no segment", and this is the error text itself.
+rm -rf "$res/r7dir"; mkdir -p "$res/r7dir/lapsphere"; chmod 555 "$res/r7dir/lapsphere"
+XDG_RUNTIME_DIR="$res/r7dir" "$synth" --hz 60 --seconds 1 --label r7 > "$res/r7.synth.out" 2>&1
+synth_rc=$?
 chmod 755 "$run"
-say "    segment directory made unwritable (chmod 555): exit=$rc (0 = the app ran anyway)"
-say "    layer said: $(grep -o 'Writer::create failed.*' "$res/r7.app.out" | head -1)"
-say "    presents counted with no writer: $(present_count)  segments now=$(seg_count)"
+say "    segment directory made unwritable (chmod 555): vkcube exit=$rc (0 = the app ran anyway), segments now=$(seg_count)"
+say "    writer creation error text, from a process that prints it: exit=$synth_rc :: $(head -1 "$res/r7.synth.out")"
 say "    NOTE: the EEXIST variant (a recycled pid meeting an old segment) needs a pid"
 say "          namespace to produce and unprivileged ones are unavailable here"
 say "          (measured: 'unshare -p -f --mount-proc' -> Operation not permitted;"

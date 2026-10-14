@@ -206,7 +206,11 @@ say "--- check D: reader regressions found in stage 1b"
 if [ ! -s "$res/primitives.txt" ]; then
     "$here/target/release/primitive_bench" --iters 200000 --io-iters 3000 > "$res/primitives.txt" 2>&1
 fi
-floor_us=$(grep '^mmap_read ' "$res/primitives.txt" | sed 's/.*median= *//; s/ ns.*//')
+# The benchmark prints a table row and a derived row, both starting with the
+# bench name: take the first. (Getting this wrong made D1 compare against an
+# empty string, which is how this check was found to be wrong the first time it
+# ran.)
+floor_us=$(grep -m1 '^mmap_read ' "$res/primitives.txt" | sed 's/.*median= *//; s/ ns.*//')
 floor_us=$(python3 -c "print('%.3f'%(${floor_us:-6700}/1000.0))")
 segs_dir="${XDG_RUNTIME_DIR:-/tmp}/lapsphere"
 rm -f "$segs_dir"/frames-* "$segs_dir"/spike.log
