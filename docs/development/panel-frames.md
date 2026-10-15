@@ -20,7 +20,7 @@ The owner's decision (recorded in [`panel-v1-baseline.md`](./panel-v1-baseline.m
 | `game_name` | `Game` | the game's `/proc/self/comm` | header `exe_name` |
 | `fps` | `FPS` | `1000 / mean(intervals)` | ring, over the statistics window |
 | `frametime_ms` | `Frame` | the mean interval, in ms | ring, same window |
-| `frametime_graph` | `Graph` | the recorded intervals, drawn | ring, newest 120 |
+| `frametime_graph` | `Graph` | the recorded intervals, drawn | ring, whole statistics window |
 | `low_1pct` | `1%low` | `1000 / mean(worst 1 %)` | ring, same window |
 | `low_01pct` | `0.1%` | `1000 / mean(worst 0.1 %)` | ring, same window |
 
@@ -82,11 +82,24 @@ $XDG_RUNTIME_DIR/lapsphere/frames-<pid>      protocol v1, mode 0600
   metrics, and this rule is what prevents it.
 * **`stats.rs`** — the statistics, ported from the reference definitions in
   [`tools/frametime_stats.py`](./tools/frametime_stats.py) rather than re-derived.
-* **`graph.rs`** — the strip: a polyline over a fixed height and a **fixed** 0–50 ms
-  scale. Intervals above the scale are clamped to the ceiling (visible, but not
-  pretending to a value); an empty source draws the strip's background and nothing
-  else — no zero line, because a flat line at the bottom would be a claim about
-  frame times.
+* **`graph.rs`** — the strip: a polyline over a fixed height (`GRAPH_STRIP_ROWS`
+  row heights) and a **fixed** 0–50 ms scale. Intervals above the scale are clamped
+  to the ceiling (visible, but not pretending to a value); an empty source draws the
+  strip's background and nothing else — no zero line, because a flat line at the
+  bottom would be a claim about frame times.
+* **The strip covers the whole statistics window, in a bounded column count.** The
+  window is a duration, so at 165 fps it holds ~1650 intervals while the strip has
+  `GRAPH_COLUMNS` (120) of them; a strip showing only the newest 120 would cover
+  ~0.7 s of a 10 s window and disagree with the numbers beside it. So a wider window
+  is **decimated, peak-preserving**: each column stands for a contiguous run of
+  intervals and carries **the worst interval in that run**. An isolated spike owns
+  its column and cannot be averaged away (`an_early_spike_survives_more_than_a_strip_of_newer_samples`,
+  on a window whose spike precedes 2000 ordinary frames). Fewer intervals than
+  columns are drawn one per column, with no interpolation. Nothing is hidden: the
+  series reports the largest number of intervals any column stands for
+  (`FrameSnapshot::column_span`), and the settings menu prints it — `0–50 ms ·
+  worst of 20` — so a smooth shape over a decimated series is never read as a smooth
+  game.
 
 ## 3. Unavailable is `—`, and nothing jumps
 
@@ -106,13 +119,36 @@ $XDG_RUNTIME_DIR/lapsphere/frames-<pid>      protocol v1, mode 0600
   source and a game exiting all leave every rect where it was, and the repaint tests
   assert exactly that (`the_same_geometry_with_and_without_frame_data`).
 * **The reader is not on the rendering path.** One worker thread polls outside the
-  UI thread at the configured cadence; the UI clones one immutable snapshot. No file
-  is opened, read or stat'd while rendering, and the panel repaints at the poll
-  cadence (250 ms at 4 Hz), **never at the game's frame rate**. With no frame
-  element on screen the panel keeps its own 500 ms timer, and the worker does no
-  filesystem work at all.
-* **No log spam.** Availability changes are announced once each: "no source" once,
-  the game's pid once when it appears, once more when it exits.
+  UI thread at the configured cadence; the UI takes **one** snapshot per frame and
+  hands it to every element through `PanelView`. No file is opened, read or stat'd
+  while rendering, and the panel repaints at the poll cadence (250 ms at 4 Hz),
+  **never at the game's frame rate**. With no frame element on screen the panel keeps
+  its own 500 ms timer, and the worker does no filesystem work at all.
+* **One snapshot per frame, for all six elements.** `fps`, `frame_time`, both lows,
+  the game name and the strip describe the same poll: the caller acquires the
+  snapshot once (`App::draw_panel`) and the registry's readers take a `PanelView`,
+  which carries that snapshot. A row that fetched its own would be one poll away
+  from contradicting the row above it, and the reader polls on another thread, so
+  that is what happens whenever a poll lands mid-frame. Two guards hold it: a
+  registry test that publishes a *second*, different snapshot after the view is
+  built and fails if any element's value moves, and a render test that reads the
+  painted polyline's point count off the frame (`3`, not the `5` the reader holds).
+* **No log spam, and availability means the source and not its numbers.**
+  Announcements are keyed on **which** source is being read — not on how much of the
+  window it has filled or how fast its frames are arriving — so warm-up and ordinary
+  frame-rate variation are silent while "no source", "a source appeared", "a read
+  failed" and "a *different* source took over" each get one line. The count that used
+  to be part of the key meant four lines a second for a whole game run.
+* **A window the history cannot fill is reported, not rounded.** `window_seconds`
+  permits 60 s, while the reader retains at most 4096 intervals — at 165 fps (6.06 ms)
+  that is ~24.8 s, at 240 fps under 2 s. The statistics are computed over what exists
+  and the result carries both spans: `Metrics::window_ms` is what the samples
+  **cover** and `Metrics::requested_ms` is what was asked for, with
+  `Metrics::is_short()` and `Metrics::coverage()` as the answers. The settings
+  surface prints the shortfall in words ("Reading pid 4242 (vkcube) — 24.6 s recorded
+  of the 60 s window asked for (41 %)"), so a 24.8 s statistic is never presented as
+  a 60 s one. Nothing is clamped, rejected or extrapolated, and protocol v1 and its
+  bounds are untouched.
 
 ## 4. The two configurable numbers are proposals
 
@@ -123,6 +159,15 @@ and the surface says in words that they are proposals
 (`the_frames_section_names_the_source_and_calls_the_defaults_proposals`). The PR
 body records the same assumption. The statistics window is a **time** window: the
 newest intervals whose total duration reaches `window_seconds`.
+
+One consequence of the reader's bounds has to be read together with that setting:
+the window is *requested*, and the ring may hold less than it needs (4096 intervals —
+about 24.8 s at 165 fps, under 2 s at 240 fps). When that happens the elements show
+the statistics of what exists **and** the surface reports the shortfall (§3), so the
+setting is never silently satisfied with less history than it names. Raising
+`window_seconds` therefore cannot make a high-frame-rate game's 1 % low cover an
+hour; only a longer ring could, and the ring's size is protocol v1's, which this
+change does not touch.
 
 ## 5. Activation: what has to be true on the host
 
@@ -145,8 +190,9 @@ panel renders `—` until a user installs the layer and runs a Vulkan game with
 
 ## 6. Tested on this commit
 
-`cargo test`: **423 tests pass, 0 fail** (341 before this change). The frame
-features' own tests, all in `gui/src/panel/frames/`:
+`cargo test`: **438 tests pass, 0 fail, 6 ignored** across the workspace (341 before
+this work; 324 in the GUI binary, 15 of them added by the review remediation below).
+The frame features' own tests:
 
 * protocol: missing file, short file (both shorter than the header and shorter than
   the ring it declares), bad magic, unsupported version, wrong `header_len`,
@@ -166,13 +212,29 @@ features' own tests, all in `gui/src/panel/frames/`:
   against the reference script itself
   (`the_statistics_match_the_reference_script_when_python3_is_available`, which
   skips loudly without `python3`);
-* presentation: the graph's sample selection and fixed scale, the reserved strip
-  height, identical geometry with and without data, every label fitting the reserved
-  label column, `—` for all five text elements with no source and real numbers with
-  one, and the repaint rule (250 ms with a frame row, 500 ms without);
+* presentation: the strip's series (one column per interval up to `GRAPH_COLUMNS`,
+  peak-preserving buckets above it, every interval accounted for by exactly one
+  column, and an early spike surviving 2000 later samples), the fixed scale, the
+  caption that names the bucket size, the reserved strip height, identical geometry
+  with and without data, every label fitting the reserved label column, `—` for all
+  five text elements with no source and real numbers with one, and the repaint rule
+  (250 ms with a frame row, 500 ms without);
+* window coverage: a window the history fills is not reported as short; a 60 s window
+  over a 4096-interval ring is (`is_short`, `coverage`, and both spans carried on the
+  result); the same segment under a 10 s window reports full coverage; a short window
+  does not change the statistics themselves; and the surface prints the shortfall in
+  words rather than a bare number;
+* one snapshot per frame: a registry test that publishes a second, different snapshot
+  after the view is built and fails if any of the six elements' values move, and a
+  render test that reads the painted polyline's point count and fails if the strip
+  reaches past the view for its series;
+* logging: a live source whose window grows from 1 to 600 intervals while the frame
+  time swings between 6 and 16 ms is announced **once**, a different pid is a new
+  source, and unavailability is not re-announced;
 * configuration and menu: the two new keys' defaults and clamps, an older
   `panel.json` gaining the six rows switched off, the frame rows appearing in the
-  settings group, and the two sliders being wired to the config.
+  settings group, the two sliders being wired to the config, and the four states of
+  the source report (no source / no interval yet / covered window / short window).
 
 ## 7. NOT TESTED — read this before quoting anything above
 
