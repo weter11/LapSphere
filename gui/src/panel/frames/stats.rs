@@ -33,13 +33,30 @@
 //! [`super::DEFAULT_WINDOW_SECONDS`], which is a *proposal*, not an owner
 //! decision; see [`super`] and the PR body.
 
+/// Half a millisecond of slack, so a window whose samples sum to 9999.9999 ms does
+/// not read as short of the 10 000 ms that was asked for. A genuinely short history
+/// misses by seconds, never by a rounding error.
+pub const SHORT_WINDOW_SLACK_MS: f64 = 0.5;
+
 /// The frame statistics one panel refresh shows.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Metrics {
     /// Intervals the statistics were computed over.
     pub samples: usize,
-    /// Total duration those intervals cover, in milliseconds.
+    /// Total duration those intervals **actually cover**, in milliseconds.
+    ///
+    /// Not the configured window: the reader can only compute over the intervals
+    /// that exist (the ring holds at most `shm::MAX_RING_CAPACITY`, and a game that
+    /// just started has a handful). This is the covered span, and
+    /// [`Metrics::requested_ms`] is what was asked for.
     pub window_ms: f64,
+    /// The span the configured statistics window asked for, in milliseconds.
+    ///
+    /// `0.0` when no window was asked for — the pure-statistics entry point has no
+    /// config to read; the poller passes the configured window to [`metrics`]. It is
+    /// what [`Metrics::is_short`] compares against, and what the panel reports
+    /// instead of presenting a shorter history as the requested window.
+    pub requested_ms: f64,
     /// Mean frame interval in milliseconds — the `frametime_ms` element.
     pub frametime_ms: f64,
     /// `1000 / mean` — the `fps` element.
@@ -123,7 +140,18 @@ pub fn low_percent(sorted_ms: &[f64], pct: f64) -> Option<f64> {
 ///
 /// `None` is the honest answer to "there is nothing to show": it becomes `—` and
 /// an empty strip, never a zero, never the previous value.
-pub fn metrics(intervals_ms: &[f64]) -> Option<Metrics> {
+/// `requested_ms` is the configured statistics window, and it is carried onto the
+/// result rather than used to clamp anything.
+///
+/// The distinction it exists for: `window_seconds` permits 60 s, while the reader
+/// retains at most `shm::MAX_RING_CAPACITY` intervals — at 165 fps that is ~24 s of
+/// history, at 240 fps under 2 s. A configured window longer than the ring can hold
+/// must therefore be **reported as partly covered**, not presented as if the
+/// requested window had been measured. Nothing is rejected and nothing is
+/// extrapolated: the statistics are what they are, over the samples that exist, and
+/// the caller gets both spans so it can say so. `0.0` means "no window was asked
+/// for" — a caller with no config — and then [`Metrics::is_short`] has no opinion.
+pub fn metrics(intervals_ms: &[f64], requested_ms: f64) -> Option<Metrics> {
     let mut sorted: Vec<f64> = intervals_ms
         .iter()
         .copied()
@@ -141,11 +169,34 @@ pub fn metrics(intervals_ms: &[f64]) -> Option<Metrics> {
     Some(Metrics {
         samples: sorted.len(),
         window_ms: sorted.iter().sum(),
+        requested_ms,
         frametime_ms,
         avg_fps: 1000.0 / frametime_ms,
         low_1pct: low_percent(&sorted, 1.0)?,
         low_01pct: low_percent(&sorted, 0.1)?,
     })
+}
+
+impl Metrics {
+    /// Is there less history than the configured window asked for?
+    ///
+    /// True for two ordinary cases, and both are worth showing rather than hiding:
+    /// a game that started less than a window ago (the layer's first intervals), and
+    /// a window longer than the ring can hold (60 s at 240 fps is ~14400 intervals
+    /// against a 4096-slot ring). `false` when no window was recorded — the
+    /// pure-statistics entry point has no opinion about coverage.
+    pub fn is_short(&self) -> bool {
+        self.requested_ms > 0.0 && self.window_ms + SHORT_WINDOW_SLACK_MS < self.requested_ms
+    }
+
+    /// How much of the requested window the samples cover, 0.0–1.0.
+    pub fn coverage(&self) -> f64 {
+        if self.requested_ms <= 0.0 {
+            1.0
+        } else {
+            (self.window_ms / self.requested_ms).clamp(0.0, 1.0)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -175,7 +226,7 @@ mod tests {
     }
 
     fn stats_of(values: &[f64]) -> Metrics {
-        metrics(&ms(values)).expect("usable samples")
+        metrics(&ms(values), 0.0).expect("usable samples")
     }
 
     // ---- the reference's own self-test cases, on the Rust side ----
@@ -289,7 +340,7 @@ mod tests {
         let w = window(&values, 10_000.0);
         assert_eq!(w, vec![1.0, 2.0]);
 
-        let st = metrics(&[0.0, 16.0, 0.0]).expect("one usable sample");
+        let st = metrics(&[0.0, 16.0, 0.0], 0.0).expect("one usable sample");
         assert_eq!(st.samples, 1);
         close(st.avg_fps, 62.5, 1e-9, "only the real frame counts");
     }
@@ -298,9 +349,9 @@ mod tests {
     fn a_window_with_no_usable_frame_has_no_metrics_at_all() {
         // `—`, not 0.0 fps and not an infinity: the elements must not invent a
         // measurement out of an empty ring.
-        assert_eq!(metrics(&[]), None);
-        assert_eq!(metrics(&[0.0, 0.0, 0.0]), None);
-        assert_eq!(metrics(&[f64::NAN, f64::INFINITY, -1.0]), None);
+        assert_eq!(metrics(&[], 0.0), None);
+        assert_eq!(metrics(&[0.0, 0.0, 0.0], 0.0), None);
+        assert_eq!(metrics(&[f64::NAN, f64::INFINITY, -1.0], 0.0), None);
     }
 
     // ---- the window ----
@@ -336,10 +387,81 @@ mod tests {
         // which is what makes the panel come alive instead of waiting 10 s.
         let values = ns(&[8.0, 9.0]);
         let w = window(&values, 10_000.0);
-        let st = metrics(&w).expect("two frames");
+        let st = metrics(&w, 0.0).expect("two frames");
         assert_eq!(st.samples, 2);
         close(st.frametime_ms, 8.5, 1e-9, "mean of two");
         close(st.low_1pct, 1000.0 / 9.0, 1e-9, "worst of two");
+    }
+
+    // ---- window coverage ----
+
+    #[test]
+    fn a_window_the_history_fills_is_not_reported_as_short() {
+        // 1250 intervals of 8 ms is exactly the 10 s window the config asks for, and
+        // the walk takes the sample that crosses the boundary, so coverage is full
+        // and the requested span is not reported as missing.
+        let values = vec![8.0f64; 1250];
+        let full = metrics(&ms(&values), 10_000.0).expect("samples");
+        assert_eq!(full.samples, 1250);
+        assert!(!full.is_short(), "{full:?}");
+        assert_eq!(full.coverage(), 1.0);
+        assert_eq!(full.requested_ms, 10_000.0);
+    }
+
+    #[test]
+    fn a_window_longer_than_the_history_is_reported_as_short_not_presented_as_full() {
+        // The case the reader cannot avoid: the ring holds 4096 intervals, so at
+        // 165 fps (6.06 ms) it holds ~24.8 s and a configured 60 s window can never
+        // be covered. The numbers are still computed over what exists -- and the
+        // result says how much of the window it covers instead of letting a caller
+        // present a 24.8 s statistic as a 60 s one.
+        let values = vec![6.06f64; 4096];
+        let short = metrics(&ms(&values), 60_000.0).expect("samples");
+        assert_eq!(short.samples, 4096);
+        assert!(short.is_short(), "{short:?}");
+        assert!(
+            (short.window_ms - 4096.0 * 6.06).abs() < 0.5,
+            "the covered span is the samples', not the request: {}",
+            short.window_ms
+        );
+        assert!(
+            (short.coverage() - 0.4136).abs() < 0.01,
+            "coverage {}",
+            short.coverage()
+        );
+
+        // A game one second old is the same report, for the other reason.
+        let fresh = metrics(&ms(&vec![8.0f64; 125]), 10_000.0).expect("samples");
+        assert!(fresh.is_short());
+        assert!((fresh.coverage() - 0.1).abs() < 0.01);
+    }
+
+    #[test]
+    fn the_pure_statistics_entry_point_records_no_window() {
+        // `metrics()` has no config to read, so it must not claim coverage either
+        // way: `is_short` is false and `coverage` is 1.0 there, and only the
+        // poller's `metrics` call carries the request.
+        let plain = metrics(&ms(&vec![8.0f64; 10]), 0.0).expect("samples");
+        assert_eq!(plain.requested_ms, 0.0);
+        assert!(!plain.is_short());
+        assert_eq!(plain.coverage(), 1.0);
+    }
+
+    #[test]
+    fn a_short_window_does_not_change_the_statistics_themselves() {
+        // Reporting a short window must not become a reason to distort the numbers:
+        // the same samples give the same fps, frame time and lows whatever the
+        // request was.
+        let values = vec![16.0f64; 300];
+        let plain = metrics(&ms(&values), 0.0).expect("samples");
+        let asked = metrics(&ms(&values), 60_000.0).expect("samples");
+        assert_eq!(plain.samples, asked.samples);
+        assert_eq!(plain.window_ms, asked.window_ms);
+        assert_eq!(plain.frametime_ms, asked.frametime_ms);
+        assert_eq!(plain.avg_fps, asked.avg_fps);
+        assert_eq!(plain.low_1pct, asked.low_1pct);
+        assert_eq!(plain.low_01pct, asked.low_01pct);
+        assert!(asked.is_short() && !plain.is_short());
     }
 
     // ---- parity with the reference implementation ----
@@ -426,7 +548,7 @@ mod tests {
             panic!("the reference script printed no {label:?} line:\n{stdout}");
         };
 
-        let st = metrics(&ms(&values)).expect("usable samples");
+        let st = metrics(&ms(&values), 0.0).expect("usable samples");
         close(st.avg_fps, reference("average fps"), 0.06, "average fps");
         close(
             st.frametime_ms,

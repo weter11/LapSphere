@@ -150,9 +150,16 @@ pub struct FrameSnapshot {
     /// segment that has just been created writes its first interval one present
     /// later).
     pub metrics: Option<Metrics>,
-    /// The newest intervals in milliseconds, oldest first, at most
-    /// [`graph::GRAPH_SAMPLES`]. Empty when there is nothing to draw.
+    /// The strip's columns in milliseconds, oldest first, at most
+    /// [`graph::GRAPH_COLUMNS`]. Empty when there is nothing to draw.
+    ///
+    /// One value per interval until the window is wider than the strip, and the
+    /// worst interval of each bucket after that — see [`graph::series`]. Held in an
+    /// `Arc` so handing one snapshot to every element of a frame copies a pointer.
     pub samples_ms: Arc<[f32]>,
+    /// The largest number of intervals one column of [`FrameSnapshot::samples_ms`]
+    /// stands for: `1` when every interval has its own column.
+    pub column_span: usize,
 }
 
 impl Default for FrameSnapshot {
@@ -161,15 +168,27 @@ impl Default for FrameSnapshot {
             source: None,
             metrics: None,
             samples_ms: Arc::from(Vec::new()),
+            column_span: 0,
         }
     }
 }
 
-/// Why there is no source, as a short phrase for the log.
+/// What the reader is currently reading, as the thing the log announces.
+///
+/// **Identity, not activity.** The variant carries no sample count, no frame rate
+/// and no timestamp on purpose: a key that moved with the window's contents would
+/// announce a "change" on every poll — during warm-up the window grows on each one,
+/// and afterwards the sample count drifts with the game's frame rate — and a log
+/// that fires four times a second while nothing is wrong is a log nobody reads.
+/// What it does carry is enough to tell the states apart that matter: no source
+/// (with the reason), a source appearing, a source being read, and a *different*
+/// source taking over.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Availability {
+    /// No usable source, with the reason it is unusable.
     Absent(String),
-    Live { pid: u32, samples: usize },
+    /// This pid is being read.
+    Live { pid: u32 },
 }
 
 /// The reader's state machine: it turns a directory into a [`FrameSnapshot`] and
@@ -225,19 +244,26 @@ impl Poller {
             }
         };
 
-        let window = stats::window(&reading.intervals, window_seconds as f64 * 1000.0);
+        // The configured window, in milliseconds: what the statistics are computed
+        // over when the history covers it, and what the result reports against when
+        // it does not (`Metrics::is_short`).
+        let requested_ms = window_seconds as f64 * 1000.0;
+        let window = stats::window(&reading.intervals, requested_ms);
+        // The strip covers the same window as the numbers: the whole sample set,
+        // folded into the strip's fixed column count with its peaks intact.
+        let series = graph::series(&window);
         let snapshot = FrameSnapshot {
             source: Some(Source {
                 pid: reading.header.pid,
                 exe_name: display_name(&reading.header.exe_name, reading.header.pid),
             }),
-            metrics: stats::metrics(&window),
-            samples_ms: Arc::from(graph::samples(&window)),
+            metrics: stats::metrics(&window, requested_ms),
+            samples_ms: Arc::from(series.columns),
+            column_span: series.span,
         };
 
         self.announce(Availability::Live {
             pid: reading.header.pid,
-            samples: window.len(),
         });
         snapshot
     }
@@ -257,8 +283,8 @@ impl Poller {
             Availability::Absent(reason) => {
                 log::debug!("panel frames: no source ({reason})");
             }
-            Availability::Live { pid, samples } => {
-                log::info!("panel frames: reading pid {pid}, {samples} interval(s) in the window");
+            Availability::Live { pid } => {
+                log::info!("panel frames: reading pid {pid}");
             }
         }
         self.announced = Some(state);
@@ -515,6 +541,7 @@ mod tests {
         assert!((metrics.avg_fps - 125.0).abs() < 1e-6, "{metrics:?}");
         assert!((metrics.low_1pct - 125.0).abs() < 1e-6, "{metrics:?}");
         assert_eq!(snapshot.samples_ms.len(), 120);
+        assert_eq!(snapshot.column_span, 1, "120 intervals, 120 columns");
         assert!(snapshot.samples_ms.iter().all(|ms| *ms == 8.0));
         assert!(snapshot.metrics.is_some());
     }
@@ -587,6 +614,7 @@ mod tests {
         assert_eq!(snapshot.source.expect("named").pid, 7004);
         assert!(snapshot.metrics.is_none());
         assert!(snapshot.samples_ms.is_empty());
+        assert_eq!(snapshot.column_span, 0);
         assert!(!snapshot.metrics.is_some());
     }
 
@@ -624,6 +652,10 @@ mod tests {
         // The strip draws the newest 120 either way.
         assert_eq!(one.samples_ms.len(), 120);
         assert_eq!(ten.samples_ms.len(), 120);
+        // Both windows are wider than the strip, so both are bucketed: 125 intervals
+        // into 120 columns puts two in one of them, 1250 puts eleven.
+        assert_eq!(one.column_span, 2);
+        assert_eq!(ten.column_span, 11);
     }
 
     #[test]
@@ -654,9 +686,77 @@ mod tests {
         flat.set_last_present_ns(now_for(0));
         let long = poller.poll(Some(flat_scratch.path()), 10, now);
         let drawn = &long.samples_ms;
-        assert_eq!(drawn.len(), graph::GRAPH_SAMPLES);
+        assert_eq!(drawn.len(), graph::GRAPH_COLUMNS);
         assert_eq!(long.metrics.expect("numbers").samples, 600);
+        assert_eq!(long.column_span, 5, "600 intervals into 120 columns");
         assert!(drawn.iter().all(|ms| *ms == 8.0), "no unwritten slots");
+    }
+
+    #[test]
+    fn the_strip_covers_the_whole_window_and_keeps_an_early_spike() {
+        // The regression this exists for, stated through the poller rather than
+        // through `graph` alone: a 10 s window of 8 ms frames with one 40 ms hitch at
+        // its very beginning. The strip used to draw the newest 120 intervals -- all
+        // of them ordinary, 2000 frames after the hitch -- so the graph showed a flat
+        // line while `low_1pct` in the row beside it counted the hitch.
+        let scratch = Scratch::new("earlyspike");
+        let mut fake = FakeWriter::new(scratch.path(), 7009, 4096);
+        fake.record(2000, 8_000_000);
+        // Overwrite the oldest slot the window will read with the hitch. The window
+        // is 10 s = 1250 intervals, so the hitch sits at the front of it and 1249
+        // ordinary frames follow.
+        fake.set_slot((2000 - 1250) % 4096, 40_000_000);
+        fake.set_last_present_ns(now_for(0));
+
+        let mut poller = Poller::default();
+        let snapshot = poller.poll(Some(scratch.path()), 10, Some(FakeWriter::present_ns_for(0)));
+        let metrics = snapshot.metrics.expect("numbers");
+        assert_eq!(metrics.samples, 1250, "the whole window, not the newest 120");
+        assert!(
+            metrics.low_1pct < 100.0,
+            "the hitch is in the statistics: {metrics:?}"
+        );
+        let columns = &snapshot.samples_ms;
+        assert_eq!(columns.len(), graph::GRAPH_COLUMNS);
+        assert!(
+            columns.iter().any(|ms| *ms == 40.0),
+            "the earliest spike must still own a column: {columns:?}"
+        );
+    }
+
+    #[test]
+    fn a_window_longer_than_the_ring_history_is_reported_as_short() {
+        // `window_seconds` permits 60 s; the ring holds 4096 intervals. At 6.06 ms
+        // per frame that is ~24.8 s of history, so the requested window can never be
+        // covered -- and the snapshot says so through `Metrics`, over the statistics
+        // of what does exist, instead of presenting 24.8 s as 60 s.
+        let scratch = Scratch::new("shortwindow");
+        let mut fake = FakeWriter::new(scratch.path(), 7010, 4096);
+        fake.record(5000, 6_000_000); // 30 s recorded, 4096 intervals (24.576 s) retained
+        fake.set_last_present_ns(now_for(0));
+
+        let mut poller = Poller::default();
+        let snapshot = poller.poll(Some(scratch.path()), 60, Some(FakeWriter::present_ns_for(0)));
+        let metrics = snapshot.metrics.expect("numbers");
+        assert_eq!(metrics.samples, 4096, "everything the ring still holds");
+        assert_eq!(metrics.requested_ms, 60_000.0);
+        assert!(metrics.is_short(), "{metrics:?}");
+        assert_eq!(metrics.window_ms, 4096.0 * 6.0, "the covered span is the samples'");
+        assert!(
+            (metrics.coverage() - 0.4096).abs() < 0.001,
+            "{}",
+            metrics.coverage()
+        );
+
+        // The same segment under a window the history covers reports full coverage,
+        // so "short" is a property of the request, not a blanket warning.
+        let fits = poller
+            .poll(Some(scratch.path()), 10, Some(FakeWriter::present_ns_for(0)))
+            .metrics
+            .expect("numbers");
+        assert!(!fits.is_short(), "{fits:?}");
+        assert_eq!(fits.coverage(), 1.0);
+        assert_eq!(fits.samples, 1667, "10 s of exactly-6 ms frames");
     }
 
     #[test]
@@ -678,6 +778,56 @@ mod tests {
     }
 
     // ---- logging ----
+
+    #[test]
+    fn a_live_source_is_not_re_announced_as_its_window_grows_or_fluctuates() {
+        // The regression this exists for: the announcement key used to include the
+        // window's sample count, so warm-up (a growing window) and ordinary frame-rate
+        // variation (a wandering one) each produced a "change" -- four log lines a
+        // second for the whole run of a game, saying nothing had changed.
+        let scratch = Scratch::new("warmup");
+        let mut fake = FakeWriter::new(scratch.path(), 7050, 4096);
+        let mut poller = Poller::default();
+
+        // A segment that has just appeared with one interval: the source is new, so
+        // exactly one announcement.
+        fake.record(1, 8_000_000);
+        fake.set_last_present_ns(now_for(0));
+        let _ = poller.poll(Some(scratch.path()), 10, Some(now_for(0)));
+        assert_eq!(poller.announcements(), 1, "the source appeared");
+
+        // Warm-up: the window grows from 1 to 600 intervals, and the frame time
+        // wanders between 6 and 16 ms while it does.
+        let mut samples_seen = Vec::new();
+        for step in 1..=12u64 {
+            let value = if step % 2 == 0 { 6_000_000 } else { 16_000_000 };
+            fake.record(50, value);
+            fake.set_last_present_ns(now_for(0));
+            let snapshot = poller.poll(Some(scratch.path()), 10, Some(now_for(0)));
+            let samples = snapshot.metrics.expect("numbers").samples;
+            samples_seen.push(samples);
+            assert_eq!(
+                poller.announcements(),
+                1,
+                "the sample count changed to {samples} while the source stayed live"
+            );
+        }
+        assert!(
+            samples_seen.first() < samples_seen.last(),
+            "premise: the window grew during the run: {samples_seen:?}"
+        );
+        assert!(
+            samples_seen.windows(2).all(|pair| pair[0] <= pair[1]),
+            "premise: monotone growth here, fluctuation in the frame times: {samples_seen:?}"
+        );
+
+        // A different game taking over IS a change worth one line.
+        let mut other = FakeWriter::new(scratch.path(), 7051, 4096);
+        other.record(60, 8_000_000);
+        other.set_last_present_ns(now_for(0) + 1_000);
+        let _ = poller.poll(Some(scratch.path()), 10, Some(now_for(0) + 1_001));
+        assert_eq!(poller.announcements(), 2, "a different pid is a new source");
+    }
 
     #[test]
     fn availability_changes_are_announced_once_and_unavailability_is_not_spammed() {

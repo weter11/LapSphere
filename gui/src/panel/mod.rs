@@ -95,6 +95,39 @@ use std::path::PathBuf;
 
 pub use config::{normalize, PanelConfig, PANEL_CONFIG_FILE};
 
+/// One frame's view of the panel's data: the hardware state, plus **one** frame
+/// snapshot.
+///
+/// # Why one snapshot
+///
+/// The six frame elements describe one interval: `fps`, `frame_time`, the two lows
+/// and the strip are computed from the same sample set, and the game name says which
+/// process that set came from. If each element asked the reader separately, an `fps`
+/// could be read from one poll and the `low_1pct` beside it from the next — two
+/// different measurements of two different intervals, presented as one reading, with
+/// the strip a third. The reader polls on another thread, so that is not a
+/// theoretical interleaving: it is what happens whenever a poll lands mid-frame.
+///
+/// So the caller acquires the snapshot **once**, before anything is drawn, and hands
+/// it to every element through this value. A row has no other route to a snapshot in
+/// the render path: [`rows::RowKind::Text`] takes a [`PanelView`], not an
+/// `AppState`, and the strip draws [`PanelView::frames`] like the text rows do.
+/// `every_frame_element_reads_the_snapshot_it_was_given` in `rows` is the guard: it
+/// publishes a *different* snapshot to the reader after the view is built and fails
+/// if any element's value moves.
+pub struct PanelView<'a> {
+    /// The hardware state every non-frame row reads.
+    pub state: &'a crate::app::AppState,
+    /// The one frame snapshot for this frame — the same one for every element.
+    pub frames: &'a frames::FrameSnapshot,
+}
+
+impl<'a> PanelView<'a> {
+    pub fn new(state: &'a crate::app::AppState, frames: &'a frames::FrameSnapshot) -> PanelView<'a> {
+        PanelView { state, frames }
+    }
+}
+
 /// `~/.config/lapsphere/panel.json`.
 pub fn panel_config_path() -> PathBuf {
     let mut path = PathBuf::from(crate::app::get_config_dir());

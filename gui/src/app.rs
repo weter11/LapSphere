@@ -1343,8 +1343,16 @@ impl LapSphereApp {
         );
         let frame = egui::Frame::central_panel(ui.style()).fill(background);
 
+        // ONE snapshot for this frame, taken before anything is drawn and handed to
+        // every element: an fps, a frame time, a 1 % low, the game name and the strip
+        // must describe the same poll. The reader polls on its own thread, so asking
+        // per row would let a poll land mid-frame and put two different measurements
+        // side by side as one reading.
+        let frames = self.state.frames.snapshot();
+        let view = crate::panel::PanelView::new(&self.state, &frames);
+
         CentralPanel::default().frame(frame).show_inside(ui, |ui| {
-            crate::panel::render::draw(ui, &self.state, &self.panel_config);
+            crate::panel::render::draw(ui, &view, &self.panel_config);
             let response = ui.interact(
                 ui.max_rect(),
                 ui.id().with("panel_surface"),

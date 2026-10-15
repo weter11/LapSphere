@@ -37,6 +37,7 @@ use super::config::{visible_row_ids, PanelConfig};
 use super::frames;
 use super::layout::{self, LABEL_GAP, LABEL_WIDTH, PADDING_X};
 use super::rows;
+use super::PanelView;
 
 /// The font the panel renders rows in: monospace, so a changing digit does not
 /// shift the column.
@@ -138,6 +139,12 @@ fn elide(ui: &egui::Ui, text: &str, font: &FontId, width: f32) -> String {
 /// `ui` is expected to be a `CentralPanel` sized to the computed panel window, so
 /// painting here cannot itself change the window.
 ///
+/// `view` carries the frame's ONE snapshot (see [`PanelView`]), so every frame
+/// element on screen — the five text rows and the strip — describes the same poll.
+/// This function never asks the reader for a snapshot of its own; a row that did
+/// would be one frame's worth of interleaving away from contradicting the row above
+/// it.
+///
 /// **The returned rect is not the right-click target.** The panel registers its
 /// interaction rect as `ui.max_rect()` in `App::draw_panel`, so the target is the
 /// panel's whole content area and takes no part in the paint order. The two rects
@@ -146,7 +153,7 @@ fn elide(ui: &egui::Ui, text: &str, font: &FontId, width: f32) -> String {
 /// panel's `max_rect()` — and the test below holds that equality, which is what
 /// makes either choice harmless today. A caller that wants to know what was
 /// painted reads this return value; a caller that wants a click target must not.
-pub fn draw(ui: &mut egui::Ui, state: &crate::app::AppState, config: &PanelConfig) -> Rect {
+pub fn draw(ui: &mut egui::Ui, view: &PanelView<'_>, config: &PanelConfig) -> Rect {
     let font = row_font_id(ui);
     let metrics = font_row_height(ui);
     let text_color = ui.visuals().weak_text_color();
@@ -184,7 +191,7 @@ pub fn draw(ui: &mut egui::Ui, state: &crate::app::AppState, config: &PanelConfi
             text_color,
         );
 
-        match row.text(state) {
+        match row.text(view) {
             Some(value) => {
                 let tint = value.tint.unwrap_or_else(|| ui.visuals().text_color());
                 painter.text(
@@ -196,13 +203,13 @@ pub fn draw(ui: &mut egui::Ui, state: &crate::app::AppState, config: &PanelConfi
                 );
             }
             None => {
-                // The strip. One snapshot clone per frame, not one per row: it is
-                // the only row that needs the samples.
-                let samples = state.frames.snapshot().samples_ms;
+                // The strip draws the series from the SAME snapshot the text rows
+                // read -- that is the whole point of `PanelView`: an fps and the
+                // shape beside it cannot come from different polls.
                 frames::graph::draw(
                     ui,
                     value_rect,
-                    &samples,
+                    &view.frames.samples_ms,
                     ui.visuals().text_color(),
                     ui.visuals().extreme_bg_color,
                 );
@@ -221,6 +228,7 @@ mod tests {
     use crate::app::AppState;
     use crate::panel::config::{RowConfig, PANEL_CONFIG_VERSION};
     use crate::panel::frames::{stats, FrameSnapshot, Source};
+    use crate::panel::PanelView;
     use egui::Context;
     use std::sync::Arc;
 
@@ -269,11 +277,31 @@ mod tests {
         ])
     }
 
+    /// The point counts of every polyline painted.
+    fn path_points(shapes: &[egui::epaint::ClippedShape]) -> Vec<usize> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<usize>) {
+            match shape {
+                egui::Shape::Path(path) => out.push(path.points.len()),
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        walk(shape, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in shapes {
+            walk(&clipped.shape, &mut out);
+        }
+        out
+    }
+
     /// Give a state a live frame snapshot, the way the worker would.
     fn live_state() -> AppState {
         let state = AppState::new();
         let window: Vec<f64> = (0..600).map(|_| 6.06).collect();
-        let metrics = stats::metrics(&window).expect("metrics");
+        let metrics = stats::metrics(&window, 0.0).expect("metrics");
         state.frames.publish_for_test(FrameSnapshot {
             source: Some(Source {
                 pid: 9911,
@@ -281,6 +309,7 @@ mod tests {
             }),
             metrics: Some(metrics),
             samples_ms: Arc::from(vec![6.06f32; 120]),
+            column_span: 1,
         });
         state
     }
@@ -307,6 +336,8 @@ mod tests {
     fn the_interaction_rect_matches_the_painted_rect_at_the_call_site() {
         let state = AppState::new();
         let config = config_with(&["cpu_processor", "gpu_name", "ram_usage"]);
+        let snapshot = state.frames.snapshot();
+        let view = PanelView::new(&state, &snapshot);
         let ctx = Context::default();
         let mut input = egui::RawInput::default();
         input.screen_rect = Some(Rect::from_min_size(
@@ -324,7 +355,7 @@ mod tests {
                 egui::CentralPanel::default()
                     .frame(frame)
                     .show_inside(ui, |ui| {
-                        painted = draw(ui, &state, &config);
+                        painted = draw(ui, &view, &config);
                         target = ui.max_rect();
                     });
             });
@@ -347,7 +378,9 @@ mod tests {
         let config = config_with(&["cpu_processor", "gpu_name", "ram_usage", "gamepad_battery"]);
 
         with_ui(300.0, 200.0, |ui| {
-            let rect = draw(ui, &state, &config);
+            let snapshot = state.frames.snapshot();
+            let view = PanelView::new(&state, &snapshot);
+            let rect = draw(ui, &view, &config);
             assert!(rect.height() > 0.0);
         });
     }
@@ -358,11 +391,17 @@ mod tests {
         // (every text row `—`, the strip empty) and live.
         let config = frame_config();
         with_ui(300.0, 300.0, |ui| {
-            let rect = draw(ui, &AppState::new(), &config);
+            let state = AppState::new();
+            let snapshot = state.frames.snapshot();
+            let view = PanelView::new(&state, &snapshot);
+            let rect = draw(ui, &view, &config);
             assert!(rect.height() > 0.0);
         });
         with_ui(300.0, 300.0, |ui| {
-            let rect = draw(ui, &live_state(), &config);
+            let state = live_state();
+            let snapshot = state.frames.snapshot();
+            let view = PanelView::new(&state, &snapshot);
+            let rect = draw(ui, &view, &config);
             assert!(rect.height() > 0.0);
         });
     }
@@ -373,7 +412,9 @@ mod tests {
         let config = config_with(&[]);
 
         with_ui(300.0, 40.0, |ui| {
-            let rect = draw(ui, &state, &config);
+            let snapshot = state.frames.snapshot();
+            let view = PanelView::new(&state, &snapshot);
+            let rect = draw(ui, &view, &config);
             // What was painted is returned whatever it holds, so a caller can see
             // the surface even with no rows on. The exact height is the
             // CentralPanel's, not this module's — `layout::height_for` is what
@@ -428,9 +469,17 @@ mod tests {
         let mut absent = Rect::NOTHING;
         let mut live = Rect::NOTHING;
         with_ui(300.0, 320.0, |ui| {
-            absent = draw(ui, &AppState::new(), &config)
+            let state = AppState::new();
+            let snapshot = state.frames.snapshot();
+            let view = PanelView::new(&state, &snapshot);
+            absent = draw(ui, &view, &config)
         });
-        with_ui(300.0, 320.0, |ui| live = draw(ui, &live_state(), &config));
+        with_ui(300.0, 320.0, |ui| {
+            let state = live_state();
+            let snapshot = state.frames.snapshot();
+            let view = PanelView::new(&state, &snapshot);
+            live = draw(ui, &view, &config)
+        });
         assert_eq!(absent, live);
 
         // And the window height the panel asks for does not depend on the data
@@ -451,12 +500,61 @@ mod tests {
         let live = live_state();
         let absent = AppState::new();
         let row = crate::panel::rows::find("fps").expect("row");
+        let absent_snapshot = absent.frames.snapshot();
+        let absent_view = PanelView::new(&absent, &absent_snapshot);
+        let live_snapshot = live.frames.snapshot();
+        let live_view = PanelView::new(&live, &live_snapshot);
         assert_eq!(
-            row.text(&absent).expect("text").text,
+            row.text(&absent_view).expect("text").text,
             crate::stat_format::ABSENT
         );
-        assert_eq!(row.text(&live).expect("text").text, "165.0 fps");
+        assert_eq!(row.text(&live_view).expect("text").text, "165.0 fps");
+        assert_eq!(absent_snapshot.samples_ms.len(), 0);
+        assert_eq!(live_snapshot.column_span, 1);
         assert_eq!(layout_slots(&config), vec![layout::Slot::Row]);
+    }
+
+    #[test]
+    fn the_strip_draws_the_series_of_the_snapshot_it_was_given() {
+        // The structural half of "one snapshot per frame", read off the painted
+        // geometry rather than off the source: the view is built with a THREE-column
+        // series, and the reader is then handed a FIVE-column one. A `draw` that
+        // fetched its own snapshot -- which is what it used to do for the strip --
+        // would paint five points.
+        let state = AppState::new();
+        let three = FrameSnapshot {
+            samples_ms: Arc::from(vec![8.0f32, 9.0, 10.0]),
+            column_span: 1,
+            ..FrameSnapshot::default()
+        };
+        let five = FrameSnapshot {
+            samples_ms: Arc::from(vec![1.0f32, 2.0, 3.0, 4.0, 5.0]),
+            column_span: 1,
+            ..FrameSnapshot::default()
+        };
+        let view = PanelView::new(&state, &three);
+        state.frames.publish_for_test(five);
+
+        let config = config_with(&["frametime_graph"]);
+        let ctx = Context::default();
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(300.0, 120.0),
+        ));
+        let output = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                draw(ui, &view, &config);
+            });
+        });
+
+        let points = path_points(&output.shapes);
+        assert_eq!(
+            points,
+            vec![3],
+            "the strip painted {points:?} points; 5 means it read the reader instead \
+             of the view"
+        );
     }
 
     #[test]

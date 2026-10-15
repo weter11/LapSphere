@@ -60,6 +60,15 @@ impl FakeWriter {
         self.write_header(self.pid().expect("pid"), 0);
     }
 
+    /// Overwrite one ring slot **by slot index** (not by frame number), so a test
+    /// can place a single interval — a spike — without disturbing the pattern the
+    /// rest of the ring holds.
+    pub fn set_slot(&mut self, slot: usize, value_ns: u64) {
+        assert!(slot < self.capacity, "slot {slot} outside the {}-slot ring", self.capacity);
+        self.write_slot(slot, value_ns);
+        self.file.flush().expect("flush");
+    }
+
     /// The header as of the last write, with a chosen sequence number.
     pub fn write_header(&mut self, pid: u32, seq: u64) {
         let mut buf = [0u8; HEADER_LEN];
@@ -112,10 +121,6 @@ impl FakeWriter {
     /// Cut the file short.
     pub fn truncate(&mut self, len: u64) {
         self.file.set_len(len).expect("set_len");
-    }
-
-    pub fn capacity(&self) -> usize {
-        self.capacity
     }
 
     pub fn frames(&self) -> u64 {
