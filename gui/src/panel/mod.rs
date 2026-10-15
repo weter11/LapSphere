@@ -31,13 +31,18 @@
 //!   `_NET_WM_STATE_SKIP_PAGER`), asked of the window manager with a
 //!   boundedly-retried, non-blocking EWMH message and confirmed by reading the
 //!   state back. A logged no-op off X11 and on a Wayland window.
+//! * [`visibility`] — the two ways the panel is shown and hidden again without
+//!   touching `panel.json`: a configurable global hotkey on X11/Xwayland
+//!   (`XGrabKey` on the root window, grabbed and polled on one connection), and
+//!   the `TogglePanel` D-Bus method on the GUI's own `io.lapsphere.Gui` name,
+//!   which is what `lapsphere --toggle-panel` calls. It also holds the
+//!   hide-safety rule: hiding is only carried out when a way back exists.
 //!
 //! # What is NOT in this PR, by decision
 //!
 //! * fps, frame time, graphs, ring buffers, the Vulkan layer, click-through and
 //!   the F8 interactivity key. No reserved slots for them either: a slot with no
 //!   producer is a permanent row of dashes.
-//! * The hotkey and the D-Bus toggle (PR 3). Nothing here implements either.
 //! * Wayland. The panel uses only `ViewportCommand`s, which is the portable
 //!   subset; the X11-specific work is PR 2's and is not tested on Wayland. The
 //!   stored position is X11-only for the same reason: `outer_rect` is not
@@ -67,6 +72,7 @@ pub mod layout;
 pub mod menu;
 pub mod render;
 pub mod rows;
+pub mod visibility;
 pub mod window;
 
 use std::path::PathBuf;
@@ -281,6 +287,20 @@ mod tests {
         let json = std::fs::read_to_string(panel_file(&dir.path())).unwrap();
         assert!(json.contains("\"width\": 355.0"), "got {json}");
         assert_eq!(load_from(&dir.path()).width, 355.0);
+    }
+
+    #[test]
+    fn the_hotkey_survives_a_save_and_is_read_back_verbatim() {
+        // "A configurable global show/hide hotkey, persisted in panel.json":
+        // what the settings surface wrote is what the next start grabs.
+        let dir = TestDir::new("hotkey");
+        let mut config = normalize(PanelConfig::fresh());
+        config.hotkey = "Control+Alt+F5".to_string();
+        save_to(&dir.path(), &config).unwrap();
+
+        let json = std::fs::read_to_string(panel_file(&dir.path())).unwrap();
+        assert!(json.contains("\"hotkey\": \"Control+Alt+F5\""), "got {json}");
+        assert_eq!(load_from(&dir.path()).hotkey, "Control+Alt+F5");
     }
 
     #[test]

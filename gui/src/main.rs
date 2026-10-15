@@ -1,4 +1,5 @@
 mod app;
+mod bus_connection;
 mod dbus_client;
 mod gamepad_registry;
 mod theme;
@@ -74,7 +75,7 @@ fn check_single_instance_linux(rt: &tokio::runtime::Runtime) -> Option<zbus::Con
                 };
 
                 let reply = dbus.request_name(
-                    "io.lapsphere.Gui".try_into().unwrap(),
+                    crate::bus_connection::GUI_BUS_NAME.try_into().unwrap(),
                     zbus::fdo::RequestNameFlags::DoNotQueue.into()
                 ).await;
 
@@ -117,6 +118,41 @@ fn check_single_instance_windows() -> Option<isize> {
         }
         Some(handle)
     }
+}
+
+/// Handle `--toggle-panel`: ask a running GUI to show or hide its panel.
+///
+/// Its own runtime, created here rather than reused: this path returns before the
+/// GUI's runtime exists, and `block_on` inside a running runtime panics. The
+/// underlying call has a bounded timeout and distinguishes "no GUI owns the
+/// name", "no control object" and "did not answer", each with its own message and
+/// a non-zero exit — see `panel::visibility::run_toggle_cli`.
+#[cfg(target_os = "linux")]
+fn toggle_running_panel() -> Result<(), eframe::Error> {
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(err) => {
+            eprintln!("LapSphere: could not start a runtime to reach the running GUI: {err}");
+            std::process::exit(1);
+        }
+    };
+
+    match rt.block_on(panel::visibility::run_toggle_cli()) {
+        Ok(()) => {
+            println!("LapSphere: panel toggled");
+            Ok(())
+        }
+        Err(err) => {
+            eprintln!("LapSphere: {err}");
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn toggle_running_panel() -> Result<(), eframe::Error> {
+    eprintln!("LapSphere: --toggle-panel is not supported on this platform");
+    std::process::exit(1);
 }
 
 // Replace glibc malloc with mimalloc: glibc's per-thread arena pool retains
@@ -226,6 +262,14 @@ fn main() -> Result<(), eframe::Error> {
     let start_in_tray_arg = args.contains(&"--tray".to_string());
     let start_in_panel_arg = args.contains(&"--panel".to_string());
 
+    // `--toggle-panel` asks the GUI that is ALREADY RUNNING to show or hide its
+    // panel, over D-Bus. Handled before the single-instance guard on purpose: a
+    // second GUI must refuse to start, but this command has to reach the first
+    // one rather than be turned away with it.
+    if args.contains(&"--toggle-panel".to_string()) {
+        return toggle_running_panel();
+    }
+
     let config = app::load_config_from_disk().unwrap_or_default();
     let start_minimized = start_in_tray_arg || config.start_minimized;
 
@@ -235,10 +279,16 @@ fn main() -> Result<(), eframe::Error> {
     let _enter = rt.enter();
 
     #[cfg(target_os = "linux")]
+    // Park the connection that owns `io.lapsphere.Gui` so the panel's D-Bus
+    // object is exported on THAT connection: an object exported on any other one
+    // is reachable only through that connection's unique name, which is how the
+    // toggle ends up hanging while the process owning the name looks healthy.
     let _instance_guard = match check_single_instance_linux(&rt) {
         Some(conn) => conn,
         None => return Ok(()),
     };
+    #[cfg(target_os = "linux")]
+    bus_connection::set_connection(Some(_instance_guard.clone()));
 
     #[cfg(target_os = "windows")]
     let _instance_guard = match check_single_instance_windows() {

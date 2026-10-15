@@ -3,6 +3,7 @@ use egui::{Align, CentralPanel, Context, FontFamily, FontId, Layout, RichText, T
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::collections::VecDeque;
 use tokio::sync::{mpsc, oneshot};
@@ -506,6 +507,21 @@ pub struct LapSphereApp {
     /// The one window's X11 id, resolved once from the frame. `NotX11` on a
     /// Wayland window, where `_NET_WM_STATE` is not a protocol a client may send.
     panel_window: crate::panel::ewmh::PanelWindow,
+    /// Whether the panel is hidden. Its window is unmapped and nothing is drawn,
+    /// and the hotkey, the tray or `--toggle-panel` brings it back. Never
+    /// persisted: a restart shows the panel, because a machine that came back
+    /// from a reboot with an invisible panel would be a puzzle rather than a
+    /// setting.
+    panel_hidden: bool,
+    /// A hide asked for by the panel's own menu, carried out at the top of the
+    /// next frame: viewport commands are not safe from inside a click handler.
+    pending_hide: bool,
+    /// The hotkey watcher, the D-Bus method and the frame loop share this, and
+    /// the hide-safety rule reads it. See `panel::visibility`.
+    visibility: Arc<crate::panel::visibility::Visibility>,
+    /// The hotkey spec the running watcher grabbed, so the settings field can
+    /// tell an edit from a click into the field it already holds.
+    panel_hotkey_grabbed: String,
 }
 
 #[derive(Debug)]
@@ -830,6 +846,22 @@ impl LapSphereApp {
         // accessory surface and must not be able to keep the GUI from starting.
         let panel_config = crate::panel::load_panel_config();
 
+        // The two routes that can bring a hidden panel back, besides the tray.
+        //
+        // The global hotkey is X11/Xwayland only — the watcher thread reports
+        // `NoDisplay` where there is no X server, and nothing claims a global key
+        // on native Wayland. The D-Bus object is exported on the connection that
+        // owns `io.lapsphere.Gui`, parked in `main` before this: an object
+        // exported on any other connection is unreachable through the well-known
+        // name, so `--toggle-panel` would hang.
+        let visibility = Arc::new(crate::panel::visibility::Visibility::new());
+        #[cfg(target_os = "linux")]
+        crate::panel::visibility::start_hotkey(&panel_config.hotkey, Arc::clone(&visibility));
+        tokio::spawn(crate::panel::visibility::export_control(Arc::clone(
+            &visibility,
+        )));
+        let panel_hotkey_grabbed = panel_config.hotkey.clone();
+
         Self {
             mode: if start_in_panel {
                 Mode::Panel
@@ -846,6 +878,10 @@ impl LapSphereApp {
             panel_atoms: Default::default(),
             panel_atoms_wanted: None,
             panel_window: Default::default(),
+            panel_hidden: false,
+            pending_hide: false,
+            visibility,
+            panel_hotkey_grabbed,
             last_poll_set: Vec::new(),
             panel_menu_open: false,
             settings_open: false,
@@ -1303,8 +1339,17 @@ impl LapSphereApp {
 
             // The right click opens the menu through the ordinary egui path.
             // A left click on the surface closes it rather than opening it.
+            //
+            // The menu's "Hide panel" entry is gated by the safety rule and the
+            // reason travels with it, so the entry and the refusal cannot
+            // disagree about whether a way back exists.
             response.context_menu(|ui| {
-                menu_action = crate::panel::menu::draw_context_menu(ui);
+                menu_action = crate::panel::menu::draw_context_menu(
+                    ui,
+                    self.visibility
+                        .has_return_path(self.state.config.tray_enabled),
+                    self.visibility.grab_status(),
+                );
             });
             if response.clicked() {
                 self.panel_menu_open = false;
@@ -1330,6 +1375,10 @@ impl LapSphereApp {
         self.panel_menu_open = self.panel_menu_open || menu_action != crate::panel::menu::ContextAction::None;
 
         match menu_action {
+            crate::panel::menu::ContextAction::Hide => {
+                self.panel_menu_open = false;
+                self.request_hide();
+            }
             crate::panel::menu::ContextAction::OpenSettings => {
                 self.panel_menu_open = false;
                 self.settings_open = true;
@@ -1378,6 +1427,11 @@ impl LapSphereApp {
 
         let mut outcome = crate::panel::menu::SettingsOutcome::default();
         let mut config = std::mem::take(&mut self.panel_config);
+        let hotkeys = crate::panel::menu::HotkeyState {
+            visibility: &self.visibility,
+            grabbed: &self.panel_hotkey_grabbed,
+            tray_enabled: self.state.config.tray_enabled,
+        };
         ctx.show_viewport_immediate(
             settings_viewport(),
             egui::ViewportBuilder::default()
@@ -1385,7 +1439,13 @@ impl LapSphereApp {
                 .with_title("LapSphere \u{2014} Panel settings")
                 .with_resizable(true),
             |ui, _class| {
-                crate::panel::menu::draw_settings_body(ui, &self.state, &mut config, &mut outcome);
+                crate::panel::menu::draw_settings_body(
+                    ui,
+                    &self.state,
+                    &mut config,
+                    &mut outcome,
+                    &hotkeys,
+                );
             },
         );
         self.panel_config = config;
@@ -1401,10 +1461,25 @@ impl LapSphereApp {
         if outcome.back_to_normal {
             self.pending_mode = Some(Mode::Normal);
         }
-        if outcome.config_changed {
+        if outcome.config_changed || outcome.hotkey_changed {
             if let Err(err) = crate::panel::save_panel_config(&self.panel_config) {
                 log::warn!("could not write {}: {err}", crate::panel::PANEL_CONFIG_FILE);
             }
+        }
+        if outcome.hotkey_changed {
+            // The spec is persisted above, before the grab is replaced: a crash
+            // between the two then leaves a file the next start re-grabs, rather
+            // than a grab the config does not remember.
+            #[cfg(target_os = "linux")]
+            crate::panel::visibility::regrab(
+                &self.panel_config.hotkey,
+                Arc::clone(&self.visibility),
+            );
+            self.panel_hotkey_grabbed = self.panel_config.hotkey.clone();
+            log::info!(
+                "panel: the show/hide hotkey is now `{}`",
+                self.panel_config.hotkey
+            );
         }
         if outcome.window_spec_changed {
             // The width and the stacking level are both read fresh from the
@@ -1459,6 +1534,121 @@ impl LapSphereApp {
         self.last_poll_set = wanted;
     }
 
+    /// Show or hide the panel, from the hotkey or from `TogglePanel`.
+    ///
+    /// Runs at the top of the frame, where viewport commands are safe. The
+    /// decision itself is `panel::visibility::toggle_action`, a pure function, so
+    /// every combination of "hidden / not in panel mode / no way back" is
+    /// testable without a window.
+    ///
+    /// A request that arrives while the panel is hidden shows it again before
+    /// anything else is considered: a second hide would leave the user with
+    /// nothing on screen and no second press to undo it.
+    fn apply_visibility_toggle(&mut self, ctx: &Context) {
+        use crate::panel::visibility::ToggleAction;
+
+        let action = crate::panel::visibility::toggle_action(
+            self.panel_hidden,
+            self.mode.is_panel(),
+            self.visibility
+                .has_return_path(self.state.config.tray_enabled),
+        );
+
+        match action {
+            ToggleAction::ShowAgain => {
+                self.panel_hidden = false;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                ctx.request_repaint();
+                log::info!("panel: shown again");
+            }
+            ToggleAction::EnterPanel => {
+                self.panel_hidden = false;
+                // The window may have been minimized to the tray: entering panel
+                // mode is a request to see it.
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                self.pending_mode = Some(Mode::Panel);
+                log::info!("panel: entering panel mode on request");
+            }
+            ToggleAction::Hide => {
+                self.panel_hidden = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                log::info!("{}", self.hidden_message());
+            }
+            ToggleAction::ReturnToNormal => self.refuse_hide(),
+        }
+    }
+
+    /// The line logged when the panel is hidden: which routes actually count.
+    ///
+    /// One function for both hide paths (a toggle request and the menu) so neither
+    /// can promise a hotkey the grab status does not back. A partially captured key
+    /// keeps its watcher and its presses, but it is the tray and the CLI that make
+    /// hiding safe, and the log says so rather than naming a key that may not fire.
+    fn hidden_message(&self) -> &'static str {
+        crate::panel::visibility::hidden_log_line(self.visibility.grab_status())
+    }
+
+    /// A hide asked for by the panel's own menu.
+    ///
+    /// Recorded and carried out at the top of the next frame rather than from
+    /// inside the click handler: a viewport command issued mid-frame is not safe,
+    /// and the reply to the click has to be painted first.
+    fn request_hide(&mut self) {
+        self.pending_hide = true;
+    }
+
+    /// Carry out a hide request, subject to the safety rule.
+    fn apply_hide(&mut self, ctx: &Context) {
+        use crate::panel::visibility::HideOutcome;
+        if self.panel_hidden {
+            return;
+        }
+        // `hotkey_is_reliable_route` and not the watcher predicate: the panel is
+        // left hidden behind a key that must fire in EVERY lock state. A partially
+        // captured hotkey keeps its watcher and its presses, but it is the tray and
+        // the D-Bus method that make hiding safe here.
+        match crate::panel::visibility::hide_outcome(
+            self.visibility.hotkey_is_reliable_route(),
+            self.state.config.tray_enabled,
+            self.visibility.dbus_available(),
+        ) {
+            HideOutcome::Hide => {
+                self.panel_hidden = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                log::info!("{}", self.hidden_message());
+            }
+            HideOutcome::ReturnToNormal => self.refuse_hide(),
+        }
+    }
+
+    /// No way back: refuse to hide and return to the normal window instead.
+    ///
+    /// Shared by the menu and the toggle, so both report the same reason. This is
+    /// the one place the safety rule's refusal becomes visible, which is why the
+    /// message names what is missing rather than saying "not allowed" — including
+    /// the case where the key exists but only covers some lock states, which is a
+    /// different sentence from "there is no hotkey".
+    fn refuse_hide(&mut self) {
+        let status = self.visibility.grab_status();
+        log::warn!(
+            "panel: hiding refused, no reliable way back exists (hotkey: {}); returning to the \
+             normal window instead",
+            status.message()
+        );
+        let reason = if status == crate::panel::visibility::GrabStatus::Partial {
+            "The panel cannot be hidden: the hotkey is only partially captured — some of its \
+             CapsLock / NumLock / ScrollLock combinations could not be captured, and the log \
+             says which — and there is no tray and no `lapsphere --toggle-panel`, so it would \
+             be unreachable. Returned to the normal window instead."
+        } else {
+            "The panel cannot be hidden: there is no hotkey, no tray and no \
+             `lapsphere --toggle-panel`, so it would be unreachable. Returned to the \
+             normal window instead."
+        };
+        self.state.show_message(reason.to_string(), true);
+        self.pending_mode = Some(Mode::Normal);
+    }
+
     /// Push the panel window spec when the mode requires it.
     ///
     /// The decision is `panel::window::mode_to_apply`, a pure function, so the
@@ -1478,6 +1668,16 @@ impl LapSphereApp {
         // returning restores the user's own window size.
         if self.mode == Mode::Normal {
             self.normal_geometry = Some(crate::panel::window::NORMAL_INNER);
+        }
+
+        // Leaving a HIDDEN panel brings the window back with the mode. The
+        // normal window is not a hidden surface, and nothing else maps it on this
+        // path: the tray's "Show Window" is a different route the user may never
+        // take, so without this the app would keep running with no window at all.
+        if target == Mode::Normal && self.panel_hidden {
+            self.panel_hidden = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            log::info!("panel: leaving panel mode, the window is shown again");
         }
 
         let spec = match target {
@@ -1680,10 +1880,17 @@ impl LapSphereApp {
         if let Some(event) = tray.handle_events() {
             match event {
                 TrayEvent::ShowWindow => {
+                    // Also brings back a HIDDEN panel: the tray's "Show Window"
+                    // is one of the routes the hide-safety rule counts on, so it
+                    // has to clear the state that says the panel is not on
+                    // screen, or the window would be mapped with nothing drawn
+                    // into it.
+                    self.panel_hidden = false;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 }
                 TrayEvent::ShowStatistics => {
                     self.state.current_page = Page::Statistics;
+                    self.panel_hidden = false;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 }
                 TrayEvent::SwitchProfile(idx) => {
@@ -1717,6 +1924,24 @@ impl eframe::App for LapSphereApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+
+        // Publish the UI context so a hotkey press or a D-Bus call can wake the
+        // frame loop: egui is not painting while the panel is hidden, so a
+        // request that only set a flag would wait for a frame that may never
+        // come.
+        self.visibility.set_context(ctx.clone());
+
+        // The hotkey thread and `TogglePanel` set different flags, and this one
+        // call drains BOTH: two requests landing in the same frame are one
+        // toggle, not two that cancel each other out.
+        if self.visibility.take_toggle() {
+            self.apply_visibility_toggle(&ctx);
+        }
+        // A hide asked for by the panel's own menu, from the frame it could not
+        // be acted on in.
+        if std::mem::take(&mut self.pending_hide) {
+            self.apply_hide(&ctx);
+        }
 
         // Tell the log-ring poll gate what is actually on screen (see
         // `should_fetch_logs`): a hidden/minimized window stops painting, so the
@@ -1760,6 +1985,18 @@ impl eframe::App for LapSphereApp {
         }
 
         if self.mode.is_panel() {
+            if self.panel_hidden {
+                // Unmapped and not drawn, and no repaint is requested: a hidden
+                // window that kept asking for frames would be a background
+                // process painting into nothing.
+                //
+                // The settings window is a SEPARATE viewport and keeps working.
+                // That matters here rather than being tidiness: it is where the
+                // user goes to change a hotkey that has stopped working.
+                self.draw_settings_window(&ctx);
+                self.apply_settings_outcome(&ctx);
+                return;
+            }
             self.track_panel_position(&ctx);
             self.draw_panel(ui, &ctx);
             ctx.request_repaint_after(Duration::from_millis(500));
@@ -1806,6 +2043,11 @@ impl eframe::App for LapSphereApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Tell the hotkey watcher to exit and release its grab. The grab would
+        // die with the connection when the process ends, but releasing it on the
+        // way out is what makes the key available again to whatever starts next
+        // without waiting for the socket to close.
+        self.visibility.stop();
         if let Some(client) = &self.dbus_client {
             let client = client.clone();
             // Use a fresh runtime for shutdown to avoid potential nesting issues
