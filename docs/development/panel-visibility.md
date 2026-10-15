@@ -171,11 +171,15 @@ sentences.
 
 What the settings surface now shows under the status line:
 
-* **Partial** — "Only some lock-key combinations could be captured: another
-  application owns the rest, so this key may not work with CapsLock, NumLock or
-  ScrollLock on. Which combinations were refused is in the log." The per-mask detail
-  stays in the log: `panel: keycode 38 under none (mask 0x000c) is already grabbed by
-  another client; the hotkey does not fire in that lock state`.
+* **Partial** — "Only some lock-state combinations could be captured, so this key may
+  not work with CapsLock, NumLock or ScrollLock on. Which combination was not acquired,
+  and why, is in the log." The warning names **no cause on purpose**: `Partial` is
+  produced both when a combination is another client's (`BadAccess`) and when the server
+  refused a variant for some other reason, and the status does not carry which one it
+  was — so the line says what happens and sends the user to the log for why. The
+  per-mask detail is there: `panel: keycode 38 under none (mask 0x000c) is already
+  grabbed by another client; the hotkey does not fire in that lock state` for the
+  `BadAccess` case, and `panel: grab of keycode … under … refused (…)` for any other.
 * **An ignored modifier token** — a spec of `Wibble+F9` is stored as typed and
   grabbed as plain `F9`, and the status line alone would read as an exact match for
   a shortcut that does not exist. The warning names the token and the **effective**
@@ -228,6 +232,33 @@ Tests for this commit: focused GUI bin **226 passed, 0 failed**; `cargo test
 --workspace` **340 passed, 0 failed, 6 ignored**. `rustfmt --check` on
 `gui/src/panel/visibility.rs` is clean, and the build reports the same 29 warnings as
 at `367a36c` (`Hotkey::parse` is `#[cfg(test)]`, so the move adds none).
+
+## The partial warning names no cause — branch commit `212ef85`
+
+`212ef8560bda31357d00b94c67c133220f529e30`. `Partial` reaches the surface for two
+different situations, and the warning stated one of them as fact: "another application
+owns the rest" was wrong whenever the missing variant was refused for some other reason
+(`grab_outcome(7, 0, 8)` is exactly that case — one combination acquired, none busy).
+The line now says what the status carries and sends the user to the log for why:
+
+> Only some lock-state combinations could be captured, so this key may not work with
+> CapsLock, NumLock or ScrollLock on. Which combination was not acquired, and why, is in
+> the log.
+
+The same wording rule applies to the refusal message in `app::refuse_hide`, which made
+the identical claim while the panel was being kept visible.
+
+| claim | evidence |
+|---|---|
+| the text says what is missing and what it means | it contains `lock-state`, `may not work`, the three lock-key names, and `log` |
+| it claims no cause | it contains none of `another application`, `another client`, `owns` — asserted for both `grab_outcome(7, 1, 8)` (one combination busy) and `grab_outcome(7, 0, 8)` (no `BadAccess` at all) |
+| the explanation is actually drawn | the painted-frame test asserts `lock-state` is painted for a `Partial` grab and **not** for a complete one — that word is in the warning body only, the status line above it says "some lock states" |
+| the tests discriminate | both fail with the old wording back in place, and pass once it is reverted |
+
+Tests for this commit: focused GUI bin **227 passed, 0 failed**; `cargo test
+--workspace` **341 passed, 0 failed, 6 ignored**. `rustfmt --check` is clean on
+`gui/src/panel/visibility.rs`, `menu.rs` reports the same single pre-existing hunk and
+`app.rs` the same 57 as at the base.
 
 ## What is NOT claimed
 
@@ -288,6 +319,12 @@ debugging session when it was hit again:
   `Wibble+F9` is stored as typed and grabbed as plain `F9`, so the status line reads
   as an exact match for a shortcut that does not exist. Keep the entered string, say
   which token was dropped and what the effective shortcut is.
+* **A status produced for two different causes must not name one of them.** `Partial`
+  covers "another client owns a combination" (`BadAccess`) and "the server refused a
+  variant for another reason"; the line the user reads has to say what happens to the
+  key and point at the log for why, or it is wrong half the time. The same goes for the
+  refusal message and the hide log line — every one of them reads the status, so every
+  one of them has to survive both causes.
 * **A parser called from a render path must not log.** The settings surface re-parses
   the configured spec on every repaint, so a parser that emits its own warnings turns
   an open window into a stream of identical lines. Return what the parse learned
