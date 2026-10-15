@@ -203,6 +203,12 @@ impl GrabStatus {
     /// The details that need per-mask data — which combinations are somebody
     /// else's — stay in the log; this is the part the user has to read to know
     /// what will happen when they press the key.
+    ///
+    /// [`GrabStatus::Partial`] deliberately does **not** name a cause. The status is
+    /// produced for two different situations — combinations another client owns
+    /// (`BadAccess`) and variants the server refused for other reasons — and the status
+    /// itself does not carry which one it was, so the line sends the user to the log
+    /// rather than stating a reason it cannot know.
     pub fn warning(self) -> Option<&'static str> {
         match self {
             GrabStatus::Busy => Some(
@@ -210,9 +216,9 @@ impl GrabStatus {
                  the tray or `lapsphere --toggle-panel`.",
             ),
             GrabStatus::Partial => Some(
-                "Only some lock-key combinations could be captured: another application owns \
-                 the rest, so this key may not work with CapsLock, NumLock or ScrollLock on. \
-                 Which combinations were refused is in the log.",
+                "Only some lock-state combinations could be captured, so this key may not work \
+                 with CapsLock, NumLock or ScrollLock on. Which combination was not acquired, and \
+                 why, is in the log.",
             ),
             _ => None,
         }
@@ -1909,6 +1915,45 @@ mod tests {
             "the one line must not read as a complete capture: {}",
             GrabStatus::Partial.message()
         );
+    }
+
+    #[test]
+    fn the_partial_warning_does_not_state_a_reason_the_status_cannot_know() {
+        // `Partial` covers two different situations: combinations another client owns
+        // (`BadAccess`) and variants the server refused for some other reason. The one
+        // warning is drawn for both, so it must not claim ownership — the per-mask
+        // reason is in the log, and only there.
+        assert_eq!(
+            grab_outcome(7, 1, 8),
+            GrabStatus::Partial,
+            "one busy combination"
+        );
+        assert_eq!(
+            grab_outcome(7, 0, 8),
+            GrabStatus::Partial,
+            "one combination refused for a reason that is not `BadAccess`"
+        );
+
+        let warning = GrabStatus::Partial.warning().expect("a partial grab warns");
+        assert!(
+            warning.contains("lock-state"),
+            "it says what is missing: {warning}"
+        );
+        assert!(
+            warning.contains("may not work"),
+            "and what that means for the user: {warning}"
+        );
+        for key in ["CapsLock", "NumLock", "ScrollLock"] {
+            assert!(warning.contains(key), "and names {key}: {warning}");
+        }
+        assert!(warning.contains("log"), "and points at the log: {warning}");
+        for claim in ["another application", "another client", "owns"] {
+            assert!(
+                !warning.contains(claim),
+                "the status does not carry the cause, so the line must not say {claim:?}: \
+                 {warning}"
+            );
+        }
     }
 
     #[test]

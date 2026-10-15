@@ -1636,10 +1636,10 @@ impl LapSphereApp {
             status.message()
         );
         let reason = if status == crate::panel::visibility::GrabStatus::Partial {
-            "The panel cannot be hidden: the hotkey is only partially captured (another \
-             application owns some of its CapsLock / NumLock / ScrollLock combinations) and \
-             there is no tray and no `lapsphere --toggle-panel`, so it would be unreachable. \
-             Returned to the normal window instead."
+            "The panel cannot be hidden: the hotkey is only partially captured — some of its \
+             CapsLock / NumLock / ScrollLock combinations could not be captured, and the log \
+             says which — and there is no tray and no `lapsphere --toggle-panel`, so it would \
+             be unreachable. Returned to the normal window instead."
         } else {
             "The panel cannot be hidden: there is no hotkey, no tray and no \
              `lapsphere --toggle-panel`, so it would be unreachable. Returned to the \

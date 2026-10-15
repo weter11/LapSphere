@@ -740,11 +740,16 @@ mod tests {
     fn the_settings_surface_warns_when_the_key_is_only_partially_captured() {
         // The brief's requirement, checked on the painted frame: a partial grab must
         // not read as a complete one, and the warning has to name the lock keys the
-        // user will find it does not work with.
+        // user will find it does not work with. "lock-state" appears in the warning
+        // body only — the status line above it says "some lock states".
         let partial = painted_text("Control+Alt+A", GrabStatus::Partial, false);
         assert!(
             painted_contains(&partial, "some lock states"),
             "the status line must not read as a complete capture: {partial:#?}"
+        );
+        assert!(
+            painted_contains(&partial, "lock-state"),
+            "and the explanation it points at must be drawn: {partial:#?}"
         );
         for key in ["CapsLock", "NumLock", "ScrollLock"] {
             assert!(
@@ -765,6 +770,7 @@ mod tests {
             !painted_contains(&complete, "some lock states"),
             "{complete:#?}"
         );
+        assert!(!painted_contains(&complete, "lock-state"), "{complete:#?}");
         for key in ["CapsLock", "NumLock", "ScrollLock"] {
             assert!(!painted_contains(&complete, key), "{complete:#?}");
         }
