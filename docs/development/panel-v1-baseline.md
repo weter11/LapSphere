@@ -46,6 +46,50 @@ commit `565930e`"). §5 row 4 and §8 are updated by it. No other row, criterion
 conclusion changed, and this page's own base and the line numbers below are still
 as of `17ece90`.*
 
+*Revision 6 (a commit on the stage-6 implementation PR; base `b0b27e3` = the merge of
+PR #130): **two rows change, and only two.** Stage 1 is no longer a failure:
+interception landed in PR #124 (merge `ec7a359`, head `edbb096`), and the three
+questions that stage left open — overhead in microseconds, agreement with MangoHud,
+robustness — were measured on PR #125, which is **open**, on a clean tree at commit
+`514bba3ce7ed`. §3.3 and §5 row 1 record that evidence and, just as importantly, what
+it does not cover. Stage 6 is implemented and unit-tested on this commit's tree and is
+recorded as `IMPLEMENTED — live acceptance NOT TESTED` rather than `PASS`, because this
+page's rule is that a status needs an observation of the *behaviour*, and no live game
+was driven with the reader in the loop; §5 row 6 and the "blocking non-conformance"
+paragraph are rewritten by it, and §4's inconsistency table is settled. The six frame
+elements now have their own page, [`panel-frames.md`](./panel-frames.md). Stage 7 is
+not started and nothing here claims it.*
+
+*Not re-checked by revision 6, and not claimed by it either: the page's own base and
+every line number outside §3.3, §4 and §5's rows 1 and 6 are still as of `17ece90`. In
+particular §5's rows 2, 3 and 5 are left exactly as revision 5 wrote them — this
+revision offers no opinion on them, and they were not re-based onto the merges of PRs
+#126, #127, #129 and #130 that followed their evidence. One of them is demonstrably
+out of date as of this base and is flagged rather than silently repaired: row 3 says
+"no `WindowLevel` anywhere in `gui/src`, no `ClientMessage`, no `_NET_WM_STATE`, no X11
+code at all", while `gui/src/panel/ewmh.rs` and `gui/src/panel/window.rs` in this tree
+send exactly those (PR #127, merge `7262c5b`). Re-stating stages 2, 3 and 5 belongs to
+whoever holds their evidence; offering a verdict here would be a status assigned with
+no observation behind it.*
+
+*Revision 7 (a commit on the same PR, addressing its review): no row's state changes —
+stage 1 is still `GO gate MET` with PR #125 unmerged, stage 6 is still `IMPLEMENTED —
+live acceptance NOT TESTED`, and stage 7 is still not started. Four semantics were
+corrected inside stage 6, and they are recorded here because the page's own text
+describes the element behaviour: the strip now covers the **whole** statistics window
+with peak-preserving columns instead of the newest 120 intervals (a 10 s window at
+165 fps is ~1650 intervals); a `window_seconds` the reader's 4096-interval ring cannot
+fill is **reported** through `Metrics::window_ms` against `requested_ms` rather than
+presented as the requested window; availability announcements are keyed on **which**
+source is read, not on its sample count, so warm-up and frame-rate variation are
+silent; and the panel takes **one** snapshot per frame for all six elements. Section
+5 row 6's evidence count is updated to this commit's run. Section 3's measurements and
+every other row are untouched by it.*
+
+*Revision 7 also states what it does **not** claim: these are unit-test and
+structural-assertion changes, so row 6's `NOT TESTED` half is unchanged and nothing
+here has been observed against a live game.*
+
 Companion pages: [`panel-measurements.md`](./panel-measurements.md) holds the
 measurements taken for the merged panel (PR 1) and their own limits;
 [`panel-transparency.md`](./panel-transparency.md) holds the stage-4 transparency
@@ -171,38 +215,78 @@ grabbed on one X connection while every press was polled on another (the log sai
 "captured" and the key did nothing). A third, `bf7945d`, corrected function-key
 keysym/keycode lookup.
 
-### 3.3 The Vulkan layer (#111) — not working
+### 3.3 The Vulkan layer — round 1 (#111), interception merged (#124), the gate measured on an open PR (#125)
 
-`spike/vk-layer/STATUS.md` (branch `feat/mini-panel`): *"**NOT WORKING** … nothing
-here has produced a measurement yet."* Concretely: the layer is enumerated and
-loaded, `vkCreateInstance` completes, `frames-<pid>` is created in
-`$XDG_RUNTIME_DIR/lapsphere/` with mode 0600 and the protocol-v1 size — but
+**Round 1 is kept as history, because its diagnosis is instructive.** On branch
+`feat/mini-panel`, `spike/vk-layer/STATUS.md` said *"**NOT WORKING** … nothing here has
+produced a measurement yet"*: the layer was enumerated and loaded, `vkCreateInstance`
+completed, `frames-<pid>` was created in `$XDG_RUNTIME_DIR/lapsphere/` with mode
+0600 and the protocol-v1 size — and
 
 ```
 enabled; segment created gipa=0 create_instance=1 create_device=0 gdpa=0
   destroy_device=0 create_swapchain=0 destroy_swapchain=0 queue_present=0
 ```
 
-`frame_count` stays **0**. Our `vkGetInstanceProcAddr` is never called, so no
-device is registered and `vkQueuePresentKHR` is never intercepted. The remaining
-blocker is the **loader interface**, not frame timing. Five bugs are already
-documented there with the value that proved each one (including a gipa from
-`libVkLayer_MESA_device_select.so` that never returns on this host, and the
-working route via the loader terminator in `libvulkan.so.1.4.341`).
+so `frame_count` stayed **0**, because our `vkGetInstanceProcAddr` was never called.
+**Round 2 retracted the conclusion drawn from that counter**, and the retraction is
+worth naming: the counters were printed at the end of `vkCreateInstance`, a point at
+which only zero is possible, and the real blockers were three uses of the loader's
+dispatch chain — the `VK_LAYER_LINK_INFO` node was never consumed (so
+`libVkLayer_MESA_device_select.so` called itself), and "next" was resolved from the
+loader terminator instead of from the link. The loader's own line numbers for all
+three are in the header of `spike/vk-layer/src/lib.rs` on the merged tree. The manifest
+`functions` map was a red herring: the loader consults it only when negotiation
+supplied no `vkGetInstanceProcAddr`.
 
-The design's **GO gate** for the layer as a whole — loads and stays inert without
-its variable, agreement with MangoHud, overhead below 10 µs median, survives exit /
-`kill -9` / resize / two instances / no reader, with no influence on the game on any
-failure — therefore has **no measured result at all**: #111 states that tests 1–6
-(MangoHud agreement, per-hook overhead, robustness, reader latency and CPU at 60 and
-240 Hz, the `frametime_stats.py` A/B) are all outstanding.
+**Interception is merged, and it was measured.** PR #124 (merge `ec7a359`, branch head
+`edbb096`) records `vkQueuePresentKHR=900` for `vkcube --c 900`, **899** intervals in
+the shared-memory ring — `writer_final: intervals=899 dropped=0 presents=900`, asserted
+by the harness rather than inferred — read back by an independent second process, with
+the application exiting 0. With the layer's variable unset: no segment, no layer log,
+the loader never activates it (checks C3/C3b). Both manifest shapes intercept 900
+presents (C4). The ring's wraparound run returns the full 4096 slots with **0**
+zero-valued slots (C5).
 
-**`docs/development/frametime-layer-spike.md` does not exist on any branch**
-(checked with `git ls-tree` on both `feat/mini-panel` and `feat/panel-ui`). That
-matters: `panel-design.md`'s criteria 9–12 point their status at that file
-("Measured in the spike — see `frametime-layer-spike.md` §3" and so on). Those
-pointers resolve to nothing, so criteria 9–12 are recorded here as
-**UNRESOLVED**, and no spike number may be quoted as a measurement.
+**The GO gate now has measured results — on PR #125, which is open.** Its battery ran
+on a clean tree (`0 dirty paths`) at commit `514bba3ce7ed`, build id
+`514bba3ce7ed/718336e1a120`:
+
+* **overhead** — the layer's own in-band sample of its present work: median
+  **0.050–0.090 µs** unthrottled and **0.120–0.141 µs** under vsync (p99 0.12–0.88 µs),
+  with an out-of-band control (`primitive_bench`: 30 ns for the clock pair, 10–30 ns for
+  `record()`, 6.792 µs for a hot 64 KiB mmap+copy) showing what the measurement itself
+  costs. The throughput A/B is a *rate* delta (single reps scatter ±2.5–3.7 µs), and
+  PR #125 reads it as a bound on the whole hook — below ~1–2 µs — rather than as an
+  overhead figure. No frame time is quoted as overhead;
+* **agreement with MangoHud** — p50 **6.0662 vs 6.0661 ms** (164.85 fps both), p99
+  9.8543 vs 9.8243 ms; aligned per-frame durations median **+0.54 µs** (limiter off) and
+  **+0.67 µs** (limiter 120). The gate's "median within 1 %" is met, and p99 is read
+  against the run-to-run noise floor, as the design says it must be;
+* **robustness** — R1 clean exit; R2 `kill -9` (status 137, orphan segment readable,
+  `--prune` clears it, next run normal); R3 three live resizes (2500 presents, 4
+  swapchain creations, `intervals = 2500 − 1 − 3` **holds**); R4 two instances; R5 no
+  reader at all (`intervals = presents − 1`, exit 0); R6 reader cost 27–98 µs per poll
+  at 60 and 240 Hz, 0.25–2.875 % of one core; R7 a writer that cannot be created stays
+  fail-open; R8 `SIGSTOP`/`SIGCONT`. Two reader defects were found and fixed there with
+  regression checks.
+
+**What that does not cover, and must not be read as covered:** the pid-reuse `O_EXCL`
+variant (it needs a pid namespace, and unprivileged ones are unavailable on this host —
+measured), 240 Hz as a *present* rate (the panel is 165 Hz; the 240 Hz figure is a
+reader poll rate or a synthetic writer), an interactive resize on the host session (it
+offers no window control: `wmctrl -l` prints nothing and `xdotool search --class .`
+finds no window while an xlib `vkcube` runs, which is why R3 ran under Xvfb+lavapipe),
+and every workload other than `vkcube` — no DXVK/Proton/Wine, no OpenGL, no 32-bit, no
+anti-cheat, no GPU-bound title.
+
+**`docs/development/frametime-layer-spike.md` still does not exist on any branch**
+(checked with `git ls-tree -r --name-only` on `feat/mini-panel` and `feat/panel-ui`), so
+`panel-design.md`'s criteria 9–12, whose status text says "Measured in the spike — see
+`frametime-layer-spike.md` §3", still point at a file that is not there. Those criteria
+are no longer *unresolved* — the measurements exist — but they are not *here*: read them
+against `spike/vk-layer/STATUS.md` and `spike/vk-layer/TESTING.md` on PR #125, or
+against PR #125's body, which carries the same tables.
 
 ### 3.4 What #121 settled about the credibility of the history — kept as history
 
@@ -236,8 +320,9 @@ requirement:
 * Consequence: an external process cannot see the game's present, so the data must
   come from **inside the game process** — a Vulkan implicit layer that timestamps
   `vkQueuePresentKHR` and publishes intervals through shared memory. That layer
-  **does not work yet** (§3.3, `frame_count = 0`), and stage 1 is the work that gets
-  it to produce frames.
+  **works** (§3.3: interception merged in PR #124; the GO gate's measurements on PR
+  #125, still open), and the GUI reads its segment directly — no daemon method, no
+  D-Bus object, no protocol change (stage 6).
 * First-release non-goals, kept so the scope cannot widen silently: no OpenGL hook,
   no 32-bit games, no Wayland-specific layer work (every Wayland *claim* is NOT
   TESTED), no anti-cheat and no DXVK/Proton coverage (the spike ran on `vkcube`).
@@ -245,22 +330,23 @@ requirement:
   binaries on #111/#115 are throwaway instruments; their numbers are not product
   measurements and must not stand in for the layer's.
 
-**Inconsistency to remove during implementation.** The merged tree states the
-opposite of this decision in prose. Those statements are no longer a live
-disagreement — the decision is the owner's and it is fixed — but they contradict it
-and they will mislead whoever implements stages 1 and 6:
+**The four contradicting statements: settled by the implementation (stage 6).** The
+merged tree used to state the opposite of this decision in prose, and revision 5 listed
+the four places. All four are gone, in the stage-6 commit:
 
-| Where | What it says |
+| Where | What it says now |
 |---|---|
-| `gui/src/panel/mod.rs:27-29` | "**No reserved slots** for them either: a slot with no producer is a permanent row of dashes" |
-| `gui/src/panel/mod.rs:39-49` | records the scope question as undecided ("Whether the FIRST release carries fps … is NOT decided by the merged code… the decision is the owner's and is not made here") |
-| `gui/src/panel/config.rs:23` | "**No frame-time / fps rows and no ring buffer.** Out of scope by decision; the reserved-slot idea that would have needed them is not carried over" |
-| `docs/development/panel-measurements.md`, "Not verified" | lists the frame elements as "not implemented anywhere" and calls their inclusion an unresolved owner decision |
+| `gui/src/panel/mod.rs` | "The frame elements are first-release elements — settled": the registry rows, the reserved slot, the two settings and the reader are named, and the "no reserved slots" argument is recorded as withdrawn |
+| `gui/src/panel/mod.rs` | the "the decision is the owner's and is not made here" note is replaced by what that decision produced |
+| `gui/src/panel/config.rs` | "**No frame-time / fps rows and no ring buffer**" is replaced by the two keys those rows need (`window_seconds`, `refresh_hz`) and by the note that their defaults are the design's *proposals*, not owner decisions |
+| `docs/development/panel-measurements.md`, "Not verified" | the frame elements are no longer called unimplemented or undecided; the row now points at the implementation and states what is still unobserved |
 
-Note the first row especially: it is not wording, it is the **layout decision**
-stage 6 depends on. Removing the four statements belongs to the implementation of
-stages 1 and 6; this page only records them as an inconsistency to settle, and
-makes no code change.
+The first of those was the **layout decision** stage 6 depended on, and the reservation
+is now real rather than promised: `layout::Slot::GraphStrip` is three row heights at
+every font size, the label column is the measured `LABEL_WIDTH`, and
+`the_same_geometry_with_and_without_frame_data` asserts that a config paints identical
+rects with and without data. The six rows are **off by default** — the same rule the
+gamepad block follows — so no existing user's panel changes size on upgrade.
 
 ## 5. Acceptance criteria for the first version — the agreed stages 1–7
 
@@ -290,33 +376,32 @@ requirement itself is undecided, or the merged scope contradicts it.
 
 | # | Stage | State | Evidence | What remains |
 |---|---|---|---|---|
-| 1 | **Research: real fps / frametime from inside the game process** (Vulkan implicit layer + shared-memory protocol) | **FAIL** — in progress, no frames recorded | Branch `feat/mini-panel` (PR #111), `spike/vk-layer/STATUS.md`: the layer enumerates and loads, `vkCreateInstance` completes, `frames-<pid>` is created with mode 0600 and the protocol-v1 size — but the counters read `gipa=0 create_instance=1 create_device=0 gdpa=0 destroy_device=0 create_swapchain=0 destroy_swapchain=0 queue_present=0`, so **`frame_count = 0`** and **`gipa = 0`**: our `vkGetInstanceProcAddr` is never called, no device is registered, and `vkQueuePresentKHR` is never intercepted. STATUS.md: "NOT WORKING … nothing here has produced a measurement yet". The blocker is an **interface question with the Vulkan loader**, not frame timing. The design's GO gate has no result (tests 1–6 outstanding), and `frametime-layer-spike.md` does not exist, so criteria 9–12 are UNRESOLVED. **PR #112's repaint work is not frame capture**: it requests a frame when *polled daemon data* arrives, observes no presents, and the merged tree contains no fps/frametime code at all (`gui/src/panel/rows.rs` has no frame row) | Answer the loader-interface question (the manifest's `functions`/negotiation route, or a working reference layer for this loader), then run the four spike tests (agreement with MangoHud, per-hook overhead, robustness, reader latency and CPU at 60 and 240 Hz), then criterion 13's Rust-vs-`frametime_stats.py` parity test. Until `frame_count > 0` no fps element may be claimed, and stage 6 cannot start |
+| 1 | **Research: real fps / frametime from inside the game process** (Vulkan implicit layer + shared-memory protocol) | **GO gate MET — on evidence that is partly merged and partly on an open PR** | Interception is **merged**: PR #124, merge `ec7a359`, branch head `edbb096` — `vkQueuePresentKHR=900` for `vkcube --c 900`, 899 intervals in the ring, read back by an independent process, exit 0; inert with the variable unset; both manifest shapes intercept; 0 zero-slots after wraparound. The gate's four areas are measured on **PR #125 — open, unmerged** — a clean-tree battery at commit `514bba3ce7ed` (build id `514bba3ce7ed/718336e1a120`): (a) inert without its variable — the merged spike's C3/C3b checks; (b) overhead median **0.050-0.090 us** unthrottled and **0.120-0.141 us** vsync, with the throughput A/B bounding the whole hook below ~1-2 us, i.e. under the gate's 10 us median; (c) agreement with MangoHud p50 **6.0662 vs 6.0661 ms** (164.85 fps both), aligned per-frame median **+0.54 us** / **+0.67 us**; (d) robustness R1-R8 — clean exit, `kill -9` (137, orphan readable and prunable), three live resizes (2500 presents, 4 swapchain recreations), two instances, no reader, reader cost 27-98 us/poll at 60 and 240 Hz, fail-open, `SIGSTOP`/`SIGCONT`. Criterion 13's Rust-vs-reference parity test now exists (stage 6, `frames/stats.rs`, run against `docs/development/tools/frametime_stats.py` itself) | What the gate does not cover stays uncovered: the pid-reuse `O_EXCL` variant, 240 Hz as a **present** rate, an interactive resize on the host session, and every workload other than `vkcube` (no DXVK/Proton/Wine, no OpenGL, no 32-bit, no anti-cheat, no GPU-bound title). Under this page's own rule an unmerged branch is never sufficient for `PASS` (§3.4), so the row is recorded as **GO gate met on named evidence** rather than `PASS`: PR #125 must merge, or its battery be re-run on the merged tree, before that word is used. `docs/development/frametime-layer-spike.md` still does not exist, so `panel-design.md`'s criteria 9-12 point at a file that is not there; their measurements live in `spike/vk-layer/STATUS.md`, `TESTING.md` and PR #125's body |
 | 2 | **Position: save and restore**, clamped against the monitor size and confirmed by read-back | **FAIL** | The merged tree has **no position code at all**: no `OuterPosition` / `ViewportCommand::OuterPosition`, no monitor clamp anywhere in `gui/src`, and no position field in `PanelConfig` (`gui/src/panel/config.rs:185-196`). `gui/src/panel/config.rs:26-28`: "**No position.** The panel is placed by the window manager / desktop for now; a stored corner is the second-monitor question, which is explicitly NOT claimed"; `gui/src/panel/mod.rs:36-37` repeats it for multi-monitor. The only attempt is on the unmerged branch: #115's historical result — stored `top_left, offset 24,24`, the panel came up at `0,43` after a restart — recorded there as a real defect, tied to no single commit, and therefore **not** a verification of anything in the merged tree | Implement (with the stacking work), apply, and confirm the applied position by read-back (`xwininfo`/`xprop`) rather than trusting the request — a request that is sent is not a request that landed (§3.4). Multi-monitor placement stays out of the first version unless the owner decides otherwise |
 | 3 | **Window flags and behaviour over other windows**: runtime always-on-top, no taskbar/switcher entry, no-op-tolerant where the platform cannot do it | **FAIL** | Provably absent in the merged tree: `apply_spec` sends only `MinInnerSize`, `Resizable`, `Decorations`, `InnerSize` (`gui/src/panel/window.rs:124-131`); no `WindowLevel` anywhere in `gui/src`; no `ClientMessage`, no `_NET_WM_STATE`, no X11 code at all; `stacking` and `hide_from_taskbar` are parsed, clamped and normalized only. `gui/src/panel/mod.rs:30-33` assigns the atoms to a later PR and states that nothing claims they are applied. Historical (not evidence about the merged tree), from #111's overlay tests on xfwm4 4.20 with **no compositor**: the **runtime** `WindowLevel(AlwaysOnTop)` is honoured where the startup builder hint is ignored (B9/B14), and ADD of `SKIP_TASKBAR`+`SKIP_PAGER` by EWMH `ClientMessage` is honoured on a `Normal` window once the message arrives after the window settles (0 ms and 50 ms fail, 100 ms+ works — B18/B18d) | Implement, then measure the **combination** — one window that is both always-on-top *and* skip-taskbar, over a borderless-fullscreen game — which is **NOT TESTED anywhere**; each half was proven separately. No claim about another WM, about a compositor-on session, or about Wayland (`_NET_WM_STATE` is X11-only, and a Wayland client may not set it) |
 | 4 | **Real transparency** (an actual translucent surface, not a drawn rectangle) | **PASS** on the merge commit `565930e` | In the merged tree at this page's base `background_opacity` is a config field only: defined with `MIN_BACKGROUND_OPACITY = 0.25`, clamped and normalized (`gui/src/panel/config.rs`), and **nothing applies it** — no `with_transparent`, no ARGB or alpha path anywhere in `gui/src`, and the panel's frame is left at egui's default opaque `CentralPanel` because "the opaque background and its transparency are PR 2's work" (`gui/src/app.rs:1252`). Historical: #111's B8 measured that a transparent window shows the root window's black rather than the desktop **when no compositor is present**. Implemented and measured on **PR #128 (unmerged, head `098c740`)**, in a session that composites — X11 on Xwayland under xfwl4: the window holds an ARGB visual (`Depth 32`), its own surface carries the configured alpha (one value `255` at 1.0; `128` at 0.5 with the glyph pixels still `255`), the screen at 50 % blends the fill with the measured backdrop (which is not visible through it at 100 %) while the text does not fade, and the ordinary window's surface is alpha `255` in every sampled pixel. Numbers, session and limits: [`panel-transparency.md`](./panel-transparency.md). **This is now `PASS`**: the implementation landed in the merge commit `565930e` (PR #128, 2026-10-14), and the acceptance run on that commit is the section "The acceptance run — merge commit `565930e`" on that page — clean worktree at `565930e`, `cargo build -p lapsphere --bin lapsphere` + `cargo test -p lapsphere --bin lapsphere` (163 passed), binary sha256 `81ab06c7…f6896`, session X11 on Xwayland under xfwl4, `Depth 32` surface, `255` in every surface pixel at 100 % with **0** of 87 271 sampled screen pixels inside the panel showing the green backdrop behind it (screen == surface exactly for 81 005, within ±2 for a further 5 426, and 840 further apart — the values repainted between the two captures); the slider dragged live to 0.48 gives a `(13,14,15)` fill at alpha `122` with the glyph pixels still `255` and reading `(219,220,219)` on screen (text sharing the opacity would read `(105,183,105)`) and the backdrop showing through at `B_eff`/backdrop = 0.748; one drag back to the right end returns every surface pixel to `255` and `panel.json` to `1.0` **with the process never restarting** (`pid 2475744` throughout, `panel.json` written by the app); the context menu is alpha `255` over 30 163 of 31 832 sampled pixels of its rectangle while the background behind it is `122`; and without `--panel` the ordinary window is `Depth 32` with all 1 107 882 surface pixels alpha `255` and **0** pixels showing the backdrop | Still NOT TESTED anywhere: a compositor other than xfwl4, a session without a compositor, and native Wayland. The slider's live path is claimed for a session in which injected pointer input reaches the X11 client; the condition that has to hold for that — and the state of this session in which it did not — is named on the transparency page ("The input route") |
 | 5 | **Hotkey and D-Bus** control (mode toggle by key and over the bus, with the hide-safety rule) | **FAIL** | Absent from the merged tree: no hotkey handling (no `F8`/`Shift_R` code; `gui/src/panel/mod.rs:30-31` assigns it to a later PR), no panel D-Bus method in `daemon/src` or the GUI, no `--toggle-panel`; mode is switched by restarting with `--panel` or from the in-window button and menu. `gui/src/panel/config.rs:29-30`: "**No hotkey or D-Bus fields.** Those arrive with the visibility work (PR 3)". Historical, branch-only: #115 recorded 20/20 `--toggle-panel` runs and the hotkey firing under XTEST with NumLock/CapsLock/ScrollLock, and found three defects that exist **only** as its fixes — the D-Bus object exported on a second connection (the toggle hung), the key grabbed on one X connection and polled on another, and a function-key keysym/keycode error | Implement; carry those three fixes instead of rediscovering them. NOT TESTED anywhere: the "key already taken" (`BadAccess`) path, keyboard pass-through, and every Wayland claim |
-| 6 | **Integration of the metrics into the panel** (the six frame elements, their config block, the shm reader) | **FAIL** for the current implementation — and the integration is blocked by a non-conformance in the merged layout (see **Blocking non-conformance** below the table) | Not implemented: the merged registry has 23 ids and **no frame row** (`gui/src/panel/rows.rs`), and the merged layout decision explicitly refuses what this stage needs — `gui/src/panel/mod.rs:27-29`: "No reserved slots for them either: a slot with no producer is a permanent row of dashes" — while the design required the six frame rows' **reserved widths** from the start so that landing the data cannot reflow the panel (its criterion 4). The owner's decision (§4) therefore has nowhere to land in the merged layout, and `gui/src/panel/mod.rs:39-49` still describes the question as open. On the unmerged branch the registry did carry `fps`, `fps_graph` and `frametime_graph` ids — with no producer, which is exactly what the merged decision rejects | Settle the reservation question for the integration: the layout decision this stage needs is required **after** frame capture is confirmed, not before it, and stage 1 does not depend on it. Then: reader selection by `STALE_AFTER = 2 s`, the statistics window for 1 %/0.1 % low, the fixed-height graph strip, `—` when there is no source. Blocked on stage 1: with `frame_count = 0` there is no value to integrate |
-| 7 | **Final acceptance of the first version** | **NOT TESTED** — cannot start | No end-to-end acceptance run exists on any commit. The evidence behind stages 1–6 is either absent from the merged tree (2–5), contradicted by it (6), or a failure on an unmerged branch with no commit identity (1). No acceptance criteria for the agreed stages existed in the merged tree before this page, and no environment matrix has been recorded for an acceptance run | Close stages 1–6 first. The run must name the commit and the build, state per-criterion evidence, name the environment it ran in (WM, compositing state, GPU, X11 or Wayland), and keep its `NOT TESTED` items visible instead of summarising them away. A pass in one of the three independent areas (transparency / window behaviour / fps) says nothing about the others |
+| 6 | **Integration of the metrics into the panel** (the six frame elements, their config block, the shm reader) | **IMPLEMENTED and unit-tested on this commit — live acceptance NOT TESTED** | Six registry rows with the decision's ids under `rows::Group::Frame`, a reserved fixed-height slot (`layout::Slot::GraphStrip`, `GRAPH_STRIP_ROWS` = 3 row heights, at every font size), the two config keys with backwards-compatible defaults and clamps, a settings section, and the reader: protocol-v1 validation in a fixed order with the offending value named, a seqlock read that **discards** a snapshot whose sequence moved, ADR-5's selection rule (`STALE_AFTER = 2 s`, larger pid on ties, `CLOCK_MONOTONIC`), statistics ported from the reference definitions, `-` and an empty strip for an absent source, and no file operation on the rendering path. Evidence: **438 tests pass, 0 fail, 6 ignored** on this commit's tree (`cargo test`; 341 before this work, 324 of them in the GUI binary), including the absence paths, the ring-wraparound and seqlock cases, a real writer thread whose every accepted snapshot must be self-consistent, the geometry-invariance test, the reference-script parity test, and the four review remediations (revision 7): the strip covers the whole statistics window with peak-preserving columns so an early spike survives 2000 later samples; a window the 4096-interval ring cannot fill is reported as partly covered rather than presented as full; availability is announced per source instead of per sample count; and all six elements read one snapshot per frame. Each of those four guards was mutation-checked to fail (the strip fetching its own snapshot, a row fetching its own, the newest-120 series, and a per-poll re-announcement) and the mutations were reverted. The blocking non-conformance is settled (below) | A **live** observation: the panel over a running Vulkan game, with the layer installed and `LAPSPHERE_FRAMES=1`, on a named commit. Nothing in this PR observes the behaviour, so this row is **not** `PASS` under §3.4's rule — unit tests are not an observation of behaviour. Also unmeasured: the panel's own cost with these rows on, and whether 4 Hz is enough for the strip to look like a graph rather than a staircase. Details, activation requirements and the limits: [`panel-frames.md`](./panel-frames.md) |
+| 7 | **Final acceptance of the first version** | **NOT TESTED** — cannot start | No end-to-end acceptance run exists on any commit. The evidence behind stages 1–6 is now a mix that must be kept apart when it is used: measured on an unmerged PR (1 — overhead, MangoHud agreement, robustness), merged and measured (1 — interception), implemented and unit-tested with no live observation (6), and absent from the merged tree or held by other PRs (2–5). No acceptance criteria for the agreed stages existed in the merged tree before this page, and no environment matrix has been recorded for an acceptance run | Close stages 1–6 first. The run must name the commit and the build, state per-criterion evidence, name the environment it ran in (WM, compositing state, GPU, X11 or Wayland), and keep its `NOT TESTED` items visible instead of summarising them away. A pass in one of the three independent areas (transparency / window behaviour / fps) says nothing about the others |
 
-**Blocking non-conformance (stage 6).** The merged layout decision and the owner's
-decision cannot both hold: the panel refuses to reserve space for the frame rows
-(`gui/src/panel/mod.rs:27-29`), while the design requires the six frame rows'
-**reserved widths** from the start, so that landing the data cannot reflow the panel
-(its criterion 4). This is what blocks the *integration* — a reserved slot is where
-the metrics are meant to live, and today there is nowhere for them to land. It blocks
-nothing else: it is not a defect in the layout as it stands, and it is no reason to
-change the panel before there is data to put in it. Settling the reservation, and
-removing the four contradicting statements listed in §4, belong to the implementation
-of stages 1 and 6.
+**The blocking non-conformance (stage 6): settled.** Revision 5 recorded that the merged
+layout decision and the owner's decision could not both hold — the panel refused to
+reserve space for the frame rows, while the design required their reserved widths so
+that landing the data could not reflow the panel. The stage-6 commit implements the
+reservation instead of arguing about it: a strip slot of a fixed number of row heights,
+a label column sized to the widest registered label and asserted by measurement, a value
+column that elides, and `-`/an empty strip in the reserved space when there is no source.
+It blocks nothing else, and it never did: the layout was not defective before the data
+existed, and the six rows are off by default, so no existing panel changes size.
 
 **The dependency chain this table encodes.** Stage 1 is independent research into
 whether real frames can be captured at all: the layer and its reader live outside the
-UI, and nothing in the panel — the layout included — may block it. Stage 6 is what
-needs the layout decision, and it needs it **after** frame capture is confirmed: with
-`frame_count = 0` there is no data for a reserved slot to hold, so the non-conformance
-above blocks the integration, not the research. Stage 7 gates on stages 1–6. The order
-of work stays the one already agreed; this table records status against it and does
-not re-plan it.
+UI, and nothing in the panel — the layout included — may block it. Stage 6 needs the
+layout decision, and it needed it **after** frame capture was confirmed — which is now
+the case: presets are intercepted, the intervals are recorded, and the reservation the
+integration needed is in the layout. Stage 7 gates on stages 1–6, and stage 7 still
+cannot start. The order of work stays the one already agreed; this table records status
+against it and does not re-plan it.
 
 ## 6. Already-merged infrastructure (context, not a stage)
 
@@ -398,7 +483,7 @@ the first version, and none of them may be counted as one:
 | Merged panel's live numbers and their limits | `docs/development/panel-measurements.md`, PR #116 body |
 | Repaint latency measured | PR #112 body ("Measurements") |
 | #115's numbers tied to no commit; failed items | PR #115 body ("Confirmed by measurement", "Failed and inconclusive") |
-| Layer not working, `frame_count = 0`, `gipa = 0`, GO gate outstanding | `spike/vk-layer/STATUS.md` on `feat/mini-panel`, PR #111 body |
+| Round 1: layer not working, `frame_count = 0`, `gipa = 0`, GO gate outstanding (kept as history, retracted in round 2) | `spike/vk-layer/STATUS.md` on `feat/mini-panel`, PR #111 body |
 | `frametime-layer-spike.md` absent | `git ls-tree -r --name-only <branch> -- docs/development/` on both branches |
 | Transparency record (B8: black without a compositor) | `docs/development/panel-overlay-tests.md` on `feat/mini-panel` |
 | Transparency measured on a compositing session (stage 4) | `docs/development/panel-transparency.md` (PR #128, head `098c740`), PR #128 body |
@@ -410,3 +495,10 @@ the first version, and none of them may be counted as one:
 | Agreed first-version stages 1–7 (this table's rows) | the owner-agreement recorded on PR #123; distinct from `panel-design.md`'s staged plan (PR A/D/C/E) |
 | Design stages, criteria 1–13, ADRs, Q1–Q13 | `docs/development/panel-design.md` on `feat/panel-ui` |
 | Retraction, gate-free status, UNRESOLVED compositing | `docs/development/panel-measurements.md` §"What these numbers are tied to", §"Compositing: unresolved", §"The right-click menu — a wrong diagnosis" |
+| Stage-1 interception merged (counters, interval count, inert-without-variable, both manifests, wraparound) | PR #124 (merge `ec7a359`, head `edbb096`); `spike/vk-layer/STATUS.md` and `TESTING.md` on the merged tree |
+| Round-1 diagnosis retracted, with the loader's line numbers | `spike/vk-layer/src/lib.rs` header on the merged tree; `spike/vk-layer/STATUS.md` ("Why round 1 stalled — three causes") |
+| GO gate measured: overhead in us, MangoHud agreement, robustness R1-R8, reader cost at 60/240 Hz, the NOT TESTED list | PR #125 (open), body and `spike/vk-layer/TESTING.md` on branch `spike/vk-layer-stage1b`; clean-tree battery at commit `514bba3ce7ed`, build id `514bba3ce7ed/718336e1a120` |
+| The six frame elements implemented: registry rows, reserved slot, config keys, reader, statistics, tests | this commit; `gui/src/panel/frames/`, `gui/src/panel/{rows,layout,render,config,menu,window}.rs`; `cargo test` = 423 passed / 0 failed |
+| The statistics definitions are the reference's | `docs/development/tools/frametime_stats.py` (unchanged from `feat/mini-panel`, sha256 `4058a81f...`), `gui/src/panel/frames/stats.rs` |
+| Activation requirements (`LAPSPHERE_FRAMES=1`, implicit-layer path, why `VK_LAYER_PATH` is not enough) | `spike/vk-layer/manifests/VK_LAYER_LAPSPHERE_frames.json` and `spike/vk-layer/install.sh` comments, merged tree |
+| Stage-6 status, activation steps, tested/not-tested lists | `docs/development/panel-frames.md` (added by this commit) |

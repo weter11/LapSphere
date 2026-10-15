@@ -57,10 +57,12 @@
 //! left click must never register as a secondary one.
 
 use super::config::{
-    PanelConfig, Stacking, MAX_BACKGROUND_OPACITY, MAX_WIDTH, MIN_BACKGROUND_OPACITY, MIN_WIDTH,
+    PanelConfig, Stacking, MAX_BACKGROUND_OPACITY, MAX_REFRESH_HZ, MAX_WIDTH, MAX_WINDOW_SECONDS,
+    MIN_BACKGROUND_OPACITY, MIN_REFRESH_HZ, MIN_WIDTH, MIN_WINDOW_SECONDS,
 };
 use super::rows::{self, Group};
 use super::visibility::{GrabStatus, Visibility};
+use super::PanelView;
 
 /// Viewport id of the settings window, stable so it is reused rather than
 /// recreated on every open.
@@ -73,13 +75,15 @@ pub fn settings_viewport() -> egui::ViewportId {
 pub const SETTINGS_SIZE: [f32; 2] = [360.0, 640.0];
 
 /// Height the settings body reserves below the scrollable row list: the width and
-/// opacity sliders with their notes, the window controls, the hotkey field with
-/// its status lines, and the Back/Close row.
+/// opacity sliders with their notes, the frame-elements section with its two
+/// sliders and its two notes, the window controls, the hotkey field with its
+/// status lines, and the Back/Close row.
 ///
 /// Measured against those sections rather than guessed. Too small a reserve and
 /// the fixed controls are pushed out of the window, which is exactly how a
-/// control becomes unreachable; too large and the row list has no room.
-const FIXED_SECTION_HEIGHT: f32 = 340.0;
+/// control becomes unreachable; too large and the row list has no room. The
+/// frame-elements section added roughly three label rows to this block.
+const FIXED_SECTION_HEIGHT: f32 = 400.0;
 
 /// What a settings interaction wants done, applied by the caller outside the UI
 /// pass.
@@ -177,12 +181,18 @@ pub fn draw_settings_body(
     outcome: &mut SettingsOutcome,
     hotkeys: &HotkeyState<'_>,
 ) {
+    // One snapshot for the whole settings surface, taken the same way the panel
+    // takes one: the live values beside the checkboxes must agree with each other,
+    // and with what the Frames section below reports about their coverage.
+    let snapshot = state.frames.snapshot();
+    let view = PanelView::new(state, &snapshot);
+
     egui::ScrollArea::vertical()
         .max_height((ui.available_height() - FIXED_SECTION_HEIGHT).max(60.0))
         .show(ui, |ui| {
             ui.label(egui::RichText::new("Rows").strong());
             for group in Group::ALL {
-                draw_group(ui, group, state, config, outcome);
+                draw_group(ui, group, &view, config, outcome);
             }
         });
 
@@ -219,6 +229,56 @@ pub fn draw_settings_body(
              What is behind the panel shows through only under a compositing window \
              manager; without one nothing blends, so a reduced opacity darkens the \
              background instead of making it see-through.",
+        )
+        .weak()
+        .small(),
+    );
+
+    ui.separator();
+
+    // The frame elements: what the source is, and the two numbers they are
+    // computed with. Both numbers are the DESIGN's proposals (its Q9 and Q10) and
+    // not owner decisions, and the note says so on the surface itself: a user who
+    // reads "10 s" here must not be told a prior decision chose it. The panel reads
+    // both fresh every frame, so there is no apply step, and neither is part of the
+    // window spec -- the window's size, level and decorations do not depend on them.
+    ui.label(egui::RichText::new("Frames").strong());
+    ui.label(
+        egui::RichText::new(
+            "Taken from a running Vulkan game's own presents, through the LapSphere \
+             layer in the game's process. Available only where that layer is installed \
+             and the game runs with LAPSPHERE_FRAMES=1; anywhere else these rows read \
+             — and the graph stays empty.",
+        )
+        .weak()
+        .small(),
+    );
+    // What is being read right now, and -- when the requested window is longer than
+    // the recorded history -- how much of it the numbers actually cover. The reader
+    // cannot hold more than its ring, so a 60 s window at a high frame rate is
+    // genuinely short, and saying so is the difference between a smaller statistic
+    // and a wrong one.
+    ui.label(egui::RichText::new(source_report(&view)).weak().small());
+    ui.horizontal(|ui| {
+        ui.label("Statistics window");
+        let (response, seconds) = window_control(ui, config.window_seconds);
+        if response.changed() && seconds != config.window_seconds {
+            config.window_seconds = seconds;
+            outcome.config_changed = true;
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("Refresh");
+        let (response, rate) = refresh_control(ui, config.refresh_hz);
+        if response.changed() && rate != config.refresh_hz {
+            config.refresh_hz = rate;
+            outcome.config_changed = true;
+        }
+    });
+    ui.label(
+        egui::RichText::new(
+            "10 s and 4 Hz are the design's proposed defaults, not an owner \
+             decision — they are configurable here for exactly that reason.",
         )
         .weak()
         .small(),
@@ -386,6 +446,60 @@ fn opacity_control(ui: &mut egui::Ui, current: f32) -> (egui::Response, f32) {
     (response, value)
 }
 
+/// What the frame elements are reading, and how much of the window they cover.
+///
+/// Four states, each a different thing for the user to act on: no source at all
+/// (nothing installed or no game), a source with no interval yet (the layer has
+/// created its segment but no second present has happened), a source whose history
+/// covers the requested window, and a **short** one — the reader retains at most
+/// `frames::shm::MAX_RING_CAPACITY` intervals, so at a high frame rate a long
+/// configured window cannot be filled, and the numbers beside the setting are then
+/// computed over less than it asks for.
+fn source_report(view: &PanelView<'_>) -> String {
+    match (&view.frames.source, view.frames.metrics) {
+        (Some(source), Some(metrics)) if metrics.is_short() => format!(
+            "Reading pid {} ({}) — {:.1} s recorded of the {:.0} s window asked for ({:.0} %)",
+            source.pid,
+            source.exe_name,
+            metrics.window_ms / 1000.0,
+            metrics.requested_ms / 1000.0,
+            100.0 * metrics.coverage()
+        ),
+        (Some(source), Some(metrics)) => format!(
+            "Reading pid {} ({}) — {:.1} s window",
+            source.pid,
+            source.exe_name,
+            metrics.window_ms / 1000.0
+        ),
+        (Some(source), None) => format!(
+            "Reading pid {} ({}) — no interval recorded yet",
+            source.pid, source.exe_name
+        ),
+        (None, _) => {
+            "No source: no running Vulkan game has published any frames.".to_string()
+        }
+    }
+}
+
+/// The statistics-window slider, and the value it now holds.
+///
+/// Clamped to the range `normalize` enforces, exactly as the opacity slider is, so
+/// a drag cannot write a window the reader would then have to refuse.
+fn window_control(ui: &mut egui::Ui, current: u32) -> (egui::Response, u32) {
+    let mut value = current.clamp(MIN_WINDOW_SECONDS, MAX_WINDOW_SECONDS);
+    let response =
+        ui.add(egui::Slider::new(&mut value, MIN_WINDOW_SECONDS..=MAX_WINDOW_SECONDS).suffix(" s"));
+    (response, value)
+}
+
+/// The frame-elements refresh slider, and the value it now holds.
+fn refresh_control(ui: &mut egui::Ui, current: u32) -> (egui::Response, u32) {
+    let mut value = current.clamp(MIN_REFRESH_HZ, MAX_REFRESH_HZ);
+    let response =
+        ui.add(egui::Slider::new(&mut value, MIN_REFRESH_HZ..=MAX_REFRESH_HZ).suffix(" Hz"));
+    (response, value)
+}
+
 /// The show/hide hotkey field, and whether it was just committed.
 ///
 /// Split out and returning its own response for the same reason the sliders are:
@@ -415,7 +529,7 @@ fn hotkey_control(
 fn draw_group(
     ui: &mut egui::Ui,
     group: Group,
-    state: &crate::app::AppState,
+    view: &PanelView<'_>,
     config: &mut PanelConfig,
     outcome: &mut SettingsOutcome,
 ) {
@@ -441,9 +555,10 @@ fn draw_group(
                     {
                         outcome.config_changed = true;
                     }
-                    // The live value, so a checkbox shows what it turns on.
+                    // The live value, so a checkbox shows what it turns on. A strip
+                    // row has no text value; it shows the scale it draws against.
                     ui.label(
-                        egui::RichText::new((row.read)(state).text)
+                        egui::RichText::new(row.menu_value(view))
                             .monospace()
                             .weak(),
                     );
@@ -1104,6 +1219,183 @@ mod tests {
             assert_eq!(high, MAX_BACKGROUND_OPACITY);
             let (_, low) = opacity_control(ui, 0.0);
             assert_eq!(low, MIN_BACKGROUND_OPACITY);
+        });
+    }
+
+    // ---- the frame elements ----
+
+    #[test]
+    fn the_frames_section_names_the_source_and_calls_the_defaults_proposals() {
+        // What the surface says, read off the painted shapes: where the numbers
+        // come from, that the layer has to be installed for them, and that 10 s /
+        // 4 Hz are proposals rather than a decision taken for the user.
+        let painted = painted_text("Shift+F9", GrabStatus::Grabbed, true);
+        for word in [
+            "Frames",
+            "Vulkan",
+            "LAPSPHERE_FRAMES=1",
+            "Statistics window",
+            "Refresh",
+            "proposed defaults",
+            "not an owner",
+        ] {
+            assert!(
+                painted_contains(&painted, word),
+                "the settings surface does not paint {word:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_frames_group_offers_a_checkbox_for_every_frame_element() {
+        // The elements are not on by default, so the menu is the only way to turn
+        // them on: a row whose label never reaches the surface is a row the user
+        // cannot enable.
+        let painted = painted_text("Shift+F9", GrabStatus::Grabbed, true);
+        // The group's collapsible header, and every element's long label. The
+        // group is collapsed by default, so its header is what the surface paints;
+        // its contents are asserted through `Group::of` below rather than by
+        // pretending they are visible.
+        assert!(painted_contains(&painted, Group::Frame.label()));
+        for id in crate::panel::frames::ELEMENT_IDS {
+            let row = rows::find(id).expect("row");
+            assert_eq!(row.group, Group::Frame);
+            assert!(!row.label.is_empty(), "{id} needs a menu label");
+        }
+    }
+
+    /// The whole settings surface, painted with a chosen frame snapshot.
+    fn painted_with_snapshot(snapshot: crate::panel::frames::FrameSnapshot) -> Vec<String> {
+        let ctx = Context::default();
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(SETTINGS_SIZE[0], SETTINGS_SIZE[1]),
+        ));
+        let mut config = PanelConfig::fresh();
+        let mut outcome = SettingsOutcome::default();
+        let visibility = Visibility::new();
+        let state = crate::app::AppState::new();
+        state.frames.publish_for_test(snapshot);
+        let output = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                draw_settings_body(
+                    ui,
+                    &state,
+                    &mut config,
+                    &mut outcome,
+                    &live_hotkeys(&visibility, "Shift+F9", true),
+                );
+            });
+        });
+        let mut text = Vec::new();
+        for clipped in &output.shapes {
+            collect_text(&clipped.shape, &mut text);
+        }
+        text
+    }
+
+    fn live_snapshot(metrics: crate::panel::frames::Metrics) -> crate::panel::frames::FrameSnapshot {
+        crate::panel::frames::FrameSnapshot {
+            source: Some(crate::panel::frames::Source {
+                pid: 4242,
+                exe_name: "vkcube".to_string(),
+            }),
+            metrics: Some(metrics),
+            samples_ms: std::sync::Arc::from(vec![8.0f32; 4]),
+            column_span: 1,
+        }
+    }
+
+    #[test]
+    fn the_frames_section_says_what_it_is_reading_and_how_much_of_the_window_it_covers() {
+        // The reader's ring is bounded, so a long configured window can be only
+        // partly covered. That has to be visible where the window is set: a statistic
+        // over 24 s presented as a 60 s window is not a smaller number, it is a wrong
+        // one. The words are asserted, not the sentence -- a label wraps at the
+        // window width, and wrapping never splits a word.
+        let short = crate::panel::frames::stats::metrics(&vec![6.0f64; 4096], 60_000.0)
+            .expect("metrics");
+        assert!(short.is_short());
+        let painted = painted_with_snapshot(live_snapshot(short));
+        assert!(painted_contains(&painted, "Reading pid 4242"), "{painted:?}");
+        assert!(painted_contains(&painted, "recorded"), "the shortfall is named");
+        assert!(painted_contains(&painted, "asked"));
+    }
+
+    #[test]
+    fn a_covered_window_reads_as_a_window_and_not_as_a_shortfall() {
+        let full = crate::panel::frames::stats::metrics(&vec![6.0f64; 1667], 10_000.0)
+            .expect("metrics");
+        assert!(!full.is_short());
+        let painted = painted_with_snapshot(live_snapshot(full));
+        assert!(painted_contains(&painted, "Reading pid 4242"), "{painted:?}");
+        assert!(
+            !painted_contains(&painted, "recorded"),
+            "a covered window must not be reported as short: {painted:?}"
+        );
+    }
+
+    #[test]
+    fn with_no_source_and_with_no_interval_yet_the_surface_says_which_case_it_is() {
+        let painted = painted_with_snapshot(crate::panel::frames::FrameSnapshot::default());
+        assert!(painted_contains(&painted, "No source"), "{painted:?}");
+
+        // A segment exists (the layer creates it at instance creation) but no second
+        // present has happened yet: a name with no numbers, which is a different
+        // state from "nothing is running".
+        let named = crate::panel::frames::FrameSnapshot {
+            source: Some(crate::panel::frames::Source {
+                pid: 4242,
+                exe_name: "vkcube".to_string(),
+            }),
+            metrics: None,
+            samples_ms: std::sync::Arc::from(Vec::new()),
+            column_span: 0,
+        };
+        let painted = painted_with_snapshot(named);
+        assert!(painted_contains(&painted, "Reading pid 4242"), "{painted:?}");
+        assert!(painted_contains(&painted, "interval"), "{painted:?}");
+    }
+
+    #[test]
+    fn the_window_and_refresh_controls_report_the_value_the_click_asked_for() {
+        let window = click_control(|ui| {
+            let (response, value) = window_control(ui, 10);
+            let changed = response.changed().then_some(value);
+            (response, changed)
+        })
+        .expect("a click on the slider must change the window");
+        assert!(
+            (MIN_WINDOW_SECONDS..=MAX_WINDOW_SECONDS).contains(&window) && window != 10,
+            "clicking mid-track from 10 gave {window}"
+        );
+
+        let refresh = click_control(|ui| {
+            let (response, value) = refresh_control(ui, 4);
+            let changed = response.changed().then_some(value);
+            (response, changed)
+        })
+        .expect("a click on the slider must change the cadence");
+        assert!(
+            (MIN_REFRESH_HZ..=MAX_REFRESH_HZ).contains(&refresh) && refresh != 4,
+            "clicking mid-track from 4 gave {refresh}"
+        );
+    }
+
+    #[test]
+    fn the_frame_controls_clamp_what_they_are_given() {
+        // A hand-edited `panel.json` must not put a handle past the end of the
+        // track, and must not be written back out of range.
+        with_ui(|ui, _config, _outcome| {
+            let (_, high) = window_control(ui, 10_000);
+            assert_eq!(high, MAX_WINDOW_SECONDS);
+            let (_, low) = window_control(ui, 0);
+            assert_eq!(low, MIN_WINDOW_SECONDS);
+            let (_, fast) = refresh_control(ui, 10_000);
+            assert_eq!(fast, MAX_REFRESH_HZ);
+            let (_, slow) = refresh_control(ui, 0);
+            assert_eq!(slow, MIN_REFRESH_HZ);
         });
     }
 

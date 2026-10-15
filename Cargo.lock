@@ -1702,6 +1702,7 @@ dependencies = [
  "env_logger",
  "ksni",
  "lapsphere-common",
+ "libc",
  "log",
  "mimalloc",
  "raw-window-handle",

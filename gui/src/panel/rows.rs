@@ -10,12 +10,19 @@
 //! the layout: the tab renders a two-column `Grid` under collapsing headers,
 //! the panel renders one `Label: value` line per row.
 //!
+//! The six frame rows ([`Group::Frame`]) are the exception, and deliberately so:
+//! the tab has no frame data at all — its numbers come from the daemon, and a
+//! game's present time is not something the daemon can see. Those rows read the
+//! GUI's own shared-memory reader ([`crate::panel::frames`]) and are listed in
+//! `NO_TAB_LABEL` below with that reason.
+//!
 //! # Absent data
 //!
 //! An `Option` field the hardware did not report becomes [`ABSENT`] — an em
 //! dash — rather than a hidden row. That is what keeps the panel's height a pure
-//! function of the row COUNT: a gamepad that disconnects must not make the
-//! window shorter, or the user's other rows move.
+//! function of the row SET: a gamepad that disconnects, a GPU that stops reporting
+//! a clock, or a game that exits must not make the window shorter or otherwise move
+//! the user's other rows.
 //!
 //! # Scope
 //!
@@ -25,9 +32,11 @@
 //! it is [`primary_gpu`] / [`primary_gamepad`] below rather than a bare
 //! `.first()`.
 
-use crate::app::AppState;
 use crate::stat_format::{self, ABSENT};
 use lapsphere_common::types::{GamepadStatus, GpuType};
+
+use super::frames;
+use super::PanelView;
 
 /// Which menu section a row's checkbox lives under.
 ///
@@ -40,11 +49,22 @@ pub enum Group {
     Gpu,
     Ram,
     Gamepad,
+    /// The six frame elements — the owner's first-release decision. Their data
+    /// does not come from the daemon; see the module docs.
+    Frame,
 }
 
 impl Group {
-    /// Every group, in menu order.
-    pub const ALL: [Group; 4] = [Group::Cpu, Group::Gpu, Group::Ram, Group::Gamepad];
+    /// Every group, in menu order. The frame group is last because it describes a
+    /// source that is present only while a game is running, unlike the hardware
+    /// groups above it.
+    pub const ALL: [Group; 5] = [
+        Group::Cpu,
+        Group::Gpu,
+        Group::Ram,
+        Group::Gamepad,
+        Group::Frame,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -52,6 +72,7 @@ impl Group {
             Group::Gpu => "GPU",
             Group::Ram => "RAM",
             Group::Gamepad => "Gamepad",
+            Group::Frame => "Frames",
         }
     }
 
@@ -93,6 +114,25 @@ impl Value {
     }
 }
 
+/// How a row produces what it shows.
+///
+/// Two shapes, and the difference is geometry rather than taste: a text row is one
+/// line in a slot one row high, and a strip row is the frame-time graph in a slot
+/// [`super::layout::GRAPH_STRIP_ROWS`] rows high. Making this a variant rather than
+/// a flag means the renderer cannot ask a strip row for text it does not have.
+pub enum RowKind {
+    /// One `Label: value` line. Never fails: absent data becomes `—`.
+    ///
+    /// The reader takes a [`PanelView`] rather than an `AppState` so that a frame
+    /// row has exactly one source for its value: the snapshot the frame was built
+    /// with (see `PanelView`). A hardware row reads `view.state`; a frame row reads
+    /// `view.frames`.
+    Text(fn(&PanelView<'_>) -> Value),
+    /// The frame-time strip: the recorded intervals, drawn in a reserved slot.
+    /// Nothing is written into the value column.
+    Graph,
+}
+
 /// One row of the panel.
 pub struct Row {
     /// Stable id, and the key in `panel.json`.
@@ -110,13 +150,47 @@ pub struct Row {
     /// keeps its long one. The VALUE is what gets elided instead — an ellipsis
     /// inside a processor name is harmless, an ellipsis inside the word
     /// "Frequency" is not.
+    ///
+    /// Every label here must fit [`super::layout::LABEL_WIDTH`];
+    /// `super::render`'s `every_label_fits_the_label_column` measures them all
+    /// against real font metrics.
     pub panel_label: &'static str,
     pub group: Group,
-    /// Read and format this row's value. Never fails: absent data becomes `—`.
-    pub read: fn(&AppState) -> Value,
+    pub kind: RowKind,
 }
 
-/// Every row, in display order: CPU, then GPU, then RAM, then gamepad.
+impl Row {
+    /// The text this row shows where a text is shown, or `None` for a strip row.
+    ///
+    /// The menu wants a live value next to each checkbox; a strip has none, so the
+    /// menu prints the strip's scale instead.
+    pub fn text(&self, view: &PanelView<'_>) -> Option<Value> {
+        match self.kind {
+            RowKind::Text(read) => Some(read(view)),
+            RowKind::Graph => None,
+        }
+    }
+
+    /// What the settings menu prints beside this row's checkbox.
+    ///
+    /// The menu wants a live value next to every checkbox, and a strip has no text
+    /// value: it prints the scale the strip draws against instead of an empty cell,
+    /// including how many intervals a column stands for when the window is wider than
+    /// the strip.
+    pub fn menu_value(&self, view: &PanelView<'_>) -> String {
+        match self.text(view) {
+            Some(value) => value.text,
+            None => frames::graph::scale_caption(view.frames.column_span),
+        }
+    }
+
+    /// Is this row the frame-time strip?
+    pub fn is_graph(&self) -> bool {
+        matches!(self.kind, RowKind::Graph)
+    }
+}
+
+/// Every row, in display order: CPU, GPU, RAM, gamepad, then the frame elements.
 pub static ROWS: &[Row] = &[
     // ---- CPU: the rows draw_cpu_info shows ----
     Row {
@@ -124,67 +198,67 @@ pub static ROWS: &[Row] = &[
         label: "Processor",
         panel_label: "CPU",
         group: Group::Cpu,
-        read: |state| match &state.cpu_info {
+        kind: RowKind::Text(|view| match &view.state.cpu_info {
             Some(cpu) => Value::plain(&cpu.name),
             None => Value::absent(),
-        },
+        }),
     },
     Row {
         id: "cpu_average_frequency",
         label: "Average Frequency",
         panel_label: "Freq",
         group: Group::Cpu,
-        read: |state| match &state.cpu_info {
+        kind: RowKind::Text(|view| match &view.state.cpu_info {
             // The tab prints this field kHz-scaled; stat_format keeps that.
             Some(cpu) => Value::plain(stat_format::average_frequency_mhz(cpu.average_frequency)),
             None => Value::absent(),
-        },
+        }),
     },
     Row {
         id: "cpu_average_load",
         label: "Average Load",
         panel_label: "Load",
         group: Group::Cpu,
-        read: |state| match &state.cpu_info {
+        kind: RowKind::Text(|view| match &view.state.cpu_info {
             Some(cpu) => Value::tinted(
                 stat_format::percent1(cpu.average_load),
                 stat_format::load_tint(cpu.average_load),
             ),
             None => Value::absent(),
-        },
+        }),
     },
     Row {
         id: "cpu_package_temperature",
         label: "Package Temperature",
         panel_label: "Temp",
         group: Group::Cpu,
-        read: |state| match &state.cpu_info {
+        kind: RowKind::Text(|view| match &view.state.cpu_info {
             Some(cpu) => Value::tinted(
                 stat_format::celsius1(cpu.package_temp),
                 stat_format::temp_tint(cpu.package_temp),
             ),
             None => Value::absent(),
-        },
+        }),
     },
     Row {
         id: "cpu_governor",
         label: "Governor",
         panel_label: "Gov",
         group: Group::Cpu,
-        read: |state| match &state.cpu_info {
+        kind: RowKind::Text(|view| match &view.state.cpu_info {
             Some(cpu) => Value::plain(&cpu.governor),
             None => Value::absent(),
-        },
+        }),
     },
     Row {
         id: "cpu_scaling_driver",
         label: "Scaling Driver",
         panel_label: "Driver",
         group: Group::Cpu,
-        read: |state| match &state.cpu_info {
+        kind: RowKind::Text(|view| match &view.state.cpu_info {
             Some(cpu) => Value::plain(&cpu.scaling_driver),
             None => Value::absent(),
-        },
+        }),
     },
     // ---- GPU: the first entry, which is what a single-column panel can show ----
     Row {
@@ -192,85 +266,103 @@ pub static ROWS: &[Row] = &[
         label: "GPU",
         panel_label: "GPU",
         group: Group::Gpu,
-        read: |state| match primary_gpu(&state.gpu_info) {
+        kind: RowKind::Text(|view| match primary_gpu(&view.state.gpu_info) {
             Some(gpu) => Value::plain(&gpu.name),
             None => Value::absent(),
-        },
+        }),
     },
     Row {
         id: "gpu_type",
         label: "Type",
         panel_label: "Type",
         group: Group::Gpu,
-        read: |state| match primary_gpu(&state.gpu_info) {
+        kind: RowKind::Text(|view| match primary_gpu(&view.state.gpu_info) {
             Some(gpu) => Value::plain(match gpu.gpu_type {
                 GpuType::Integrated => "Integrated",
                 GpuType::Discrete => "Discrete",
             }),
             None => Value::absent(),
-        },
+        }),
     },
     Row {
         id: "gpu_core_frequency",
         label: "Core Frequency",
         panel_label: "Clock",
         group: Group::Gpu,
-        read: |state| match primary_gpu(&state.gpu_info).and_then(|g| g.frequency) {
-            Some(mhz) => Value::plain(stat_format::mhz(mhz)),
-            None => Value::absent(),
-        },
+        kind: RowKind::Text(
+            |view| match primary_gpu(&view.state.gpu_info).and_then(|g| g.frequency) {
+                Some(mhz) => Value::plain(stat_format::mhz(mhz)),
+                None => Value::absent(),
+            },
+        ),
     },
     Row {
         id: "gpu_temperature",
         label: "Temperature",
         panel_label: "Temp",
         group: Group::Gpu,
-        read: |state| match primary_gpu(&state.gpu_info).and_then(|g| g.temperature) {
-            Some(temp) => Value::tinted(stat_format::celsius1(temp), stat_format::temp_tint(temp)),
-            None => Value::absent(),
-        },
+        kind: RowKind::Text(|view| {
+            match primary_gpu(&view.state.gpu_info).and_then(|g| g.temperature) {
+                Some(temp) => {
+                    Value::tinted(stat_format::celsius1(temp), stat_format::temp_tint(temp))
+                }
+                None => Value::absent(),
+            }
+        }),
     },
     Row {
         id: "gpu_load",
         label: "Load",
         panel_label: "Load",
         group: Group::Gpu,
-        read: |state| match primary_gpu(&state.gpu_info).and_then(|g| g.load) {
-            Some(load) => Value::tinted(stat_format::percent1(load), stat_format::load_tint(load)),
-            None => Value::absent(),
-        },
+        kind: RowKind::Text(
+            |view| match primary_gpu(&view.state.gpu_info).and_then(|g| g.load) {
+                Some(load) => {
+                    Value::tinted(stat_format::percent1(load), stat_format::load_tint(load))
+                }
+                None => Value::absent(),
+            },
+        ),
     },
     Row {
         id: "gpu_power",
         label: "Power",
         panel_label: "Power",
         group: Group::Gpu,
-        read: |state| match primary_gpu(&state.gpu_info).and_then(|g| g.power) {
-            Some(watts) => {
-                Value::tinted(stat_format::watts1(watts), stat_format::power_tint(watts))
-            }
-            None => Value::absent(),
-        },
+        kind: RowKind::Text(
+            |view| match primary_gpu(&view.state.gpu_info).and_then(|g| g.power) {
+                Some(watts) => {
+                    Value::tinted(stat_format::watts1(watts), stat_format::power_tint(watts))
+                }
+                None => Value::absent(),
+            },
+        ),
     },
     Row {
         id: "gpu_memory_frequency",
         label: "Memory Frequency",
         panel_label: "MemClk",
         group: Group::Gpu,
-        read: |state| match primary_gpu(&state.gpu_info).and_then(|g| g.memory_frequency) {
-            Some(mhz) => Value::plain(stat_format::mhz(mhz)),
-            None => Value::absent(),
-        },
+        kind: RowKind::Text(|view| {
+            match primary_gpu(&view.state.gpu_info).and_then(|g| g.memory_frequency) {
+                Some(mhz) => Value::plain(stat_format::mhz(mhz)),
+                None => Value::absent(),
+            }
+        }),
     },
     Row {
         id: "gpu_memory_usage",
         label: "VRAM available / total",
         panel_label: "VRAM",
         group: Group::Gpu,
-        read: |state| match primary_gpu(&state.gpu_info).and_then(|g| g.vram_memory.as_ref()) {
-            Some(memory) => Value::plain(format!("{} / {} MiB", memory.free_mib, memory.total_mib)),
-            None => Value::absent(),
-        },
+        kind: RowKind::Text(|view| {
+            match primary_gpu(&view.state.gpu_info).and_then(|g| g.vram_memory.as_ref()) {
+                Some(memory) => {
+                    Value::plain(format!("{} / {} MiB", memory.free_mib, memory.total_mib))
+                }
+                None => Value::absent(),
+            }
+        }),
     },
     // ---- RAM ----
     Row {
@@ -278,69 +370,69 @@ pub static ROWS: &[Row] = &[
         label: "Usage",
         panel_label: "Usage",
         group: Group::Ram,
-        read: |state| match &state.memory_info {
+        kind: RowKind::Text(|view| match &view.state.memory_info {
             Some(mem) => Value::tinted(
                 stat_format::percent1(mem.used_percent),
                 stat_format::load_tint(mem.used_percent),
             ),
             None => Value::absent(),
-        },
+        }),
     },
     Row {
         id: "ram_used",
         label: "Used",
         panel_label: "Used",
         group: Group::Ram,
-        read: |state| match &state.memory_info {
+        kind: RowKind::Text(|view| match &view.state.memory_info {
             Some(mem) => Value::plain(stat_format::gib2(mem.used_gib)),
             None => Value::absent(),
-        },
+        }),
     },
     Row {
         id: "ram_available",
         label: "Available",
         panel_label: "Free",
         group: Group::Ram,
-        read: |state| match &state.memory_info {
+        kind: RowKind::Text(|view| match &view.state.memory_info {
             Some(mem) => Value::plain(stat_format::gib2(mem.available_gib)),
             None => Value::absent(),
-        },
+        }),
     },
     Row {
         id: "ram_total",
         label: "Total",
         panel_label: "Total",
         group: Group::Ram,
-        read: |state| match &state.memory_info {
+        kind: RowKind::Text(|view| match &view.state.memory_info {
             Some(mem) => Value::plain(stat_format::gib2(mem.total_gib)),
             None => Value::absent(),
-        },
+        }),
     },
     Row {
         id: "ram_type",
         label: "Memory Type",
         panel_label: "Type",
         group: Group::Ram,
-        read: |state| match &state.memory_info {
+        kind: RowKind::Text(|view| match &view.state.memory_info {
             Some(mem) => match &mem.memory_type {
                 Some(kind) => Value::plain(kind),
                 None => Value::absent(),
             },
             None => Value::absent(),
-        },
+        }),
     },
     Row {
         id: "ram_frequency",
         label: "Memory Frequency",
         panel_label: "MemClk",
         group: Group::Ram,
-        read: |state| match &state.memory_info {
+        kind: RowKind::Text(|view| match &view.state.memory_info {
             Some(mem) => match mem.memory_frequency {
                 Some(mhz) => Value::plain(stat_format::mhz(mhz)),
                 None => Value::absent(),
             },
             None => Value::absent(),
-        },
+        }),
     },
     // ---- Gamepad: the first remembered one, as the tab's first block ----
     Row {
@@ -348,40 +440,122 @@ pub static ROWS: &[Row] = &[
         label: "Gamepad",
         panel_label: "Pad",
         group: Group::Gamepad,
-        read: |state| match primary_gamepad(&state.config.remembered_gamepads) {
-            Some(pad) => Value::plain(&pad.name),
-            None => Value::absent(),
-        },
+        kind: RowKind::Text(
+            |view| match primary_gamepad(&view.state.config.remembered_gamepads) {
+                Some(pad) => Value::plain(&pad.name),
+                None => Value::absent(),
+            },
+        ),
     },
     Row {
         id: "gamepad_status",
         label: "Status",
         panel_label: "Status",
         group: Group::Gamepad,
-        read: |state| match primary_gamepad(&state.config.remembered_gamepads) {
-            Some(pad) => Value::plain(match pad.status {
-                GamepadStatus::Connected => "Connected",
-                GamepadStatus::Disconnected => "Disconnected",
-            }),
-            None => Value::absent(),
-        },
+        kind: RowKind::Text(
+            |view| match primary_gamepad(&view.state.config.remembered_gamepads) {
+                Some(pad) => Value::plain(match pad.status {
+                    GamepadStatus::Connected => "Connected",
+                    GamepadStatus::Disconnected => "Disconnected",
+                }),
+                None => Value::absent(),
+            },
+        ),
     },
     Row {
         id: "gamepad_battery",
         label: "Battery",
         panel_label: "Batt",
         group: Group::Gamepad,
-        read: |state| match state
-            .config
-            .remembered_gamepads
-            .first()
-            .and_then(|p| p.battery_level)
-        {
-            Some(level) => Value::plain(format!("{}%", level)),
+        kind: RowKind::Text(|view| {
+            match view
+                .state
+                .config
+                .remembered_gamepads
+                .first()
+                .and_then(|p| p.battery_level)
+            {
+                Some(level) => Value::plain(format!("{}%", level)),
+                None => Value::absent(),
+            }
+        }),
+    },
+    // ---- Frames: the owner's six first-release elements ----
+    //
+    // Each reads the GUI's own reader (see `crate::panel::frames`), which is the
+    // only place a game's present time can come from. `snapshot()` clones one
+    // immutable value; no file is touched here.
+    Row {
+        id: "game_name",
+        label: "Game",
+        panel_label: "Game",
+        group: Group::Frame,
+        kind: RowKind::Text(|view| match &view.frames.source {
+            Some(source) => Value::plain(source.exe_name.as_str()),
             None => Value::absent(),
-        },
+        }),
+    },
+    Row {
+        id: "fps",
+        label: "FPS",
+        panel_label: "FPS",
+        group: Group::Frame,
+        kind: RowKind::Text(|view| match view.frames.metrics {
+            Some(metrics) => Value::plain(fps_text(metrics.avg_fps)),
+            None => Value::absent(),
+        }),
+    },
+    Row {
+        id: "frametime_ms",
+        label: "Frame Time",
+        panel_label: "Frame",
+        group: Group::Frame,
+        kind: RowKind::Text(|view| match view.frames.metrics {
+            Some(metrics) => Value::plain(ms_text(metrics.frametime_ms)),
+            None => Value::absent(),
+        }),
+    },
+    Row {
+        id: "frametime_graph",
+        label: "Frame Time Graph",
+        panel_label: "Graph",
+        group: Group::Frame,
+        // The strip. Its menu value is the scale it draws against.
+        kind: RowKind::Graph,
+    },
+    Row {
+        id: "low_1pct",
+        label: "1% Low",
+        panel_label: "1%low",
+        group: Group::Frame,
+        kind: RowKind::Text(|view| match view.frames.metrics {
+            Some(metrics) => Value::plain(fps_text(metrics.low_1pct)),
+            None => Value::absent(),
+        }),
+    },
+    Row {
+        id: "low_01pct",
+        label: "0.1% Low",
+        panel_label: "0.1%",
+        group: Group::Frame,
+        kind: RowKind::Text(|view| match view.frames.metrics {
+            Some(metrics) => Value::plain(fps_text(metrics.low_01pct)),
+            None => Value::absent(),
+        }),
     },
 ];
+
+/// An fps value, one decimal: the precision every overlay's readout uses, and
+/// enough to see a 0.1 fps change without the text width moving the eye.
+fn fps_text(fps: f64) -> String {
+    format!("{fps:.1} fps")
+}
+
+/// A frame time in milliseconds, two decimals: 16.67 and 6.07 are both readable,
+/// and the extra digit is where a hitch shows before the fps does.
+fn ms_text(ms: f64) -> String {
+    format!("{ms:.2} ms")
+}
 
 /// Look a row up by id.
 pub fn find(id: &str) -> Option<&'static Row> {
@@ -431,12 +605,23 @@ pub fn all_ids() -> Vec<&'static str> {
     ROWS.iter().map(|row| row.id).collect()
 }
 
-/// The ids a freshly-installed panel shows: every row except the gamepad block.
+/// The ids a freshly-installed panel shows: the hardware rows it drew before the
+/// frame elements existed, and none of the frame rows.
 ///
-/// Rationale, not an arbitrary pick: a machine with no gamepad ever connected
-/// would otherwise open with three permanent dashes at the bottom, and a
-/// disconnected gamepad is better added deliberately from the menu than carried
-/// as noise. Every other row describes hardware that is always present.
+/// Rationale, not an arbitrary pick:
+///
+/// * a machine with no gamepad ever connected would otherwise open with three
+///   permanent dashes at the bottom, and a disconnected gamepad is better added
+///   deliberately from the menu than carried as noise. Every other hardware row
+///   describes hardware that is always present;
+/// * the six frame elements are first-release elements by the owner's decision
+///   (`docs/development/panel-v1-baseline.md` §4), and being in the registry,
+///   configurable and drawn is what that decision requires of them — but they are
+///   **not** on by default, by the same rule the gamepad block follows. Their
+///   source is an implicit Vulkan layer that nothing installs for the user, so a
+///   fresh install would otherwise open with five permanent `—` rows and an empty
+///   strip. They are one click away, under "Frames" in the panel settings, and a
+///   `panel.json` from any earlier build keeps its existing rows untouched.
 pub const DEFAULT_VISIBLE: &[&str] = &[
     "cpu_processor",
     "cpu_average_frequency",
@@ -453,6 +638,10 @@ pub const DEFAULT_VISIBLE: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::AppState;
+    use crate::panel::frames::{stats, FrameSnapshot, Source};
+    use crate::panel::PanelView;
+    use std::sync::Arc;
 
     #[test]
     fn ids_are_unique() {
@@ -493,7 +682,21 @@ mod tests {
     /// * `ram_type` — `MemoryInfo::memory_type` exists on the wire type, but
     ///   `draw_memory_info` never renders it. The panel shows a value the tab
     ///   does not; that is a deliberate gap, not a duplicate.
-    const NO_TAB_LABEL: &[&str] = &["gpu_name", "gamepad_name", "ram_type"];
+    /// * the six frame rows — the tab shows no frame data at all, and cannot: the
+    ///   numbers come from inside the game process (the Vulkan layer's shared
+    ///   memory), not from a daemon getter. There is nothing in the tab for them to
+    ///   duplicate, and nothing to drift from.
+    const NO_TAB_LABEL: &[&str] = &[
+        "gpu_name",
+        "gamepad_name",
+        "ram_type",
+        "game_name",
+        "fps",
+        "frametime_ms",
+        "frametime_graph",
+        "low_1pct",
+        "low_01pct",
+    ];
 
     #[test]
     fn every_row_label_appears_in_the_statistics_tab() {
@@ -614,5 +817,170 @@ mod tests {
         ] {
             assert!(find(id).is_some(), "{id} must exist");
         }
+    }
+
+    // ---- the frame elements ----
+
+    #[test]
+    fn the_six_frame_elements_are_the_ones_the_owners_decision_names() {
+        // The decision's list, in its order. A missing element is a silently
+        // dropped requirement, and an extra one is scope creep.
+        for id in frames::ELEMENT_IDS {
+            let row = find(id).unwrap_or_else(|| panic!("{id} is not in the registry"));
+            assert_eq!(row.group, Group::Frame, "{id} must be in the Frames group");
+        }
+        let registry: Vec<&str> = ROWS
+            .iter()
+            .filter(|row| row.group == Group::Frame)
+            .map(|row| row.id)
+            .collect();
+        assert_eq!(registry, frames::ELEMENT_IDS.to_vec());
+    }
+
+    #[test]
+    fn the_frame_rows_are_not_on_by_default_and_are_not_in_the_shown_set() {
+        // The rule the gamepad block follows: a source that may never exist does
+        // not open as a permanent row of dashes. They are one click away in the
+        // Frames section of the settings menu, and an older panel.json keeps
+        // whatever it already had.
+        for id in frames::ELEMENT_IDS {
+            assert!(
+                !DEFAULT_VISIBLE.contains(&id),
+                "{id} must not be shown by a fresh install"
+            );
+        }
+    }
+
+    #[test]
+    fn exactly_one_row_is_the_strip_and_it_is_the_frame_time_graph() {
+        let strips: Vec<&str> = ROWS
+            .iter()
+            .filter(|row| row.is_graph())
+            .map(|row| row.id)
+            .collect();
+        assert_eq!(strips, vec!["frametime_graph"]);
+        // A strip row has no text value; the menu prints its scale instead.
+        let state = AppState::new();
+        let empty = FrameSnapshot::default();
+        let view = PanelView::new(&state, &empty);
+        assert!(find("frametime_graph").expect("row").text(&view).is_none());
+        assert_eq!(
+            find("frametime_graph").expect("row").menu_value(&view),
+            frames::graph::scale_caption(1)
+        );
+
+        // And when the window is wider than the strip, the caption says how many
+        // intervals a column stands for rather than leaving a smooth shape to read as
+        // a smooth game.
+        let decimated = FrameSnapshot {
+            column_span: 20,
+            ..FrameSnapshot::default()
+        };
+        assert_eq!(
+            find("frametime_graph")
+                .expect("row")
+                .menu_value(&PanelView::new(&state, &decimated)),
+            "0–50 ms · worst of 20"
+        );
+        // Every other row is a text row.
+        for row in ROWS.iter().filter(|row| row.id != "frametime_graph") {
+            assert!(!row.is_graph(), "{} must be a text row", row.id);
+        }
+    }
+
+    #[test]
+    fn with_no_source_every_frame_row_reads_as_absent() {
+        // The reader is offline in `AppState::new()`: no segment, no thread. The
+        // six rows must render `—` (and a strip with nothing in it), never a zero.
+        let state = AppState::new();
+        let snapshot = FrameSnapshot::default();
+        let view = PanelView::new(&state, &snapshot);
+        for id in frames::ELEMENT_IDS {
+            let row = find(id).expect("row");
+            if let Some(value) = row.text(&view) {
+                assert_eq!(value.text, ABSENT, "{id} must render the absent marker");
+            }
+        }
+    }
+
+    #[test]
+    fn with_a_live_source_the_frame_rows_print_the_decision_s_numbers() {
+        // 120 frames of 8 ms and two 40 ms hitches: 122 intervals, so the mean is
+        // 8.5246 ms, the average is 117.3 fps, and both lows are the hitches —
+        // ceil(1 % × 122) = 2 worst intervals, and ceil(0.1 % × 122) = 1, which is
+        // the same 40 ms frame. The values below are the registry's FORMATTING,
+        // not the statistics; `frames::stats` owns the statistics themselves.
+        let state = AppState::new();
+        let mut window = vec![8.0f64; 120];
+        window.push(40.0);
+        window.push(40.0);
+        let metrics = stats::metrics(&window, 0.0).expect("metrics");
+        let snapshot = FrameSnapshot {
+            source: Some(Source {
+                pid: 4242,
+                exe_name: "vkcube".to_string(),
+            }),
+            metrics: Some(metrics),
+            samples_ms: Arc::from(vec![8.0f32; 5]),
+            column_span: 1,
+        };
+        state.frames.publish_for_test(snapshot.clone());
+        let view = PanelView::new(&state, &snapshot);
+
+        let text = |id: &str| find(id).expect("row").text(&view).expect("text").text;
+        assert_eq!(text("game_name"), "vkcube");
+        assert_eq!(text("fps"), "117.3 fps");
+        assert_eq!(text("frametime_ms"), "8.52 ms");
+        assert_eq!(text("low_1pct"), "25.0 fps");
+        assert_eq!(text("low_01pct"), "25.0 fps");
+        // The strip is drawn, not printed.
+        assert!(find("frametime_graph").expect("row").text(&view).is_none());
+    }
+
+    #[test]
+    fn every_frame_element_reads_the_snapshot_it_was_given() {
+        // The guard for "one snapshot per frame". A view is built from the FIRST
+        // snapshot and the reader is then handed a SECOND one -- a different game,
+        // different numbers, a different series -- which is exactly the interleaving a
+        // row that fetched its own snapshot would pick up mid-frame. Every element
+        // must still report the first.
+        let state = AppState::new();
+        let first = FrameSnapshot {
+            source: Some(Source {
+                pid: 1111,
+                exe_name: "first-game".to_string(),
+            }),
+            metrics: Some(stats::metrics(&[8.0f64; 120], 0.0).expect("metrics")),
+            samples_ms: Arc::from(vec![8.0f32; 3]),
+            column_span: 1,
+        };
+        let second = FrameSnapshot {
+            source: Some(Source {
+                pid: 2222,
+                exe_name: "second-game".to_string(),
+            }),
+            metrics: Some(stats::metrics(&[20.0f64; 120], 0.0).expect("metrics")),
+            samples_ms: Arc::from(vec![20.0f32; 5]),
+            column_span: 9,
+        };
+        let view = PanelView::new(&state, &first);
+
+        // The source of truth changes under the view.
+        state.frames.publish_for_test(second);
+
+        let text = |id: &str| find(id).expect("row").text(&view).expect("text").text;
+        assert_eq!(text("game_name"), "first-game", "not the newer source");
+        assert_eq!(text("fps"), "125.0 fps", "not the newer numbers");
+        assert_eq!(text("frametime_ms"), "8.00 ms");
+        assert_eq!(text("low_1pct"), "125.0 fps");
+        assert_eq!(text("low_01pct"), "125.0 fps");
+        // The strip's series and its caption come from the view too: five columns or
+        // "worst of 9" would mean an element reached past the view into the reader.
+        assert_eq!(view.frames.samples_ms.len(), 3);
+        assert_eq!(view.frames.column_span, 1, "one column per interval");
+        assert_eq!(
+            find("frametime_graph").expect("row").menu_value(&view),
+            "0–50 ms"
+        );
     }
 }
