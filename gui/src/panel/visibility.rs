@@ -253,24 +253,14 @@ pub struct Hotkey {
     pub keycode: u8,
 }
 
+#[cfg(test)]
 impl Hotkey {
-    /// Parse a hotkey string.
+    /// The hotkey a spec denotes, without the parts of it that were dropped.
     ///
-    /// Modifiers are `Shift`/`Shift_L`/`Shift_R`, `Control`/`Ctrl`,
-    /// `Alt`/`Mod1`, `Lock`/`CapsLock`, `NumLock`, `ScrollLock`, joined by `+`
-    /// with a final key name (`F1`..`F35`, `A`..`Z`, `0`..`9`).
-    ///
-    /// `Shift_L` and `Shift_R` are accepted but parse to plain `ShiftMask`: X11
-    /// has no way to ask for one of the two Shift keys in a grab, and a spec that
-    /// claimed a right-hand-only key would promise something the server cannot
-    /// deliver. One `log::info!` line says so, because the user typed the
-    /// distinction and deserves to know it was dropped.
-    ///
-    /// An empty spec is not an error: it is the user turning the key off, and
-    /// the tray and `--toggle-panel` still work. An unknown modifier is ignored
-    /// with a warning rather than failing the whole spec, so one typo does not
-    /// disable the key — [`parse_spec`] is where those tokens can be read back,
-    /// which is what the settings surface warns from.
+    /// Test-only, and deliberately so: production reads a spec through
+    /// [`parse_spec`], which also reports the tokens it ignored and whether one of
+    /// the two Shift keys was named — the data the apply-time notes
+    /// ([`log_applied_spec`]) and the settings warning are built from.
     pub fn parse(spec: &str) -> Option<Self> {
         parse_spec(spec).map(|parsed| parsed.hotkey)
     }
@@ -320,6 +310,13 @@ pub struct ParsedSpec {
     pub ignored: Vec<String>,
     /// The key token as it was written, for the effective-shortcut line.
     pub key_token: String,
+    /// Did the spec name one of the two Shift keys (`Shift_L` / `Shift_R`)?
+    ///
+    /// One of them parses to the same `ShiftMask` bit as `Shift` does, so the
+    /// distinction is dropped: the note about that belongs to the caller that
+    /// applies the key, and this flag is what lets it say so without parsing the
+    /// string a second time.
+    pub named_shift_key: bool,
 }
 
 impl ParsedSpec {
@@ -360,8 +357,29 @@ fn canonical_key_name(token: &str, keysym: u32) -> String {
 
 /// Parse a spec, keeping the modifier tokens that were ignored.
 ///
-/// `None` for an empty spec (the user turning the key off) or for a key name this
-/// parser does not know.
+/// Modifiers are `Shift`/`Shift_L`/`Shift_R`, `Control`/`Ctrl`, `Alt`/`Mod1`,
+/// `Lock`/`CapsLock`, `NumLock`, `ScrollLock`, joined by `+` with a final key name
+/// (`F1`..`F35`, `A`..`Z`, `0`..`9`).
+///
+/// `Shift_L` and `Shift_R` are accepted but parse to plain `ShiftMask`: X11 has no
+/// way to ask for one of the two Shift keys in a grab, and a spec that claimed a
+/// right-hand-only key would promise something the server cannot deliver. That the
+/// distinction was dropped is one of the notes [`log_applied_spec`] emits when the
+/// key is applied — the flag travels in the value ([`ParsedSpec::named_shift_key`]).
+///
+/// An empty spec is not an error: it is the user turning the key off, and the tray
+/// and `--toggle-panel` still work. An unknown modifier is ignored rather than
+/// failing the whole spec, so one typo does not disable the key, and the token is
+/// returned in [`ParsedSpec::ignored`] — which is what the settings warning and the
+/// apply-time note are built from.
+///
+/// `None` for an empty spec or for a key name this parser does not know.
+///
+/// **Side-effect free on purpose.** Everything the parse learned is returned in the
+/// value, because this is also the settings surface's read path — it parses the
+/// configured spec on every repaint, so a parser that logged would turn an open
+/// window into a stream of identical lines. The one-off notes belong to the caller
+/// that APPLIES the key: [`log_applied_spec`].
 pub fn parse_spec(spec: &str) -> Option<ParsedSpec> {
     let spec = spec.trim();
     if spec.is_empty() {
@@ -390,7 +408,7 @@ pub fn parse_spec(spec: &str) -> Option<ParsedSpec> {
 
     let keysym = keysym_for(key)?;
 
-    let parsed = ParsedSpec {
+    Some(ParsedSpec {
         hotkey: Hotkey {
             modifiers,
             keysym,
@@ -399,8 +417,19 @@ pub fn parse_spec(spec: &str) -> Option<ParsedSpec> {
         },
         ignored,
         key_token: (*key).to_string(),
-    };
+        named_shift_key,
+    })
+}
 
+/// Emit the one-off notes about a spec that is being **applied**: which modifier
+/// tokens were dropped, and that a `Shift_L`/`Shift_R` spelling collapses onto the
+/// single `ShiftMask` bit.
+///
+/// Called from [`start_hotkey`] — the initial grab and every re-grab after a
+/// settings change — and from nowhere else on purpose. The settings surface parses
+/// and re-parses the spec as it repaints ([`ignored_modifiers_warning`]), and a
+/// parser that logged there would emit the same lines on every frame.
+pub fn log_applied_spec(spec: &str, parsed: &ParsedSpec) {
     if !parsed.ignored.is_empty() {
         log::warn!(
             "panel: hotkey `{spec}` ignores unknown modifier(s) {}; the effective shortcut is \
@@ -414,14 +443,12 @@ pub fn parse_spec(spec: &str) -> Option<ParsedSpec> {
             parsed.effective()
         );
     }
-    if named_shift_key {
+    if parsed.named_shift_key {
         log::info!(
             "panel: `{spec}` names one Shift key, but an X11 grab takes one ShiftMask bit; \
              the shortcut is Shift+<key> and either Shift key fires it"
         );
     }
-
-    Some(parsed)
 }
 
 /// The warning the settings surface shows for a spec with ignored modifiers, or
@@ -430,6 +457,9 @@ pub fn parse_spec(spec: &str) -> Option<ParsedSpec> {
 /// Both halves matter: which tokens were dropped, and what the shortcut will
 /// really be. A spec of `Wibble+F9` that reports "Hotkey captured" reads as an
 /// exact match, and the key the user thinks they configured does not exist.
+///
+/// Called while rendering, so it is pure: parsing is silent and the returned string
+/// is derived only from the spec.
 pub fn ignored_modifiers_warning(spec: &str) -> Option<String> {
     let parsed = parse_spec(spec)?;
     if parsed.ignored.is_empty() {
@@ -944,11 +974,16 @@ pub fn start_hotkey(spec: &str, visibility: Arc<Visibility>) {
         return;
     }
 
-    let Some(hotkey) = Hotkey::parse(&spec) else {
+    let Some(parsed) = parse_spec(&spec) else {
         visibility.set_grab_status(GrabStatus::Failed);
         log::warn!("panel: hotkey `{spec}` does not parse; the tray and the CLI still work");
         return;
     };
+    // The parse is silent; these are the lines the user gets once per apply. This
+    // is the only production caller: the initial grab and the re-grab after a
+    // settings change, never a repaint.
+    log_applied_spec(&spec, &parsed);
+    let hotkey = parsed.hotkey;
 
     let stop = visibility.stop_signal();
     let trigger = visibility.trigger_flag();
@@ -1404,6 +1439,121 @@ mod tests {
             );
         }
         assert_eq!(modifier_bits("Wibble"), None);
+    }
+
+    // ---- what gets logged, and when ----
+
+    /// Every line the `log` facade produced, for the tests that have to tell "said
+    /// nothing" from "said something".
+    ///
+    /// The test binary installs this logger once. Records from other tests are
+    /// filtered out by matching on a spec string only the test in question uses,
+    /// because the tests run in parallel and share the facade.
+    static CAPTURED: Mutex<Vec<(log::Level, String)>> = Mutex::new(Vec::new());
+
+    struct CaptureLines;
+
+    impl log::Log for CaptureLines {
+        fn enabled(&self, _metadata: &log::Metadata) -> bool {
+            true
+        }
+        fn log(&self, record: &log::Record) {
+            let mut captured = CAPTURED.lock().unwrap_or_else(|err| err.into_inner());
+            captured.push((record.level(), record.args().to_string()));
+        }
+        fn flush(&self) {}
+    }
+
+    fn capture_installed() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            log::set_logger(&CaptureLines).expect("the test binary installs no other logger");
+            log::set_max_level(log::LevelFilter::Trace);
+        });
+    }
+
+    fn captured_len() -> usize {
+        CAPTURED.lock().unwrap_or_else(|err| err.into_inner()).len()
+    }
+
+    /// The lines captured since `mark` that mention `needle`.
+    fn lines_about(mark: usize, needle: &str) -> Vec<(log::Level, String)> {
+        let captured = CAPTURED.lock().unwrap_or_else(|err| err.into_inner());
+        captured[mark.min(captured.len())..]
+            .iter()
+            .filter(|(_, line)| line.contains(needle))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn parsing_a_spec_is_silent_and_applying_it_says_it_once() {
+        capture_installed();
+        // A spec string nothing else in this binary uses, so the records can be
+        // attributed even though other tests log in parallel.
+        let spec = "Wibblestem+Shift_R+Nope+F9";
+
+        let mark = captured_len();
+        let parsed = parse_spec(spec).expect("the key is known");
+        let warning = ignored_modifiers_warning(spec).expect("a warning for the settings surface");
+        assert!(!warning.is_empty());
+        let _ = Hotkey::parse(spec);
+        assert_eq!(
+            lines_about(mark, spec),
+            Vec::new(),
+            "parsing, and the settings surface's read path, must not log"
+        );
+
+        // The positive control: those records ARE visible when emitted, so the
+        // assertion above is about silence rather than about a deaf harness.
+        let mark = captured_len();
+        log_applied_spec(spec, &parsed);
+        let notes = lines_about(mark, spec);
+        assert_eq!(notes.len(), 2, "one warning, one info line: {notes:#?}");
+        assert!(
+            notes.iter().any(|(level, line)| *level == log::Level::Warn
+                && line.contains("Wibblestem")
+                && line.contains("Nope")
+                && line.contains("effective")),
+            "{notes:#?}"
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|(level, line)| *level == log::Level::Info && line.contains("ShiftMask")),
+            "{notes:#?}"
+        );
+    }
+
+    #[test]
+    fn a_repainting_settings_window_does_not_log() {
+        // The review finding: `ignored_modifiers_warning` runs on every repaint, and
+        // it used to parse — and therefore log — each time.
+        capture_installed();
+        let spec = "Repainttest+F9";
+        let mark = captured_len();
+        for _ in 0..20 {
+            assert!(ignored_modifiers_warning(spec).is_some());
+            let _ = parse_spec(spec);
+            let _ = Hotkey::parse(spec);
+        }
+        assert_eq!(
+            lines_about(mark, spec),
+            Vec::new(),
+            "twenty repaints must produce nothing"
+        );
+    }
+
+    #[test]
+    fn the_shift_alias_is_data_for_the_apply_time_note() {
+        // The flag the note reads, so both Shift spellings still parse to the one
+        // mask and the "either Shift key fires it" line needs no second parse.
+        for spec in ["Shift_L+F9", "Shift_R+F9", "Control+Shift_L+A"] {
+            assert!(parse_spec(spec).unwrap().named_shift_key, "{spec}");
+        }
+        for spec in ["Shift+F9", "Control+Alt+A", "F9"] {
+            assert!(!parse_spec(spec).unwrap().named_shift_key, "{spec}");
+        }
     }
 
     #[test]
