@@ -20,8 +20,18 @@
 //!
 //! Deliberately absent, and each for a reason:
 //!
-//! * **No frame-time / fps rows and no ring buffer.** Out of scope by decision;
-//!   the reserved-slot idea that would have needed them is not carried over.
+//! * **The frame elements and their two settings.** The six frame rows
+//!   (`game_name`, `fps`, `frametime_ms`, `frametime_graph`, `low_1pct`,
+//!   `low_01pct`) ARE first-release elements — the owner's decision, taken as
+//!   settled and recorded in `docs/development/panel-v1-baseline.md` §4 — so their
+//!   rows live in [`super::rows`] and this file carries the two settings they need:
+//!   [`PanelConfig::window_seconds`] (the statistics window) and
+//!   [`PanelConfig::refresh_hz`] (the panel's repaint cadence in panel mode). Both
+//!   values are the design's **proposals** (its Q9 and Q10), not owner decisions,
+//!   and both are defaults: an older `panel.json` carries neither key and loads as
+//!   if it had always said 10 and 4. The `frames` block the design sketched is not
+//!   copied — a nested block would be a second schema inside this one, and the two
+//!   settings are two numbers.
 //! * **No click-through.** Out of scope by decision.
 //! * **No multi-monitor position.** [`PanelConfig::position`] stores where the
 //!   panel was last seen and is clamped into the monitor on load, but only
@@ -90,6 +100,37 @@ pub const DEFAULT_HOTKEY: &str = "Shift+F9";
 /// bright desktop is unreadable rather than "transparent".
 pub const MIN_BACKGROUND_OPACITY: f32 = 0.25;
 pub const MAX_BACKGROUND_OPACITY: f32 = 1.0;
+
+/// Default statistics window for the frame elements, in seconds.
+///
+/// **A proposal, not an owner decision.** The design's Q9 asks whether `1 % low`
+/// should cover the last N seconds, the whole run, or the interval since the last
+/// display change, and proposes a time window of 10 s without settling it. This
+/// change therefore makes it configurable and says so: the settings surface names
+/// it a proposal, `docs/development/panel-frames.md` records the assumption, and
+/// the PR body reports it as one. Ten seconds is several hundred intervals at any
+/// ordinary frame rate, which is what makes a 1 % low over it meaningful.
+pub const DEFAULT_WINDOW_SECONDS: u32 = 10;
+/// Shortest window. Below a second the window is a handful of frames and the
+/// percentiles become the frame-to-frame jitter rather than a statistic.
+pub const MIN_WINDOW_SECONDS: u32 = 1;
+/// Longest window. At 60 fps the writer's 4096-slot ring holds ~68 s, so beyond
+/// 60 s the window would silently be the ring's contents rather than the setting.
+pub const MAX_WINDOW_SECONDS: u32 = 60;
+
+/// Default refresh cadence for the frame elements, in Hz.
+///
+/// **A proposal, not an owner decision** (the design's Q10): fast enough that fps
+/// looks live, slow enough that the panel does not become a redraw source over the
+/// game. Whether 4 Hz is enough for the graph to look like a graph rather than a
+/// staircase is `NOT TESTED` — that is a question about what the element is for,
+/// and it is one of the things stage 7 would have to observe.
+pub const DEFAULT_REFRESH_HZ: u32 = 4;
+/// Slowest cadence: one update a second still looks live for fps.
+pub const MIN_REFRESH_HZ: u32 = 1;
+/// Fastest cadence. The panel's repaint in panel mode follows this — and it must
+/// never approach a game's frame rate, which is what the ceil exists for.
+pub const MAX_REFRESH_HZ: u32 = 30;
 
 /// How the panel window stacks against other windows.
 ///
@@ -306,6 +347,23 @@ pub struct PanelConfig {
     /// `--toggle-panel` remain. See [`super::visibility`] for what is claimed
     /// about the key and where it is available.
     pub hotkey: String,
+    /// Statistics window for the frame elements, in seconds — clamped to
+    /// `MIN_WINDOW_SECONDS..=MAX_WINDOW_SECONDS`.
+    ///
+    /// A **proposal** (see [`DEFAULT_WINDOW_SECONDS`]), not an owner decision. It
+    /// is what `1 % low`, `0.1 % low`, fps and the strip are computed over: the
+    /// newest intervals whose total duration reaches this many seconds. A missing
+    /// key — every `panel.json` written before this field existed — loads as the
+    /// default.
+    pub window_seconds: u32,
+    /// Refresh cadence of the panel's frame elements, in Hz — clamped to
+    /// `MIN_REFRESH_HZ..=MAX_REFRESH_HZ`.
+    ///
+    /// A **proposal** (see [`DEFAULT_REFRESH_HZ`]), not an owner decision. It is the
+    /// panel's repaint interval in panel mode *while a frame element is visible*,
+    /// and the rate at which the GUI's reader polls; without a frame element the
+    /// panel keeps its own 500 ms timer.
+    pub refresh_hz: u32,
     pub rows: Vec<RowConfig>,
 }
 
@@ -322,6 +380,8 @@ impl Default for PanelConfig {
             // field did.
             position: None,
             hotkey: DEFAULT_HOTKEY.to_string(),
+            window_seconds: DEFAULT_WINDOW_SECONDS,
+            refresh_hz: DEFAULT_REFRESH_HZ,
             rows: rows::all_ids().into_iter().map(RowConfig::new).collect(),
         }
     }
@@ -392,6 +452,22 @@ pub fn normalize(mut config: PanelConfig) -> PanelConfig {
 
     config.rows = normalize_rows(&config.rows);
 
+    // The two frame settings: a hand-edited 0 or a 5000-second window is not
+    // something the reader can honour, and both would be silent. Clamped rather
+    // than defaulted, because "almost the whole ring" is what a huge value means.
+    config.window_seconds = normalize_u32(
+        config.window_seconds,
+        MIN_WINDOW_SECONDS,
+        MAX_WINDOW_SECONDS,
+        "window_seconds",
+    );
+    config.refresh_hz = normalize_u32(
+        config.refresh_hz,
+        MIN_REFRESH_HZ,
+        MAX_REFRESH_HZ,
+        "refresh_hz",
+    );
+
     // A non-finite corner is not a position: a NaN would be an `OuterPosition`
     // request with no defined meaning, and an infinity always lands outside the
     // monitor. Forgetting it falls back to window-manager placement, the same
@@ -412,6 +488,16 @@ fn normalize_float(value: f32, default: f32, min: f32, max: f32, field: &str) ->
         return default;
     }
     value.clamp(min, max)
+}
+
+/// One clamp for the integer settings, which cannot be NaN and so are clamped
+/// rather than defaulted: a window of 0 means "the newest frame", not "10 s".
+fn normalize_u32(value: u32, min: u32, max: u32, field: &str) -> u32 {
+    let clamped = value.clamp(min, max);
+    if clamped != value {
+        log::warn!("panel.json has {field} = {value}, which is unusable; using {clamped}");
+    }
+    clamped
 }
 
 /// The row ids the panel will actually lay out, in order.
@@ -750,5 +836,91 @@ mod tests {
             });
             assert_eq!(config.position, None);
         }
+    }
+
+    // ---- the frame elements' two settings ----
+
+    #[test]
+    fn a_fresh_config_carries_the_proposed_window_and_cadence() {
+        // The design's proposals, used as configurable defaults. Named as
+        // proposals in the docs and on the settings surface: no owner decision
+        // records either number, and this test must not be read as one.
+        let config = normalize(PanelConfig::fresh());
+        assert_eq!(config.window_seconds, DEFAULT_WINDOW_SECONDS);
+        assert_eq!(config.refresh_hz, DEFAULT_REFRESH_HZ);
+        assert_eq!(DEFAULT_WINDOW_SECONDS, 10);
+        assert_eq!(DEFAULT_REFRESH_HZ, 4);
+    }
+
+    #[test]
+    fn a_file_from_before_these_fields_existed_loads_the_defaults() {
+        // Exactly an older `panel.json`: neither key at all.
+        let parsed: PanelConfig = serde_json::from_str(
+            r#"{"version": 1, "width": 410.0, "background_opacity": 0.5, "hotkey": "Shift+F9",
+                "rows": [{"id": "ram_usage", "visible": true}]}"#,
+        )
+        .expect("an older file decodes");
+        let config = normalize(parsed);
+        assert_eq!(config.window_seconds, DEFAULT_WINDOW_SECONDS);
+        assert_eq!(config.refresh_hz, DEFAULT_REFRESH_HZ);
+        assert_eq!(config.width, 410.0, "and nothing else is disturbed");
+    }
+
+    #[test]
+    fn an_older_file_gains_the_frame_rows_switched_off() {
+        // Backwards compatibility in the direction that matters: a user who never
+        // asked for the frame rows does not open the next build with six new rows
+        // and a taller panel. They are in the registry, so the menu offers them.
+        let parsed: PanelConfig = serde_json::from_str(
+            r#"{"version": 1, "width": 300.0, "rows": [{"id": "cpu_processor", "visible": true}]}"#,
+        )
+        .expect("decodes");
+        let config = normalize(parsed);
+        assert_eq!(config.rows.len(), rows::all_ids().len());
+        for id in crate::panel::frames::ELEMENT_IDS {
+            let row = config
+                .rows
+                .iter()
+                .find(|row| row.id == id)
+                .unwrap_or_else(|| panic!("{id} must be appended by normalize"));
+            assert!(
+                !row.visible,
+                "{id} must not appear on an older file's panel"
+            );
+        }
+        assert!(config
+            .rows
+            .iter()
+            .any(|row| row.id == "cpu_processor" && row.visible));
+    }
+
+    #[test]
+    fn unusable_window_and_cadence_values_are_clamped_rather_than_ignored() {
+        let mut config = PanelConfig::fresh();
+        config.window_seconds = 0;
+        assert_eq!(normalize(config.clone()).window_seconds, MIN_WINDOW_SECONDS);
+        config.window_seconds = 10_000;
+        assert_eq!(normalize(config.clone()).window_seconds, MAX_WINDOW_SECONDS);
+        config.refresh_hz = 0;
+        assert_eq!(normalize(config.clone()).refresh_hz, MIN_REFRESH_HZ);
+        config.refresh_hz = 10_000;
+        assert_eq!(normalize(config).refresh_hz, MAX_REFRESH_HZ);
+    }
+
+    #[test]
+    fn the_two_frame_settings_survive_a_round_trip_through_json() {
+        let config = PanelConfig {
+            window_seconds: 5,
+            refresh_hz: 2,
+            ..PanelConfig::fresh()
+        };
+        let json = serde_json::to_string_pretty(&config).expect("serialize");
+        assert!(json.contains("\"window_seconds\": 5"), "got {json}");
+        assert!(json.contains("\"refresh_hz\": 2"), "got {json}");
+        // Two flat keys, not the design's nested `frames` block: this file has one
+        // schema, and a nested one would be a second.
+        assert!(!json.contains("\"frames\""));
+        let back: PanelConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(normalize(back), normalize(config));
     }
 }

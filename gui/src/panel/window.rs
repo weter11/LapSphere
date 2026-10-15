@@ -34,10 +34,11 @@
 //! (`docs/development/panel-overlay-tests.md`, B2 and B9 in PR #111). The taskbar
 //! atoms are a separate, EWMH-specific path — see [`super::ewmh`].
 //!
-//! The size sent is [`layout::panel_size`] — computed from the visible row count
-//! and the font row height, never measured — so there is no measure/resize/
-//! measure loop. The width is the configured width, so moving the width slider
-//! resizes the window on the very next frame.
+//! The size sent is [`layout::panel_size`] — computed from the visible rows' slot
+//! heights and the font row height, never measured — so there is no
+//! measure/resize/measure loop. The width is the configured width, so moving the
+//! width slider resizes the window on the very next frame, and the frame-time
+//! strip's slot is part of the computed height whether or not it has data.
 //!
 //! # Position: request, then read back
 //!
@@ -159,8 +160,8 @@ pub fn panel_spec(
     font_row_height: f32,
     monitor: Option<[f32; 2]>,
 ) -> WindowSpec {
-    let row_count = super::render::visible_row_count(config);
-    let size: Size = layout::panel_size(config, row_count, font_row_height);
+    let slots = super::render::layout_slots(config);
+    let size: Size = layout::panel_size(config, &slots, font_row_height);
 
     WindowSpec {
         inner: [size.width, size.height],
@@ -519,6 +520,7 @@ fn component_for(id: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::panel::config::{PanelConfig, RowConfig};
+    use crate::panel::render;
     use crate::panel::rows;
 
     /// The monitor the size tests are stated against: 1280x720, the size of the
@@ -587,7 +589,8 @@ mod tests {
     fn the_panel_spec_matches_the_computed_layout_size() {
         let config = config_with(&["cpu_processor", "cpu_average_load", "ram_usage"]);
         let spec = panel_spec(&config, TEST_ROW_HEIGHT, TEST_MONITOR);
-        let expected = layout::panel_size(&config, 3, TEST_ROW_HEIGHT);
+        let expected = layout::panel_size(&config, &render::layout_slots(&config), TEST_ROW_HEIGHT);
+        assert_eq!(expected.height, layout::height_for(3, TEST_ROW_HEIGHT));
 
         assert_eq!(spec.inner[0], expected.width);
         assert_eq!(spec.inner[1], expected.height);
@@ -837,6 +840,58 @@ mod tests {
         // `normalize` drops these, but `required_components` must not panic on
         // one if it is ever called before normalization.
         assert_eq!(component_for("not_a_row"), None);
+    }
+
+    #[test]
+    fn the_frame_rows_add_no_polled_component() {
+        // The six frame elements are the one group whose data does not come from
+        // the daemon: it comes from the game's own process, through the GUI's
+        // shared-memory reader. A frame row that added a component here would make
+        // the panel poll the daemon for a number the daemon cannot produce.
+        let frame_only = config_with(&[
+            "game_name",
+            "fps",
+            "frametime_ms",
+            "frametime_graph",
+            "low_1pct",
+            "low_01pct",
+        ]);
+        assert!(
+            required_components(&frame_only).is_empty(),
+            "the frame rows must poll nothing: {:?}",
+            required_components(&frame_only)
+        );
+        for id in crate::panel::frames::ELEMENT_IDS {
+            assert_eq!(component_for(id), None, "{id} must not name a component");
+        }
+
+        // And they do not disturb the hardware set when both are on.
+        let mixed = config_with(&["fps", "cpu_processor", "frametime_graph", "ram_used"]);
+        let mut needed = required_components(&mixed);
+        needed.sort_unstable();
+        assert_eq!(needed, vec!["cpu", "memory"]);
+    }
+
+    #[test]
+    fn the_spec_height_reserves_the_strip_whether_or_not_it_has_data() {
+        // The strip's slot is `GRAPH_STRIP_ROWS` row heights, counted in the window
+        // size the panel asks for — before anything is read. That is the
+        // reservation, stated where the window is sized.
+        let text_only = config_with(&["cpu_processor"]);
+        let with_strip = config_with(&["cpu_processor", "frametime_graph"]);
+        let text_spec = panel_spec(&text_only, TEST_ROW_HEIGHT, TEST_MONITOR);
+        let strip_spec = panel_spec(&with_strip, TEST_ROW_HEIGHT, TEST_MONITOR);
+
+        assert_eq!(
+            strip_spec.inner[1] - text_spec.inner[1],
+            layout::row_height(TEST_ROW_HEIGHT) * layout::GRAPH_STRIP_ROWS,
+            "the strip must add exactly its reserved height"
+        );
+        assert_eq!(
+            strip_spec.inner[1],
+            layout::height_for_slots(&render::layout_slots(&with_strip), TEST_ROW_HEIGHT)
+        );
+        assert!(strip_spec.inner[1] > 0.0);
     }
 
     // ---- the stored position ----

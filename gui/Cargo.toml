@@ -74,6 +74,12 @@ systemstat.workspace = true
 # and works offline.
 x11rb = "0.13"
 raw-window-handle = "0.6"
+# `CLOCK_MONOTONIC` for the panel's frame reader: the Vulkan layer stamps presents
+# with that clock, and the staleness rule has to compare against the same one. std
+# exposes no monotonic clock value, only `Instant` (which cannot be compared with a
+# raw nanosecond stamp), and libc is already in the lock file as a dependency of the
+# daemon, nix, zbus and winit.
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }

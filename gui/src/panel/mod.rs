@@ -37,12 +37,17 @@
 //!   the `TogglePanel` D-Bus method on the GUI's own `io.lapsphere.Gui` name,
 //!   which is what `lapsphere --toggle-panel` calls. It also holds the
 //!   hide-safety rule: hiding is only carried out when a way back exists.
+//! * [`frames`] — the frame metrics: the six first-release elements' data. A
+//!   read-only reader of the Vulkan layer's shared-memory protocol v1
+//!   (`$XDG_RUNTIME_DIR/lapsphere/frames-<pid>`), the selection rule that picks
+//!   which game's segment to read, the statistics ported from the reference
+//!   definitions, and the fixed-height strip. Nothing here is a daemon method:
+//!   a game's present time exists only inside the game's own process.
 //!
 //! # What is NOT in this PR, by decision
 //!
-//! * fps, frame time, graphs, ring buffers, the Vulkan layer, click-through and
-//!   the F8 interactivity key. No reserved slots for them either: a slot with no
-//!   producer is a permanent row of dashes.
+//! * Click-through, and the F8 interactivity key. The global show/hide hotkey is a
+//!   different thing and does exist (see [`visibility`]).
 //! * Wayland. The panel uses only `ViewportCommand`s, which is the portable
 //!   subset; the X11-specific work is PR 2's and is not tested on Wayland. The
 //!   stored position is X11-only for the same reason: `outer_rect` is not
@@ -55,19 +60,30 @@
 //!   available (`ViewportInfo` reports a size) — so no second-monitor claim is
 //!   made.
 //!
-//! # A scope question this code does not settle
+//! # The frame elements are first-release elements — settled
 //!
-//! Whether the FIRST release carries fps, frame time, a frame-time graph, 1 % low,
-//! 0.1 % low and the game name is NOT decided by the merged code, and must not be
-//! read off it. The history states both: PR #111 (open, unmerged) records an owner
-//! decision dated 2026-10-03 that those are first-release panel elements, while the
-//! merged change that introduced this module describes them as later work. This
-//! note records the disagreement and does not choose a side -- the decision is the
-//! owner's and is not made here. Nothing in this module implements any of those
-//! elements, and no placeholder row exists for them.
+//! The merged layout used to refuse to reserve space for `fps`, frame time, the
+//! frame-time graph, `1 % low`, `0.1 % low` and the game name, on the grounds that
+//! "a slot with no producer is a permanent row of dashes", and this module
+//! recorded the scope question as undecided. Both are gone: the owner's decision
+//! of 2026-10-03 makes those six elements first-release elements
+//! (`docs/development/panel-v1-baseline.md` §4), and stage 6 implemented them —
+//! registry rows with stable ids under [`rows::Group::Frame`], a reserved
+//! fixed-height slot in [`layout::Slot`], the two settings in
+//! [`config::PanelConfig`], and the reader in [`frames`].
+//!
+//! What that reservation means concretely: the strip's height and every label
+//! column width are fixed by the config and the font, so **arriving data cannot
+//! reflow the panel**, and an absent source renders `—` (text) or an empty strip
+//! (graph) in an already-reserved slot. The six rows are **off by default**, by
+//! the same rule the gamepad block follows — the layer that produces their data is
+//! installed by the user and opt-in per game, so a fresh panel would otherwise open
+//! with five permanent dashes. They are one click away under "Frames" in the panel
+//! settings.
 
 pub mod config;
 pub mod ewmh;
+pub mod frames;
 pub mod layout;
 pub mod menu;
 pub mod render;

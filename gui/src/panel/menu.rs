@@ -57,7 +57,8 @@
 //! left click must never register as a secondary one.
 
 use super::config::{
-    PanelConfig, Stacking, MAX_BACKGROUND_OPACITY, MAX_WIDTH, MIN_BACKGROUND_OPACITY, MIN_WIDTH,
+    PanelConfig, Stacking, MAX_BACKGROUND_OPACITY, MAX_REFRESH_HZ, MAX_WIDTH, MAX_WINDOW_SECONDS,
+    MIN_BACKGROUND_OPACITY, MIN_REFRESH_HZ, MIN_WIDTH, MIN_WINDOW_SECONDS,
 };
 use super::rows::{self, Group};
 use super::visibility::{GrabStatus, Visibility};
@@ -73,13 +74,15 @@ pub fn settings_viewport() -> egui::ViewportId {
 pub const SETTINGS_SIZE: [f32; 2] = [360.0, 640.0];
 
 /// Height the settings body reserves below the scrollable row list: the width and
-/// opacity sliders with their notes, the window controls, the hotkey field with
-/// its status lines, and the Back/Close row.
+/// opacity sliders with their notes, the frame-elements section with its two
+/// sliders and its two notes, the window controls, the hotkey field with its
+/// status lines, and the Back/Close row.
 ///
 /// Measured against those sections rather than guessed. Too small a reserve and
 /// the fixed controls are pushed out of the window, which is exactly how a
-/// control becomes unreachable; too large and the row list has no room.
-const FIXED_SECTION_HEIGHT: f32 = 340.0;
+/// control becomes unreachable; too large and the row list has no room. The
+/// frame-elements section added roughly three label rows to this block.
+const FIXED_SECTION_HEIGHT: f32 = 400.0;
 
 /// What a settings interaction wants done, applied by the caller outside the UI
 /// pass.
@@ -219,6 +222,50 @@ pub fn draw_settings_body(
              What is behind the panel shows through only under a compositing window \
              manager; without one nothing blends, so a reduced opacity darkens the \
              background instead of making it see-through.",
+        )
+        .weak()
+        .small(),
+    );
+
+    ui.separator();
+
+    // The frame elements: what the source is, and the two numbers they are
+    // computed with. Both numbers are the DESIGN's proposals (its Q9 and Q10) and
+    // not owner decisions, and the note says so on the surface itself: a user who
+    // reads "10 s" here must not be told a prior decision chose it. The panel reads
+    // both fresh every frame, so there is no apply step, and neither is part of the
+    // window spec -- the window's size, level and decorations do not depend on them.
+    ui.label(egui::RichText::new("Frames").strong());
+    ui.label(
+        egui::RichText::new(
+            "Taken from a running Vulkan game's own presents, through the LapSphere \
+             layer in the game's process. Available only where that layer is installed \
+             and the game runs with LAPSPHERE_FRAMES=1; anywhere else these rows read \
+             — and the graph stays empty.",
+        )
+        .weak()
+        .small(),
+    );
+    ui.horizontal(|ui| {
+        ui.label("Statistics window");
+        let (response, seconds) = window_control(ui, config.window_seconds);
+        if response.changed() && seconds != config.window_seconds {
+            config.window_seconds = seconds;
+            outcome.config_changed = true;
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("Refresh");
+        let (response, rate) = refresh_control(ui, config.refresh_hz);
+        if response.changed() && rate != config.refresh_hz {
+            config.refresh_hz = rate;
+            outcome.config_changed = true;
+        }
+    });
+    ui.label(
+        egui::RichText::new(
+            "10 s and 4 Hz are the design's proposed defaults, not an owner \
+             decision — they are configurable here for exactly that reason.",
         )
         .weak()
         .small(),
@@ -386,6 +433,25 @@ fn opacity_control(ui: &mut egui::Ui, current: f32) -> (egui::Response, f32) {
     (response, value)
 }
 
+/// The statistics-window slider, and the value it now holds.
+///
+/// Clamped to the range `normalize` enforces, exactly as the opacity slider is, so
+/// a drag cannot write a window the reader would then have to refuse.
+fn window_control(ui: &mut egui::Ui, current: u32) -> (egui::Response, u32) {
+    let mut value = current.clamp(MIN_WINDOW_SECONDS, MAX_WINDOW_SECONDS);
+    let response =
+        ui.add(egui::Slider::new(&mut value, MIN_WINDOW_SECONDS..=MAX_WINDOW_SECONDS).suffix(" s"));
+    (response, value)
+}
+
+/// The frame-elements refresh slider, and the value it now holds.
+fn refresh_control(ui: &mut egui::Ui, current: u32) -> (egui::Response, u32) {
+    let mut value = current.clamp(MIN_REFRESH_HZ, MAX_REFRESH_HZ);
+    let response =
+        ui.add(egui::Slider::new(&mut value, MIN_REFRESH_HZ..=MAX_REFRESH_HZ).suffix(" Hz"));
+    (response, value)
+}
+
 /// The show/hide hotkey field, and whether it was just committed.
 ///
 /// Split out and returning its own response for the same reason the sliders are:
@@ -441,9 +507,10 @@ fn draw_group(
                     {
                         outcome.config_changed = true;
                     }
-                    // The live value, so a checkbox shows what it turns on.
+                    // The live value, so a checkbox shows what it turns on. A strip
+                    // row has no text value; it shows the scale it draws against.
                     ui.label(
-                        egui::RichText::new((row.read)(state).text)
+                        egui::RichText::new(row.menu_value(state))
                             .monospace()
                             .weak(),
                     );
@@ -1104,6 +1171,89 @@ mod tests {
             assert_eq!(high, MAX_BACKGROUND_OPACITY);
             let (_, low) = opacity_control(ui, 0.0);
             assert_eq!(low, MIN_BACKGROUND_OPACITY);
+        });
+    }
+
+    // ---- the frame elements ----
+
+    #[test]
+    fn the_frames_section_names_the_source_and_calls_the_defaults_proposals() {
+        // What the surface says, read off the painted shapes: where the numbers
+        // come from, that the layer has to be installed for them, and that 10 s /
+        // 4 Hz are proposals rather than a decision taken for the user.
+        let painted = painted_text("Shift+F9", GrabStatus::Grabbed, true);
+        for word in [
+            "Frames",
+            "Vulkan",
+            "LAPSPHERE_FRAMES=1",
+            "Statistics window",
+            "Refresh",
+            "proposed defaults",
+            "not an owner",
+        ] {
+            assert!(
+                painted_contains(&painted, word),
+                "the settings surface does not paint {word:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_frames_group_offers_a_checkbox_for_every_frame_element() {
+        // The elements are not on by default, so the menu is the only way to turn
+        // them on: a row whose label never reaches the surface is a row the user
+        // cannot enable.
+        let painted = painted_text("Shift+F9", GrabStatus::Grabbed, true);
+        // The group's collapsible header, and every element's long label. The
+        // group is collapsed by default, so its header is what the surface paints;
+        // its contents are asserted through `Group::of` below rather than by
+        // pretending they are visible.
+        assert!(painted_contains(&painted, Group::Frame.label()));
+        for id in crate::panel::frames::ELEMENT_IDS {
+            let row = rows::find(id).expect("row");
+            assert_eq!(row.group, Group::Frame);
+            assert!(!row.label.is_empty(), "{id} needs a menu label");
+        }
+    }
+
+    #[test]
+    fn the_window_and_refresh_controls_report_the_value_the_click_asked_for() {
+        let window = click_control(|ui| {
+            let (response, value) = window_control(ui, 10);
+            let changed = response.changed().then_some(value);
+            (response, changed)
+        })
+        .expect("a click on the slider must change the window");
+        assert!(
+            (MIN_WINDOW_SECONDS..=MAX_WINDOW_SECONDS).contains(&window) && window != 10,
+            "clicking mid-track from 10 gave {window}"
+        );
+
+        let refresh = click_control(|ui| {
+            let (response, value) = refresh_control(ui, 4);
+            let changed = response.changed().then_some(value);
+            (response, changed)
+        })
+        .expect("a click on the slider must change the cadence");
+        assert!(
+            (MIN_REFRESH_HZ..=MAX_REFRESH_HZ).contains(&refresh) && refresh != 4,
+            "clicking mid-track from 4 gave {refresh}"
+        );
+    }
+
+    #[test]
+    fn the_frame_controls_clamp_what_they_are_given() {
+        // A hand-edited `panel.json` must not put a handle past the end of the
+        // track, and must not be written back out of range.
+        with_ui(|ui, _config, _outcome| {
+            let (_, high) = window_control(ui, 10_000);
+            assert_eq!(high, MAX_WINDOW_SECONDS);
+            let (_, low) = window_control(ui, 0);
+            assert_eq!(low, MIN_WINDOW_SECONDS);
+            let (_, fast) = refresh_control(ui, 10_000);
+            assert_eq!(fast, MAX_REFRESH_HZ);
+            let (_, slow) = refresh_control(ui, 0);
+            assert_eq!(slow, MIN_REFRESH_HZ);
         });
     }
 

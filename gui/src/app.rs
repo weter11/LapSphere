@@ -154,6 +154,16 @@ pub struct AppState {
     // Refresh coordinator handle
     pub coordinator_handle: Option<CoordinatorHandle>,
 
+    /// The panel's frame-metrics reader: the six frame elements' data.
+    ///
+    /// Not daemon data — a game's present time exists only inside the game's own
+    /// process, so this is the GUI's own reader of the Vulkan layer's
+    /// shared-memory segment (`crate::panel::frames`). It starts no thread until a
+    /// frame row is actually on screen, and `AppState::new()` therefore has an
+    /// offline one: every frame row reads `—`, which is what a test and a process
+    /// that never enters panel mode must see.
+    pub frames: crate::panel::frames::Frames,
+
     pub keyboard_brush_color: [u8; 3],
 }
 
@@ -230,6 +240,10 @@ impl AppState {
             pending_battery_update: None,
             pending_profile_apply: None,
             coordinator_handle: None,
+            // No worker until a frame element is on screen: `panel::frames` starts
+            // its thread from `App::sync_frames`, and an offline reader reports
+            // unavailable values rather than a zero.
+            frames: crate::panel::frames::Frames::offline(),
             selected_fan_curve: 0,
             keyboard_brush_color: [255, 255, 255],
         }
@@ -1497,6 +1511,31 @@ impl LapSphereApp {
         }
     }
 
+    /// Keep the frame reader in step with the panel.
+    ///
+    /// Two jobs. First, the worker does filesystem work **only** while a frame
+    /// element is on screen: with the panel in normal mode, hidden, or showing no
+    /// frame row, the reader is inactive and polls nothing. Second, the two
+    /// configurable numbers travel to the worker — the statistics window and the
+    /// cadence — so a slider in the settings window reaches the reader on the next
+    /// frame, as every other panel control does.
+    ///
+    /// The thread is started at most once, and only when something needs it: a user
+    /// who never shows a frame row never pays for a reader thread.
+    fn sync_frames(&mut self) {
+        let wanted = self.mode.is_panel()
+            && !self.panel_hidden
+            && crate::panel::render::has_visible_frame_row(&self.panel_config);
+        if wanted && !self.state.frames.is_running() {
+            self.state.frames.start();
+        }
+        self.state.frames.configure(
+            self.panel_config.window_seconds,
+            self.panel_config.refresh_hz,
+        );
+        self.state.frames.set_active(wanted);
+    }
+
     /// Narrow the coordinator's poll set to what the current surface draws.
     ///
     /// In panel mode only the components backing a VISIBLE row are polled; `logs`
@@ -1967,6 +2006,9 @@ impl eframe::App for LapSphereApp {
         // body must be laid out in a window that already has the panel's size.
         self.apply_mode(&ctx);
         self.sync_poll_set();
+        // The frame reader is the one data source this surface reads itself rather
+        // than through the daemon, so it is brought in step with the mode here too.
+        self.sync_frames();
         // After `apply_mode`: the EWMH state depends on the mode this frame is
         // in, so entering or leaving panel mode and the state change are decided
         // on the same frame.
@@ -1999,7 +2041,10 @@ impl eframe::App for LapSphereApp {
             }
             self.track_panel_position(&ctx);
             self.draw_panel(ui, &ctx);
-            ctx.request_repaint_after(Duration::from_millis(500));
+            // The cadence the frame elements need — the reader's poll rate, not the
+            // game's frame rate — or the panel's own 500 ms timer when no frame
+            // element is on screen. See `panel::frames::repaint_interval`.
+            ctx.request_repaint_after(crate::panel::frames::repaint_interval(&self.panel_config));
             return;
         }
 
