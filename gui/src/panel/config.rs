@@ -70,11 +70,19 @@ pub const DEFAULT_BACKGROUND_OPACITY: f32 = 1.0;
 
 /// Default global show/hide hotkey.
 ///
-/// `Shift_R+F9`: a right-hand modifier and a function key no ordinary
-/// application claims, and on this host F9 is keycode 75 / keysym 0xffc6
-/// (`xmodmap -pke`). X11/Xwayland only — see [`super::visibility`] — and the
-/// stored string is the spec that module parses.
-pub const DEFAULT_HOTKEY: &str = "Shift_R+F9";
+/// `Shift+F9`: a modifier and a function key no ordinary application claims, and
+/// on this host F9 is keycode 75 / keysym 0xffc6 (`xmodmap -pke`).
+///
+/// Written as `Shift` rather than `Shift_R` because the right-hand key cannot be
+/// asked for: an X11 grab takes a `ModMask`, both Shift keys set the same
+/// `ShiftMask` bit, and the delivered event carries no distinction either. The
+/// alternative — a spec that says `Shift_R` but grabs `ShiftMask` — promises a
+/// right-hand-only key that does not exist, so the default, the settings hint and
+/// the docs all say `Shift+F9`, and both Shift keys fire it. `Shift_R+F9` and
+/// `Shift_L+F9` stay accepted as spellings of the same mask, which is what a
+/// `panel.json` written by an earlier build holds. X11/Xwayland only — see
+/// [`super::visibility`] — and the stored string is the spec that module parses.
+pub const DEFAULT_HOTKEY: &str = "Shift+F9";
 
 /// Least opaque the background may be set to.
 ///
@@ -289,7 +297,7 @@ pub struct PanelConfig {
     /// for: a request the window manager declined is not where the panel is.
     #[serde(deserialize_with = "deserialize_position")]
     pub position: Option<PanelPosition>,
-    /// Global show/hide hotkey, as a spec such as `Shift_R+F9`.
+    /// Global show/hide hotkey, as a spec such as `Shift+F9`.
     ///
     /// Stored verbatim, never silently replaced: a spec this build cannot parse
     /// is exactly what the user has to see in order to fix it, and rewriting it
@@ -649,7 +657,7 @@ mod tests {
         // The value has to survive so the user can SEE what they typed and fix
         // it; normalizing it back to the default would silently take the default
         // key, and an empty spec is a legitimate "key off", not an error.
-        for raw in ["Shift+Nope", "not a hotkey", "", "Shift_R+"] {
+        for raw in ["Shift+Nope", "not a hotkey", "", "Shift+"] {
             let config = PanelConfig {
                 hotkey: raw.to_string(),
                 ..PanelConfig::fresh()

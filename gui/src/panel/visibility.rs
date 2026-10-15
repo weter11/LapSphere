@@ -6,7 +6,7 @@
 //! The app has one window and the panel has one hidden state, and it is brought
 //! back by any of:
 //!
-//! * the **global hotkey** (`Shift_R+F9` by default) — a passive `XGrabKey` on
+//! * the **global hotkey** (`Shift+F9` by default) — a passive `XGrabKey` on
 //!   the root window, watched by a dedicated thread. A global key is needed
 //!   because egui only sees keys delivered to this window, and a hidden or
 //!   unfocused panel receives none;
@@ -41,6 +41,18 @@
 //!   void, and the error arrives afterwards as an event. Each lock variant is
 //!   confirmed through its cookie's `check()`, and [`grab_outcome`] turns the
 //!   per-variant results into the reported status.
+//! * **The grab masks come from the configured modifiers**, plus every
+//!   combination of the lock bits ([`lock_variants`]). A fixed mask would grab a
+//!   key nobody configured: the server delivers a `KeyPress` only for the mask
+//!   the grab was made with, so the configured `Control+Alt+F5` grabbed under
+//!   `Shift` does nothing while the log says "captured". The lock combinations
+//!   are what make the key still work with CapsLock, NumLock and ScrollLock set —
+//!   including several of them at once.
+//! * **`Shift`, not `Shift_R`.** `XGrabKey` takes a `ModMask` and both Shift keys
+//!   set the same `ShiftMask` bit, so a right-hand-only grab cannot be expressed:
+//!   the shortcut is documented as `Shift+F9` and either Shift key fires it.
+//!   `Shift_L`/`Shift_R` stay accepted as spellings of the same mask, so a
+//!   `panel.json` written by an earlier build keeps working.
 //! * **X11/Xwayland only, and only while an X11 window holds the keyboard
 //!   focus.** The grab is an X server grab: a native Wayland client never routes
 //!   its keys through the X server, so no global-hotkey support is claimed
@@ -84,19 +96,46 @@ pub const MIN_KEYCODE: u8 = 8;
 /// `xmodmap -pke` on this host, where F9 is keycode 75 with keysym 0xffc6.
 pub const KEYSYM_F1: u32 = 0xFFBE;
 
-/// The lock-key states the hotkey is grabbed under, in the order they are tried.
+/// The lock-key bits the server may OR into the modifier mask it DELIVERS, as
+/// the states those keys can be in at press time.
 ///
-/// One grab per entry, and that is the point: on X11 a lock key changes the
-/// modifier mask the server DELIVERS, so a grab made only under plain Shift
-/// misses the combination while a lock is on. Each entry is the hotkey's own
-/// modifiers plus that lock's bit.
-pub fn lock_variants() -> Vec<(&'static str, u16)> {
-    vec![
-        ("none", MOD_SHIFT),
-        ("capslock", MOD_SHIFT | MOD_LOCK),
-        ("numlock", MOD_SHIFT | MOD_M2),
-        ("scrolllock", MOD_SHIFT | MOD_M5),
-    ]
+/// All eight combinations, not just the three single locks: the server reports
+/// ONE mask for the state the keyboard is in, and with CapsLock **and** NumLock
+/// both on the delivered mask carries both bits. A grab made only for the
+/// single-lock variants misses the key in exactly the state a user who leaves
+/// both locks set is always in.
+pub const LOCK_COMBINATIONS: [(&str, u16); 8] = [
+    ("none", 0),
+    ("capslock", MOD_LOCK),
+    ("numlock", MOD_M2),
+    ("capslock+numlock", MOD_LOCK | MOD_M2),
+    ("scrolllock", MOD_M5),
+    ("capslock+scrolllock", MOD_LOCK | MOD_M5),
+    ("numlock+scrolllock", MOD_M2 | MOD_M5),
+    ("capslock+numlock+scrolllock", MOD_LOCK | MOD_M2 | MOD_M5),
+];
+
+/// Every mask `keycode` is grabbed under for a hotkey configured with
+/// `modifiers`, in the order they are tried.
+///
+/// One grab per lock combination, and each is the hotkey's **own** modifiers plus
+/// those lock bits — never a fixed set. This is not cosmetic: the server delivers
+/// a `KeyPress` only for the mask the grab was made with, so a `Control+Alt+F5`
+/// hotkey grabbed under `Shift` is a key that does nothing at all, and the
+/// capture log still says it was captured.
+///
+/// Duplicates are dropped, because a spec that names a lock key as its modifier
+/// (`CapsLock+F9`) collapses some combinations onto one mask, and a second
+/// identical grab would only distort the per-variant counts.
+pub fn lock_variants(modifiers: u16) -> Vec<(&'static str, u16)> {
+    let mut variants: Vec<(&'static str, u16)> = Vec::with_capacity(LOCK_COMBINATIONS.len());
+    for (name, lock_bits) in LOCK_COMBINATIONS {
+        let bits = modifiers | lock_bits;
+        if !variants.iter().any(|(_, seen)| *seen == bits) {
+            variants.push((name, bits));
+        }
+    }
+    variants
 }
 
 /// What is known about the global hotkey.
@@ -152,10 +191,11 @@ impl GrabStatus {
     }
 }
 
-/// A parsed hotkey such as `Shift_R+F9`.
+/// A parsed hotkey such as `Shift+F9`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hotkey {
-    /// X11 modifier bits ([`MOD_SHIFT`] and friends).
+    /// X11 modifier bits ([`MOD_SHIFT`] and friends). These are the bits the grab
+    /// is made with — see [`lock_variants`].
     pub modifiers: u16,
     /// X11 keysym value.
     pub keysym: u32,
@@ -169,6 +209,12 @@ impl Hotkey {
     /// Modifiers are `Shift`/`Shift_L`/`Shift_R`, `Control`/`Ctrl`,
     /// `Alt`/`Mod1`, `Lock`/`CapsLock`, `NumLock`, `ScrollLock`, joined by `+`
     /// with a final key name (`F1`..`F35`, `A`..`Z`, `0`..`9`).
+    ///
+    /// `Shift_L` and `Shift_R` are accepted but parse to plain `ShiftMask`: X11
+    /// has no way to ask for one of the two Shift keys in a grab, and a spec that
+    /// claimed a right-hand-only key would promise something the server cannot
+    /// deliver. One `log::info!` line says so, because the user typed the
+    /// distinction and deserves to know it was dropped.
     ///
     /// An empty spec is not an error: it is the user turning the key off, and
     /// the tray and `--toggle-panel` still work. An unknown modifier is ignored
@@ -184,9 +230,14 @@ impl Hotkey {
         let (key, modifier_parts) = parts.split_last()?;
 
         let mut modifiers = 0u16;
+        let mut named_shift_key = false;
         for part in modifier_parts {
             modifiers |= match *part {
-                "Shift" | "Shift_L" | "Shift_R" => MOD_SHIFT,
+                "Shift" => MOD_SHIFT,
+                "Shift_L" | "Shift_R" => {
+                    named_shift_key = true;
+                    MOD_SHIFT
+                }
                 "Lock" | "CapsLock" => MOD_LOCK,
                 "Control" | "Ctrl" | "Control_L" | "Control_R" => MOD_CONTROL,
                 "Alt" | "Mod1" => MOD_M1,
@@ -197,6 +248,12 @@ impl Hotkey {
                     0
                 }
             };
+        }
+        if named_shift_key {
+            log::info!(
+                "panel: `{spec}` names one Shift key, but an X11 grab takes one ShiftMask bit; \
+                 the shortcut is Shift+<key> and either Shift key fires it"
+            );
         }
 
         Some(Self {
@@ -562,7 +619,8 @@ fn resolve_keycode(conn: &x11rb::rust_connection::RustConnection, keysym: u32) -
     keycode_from_mapping(min, mapping.keysyms_per_keycode, &mapping.keysyms, keysym)
 }
 
-/// Grab `keycode` on the root window under every lock variant.
+/// Grab `keycode` on the root window under every mask [`lock_variants`] derives
+/// from the hotkey's `modifiers`.
 ///
 /// Each variant's result is confirmed before the next is attempted, and that is
 /// not optional: `XGrabKey` is void on the wire, so success and "another client
@@ -570,7 +628,11 @@ fn resolve_keycode(conn: &x11rb::rust_connection::RustConnection, keysym: u32) -
 /// Reporting "captured" for a refused grab would make the safety rule offer a
 /// key that does nothing.
 #[cfg(target_os = "linux")]
-fn grab_hotkey(conn: &x11rb::rust_connection::RustConnection, keycode: u8) -> GrabStatus {
+fn grab_hotkey(
+    conn: &x11rb::rust_connection::RustConnection,
+    keycode: u8,
+    modifiers: u16,
+) -> GrabStatus {
     use x11rb::connection::Connection;
     use x11rb::errors::ReplyError;
     use x11rb::protocol::xproto::{ConnectionExt, GrabMode, ModMask};
@@ -584,7 +646,7 @@ fn grab_hotkey(conn: &x11rb::rust_connection::RustConnection, keycode: u8) -> Gr
     let mut grabbed = 0usize;
     let mut busy = 0usize;
 
-    for (_, bits) in lock_variants() {
+    for (name, bits) in lock_variants(modifiers) {
         // Signature: (owner_events, grab_window, modifiers, key, pointer_mode,
         // keyboard_mode).
         let Ok(cookie) = conn.grab_key(
@@ -603,12 +665,29 @@ fn grab_hotkey(conn: &x11rb::rust_connection::RustConnection, keycode: u8) -> Gr
         // `poll_for_event` that finds an empty queue reads a refusal as a
         // success.
         match cookie.check() {
-            Ok(()) => grabbed += 1,
+            Ok(()) => {
+                grabbed += 1;
+                // The mask actually sent, per variant: the only place the
+                // configured modifiers and the lock bits are visible on the
+                // wire, and what a live run is checked against.
+                log::info!("panel: grabbed keycode {keycode} under {name} (mask {bits:#06x})");
+            }
             // `ErrorKind::Access` is `BadAccess` on the wire: another client
             // already owns this exact combination.
-            Err(ReplyError::X11Error(err)) if err.error_kind == ErrorKind::Access => busy += 1,
+            Err(ReplyError::X11Error(err)) if err.error_kind == ErrorKind::Access => {
+                busy += 1;
+                // Logged, not silently counted: a variant another client owns is
+                // a lock state the key does not work in. The status is still
+                // `Grabbed` because the other variants cover the rest, so this
+                // line is the only place that partial loss is visible.
+                log::warn!(
+                    "panel: keycode {keycode} under {name} (mask {bits:#06x}) is already grabbed \
+                     by another client; the hotkey does not fire in that lock state"
+                );
+            }
             Err(err) => log::warn!(
-                "panel: grab of keycode {keycode} refused ({err}); trying the next lock variant"
+                "panel: grab of keycode {keycode} under {name} refused ({err}); \
+                 trying the next lock variant"
             ),
         }
     }
@@ -664,19 +743,25 @@ pub fn start_hotkey(spec: &str, visibility: Arc<Visibility>) {
             return;
         };
 
-        // Grab on THIS connection, which is the one that will poll it.
-        let status = grab_hotkey(&conn, keycode);
+        // Grab on THIS connection, which is the one that will poll it, and with
+        // the modifiers the user configured: a fixed mask would grab a
+        // combination nobody asked for.
+        let status = grab_hotkey(&conn, keycode, hotkey.modifiers);
         visibility.set_grab_status(status);
         if !status.is_usable() {
             log::warn!(
-                "panel: hotkey `{spec}` not captured (keycode {keycode}): {}",
+                "panel: hotkey `{spec}` not captured (keycode {keycode}, mask {:#06x}): {}",
+                hotkey.modifiers,
                 status.message()
             );
             return;
         }
-        log::info!("panel: hotkey `{spec}` captured (keycode {keycode})");
+        log::info!(
+            "panel: hotkey `{spec}` captured (keycode {keycode}, modifiers {:#06x})",
+            hotkey.modifiers
+        );
 
-        watch_hotkey(&conn, keycode, trigger, stop, ctx_flag);
+        watch_hotkey(&conn, keycode, hotkey.modifiers, trigger, stop, ctx_flag);
     });
 }
 
@@ -695,6 +780,7 @@ pub fn regrab(spec: &str, visibility: Arc<Visibility>) {
 fn watch_hotkey(
     conn: &x11rb::rust_connection::RustConnection,
     keycode: u8,
+    modifiers: u16,
     trigger: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     ctx_flag: Arc<Mutex<Option<egui::Context>>>,
@@ -734,9 +820,10 @@ fn watch_hotkey(
         }
     }
 
-    // Release every variant this thread grabbed.
+    // Release every variant this thread grabbed — the same masks it grabbed,
+    // derived from the same modifiers.
     if let Some(screen) = conn.setup().roots.first() {
-        for (_, bits) in lock_variants() {
+        for (_, bits) in lock_variants(modifiers) {
             let _ = conn.ungrab_key(
                 keycode,
                 screen.root,
@@ -924,10 +1011,31 @@ mod tests {
     fn the_default_hotkey_parses_to_its_real_keysym() {
         // The shipped default, and the keysym it has to resolve to: 0xFFC6 is
         // XK_F9, which `xmodmap -pke` reports for keycode 75 on this host.
-        assert_eq!(DEFAULT_HOTKEY, "Shift_R+F9");
+        assert_eq!(DEFAULT_HOTKEY, "Shift+F9");
         let hotkey = Hotkey::parse(DEFAULT_HOTKEY).expect("the default must parse");
         assert_eq!(hotkey.modifiers, MOD_SHIFT);
         assert_eq!(hotkey.keysym, 0xFFC6);
+    }
+
+    #[test]
+    fn shift_and_the_two_shift_keys_are_one_grab() {
+        // `Shift_R` was the old default's spelling. X11 cannot deliver on it:
+        // both Shift keys set `ShiftMask` and the grab takes one mask, so a
+        // right-hand-only claim would be unimplementable. The three spellings are
+        // therefore one mask — which is what "either Shift key fires it" means —
+        // and a `panel.json` written by an earlier build keeps working.
+        for spec in ["Shift+F9", "Shift_L+F9", "Shift_R+F9"] {
+            let hotkey = Hotkey::parse(spec).unwrap_or_else(|| panic!("{spec} parses"));
+            assert_eq!(hotkey.modifiers, MOD_SHIFT, "{spec}");
+            assert_eq!(hotkey.keysym, 0xFFC6, "{spec}");
+        }
+
+        // And the described shortcut really is the default one: the string the
+        // settings hint, the docs and the config all show.
+        assert_eq!(
+            Hotkey::parse(DEFAULT_HOTKEY).unwrap().modifiers,
+            Hotkey::parse("Shift_R+F9").unwrap().modifiers
+        );
     }
 
     #[test]
@@ -1081,9 +1189,21 @@ mod tests {
 
     #[test]
     fn every_lock_key_variant_is_its_own_grab() {
-        let variants = lock_variants();
+        let variants = lock_variants(MOD_SHIFT);
         let names: Vec<&str> = variants.iter().map(|(name, _)| *name).collect();
-        assert_eq!(names, vec!["none", "capslock", "numlock", "scrolllock"]);
+        assert_eq!(
+            names,
+            vec![
+                "none",
+                "capslock",
+                "numlock",
+                "capslock+numlock",
+                "scrolllock",
+                "capslock+scrolllock",
+                "numlock+scrolllock",
+                "capslock+numlock+scrolllock",
+            ]
+        );
 
         for (name, bits) in &variants {
             assert_eq!(
@@ -1096,7 +1216,8 @@ mod tests {
             }
         }
 
-        // The three lock bits are distinct, or two variants would be one grab.
+        // The variants are distinct grabs, or the per-variant counts in
+        // `grab_outcome` count the same grab twice.
         let mut bits: Vec<u16> = variants.iter().map(|(_, bits)| *bits).collect();
         let before = bits.len();
         bits.sort_unstable();
@@ -1105,12 +1226,96 @@ mod tests {
     }
 
     #[test]
+    fn the_configured_modifiers_are_the_masks_that_are_grabbed() {
+        // The defect this pins: the masks were built from a hardcoded
+        // `ShiftMask`, so a hotkey configured as `Control+Alt+F5` was grabbed
+        // under Shift. The server delivers a `KeyPress` only for the mask the
+        // grab was made with, so the key did nothing at all while the log said
+        // "captured".
+        let hotkey = Hotkey::parse("Control+Alt+F5").expect("a non-default combination parses");
+        let base = MOD_CONTROL | MOD_M1;
+        assert_eq!(hotkey.modifiers, base);
+        assert_eq!(hotkey.keysym, keysym_for("F5").unwrap());
+
+        let masks: Vec<u16> = lock_variants(hotkey.modifiers)
+            .into_iter()
+            .map(|(_, bits)| bits)
+            .collect();
+        assert_eq!(
+            masks,
+            vec![
+                base,
+                base | MOD_LOCK,
+                base | MOD_M2,
+                base | MOD_LOCK | MOD_M2,
+                base | MOD_M5,
+                base | MOD_LOCK | MOD_M5,
+                base | MOD_M2 | MOD_M5,
+                base | MOD_LOCK | MOD_M2 | MOD_M5,
+            ],
+            "every mask is the configured combination plus a lock state"
+        );
+
+        // Not one of them may carry Shift: it is not in the hotkey, and a grab
+        // under a modifier the user did not configure is a key that never fires.
+        for bits in &masks {
+            assert_eq!(
+                bits & MOD_SHIFT,
+                0,
+                "the configured hotkey has no Shift ({bits:#06x})"
+            );
+            assert_eq!(
+                bits & base,
+                base,
+                "the configured modifiers stay in ({bits:#06x})"
+            );
+        }
+    }
+
+    #[test]
+    fn simultaneous_lock_states_are_grabbed() {
+        // CapsLock and NumLock both on is one mask carrying both bits, and a user
+        // who leaves both locks set is in it permanently. Grabbing only the
+        // single-lock variants loses the key in exactly that state — the state
+        // can be seen at press time, not chosen by the app.
+        let base = MOD_SHIFT;
+        let variants = lock_variants(base);
+        assert_eq!(
+            variants.len(),
+            8,
+            "three lock keys have 2^3 states, and each state is one delivered mask"
+        );
+
+        let mask_of = |wanted: &str| {
+            variants
+                .iter()
+                .find(|(name, _)| *name == wanted)
+                .unwrap_or_else(|| panic!("{wanted} is a state the key can be in"))
+                .1
+        };
+        assert_eq!(mask_of("capslock+numlock"), base | MOD_LOCK | MOD_M2);
+        assert_eq!(mask_of("capslock+scrolllock"), base | MOD_LOCK | MOD_M5);
+        assert_eq!(mask_of("numlock+scrolllock"), base | MOD_M2 | MOD_M5);
+        assert_eq!(
+            mask_of("capslock+numlock+scrolllock"),
+            base | MOD_LOCK | MOD_M2 | MOD_M5,
+            "all three locks at once is a mask of its own"
+        );
+
+        // Every combination is present exactly once, over all eight subsets.
+        let mut masks: Vec<u16> = variants.iter().map(|(_, bits)| *bits).collect();
+        masks.sort_unstable();
+        masks.dedup();
+        assert_eq!(masks.len(), 8, "no combination is missing or duplicated");
+    }
+
+    #[test]
     fn the_lock_bits_are_the_ones_the_server_sets() {
         // NumLock is Mod2 and ScrollLock is Mod5 on the standard keymap. A wrong
         // bit is a grab under a mask the server never delivers — a key that works
         // only while every lock is off.
         let bits = |wanted: &str| {
-            lock_variants()
+            lock_variants(MOD_SHIFT)
                 .into_iter()
                 .find(|(name, _)| *name == wanted)
                 .unwrap()
@@ -1119,6 +1324,32 @@ mod tests {
         assert_eq!(bits("numlock"), MOD_SHIFT | MOD_M2);
         assert_eq!(bits("scrolllock"), MOD_SHIFT | MOD_M5);
         assert_eq!(bits("capslock"), MOD_SHIFT | MOD_LOCK);
+    }
+
+    #[test]
+    fn a_lock_key_named_as_a_modifier_does_not_double_grab() {
+        // `CapsLock+F9` is a legal spec, and `CapsLockMask` is one of the bits the
+        // variants add — so four of the eight collapse onto the other four. The
+        // collision is dropped rather than grabbed twice.
+        let variants = lock_variants(MOD_LOCK);
+        let masks: Vec<u16> = variants.iter().map(|(_, bits)| *bits).collect();
+        assert_eq!(masks.len(), 4);
+        assert_eq!(
+            masks,
+            vec![
+                MOD_LOCK,
+                MOD_LOCK | MOD_M2,
+                MOD_LOCK | MOD_M5,
+                MOD_LOCK | MOD_M2 | MOD_M5,
+            ]
+        );
+        for (name, bits) in &variants {
+            assert_eq!(
+                bits & MOD_LOCK,
+                MOD_LOCK,
+                "{name} must keep the configured lock request"
+            );
+        }
     }
 
     // ---- grab failure states ----

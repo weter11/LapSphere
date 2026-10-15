@@ -377,7 +377,7 @@ fn hotkey_control(
     grabbed: &str,
 ) -> (egui::Response, bool) {
     let response = ui.text_edit_singleline(&mut config.hotkey).on_hover_text(
-        "X11/Xwayland only, e.g. Shift_R+F9. An empty value turns the key off; the \
+        "X11/Xwayland only, e.g. Shift+F9. An empty value turns the key off; the \
          tray and `lapsphere --toggle-panel` still work.",
     );
     // Committed on lost focus, never per keystroke: see
@@ -602,7 +602,7 @@ mod tests {
                 &AppState::new(),
                 config,
                 outcome,
-                &live_hotkeys(&visibility, "Shift_R+F9", false),
+                &live_hotkeys(&visibility, "Shift+F9", false),
             );
             assert!(!outcome.back_to_normal);
             assert!(!outcome.config_changed);
@@ -624,7 +624,7 @@ mod tests {
                 &AppState::new(),
                 config,
                 outcome,
-                &live_hotkeys(&visibility, "Shift_R+F9", false),
+                &live_hotkeys(&visibility, "Shift+F9", false),
             );
         });
     }
@@ -650,7 +650,7 @@ mod tests {
                     &AppState::new(),
                     config,
                     outcome,
-                    &live_hotkeys(&visibility, "Shift_R+F9", false),
+                    &live_hotkeys(&visibility, "Shift+F9", false),
                 );
                 assert!(
                     !outcome.hotkey_changed,
@@ -833,7 +833,7 @@ mod tests {
     /// somewhere else — so press and release at the empty corner have to be in
     /// frames of their own as well.
     fn commit_typed_hotkey(typed: &str) -> (String, bool) {
-        const GRABBED: &str = "Shift_R+F9";
+        const GRABBED: &str = "Shift+F9";
 
         let ctx = Context::default();
         let screen = Rect::from_min_size(
@@ -880,7 +880,7 @@ mod tests {
         // The positive case: a new spec typed into the field has to reach the
         // caller, or changing the key would need a restart.
         let (typed, committed) = commit_typed_hotkey("+X");
-        assert_eq!(typed, "Shift_R+F9+X", "the typed text lands in the config");
+        assert_eq!(typed, "Shift+F9+X", "the typed text lands in the config");
         assert!(
             committed,
             "a changed spec must be committed so the key is re-grabbed"
@@ -890,7 +890,7 @@ mod tests {
         // NOT commit, or every click into the field would tear the grab down and
         // put it back up.
         let (unchanged, committed) = commit_typed_hotkey("");
-        assert_eq!(unchanged, "Shift_R+F9");
+        assert_eq!(unchanged, "Shift+F9");
         assert!(!committed, "an unchanged spec must not trigger a re-grab");
     }
 
