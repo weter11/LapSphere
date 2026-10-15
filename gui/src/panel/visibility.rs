@@ -147,15 +147,29 @@ pub enum GrabStatus {
     /// so that no frame ever waits on the X server, and this is what the UI shows
     /// until that thread reports.
     Unknown,
-    /// Captured: the server accepted the grab for at least one lock variant.
+    /// Captured **in every lock state**: the server accepted the grab for each
+    /// unique mask that was attempted.
+    ///
+    /// This is the only status the hide-safety rule counts as a guaranteed way
+    /// back, because it is the only one where the key works whatever the lock
+    /// keys are doing.
     Grabbed,
+    /// Captured in **some** lock states: at least one unique mask was accepted and
+    /// at least one was not (another client owns it, or its request was refused).
+    ///
+    /// A real hotkey — presses in the states that were acquired do arrive, so the
+    /// watcher must run — but not a guaranteed route back, because whether the key
+    /// fires depends on the lock keys. Distinct from [`GrabStatus::Grabbed`] so
+    /// the UI and the safety rule cannot treat "usually works" as "always works".
+    Partial,
     /// The user turned the key off (an empty spec in `panel.json`).
     ///
     /// Distinct from [`GrabStatus::Failed`] because the two need different
     /// sentences: "no key configured" is a choice the tray and the CLI already
     /// cover, while "could not capture" is something to act on.
     Disabled,
-    /// The combination is already owned by another client (X11 `BadAccess`).
+    /// The combination is already owned by another client (X11 `BadAccess`), and
+    /// **no** variant was acquired.
     Busy,
     /// No X11 display (native Wayland, or no `DISPLAY`).
     NoDisplay,
@@ -170,6 +184,7 @@ impl GrabStatus {
         match self {
             GrabStatus::Unknown => "Hotkey not checked yet",
             GrabStatus::Grabbed => "Hotkey captured",
+            GrabStatus::Partial => "Hotkey captured for some lock states only",
             GrabStatus::Disabled => {
                 "No hotkey configured: the tray and `lapsphere --toggle-panel` are the ways back"
             }
@@ -182,11 +197,46 @@ impl GrabStatus {
         }
     }
 
-    /// Is this a key the user can actually press?
+    /// The longer explanation the settings surface shows under the status line,
+    /// or `None` when the one line says everything there is to say.
     ///
-    /// The one place "captured" is defined, so the safety rule can never count a
-    /// refused, disabled or not-yet-attempted grab as a way back.
-    pub fn is_usable(self) -> bool {
+    /// The details that need per-mask data — which combinations are somebody
+    /// else's — stay in the log; this is the part the user has to read to know
+    /// what will happen when they press the key.
+    pub fn warning(self) -> Option<&'static str> {
+        match self {
+            GrabStatus::Busy => Some(
+                "Another application already owns this key. Pick a different one, or use \
+                 the tray or `lapsphere --toggle-panel`.",
+            ),
+            GrabStatus::Partial => Some(
+                "Only some lock-key combinations could be captured: another application owns \
+                 the rest, so this key may not work with CapsLock, NumLock or ScrollLock on. \
+                 Which combinations were refused is in the log.",
+            ),
+            _ => None,
+        }
+    }
+
+    /// Should the hotkey work at all — i.e. did the server accept at least one
+    /// unique mask?
+    ///
+    /// The predicate the watcher's life depends on, and nothing else: a
+    /// [`GrabStatus::Partial`] key does fire in the states that were acquired, so
+    /// the thread that polls it must not be torn down. Reading the safety
+    /// predicate here instead would silently kill a working key.
+    pub fn keeps_watcher(self) -> bool {
+        matches!(self, GrabStatus::Grabbed | GrabStatus::Partial)
+    }
+
+    /// Is this a key the user can rely on as a way back — captured in EVERY lock
+    /// state?
+    ///
+    /// The one place a "way back" is defined, so the safety rule can never count a
+    /// refused, disabled, not-yet-attempted or partially captured grab as a
+    /// guaranteed route. A partial grab is not one: whether it fires depends on
+    /// the lock keys.
+    pub fn is_reliable_route(self) -> bool {
         matches!(self, GrabStatus::Grabbed)
     }
 }
@@ -219,50 +269,184 @@ impl Hotkey {
     /// An empty spec is not an error: it is the user turning the key off, and
     /// the tray and `--toggle-panel` still work. An unknown modifier is ignored
     /// with a warning rather than failing the whole spec, so one typo does not
-    /// disable the key.
+    /// disable the key — [`parse_spec`] is where those tokens can be read back,
+    /// which is what the settings surface warns from.
     pub fn parse(spec: &str) -> Option<Self> {
-        let spec = spec.trim();
-        if spec.is_empty() {
-            return None;
+        parse_spec(spec).map(|parsed| parsed.hotkey)
+    }
+}
+
+/// The modifier bits a token denotes, or `None` when this parser does not know
+/// the token.
+///
+/// The ONE spelling table: [`parse_spec`], the ignored-token report and the
+/// effective-shortcut description all read it, so a spec cannot parse one way and
+/// be explained another.
+pub fn modifier_bits(token: &str) -> Option<u16> {
+    Some(match token {
+        "Shift" | "Shift_L" | "Shift_R" => MOD_SHIFT,
+        "Lock" | "CapsLock" => MOD_LOCK,
+        "Control" | "Ctrl" | "Control_L" | "Control_R" => MOD_CONTROL,
+        "Alt" | "Mod1" => MOD_M1,
+        "NumLock" => MOD_M2,
+        "ScrollLock" => MOD_M5,
+        _ => return None,
+    })
+}
+
+/// The canonical spelling of each modifier bit, in the order the effective
+/// shortcut is written.
+///
+/// Canonical, not the user's alias: `Ctrl` is described as `Control` and `Lock`
+/// as `CapsLock`, because this string is what the app will actually grab.
+const MODIFIER_NAMES: [(u16, &str); 6] = [
+    (MOD_SHIFT, "Shift"),
+    (MOD_CONTROL, "Control"),
+    (MOD_M1, "Alt"),
+    (MOD_LOCK, "CapsLock"),
+    (MOD_M2, "NumLock"),
+    (MOD_M5, "ScrollLock"),
+];
+
+/// A spec, the hotkey it denotes, and the parts of it that were dropped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedSpec {
+    pub hotkey: Hotkey,
+    /// Modifier tokens this parser does not know, in the order they appear.
+    ///
+    /// They are ignored rather than fatal, so the effective shortcut is shorter
+    /// than what the user typed — which is exactly what the settings surface has
+    /// to say out loud instead of reporting the spec as an exact match.
+    pub ignored: Vec<String>,
+    /// The key token as it was written, for the effective-shortcut line.
+    pub key_token: String,
+}
+
+impl ParsedSpec {
+    /// The shortcut that will actually be grabbed: the recognised modifiers in
+    /// canonical spelling, plus the key.
+    ///
+    /// This is the string the user has to be shown for `Wibble+F9`, whose
+    /// effective shortcut is plain `F9`.
+    pub fn effective(&self) -> String {
+        let mut parts: Vec<&str> = MODIFIER_NAMES
+            .iter()
+            .filter(|(bit, _)| self.hotkey.modifiers & bit != 0)
+            .map(|(_, name)| *name)
+            .collect();
+        let key = canonical_key_name(&self.key_token, self.hotkey.keysym);
+        parts.push(&key);
+        parts.join("+")
+    }
+}
+
+/// The key as the app names it, derived from the keysym that was resolved rather
+/// than from the token as typed: `f5` and `F5` are the same key and must not
+/// produce two different descriptions, and a letter's keysym is its upper case.
+fn canonical_key_name(token: &str, keysym: u32) -> String {
+    const F35_KEYKSYM: u32 = KEYSYM_F1 + 34;
+    if (KEYSYM_F1..=F35_KEYKSYM).contains(&keysym) {
+        return format!("F{}", keysym - KEYSYM_F1 + 1);
+    }
+    if token.len() == 1 {
+        if let Some(ch) = token.chars().next() {
+            if ch.is_ascii_alphabetic() {
+                return ch.to_ascii_uppercase().to_string();
+            }
         }
+    }
+    token.to_string()
+}
 
-        let parts: Vec<&str> = spec.split('+').map(|part| part.trim()).collect();
-        let (key, modifier_parts) = parts.split_last()?;
+/// Parse a spec, keeping the modifier tokens that were ignored.
+///
+/// `None` for an empty spec (the user turning the key off) or for a key name this
+/// parser does not know.
+pub fn parse_spec(spec: &str) -> Option<ParsedSpec> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return None;
+    }
 
-        let mut modifiers = 0u16;
-        let mut named_shift_key = false;
-        for part in modifier_parts {
-            modifiers |= match *part {
-                "Shift" => MOD_SHIFT,
-                "Shift_L" | "Shift_R" => {
+    let parts: Vec<&str> = spec.split('+').map(|part| part.trim()).collect();
+    let (key, modifier_parts) = parts.split_last()?;
+
+    let mut modifiers = 0u16;
+    let mut ignored: Vec<String> = Vec::new();
+    let mut named_shift_key = false;
+    for part in modifier_parts {
+        match modifier_bits(part) {
+            Some(bits) => {
+                modifiers |= bits;
+                if *part == "Shift_L" || *part == "Shift_R" {
                     named_shift_key = true;
-                    MOD_SHIFT
                 }
-                "Lock" | "CapsLock" => MOD_LOCK,
-                "Control" | "Ctrl" | "Control_L" | "Control_R" => MOD_CONTROL,
-                "Alt" | "Mod1" => MOD_M1,
-                "NumLock" => MOD_M2,
-                "ScrollLock" => MOD_M5,
-                other => {
-                    log::warn!("panel: unknown hotkey modifier `{other}` ignored");
-                    0
-                }
-            };
+            }
+            // Ignored, not fatal: one typo must not disable the key. The token is
+            // kept so the UI can say which one it was.
+            None => ignored.push((*part).to_string()),
         }
-        if named_shift_key {
-            log::info!(
-                "panel: `{spec}` names one Shift key, but an X11 grab takes one ShiftMask bit; \
-                 the shortcut is Shift+<key> and either Shift key fires it"
-            );
-        }
+    }
 
-        Some(Self {
+    let keysym = keysym_for(key)?;
+
+    let parsed = ParsedSpec {
+        hotkey: Hotkey {
             modifiers,
-            keysym: keysym_for(key)?,
+            keysym,
             // Filled in against the running server; 0 means "not resolved yet".
             keycode: 0,
-        })
+        },
+        ignored,
+        key_token: (*key).to_string(),
+    };
+
+    if !parsed.ignored.is_empty() {
+        log::warn!(
+            "panel: hotkey `{spec}` ignores unknown modifier(s) {}; the effective shortcut is \
+             `{}`",
+            parsed
+                .ignored
+                .iter()
+                .map(|token| format!("`{token}`"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            parsed.effective()
+        );
     }
+    if named_shift_key {
+        log::info!(
+            "panel: `{spec}` names one Shift key, but an X11 grab takes one ShiftMask bit; \
+             the shortcut is Shift+<key> and either Shift key fires it"
+        );
+    }
+
+    Some(parsed)
+}
+
+/// The warning the settings surface shows for a spec with ignored modifiers, or
+/// `None` when the spec is exactly what it says.
+///
+/// Both halves matter: which tokens were dropped, and what the shortcut will
+/// really be. A spec of `Wibble+F9` that reports "Hotkey captured" reads as an
+/// exact match, and the key the user thinks they configured does not exist.
+pub fn ignored_modifiers_warning(spec: &str) -> Option<String> {
+    let parsed = parse_spec(spec)?;
+    if parsed.ignored.is_empty() {
+        return None;
+    }
+    let tokens = parsed
+        .ignored
+        .iter()
+        .map(|token| format!("`{token}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "Ignored modifier{plural} {tokens}: not a name this build knows, so the effective \
+         shortcut is `{effective}`. Fix the spelling, or clear the field to turn the key off.",
+        plural = if parsed.ignored.len() == 1 { "" } else { "s" },
+        effective = parsed.effective(),
+    ))
 }
 
 /// The X11 keysym a key name denotes, or `None` when this parser does not know
@@ -318,21 +502,33 @@ pub fn keycode_from_mapping(
 
 /// The reported status for the variants one grab attempt produced.
 ///
-/// One grab per lock variant, and the server refuses each independently: another
-/// client may own the NumLock variant while the plain one is free. `grabbed`
-/// counts the variants the server accepted and `busy` the ones it refused with
-/// `BadAccess`, so:
+/// One grab per **unique** mask ([`lock_variants`] drops the combinations a spec
+/// already asks for), and the server refuses each independently: another client
+/// may own the NumLock combination while the plain one is free. So the comparison
+/// is against `attempted`, the number of unique masks that were tried — not
+/// against a constant:
 ///
-/// * any accepted variant is a usable hotkey ([`GrabStatus::Grabbed`]);
-/// * every variant refused as busy is [`GrabStatus::Busy`] — the key is somebody
-///   else's;
+/// * every attempted mask accepted is [`GrabStatus::Grabbed`] — the key works in
+///   every lock state, which is what makes it a way back;
+/// * some accepted and some not is [`GrabStatus::Partial`] — the key fires in the
+///   states that were acquired and not in the others, so it is usable but not
+///   guaranteed;
+/// * nothing accepted with at least one `BadAccess` is [`GrabStatus::Busy`] — the
+///   key is somebody else's;
 /// * nothing accepted and nothing busy is [`GrabStatus::Failed`].
 ///
-/// The order matters: a refused variant must never be reported as captured, and
-/// a partial success must not be reported as busy.
-pub fn grab_outcome(grabbed: usize, busy: usize) -> GrabStatus {
-    if grabbed > 0 {
+/// The order matters: a refused variant must never be reported as captured, a
+/// partial success must never be reported as complete, and a partial success must
+/// not be reported as busy.
+pub fn grab_outcome(grabbed: usize, busy: usize, attempted: usize) -> GrabStatus {
+    if attempted == 0 {
+        // Nothing was even attempted: there is no key, so there is nothing to
+        // report as captured or as somebody else's.
+        GrabStatus::Failed
+    } else if grabbed == attempted {
         GrabStatus::Grabbed
+    } else if grabbed > 0 {
+        GrabStatus::Partial
     } else if busy > 0 {
         GrabStatus::Busy
     } else {
@@ -351,6 +547,21 @@ pub fn grab_outcome(grabbed: usize, busy: usize) -> GrabStatus {
 /// where they are false is exactly the state the rule exists for.
 pub fn can_hide(hotkey_grabbed: bool, tray_enabled: bool, dbus_available: bool) -> bool {
     hotkey_grabbed || tray_enabled || dbus_available
+}
+
+/// The line logged when the panel is hidden, naming what actually brings it back.
+///
+/// A partially captured key keeps its watcher and its presses, but it is the tray
+/// and the CLI that make hiding safe: whether it fires depends on the lock keys in
+/// use, so the log must not promise a key that may not work. One function for both
+/// hide paths (a toggle request and the menu) so neither can promise it.
+pub fn hidden_log_line(status: GrabStatus) -> &'static str {
+    if status.is_reliable_route() {
+        "panel: hidden; the hotkey, the tray or `lapsphere --toggle-panel` brings it back"
+    } else {
+        "panel: hidden; the hotkey is not a reliable route in this state, so the tray or \
+         `lapsphere --toggle-panel` is what brings it back"
+    }
 }
 
 /// What a hide request must actually do.
@@ -503,9 +714,15 @@ impl Visibility {
         status_from_byte(self.grab_status.load(Ordering::Relaxed))
     }
 
-    /// Was the show/hide hotkey captured?
-    pub fn hotkey_grabbed(&self) -> bool {
-        self.grab_status().is_usable()
+    /// Is the show/hide hotkey a **reliable** way back — captured in every lock
+    /// state?
+    ///
+    /// The hide-safety input, and deliberately not "did any grab succeed": a
+    /// [`GrabStatus::Partial`] key may or may not fire depending on the lock keys,
+    /// so it cannot be the only route back. The tray and the D-Bus method are the
+    /// routes that cover that gap, and [`can_hide`] counts them separately.
+    pub fn hotkey_is_reliable_route(&self) -> bool {
+        self.grab_status().is_reliable_route()
     }
 
     /// Record whether the D-Bus control object was exported.
@@ -519,7 +736,11 @@ impl Visibility {
 
     /// Is there a way back to the panel after it is hidden?
     pub fn has_return_path(&self, tray_enabled: bool) -> bool {
-        can_hide(self.hotkey_grabbed(), tray_enabled, self.dbus_available())
+        can_hide(
+            self.hotkey_is_reliable_route(),
+            tray_enabled,
+            self.dbus_available(),
+        )
     }
 
     /// The flag that stops the current watcher thread.
@@ -568,10 +789,12 @@ const STATUS_BUSY: u8 = 2;
 const STATUS_NO_DISPLAY: u8 = 3;
 const STATUS_FAILED: u8 = 4;
 const STATUS_DISABLED: u8 = 5;
+const STATUS_PARTIAL: u8 = 6;
 
 fn status_from_byte(byte: u8) -> GrabStatus {
     match byte {
         STATUS_GRABBED => GrabStatus::Grabbed,
+        STATUS_PARTIAL => GrabStatus::Partial,
         STATUS_BUSY => GrabStatus::Busy,
         STATUS_NO_DISPLAY => GrabStatus::NoDisplay,
         STATUS_FAILED => GrabStatus::Failed,
@@ -584,6 +807,7 @@ fn byte_from_status(status: GrabStatus) -> u8 {
     match status {
         GrabStatus::Unknown => STATUS_UNKNOWN,
         GrabStatus::Grabbed => STATUS_GRABBED,
+        GrabStatus::Partial => STATUS_PARTIAL,
         GrabStatus::Busy => STATUS_BUSY,
         GrabStatus::NoDisplay => STATUS_NO_DISPLAY,
         GrabStatus::Failed => STATUS_FAILED,
@@ -646,7 +870,12 @@ fn grab_hotkey(
     let mut grabbed = 0usize;
     let mut busy = 0usize;
 
-    for (name, bits) in lock_variants(modifiers) {
+    let variants = lock_variants(modifiers);
+    // The comparison base for the outcome: the UNIQUE masks this spec needs, not a
+    // constant. A spec that asks for a lock key itself (`CapsLock+F9`) has fewer.
+    let attempted = variants.len();
+
+    for (name, bits) in variants {
         // Signature: (owner_events, grab_window, modifiers, key, pointer_mode,
         // keyboard_mode).
         let Ok(cookie) = conn.grab_key(
@@ -676,10 +905,9 @@ fn grab_hotkey(
             // already owns this exact combination.
             Err(ReplyError::X11Error(err)) if err.error_kind == ErrorKind::Access => {
                 busy += 1;
-                // Logged, not silently counted: a variant another client owns is
-                // a lock state the key does not work in. The status is still
-                // `Grabbed` because the other variants cover the rest, so this
-                // line is the only place that partial loss is visible.
+                // The per-mask detail the user's status line cannot carry: which
+                // combination is somebody else's, so which lock state the hotkey
+                // will not fire in.
                 log::warn!(
                     "panel: keycode {keycode} under {name} (mask {bits:#06x}) is already grabbed \
                      by another client; the hotkey does not fire in that lock state"
@@ -692,7 +920,7 @@ fn grab_hotkey(
         }
     }
 
-    grab_outcome(grabbed, busy)
+    grab_outcome(grabbed, busy, attempted)
 }
 
 /// Establish the grab and start the watcher thread.
@@ -748,7 +976,11 @@ pub fn start_hotkey(spec: &str, visibility: Arc<Visibility>) {
         // combination nobody asked for.
         let status = grab_hotkey(&conn, keycode, hotkey.modifiers);
         visibility.set_grab_status(status);
-        if !status.is_usable() {
+        // `keeps_watcher`, not the safety predicate: a PARTIAL grab is a working
+        // key in the lock states it acquired, so the thread that polls it must
+        // run. Returning here on anything but a complete grab would leave a key
+        // that is installed on the server and never listened to.
+        if !status.keeps_watcher() {
             log::warn!(
                 "panel: hotkey `{spec}` not captured (keycode {keycode}, mask {:#06x}): {}",
                 hotkey.modifiers,
@@ -756,10 +988,20 @@ pub fn start_hotkey(spec: &str, visibility: Arc<Visibility>) {
             );
             return;
         }
-        log::info!(
-            "panel: hotkey `{spec}` captured (keycode {keycode}, modifiers {:#06x})",
-            hotkey.modifiers
-        );
+        if status.is_reliable_route() {
+            log::info!(
+                "panel: hotkey `{spec}` captured (keycode {keycode}, modifiers {:#06x})",
+                hotkey.modifiers
+            );
+        } else {
+            // Not the "captured" line: some lock states are missing, and the
+            // per-mask warnings above say which.
+            log::warn!(
+                "panel: hotkey `{spec}` captured for some lock states only (keycode {keycode}, \
+                 modifiers {:#06x}); it may not fire with CapsLock, NumLock or ScrollLock on",
+                hotkey.modifiers
+            );
+        }
 
         watch_hotkey(&conn, keycode, hotkey.modifiers, trigger, stop, ctx_flag);
     });
@@ -1046,21 +1288,150 @@ mod tests {
         // captured" when they had deliberately turned it off.
         assert_eq!(Hotkey::parse(""), None);
         assert_eq!(Hotkey::parse("   "), None);
-        assert!(!GrabStatus::Disabled.is_usable());
+        assert!(!GrabStatus::Disabled.is_reliable_route());
+        assert!(!GrabStatus::Disabled.keeps_watcher());
         let message = GrabStatus::Disabled.message();
         assert!(message.contains("No hotkey configured"), "got {message}");
         assert!(message.contains("--toggle-panel"), "got {message}");
     }
 
     #[test]
+    fn an_ignored_modifier_is_reported_rather_than_silently_dropped() {
+        // `Wibble+F9` grabs plain F9. Without a report the settings surface shows
+        // `Wibble+F9 — Hotkey captured`, which reads as an exact match for a
+        // shortcut that does not exist.
+        let parsed = parse_spec("Wibble+F9").expect("the key is known, so the spec parses");
+        assert_eq!(parsed.ignored, vec!["Wibble".to_string()]);
+        assert_eq!(parsed.effective(), "F9");
+        assert_eq!(parsed.hotkey.modifiers, 0, "nothing was recognised");
+        assert_eq!(parsed.hotkey.keysym, keysym_for("F9").unwrap());
+
+        let warning = ignored_modifiers_warning("Wibble+F9").expect("a warning");
+        assert!(warning.contains("Wibble"), "got {warning}");
+        assert!(warning.contains("effective"), "got {warning}");
+        assert!(warning.contains("F9"), "got {warning}");
+    }
+
+    #[test]
+    fn a_spec_with_nothing_ignored_gets_no_warning() {
+        // The negative control: a warning that fires for a correct spec would be
+        // noise the user cannot clear.
+        for spec in [
+            "Shift+F9",
+            "Shift_R+F9",
+            "Shift_L+F9",
+            "Control+Alt+A",
+            "F9",
+        ] {
+            assert_eq!(
+                ignored_modifiers_warning(spec),
+                None,
+                "{spec} is understood exactly as written"
+            );
+            assert!(parse_spec(spec).unwrap().ignored.is_empty(), "{spec}");
+        }
+
+        // And the states with no key at all say nothing either.
+        assert_eq!(ignored_modifiers_warning(""), None);
+        assert_eq!(ignored_modifiers_warning("   "), None);
+        assert_eq!(ignored_modifiers_warning("Wibble+Nope"), None);
+    }
+
+    #[test]
+    fn the_effective_shortcut_names_the_aliases_canonically() {
+        // The string the user is shown has to be what the app will grab: `Ctrl` is
+        // `Control`, `Lock` is `CapsLock`, and a lower-case key is upper case.
+        let cases = [
+            ("Ctrl+F9", "Control+F9"),
+            ("Control+Alt+A", "Control+Alt+A"),
+            ("Lock+NumLock+F9", "CapsLock+NumLock+F9"),
+            ("Shift+Wibble+ScrollLock+f5", "Shift+ScrollLock+F5"),
+            ("Alt+Mod1+F9", "Alt+F9"),
+            ("f9", "F9"),
+        ];
+        for (spec, expected) in cases {
+            let parsed = parse_spec(spec).unwrap_or_else(|| panic!("{spec} parses"));
+            assert_eq!(parsed.effective(), expected, "{spec}");
+        }
+    }
+
+    #[test]
+    fn every_ignored_token_is_named_and_the_supported_ones_are_not() {
+        // Two typos in one spec: both are reported, in the order they appear, and
+        // the recognised modifiers survive.
+        let parsed = parse_spec("Wibble+Shift+Nope+F9").expect("parses");
+        assert_eq!(
+            parsed.ignored,
+            vec!["Wibble".to_string(), "Nope".to_string()]
+        );
+        assert_eq!(parsed.hotkey.modifiers, MOD_SHIFT);
+        assert_eq!(parsed.effective(), "Shift+F9");
+
+        let warning = ignored_modifiers_warning("Wibble+Shift+Nope+F9").unwrap();
+        assert!(
+            warning.contains("Wibble") && warning.contains("Nope"),
+            "{warning}"
+        );
+        assert!(
+            warning.contains("modifiers"),
+            "more than one token is reported in the plural: {warning}"
+        );
+
+        // The spelled aliases are all supported, so none of them is ever reported
+        // as ignored — that is what makes the warning mean "this is a typo".
+        let aliases = [
+            ("Shift_L", MOD_SHIFT),
+            ("Shift_R", MOD_SHIFT),
+            ("Shift", MOD_SHIFT),
+            ("Ctrl", MOD_CONTROL),
+            ("Control", MOD_CONTROL),
+            ("Control_R", MOD_CONTROL),
+            ("Alt", MOD_M1),
+            ("Mod1", MOD_M1),
+            ("Lock", MOD_LOCK),
+            ("CapsLock", MOD_LOCK),
+            ("NumLock", MOD_M2),
+            ("ScrollLock", MOD_M5),
+        ];
+        for (alias, bits) in aliases {
+            assert_eq!(modifier_bits(alias), Some(bits), "{alias}");
+            assert!(
+                parse_spec(&format!("{alias}+F9"))
+                    .unwrap()
+                    .ignored
+                    .is_empty(),
+                "{alias} is supported"
+            );
+        }
+        assert_eq!(modifier_bits("Wibble"), None);
+    }
+
+    #[test]
+    fn the_entered_spec_is_what_gets_grabbed_except_for_ignored_tokens() {
+        // Parsing must not "fix" the spec: the recognised bits are used and the rest
+        // is dropped, which is exactly the behaviour the warning describes.
+        let with_typo = Hotkey::parse("Wibble+Control+F5").expect("parses");
+        let clean = Hotkey::parse("Control+F5").expect("parses");
+        assert_eq!(with_typo, clean, "the same grab, spec aside");
+        assert_eq!(
+            lock_variants(with_typo.modifiers),
+            lock_variants(clean.modifiers)
+        );
+    }
+
+    #[test]
     fn every_status_round_trips_through_the_shared_byte() {
         // The store is a byte behind an atomic, so a variant missing from either
         // direction reads as a different state: `Disabled` would come back as
-        // `Unknown`, and the UI would say "not checked yet" forever.
+        // `Unknown`, and the UI would say "not checked yet" forever. `Partial` is
+        // the newest variant and the one the safety rule distinguishes, so a gap
+        // here would silently turn it into "not checked yet" — which is *not* a way
+        // back either, but for the wrong reason and with the wrong sentence.
         let visibility = Visibility::new();
         for status in [
             GrabStatus::Unknown,
             GrabStatus::Grabbed,
+            GrabStatus::Partial,
             GrabStatus::Disabled,
             GrabStatus::Busy,
             GrabStatus::NoDisplay,
@@ -1352,30 +1723,122 @@ mod tests {
         }
     }
 
-    // ---- grab failure states ----
+    // ---- grab outcomes ----
+
+    #[test]
+    fn every_mask_accepted_is_a_complete_grab() {
+        // The only outcome that is a guaranteed way back.
+        let status = grab_outcome(8, 0, 8);
+        assert_eq!(status, GrabStatus::Grabbed);
+        assert!(status.is_reliable_route());
+        assert!(status.keeps_watcher());
+        assert_eq!(status.message(), "Hotkey captured");
+        assert_eq!(status.warning(), None, "nothing to warn about");
+    }
+
+    #[test]
+    fn some_masks_accepted_is_a_partial_grab() {
+        // The case the old rule reported as `Grabbed`: seven combinations of eight,
+        // with another client owning the eighth. The key fires in the states that
+        // were acquired, so the watcher must live — and it must NOT be treated as a
+        // guaranteed way back, because whether it fires depends on the lock keys.
+        let status = grab_outcome(7, 1, 8);
+        assert_eq!(status, GrabStatus::Partial);
+        assert!(
+            status.keeps_watcher(),
+            "presses in the acquired states arrive"
+        );
+        assert!(!status.is_reliable_route(), "not a guaranteed way back");
+
+        let warning = status.warning().expect("a partial grab needs a warning");
+        assert!(warning.contains("CapsLock"), "got {warning}");
+        assert!(warning.contains("NumLock"), "got {warning}");
+        assert!(warning.contains("ScrollLock"), "got {warning}");
+        assert!(
+            GrabStatus::Partial.message().contains("some lock states"),
+            "the one line must not read as a complete capture: {}",
+            GrabStatus::Partial.message()
+        );
+    }
+
+    #[test]
+    fn a_partial_grab_by_a_refusal_that_is_not_busy_is_still_partial() {
+        // One mask accepted, the rest refused for a reason other than `BadAccess`:
+        // still some lock states missing, so still not complete. The old rule could
+        // not tell this from a full grab either.
+        let status = grab_outcome(1, 0, 8);
+        assert_eq!(status, GrabStatus::Partial);
+        assert!(status.keeps_watcher());
+        assert!(!status.is_reliable_route());
+    }
 
     #[test]
     fn a_refused_grab_is_never_reported_as_captured() {
-        // Every variant refused by another client's grab.
-        assert_eq!(grab_outcome(0, 4), GrabStatus::Busy);
-        assert!(!grab_outcome(0, 4).is_usable());
-        assert!(!GrabStatus::Busy.is_usable());
+        // Every unique mask refused by another client's grab: the key is somebody
+        // else's, and none of it is ours to report as captured.
+        assert_eq!(grab_outcome(0, 8, 8), GrabStatus::Busy);
+        assert!(!grab_outcome(0, 8, 8).is_reliable_route());
+        assert!(!GrabStatus::Busy.keeps_watcher(), "nothing to watch");
+        assert!(!GrabStatus::Busy.is_reliable_route());
+
+        // Busy on some masks with the rest refused for other reasons is still
+        // Busy: no variant was acquired and a `BadAccess` conflict is why.
+        assert_eq!(grab_outcome(0, 5, 8), GrabStatus::Busy);
 
         // Nothing accepted and nothing busy is a failure, not a capture.
-        assert_eq!(grab_outcome(0, 0), GrabStatus::Failed);
-        assert!(!GrabStatus::Failed.is_usable());
+        assert_eq!(grab_outcome(0, 0, 8), GrabStatus::Failed);
+        assert!(!GrabStatus::Failed.is_reliable_route());
+        assert!(!GrabStatus::Failed.keeps_watcher());
 
-        // One accepted variant is a working key even when others are taken.
-        assert_eq!(grab_outcome(1, 3), GrabStatus::Grabbed);
-        assert!(grab_outcome(1, 3).is_usable());
-        assert_eq!(grab_outcome(4, 0), GrabStatus::Grabbed);
+        // Nothing was even attempted.
+        assert_eq!(grab_outcome(0, 0, 0), GrabStatus::Failed);
+    }
+
+    #[test]
+    fn the_outcome_counts_the_unique_masks_not_a_constant() {
+        // `CapsLock+F9` asks for a lock bit the variant table already adds, so only
+        // four unique masks exist. Measuring the result against eight would report a
+        // complete grab as partial forever — a warning the user can never clear.
+        let variants = lock_variants(MOD_SHIFT | MOD_LOCK);
+        assert_eq!(variants.len(), 4);
+
+        assert_eq!(grab_outcome(4, 0, variants.len()), GrabStatus::Grabbed);
+        assert_eq!(grab_outcome(3, 1, variants.len()), GrabStatus::Partial);
+        assert_eq!(grab_outcome(4, 0, 8), GrabStatus::Partial);
+
+        // And the eight-mask case is unaffected by the same arithmetic.
+        assert_eq!(
+            grab_outcome(8, 0, lock_variants(MOD_SHIFT).len()),
+            GrabStatus::Grabbed
+        );
+    }
+
+    #[test]
+    fn the_watcher_and_the_safety_rule_read_different_predicates() {
+        // One table per status: which of the two questions each answer gives. The
+        // distinction is the whole point of `Partial` — a single predicate would
+        // either kill a working key or hide the panel behind one that may not fire.
+        let cases = [
+            (GrabStatus::Unknown, false, false),
+            (GrabStatus::Grabbed, true, true),
+            (GrabStatus::Partial, true, false),
+            (GrabStatus::Disabled, false, false),
+            (GrabStatus::Busy, false, false),
+            (GrabStatus::NoDisplay, false, false),
+            (GrabStatus::Failed, false, false),
+        ];
+        for (status, watch, reliable) in cases {
+            assert_eq!(status.keeps_watcher(), watch, "{status:?} keeps_watcher");
+            assert_eq!(status.is_reliable_route(), reliable, "{status:?} reliable");
+        }
     }
 
     #[test]
     fn no_x_display_is_a_reported_state_not_a_capture() {
         // Native Wayland, or no DISPLAY: no global hotkey is claimed, and the
         // message names the routes that do work there.
-        assert!(!GrabStatus::NoDisplay.is_usable());
+        assert!(!GrabStatus::NoDisplay.is_reliable_route());
+        assert!(!GrabStatus::NoDisplay.keeps_watcher());
         let message = GrabStatus::NoDisplay.message();
         assert!(message.contains("--toggle-panel"), "got {message}");
         assert!(message.contains("tray"), "got {message}");
@@ -1387,7 +1850,7 @@ mod tests {
         // there is no key to count on.
         let visibility = Visibility::new();
         assert_eq!(visibility.grab_status(), GrabStatus::Unknown);
-        assert!(!visibility.hotkey_grabbed());
+        assert!(!visibility.hotkey_is_reliable_route());
         assert!(!visibility.has_return_path(false));
     }
 
@@ -1398,9 +1861,30 @@ mod tests {
             "Hotkey is taken by another application"
         );
         assert_eq!(GrabStatus::Grabbed.message(), "Hotkey captured");
+        assert_eq!(
+            GrabStatus::Partial.message(),
+            "Hotkey captured for some lock states only"
+        );
         assert_eq!(GrabStatus::Failed.message(), "Could not capture the hotkey");
         assert_eq!(GrabStatus::Unknown.message(), "Hotkey not checked yet");
-        assert!(!GrabStatus::Disabled.is_usable());
+        assert!(!GrabStatus::Disabled.is_reliable_route());
+
+        // Every line the settings surface can show is non-empty for every state,
+        // so no status can render as a blank explanation.
+        for status in [
+            GrabStatus::Unknown,
+            GrabStatus::Grabbed,
+            GrabStatus::Partial,
+            GrabStatus::Disabled,
+            GrabStatus::Busy,
+            GrabStatus::NoDisplay,
+            GrabStatus::Failed,
+        ] {
+            assert!(!status.message().is_empty(), "{status:?} needs a line");
+            if let Some(warning) = status.warning() {
+                assert!(!warning.is_empty(), "{status:?} needs a real warning");
+            }
+        }
     }
 
     // ---- request coalescing ----
@@ -1586,7 +2070,7 @@ mod tests {
         // cannot press it. This is the difference between "a spec exists" and
         // "the key works", and the whole safety rule turns on it.
         let visibility = Visibility::new();
-        assert!(!visibility.hotkey_grabbed());
+        assert!(!visibility.hotkey_is_reliable_route());
         assert!(!visibility.has_return_path(false));
 
         visibility.set_grab_status(GrabStatus::Busy);
@@ -1605,6 +2089,84 @@ mod tests {
         assert!(
             !visibility.has_return_path(false),
             "a deliberately disabled key is not a way back"
+        );
+
+        // Partial is the new row, and the one that has to keep its watcher: the
+        // key works in some lock states, so it is not nothing — but it is not the
+        // route the panel may be left hidden behind either.
+        visibility.set_grab_status(GrabStatus::Partial);
+        assert!(
+            !visibility.has_return_path(false),
+            "a partially captured key is not a reliable way back"
+        );
+        assert!(
+            !visibility.hotkey_is_reliable_route(),
+            "and the safety input says so"
+        );
+        assert!(
+            GrabStatus::Partial.keeps_watcher(),
+            "while the watcher still runs for it"
+        );
+    }
+
+    #[test]
+    fn the_hidden_line_names_the_routes_that_actually_work() {
+        // The log is read by whoever is debugging "the panel is gone": it must not
+        // name a key that only fires in some lock states.
+        let complete = hidden_log_line(GrabStatus::Grabbed);
+        assert!(complete.contains("hotkey"), "{complete}");
+
+        for status in [
+            GrabStatus::Unknown,
+            GrabStatus::Partial,
+            GrabStatus::Disabled,
+            GrabStatus::Busy,
+            GrabStatus::NoDisplay,
+            GrabStatus::Failed,
+        ] {
+            let line = hidden_log_line(status);
+            assert!(
+                !line.contains("the hotkey, the tray"),
+                "{status:?} must not promise the hotkey: {line}"
+            );
+            assert!(line.contains("--toggle-panel"), "{status:?}: {line}");
+        }
+        assert!(
+            hidden_log_line(GrabStatus::Partial).contains("not a reliable route"),
+            "a partial key is the case this line exists for"
+        );
+    }
+
+    #[test]
+    fn a_partial_key_does_not_block_hiding_when_another_route_exists() {
+        // The rule the brief states explicitly: partial success must not make the
+        // panel unreachable. Hiding stays allowed as soon as the tray or the CLI
+        // can bring it back, and equal-weight with a complete grab in that case.
+        let partial = Visibility::new();
+        partial.set_grab_status(GrabStatus::Partial);
+        assert_eq!(
+            hide_outcome(
+                partial.hotkey_is_reliable_route(),
+                false,
+                true // D-Bus exported, which is how the GUI runs in practice
+            ),
+            HideOutcome::Hide,
+            "the D-Bus method is the route that covers a partial hotkey"
+        );
+        assert!(partial.has_return_path(true), "the tray does the same");
+        assert_eq!(
+            hide_outcome(partial.hotkey_is_reliable_route(), false, false),
+            HideOutcome::ReturnToNormal,
+            "with nothing else, there is no reliable way back and hiding is refused"
+        );
+
+        // The same environment with a complete grab hides, so the only difference
+        // is the status itself.
+        let complete = Visibility::new();
+        complete.set_grab_status(GrabStatus::Grabbed);
+        assert_eq!(
+            hide_outcome(complete.hotkey_is_reliable_route(), false, false),
+            HideOutcome::Hide
         );
     }
 

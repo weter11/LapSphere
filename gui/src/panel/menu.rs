@@ -274,30 +274,42 @@ pub fn draw_settings_body(
     } else {
         config.hotkey.trim().to_string()
     };
-    let conflict = status == GrabStatus::Busy;
+    // The states where one line is not enough to say what will happen when the
+    // key is pressed: somebody else owns it, or only some lock states were
+    // captured.
+    let caveat = status.warning().is_some();
     ui.label(
-        egui::RichText::new(format!("{configured} — {}", status.message())).color(if conflict {
+        egui::RichText::new(format!("{configured} — {}", status.message())).color(if caveat {
             egui::Color32::from_rgb(220, 160, 60)
         } else {
             ui.visuals().weak_text_color()
         }),
     );
-    if conflict {
+    if let Some(warning) = status.warning() {
+        ui.label(egui::RichText::new(warning).small().italics());
+    }
+    // A spec with a modifier this build does not know is stored as typed and
+    // grabbed without that token, so the status line above would read as an exact
+    // match for a shortcut that does not exist. Shown for as long as the spec
+    // says it, because the config keeps the typo until the user fixes it.
+    if let Some(warning) = super::visibility::ignored_modifiers_warning(&config.hotkey) {
         ui.label(
-            egui::RichText::new(
-                "Another application already owns this key. Pick a different one, or use \
-                 the tray or `lapsphere --toggle-panel`.",
-            )
-            .small()
-            .italics(),
+            egui::RichText::new(warning)
+                .small()
+                .italics()
+                .color(egui::Color32::from_rgb(220, 160, 60)),
         );
     }
 
     // The safety rule, stated where the key is configured: what the user needs to
     // know is whether hiding is currently allowed, and it follows from the key,
     // the tray and the CLI.
+    //
+    // `is_reliable_route` and not "some grab succeeded": a partially captured key
+    // fires only in some lock states, so it cannot be the route the panel is left
+    // hidden behind — the tray and the CLI are what cover that gap here.
     let may_hide = super::visibility::can_hide(
-        status.is_usable(),
+        status.is_reliable_route(),
         hotkeys.tray_enabled,
         hotkeys.visibility.dbus_available(),
     );
@@ -311,6 +323,16 @@ pub fn draw_settings_body(
         .weak()
         .small(),
     );
+    if status == GrabStatus::Partial && may_hide {
+        ui.label(
+            egui::RichText::new(
+                "The hotkey is not counted as that way back while only some lock states are \
+                 captured; the tray or `lapsphere --toggle-panel` is what makes hiding safe.",
+            )
+            .weak()
+            .small(),
+        );
+    }
 
     ui.separator();
     ui.horizontal(|ui| {
@@ -448,6 +470,59 @@ mod tests {
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| f(ui, &mut config, &mut outcome));
         });
+    }
+
+    /// Run the settings body and return every string the frame actually PAINTED.
+    ///
+    /// A warning nobody draws is not a warning, and a pure-text test alone cannot
+    /// tell the two apart: this reads the text shapes egui produced. Words are
+    /// asserted, not whole sentences — a label wraps at the window width, so a
+    /// sentence can be painted with line breaks inside it.
+    fn painted_text(config_hotkey: &str, status: GrabStatus, tray_enabled: bool) -> Vec<String> {
+        let ctx = Context::default();
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(SETTINGS_SIZE[0], SETTINGS_SIZE[1]),
+        ));
+        let mut config = PanelConfig::fresh();
+        config.hotkey = config_hotkey.to_string();
+        let mut outcome = SettingsOutcome::default();
+        let visibility = Visibility::new();
+        visibility.set_grab_status(status);
+        let output = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                draw_settings_body(
+                    ui,
+                    &AppState::new(),
+                    &mut config,
+                    &mut outcome,
+                    &live_hotkeys(&visibility, config_hotkey, tray_enabled),
+                );
+            });
+        });
+
+        let mut text = Vec::new();
+        for clipped in &output.shapes {
+            collect_text(&clipped.shape, &mut text);
+        }
+        text
+    }
+
+    fn collect_text(shape: &egui::Shape, out: &mut Vec<String>) {
+        match shape {
+            egui::Shape::Text(text) => out.push(text.galley.text().to_string()),
+            egui::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect_text(shape, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn painted_contains(text: &[String], needle: &str) -> bool {
+        text.iter().any(|line| line.contains(needle))
     }
 
     /// The live state the hotkey controls read, for a test that is not about it.
@@ -631,12 +706,13 @@ mod tests {
 
     #[test]
     fn the_settings_body_renders_for_every_grab_state() {
-        // Including the two that are not a working key: a refused key and an
-        // unattempted one both have a status line, and neither may be drawn as
-        // "captured".
+        // Including the states that are not a working key: a refused key, a
+        // not-yet-attempted one and a partially captured one all have a status
+        // line, and none of them may be drawn as "captured".
         for status in [
             GrabStatus::Unknown,
             GrabStatus::Grabbed,
+            GrabStatus::Partial,
             GrabStatus::Disabled,
             GrabStatus::Busy,
             GrabStatus::NoDisplay,
@@ -657,6 +733,92 @@ mod tests {
                     "drawing must not report a re-grab for {status:?}"
                 );
             });
+        }
+    }
+
+    #[test]
+    fn the_settings_surface_warns_when_the_key_is_only_partially_captured() {
+        // The brief's requirement, checked on the painted frame: a partial grab must
+        // not read as a complete one, and the warning has to name the lock keys the
+        // user will find it does not work with.
+        let partial = painted_text("Control+Alt+A", GrabStatus::Partial, false);
+        assert!(
+            painted_contains(&partial, "some lock states"),
+            "the status line must not read as a complete capture: {partial:#?}"
+        );
+        for key in ["CapsLock", "NumLock", "ScrollLock"] {
+            assert!(
+                painted_contains(&partial, key),
+                "the warning must name {key}: {partial:#?}"
+            );
+        }
+
+        // The negative control: the same spec with a complete grab paints neither
+        // the status line nor the lock-key warning, so the assertion above is about
+        // the Partial state and not about words that are always on screen.
+        let complete = painted_text("Control+Alt+A", GrabStatus::Grabbed, false);
+        assert!(
+            painted_contains(&complete, "Hotkey captured"),
+            "{complete:#?}"
+        );
+        assert!(
+            !painted_contains(&complete, "some lock states"),
+            "{complete:#?}"
+        );
+        for key in ["CapsLock", "NumLock", "ScrollLock"] {
+            assert!(!painted_contains(&complete, key), "{complete:#?}");
+        }
+    }
+
+    #[test]
+    fn the_settings_surface_explains_why_a_partial_key_is_not_the_way_back() {
+        // With the tray on, hiding is still allowed — and the surface has to say
+        // that the hotkey is not the route it is relying on.
+        let with_tray = painted_text("Control+Alt+A", GrabStatus::Partial, true);
+        assert!(
+            painted_contains(&with_tray, "way back exists"),
+            "hiding is allowed here: {with_tray:#?}"
+        );
+        assert!(
+            painted_contains(&with_tray, "not counted"),
+            "and the partial key is not that route: {with_tray:#?}"
+        );
+
+        // Without another route the panel cannot be hidden, which is the rule the
+        // partial key must not be allowed to bypass.
+        let alone = painted_text("Control+Alt+A", GrabStatus::Partial, false);
+        assert!(
+            painted_contains(&alone, "cannot be hidden"),
+            "no tray, no D-Bus in this state: {alone:#?}"
+        );
+    }
+
+    #[test]
+    fn the_settings_surface_warns_about_modifiers_it_ignored() {
+        // `Wibble+F9` is stored as typed and grabbed as plain F9. The status line
+        // alone would read as an exact match for the spec, so the surface has to
+        // name the ignored token and the shortcut that is really in effect.
+        let typo = painted_text("Wibble+F9", GrabStatus::Grabbed, false);
+        assert!(
+            painted_contains(&typo, "Wibble"),
+            "the ignored token must be named: {typo:#?}"
+        );
+        assert!(
+            painted_contains(&typo, "effective"),
+            "and the effective shortcut explained: {typo:#?}"
+        );
+
+        // The user's own spec is still what the field shows.
+        assert!(painted_contains(&typo, "Wibble+F9"), "{typo:#?}");
+
+        // The negative control: a spec with nothing ignored paints no such warning,
+        // and the two Shift aliases are supported, so neither of them warns.
+        for clean in ["Shift+F9", "Shift_R+F9", "Shift_L+F9"] {
+            let text = painted_text(clean, GrabStatus::Grabbed, false);
+            assert!(
+                !painted_contains(&text, "effective"),
+                "{clean} must not warn: {text:#?}"
+            );
         }
     }
 

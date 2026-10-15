@@ -1572,13 +1572,20 @@ impl LapSphereApp {
             ToggleAction::Hide => {
                 self.panel_hidden = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                log::info!(
-                    "panel: hidden; the hotkey, the tray or `lapsphere --toggle-panel` \
-                     brings it back"
-                );
+                log::info!("{}", self.hidden_message());
             }
             ToggleAction::ReturnToNormal => self.refuse_hide(),
         }
+    }
+
+    /// The line logged when the panel is hidden: which routes actually count.
+    ///
+    /// One function for both hide paths (a toggle request and the menu) so neither
+    /// can promise a hotkey the grab status does not back. A partially captured key
+    /// keeps its watcher and its presses, but it is the tray and the CLI that make
+    /// hiding safe, and the log says so rather than naming a key that may not fire.
+    fn hidden_message(&self) -> &'static str {
+        crate::panel::visibility::hidden_log_line(self.visibility.grab_status())
     }
 
     /// A hide asked for by the panel's own menu.
@@ -1596,18 +1603,19 @@ impl LapSphereApp {
         if self.panel_hidden {
             return;
         }
+        // `hotkey_is_reliable_route` and not the watcher predicate: the panel is
+        // left hidden behind a key that must fire in EVERY lock state. A partially
+        // captured hotkey keeps its watcher and its presses, but it is the tray and
+        // the D-Bus method that make hiding safe here.
         match crate::panel::visibility::hide_outcome(
-            self.visibility.hotkey_grabbed(),
+            self.visibility.hotkey_is_reliable_route(),
             self.state.config.tray_enabled,
             self.visibility.dbus_available(),
         ) {
             HideOutcome::Hide => {
                 self.panel_hidden = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                log::info!(
-                    "panel: hidden from the menu; the hotkey, the tray or \
-                     `lapsphere --toggle-panel` brings it back"
-                );
+                log::info!("{}", self.hidden_message());
             }
             HideOutcome::ReturnToNormal => self.refuse_hide(),
         }
@@ -1617,20 +1625,27 @@ impl LapSphereApp {
     ///
     /// Shared by the menu and the toggle, so both report the same reason. This is
     /// the one place the safety rule's refusal becomes visible, which is why the
-    /// message names what is missing rather than saying "not allowed".
+    /// message names what is missing rather than saying "not allowed" — including
+    /// the case where the key exists but only covers some lock states, which is a
+    /// different sentence from "there is no hotkey".
     fn refuse_hide(&mut self) {
+        let status = self.visibility.grab_status();
         log::warn!(
-            "panel: hiding refused, no way back exists (hotkey: {}); returning to the \
+            "panel: hiding refused, no reliable way back exists (hotkey: {}); returning to the \
              normal window instead",
-            self.visibility.grab_status().message()
+            status.message()
         );
-        self.state.show_message(
+        let reason = if status == crate::panel::visibility::GrabStatus::Partial {
+            "The panel cannot be hidden: the hotkey is only partially captured (another \
+             application owns some of its CapsLock / NumLock / ScrollLock combinations) and \
+             there is no tray and no `lapsphere --toggle-panel`, so it would be unreachable. \
+             Returned to the normal window instead."
+        } else {
             "The panel cannot be hidden: there is no hotkey, no tray and no \
              `lapsphere --toggle-panel`, so it would be unreachable. Returned to the \
              normal window instead."
-                .to_string(),
-            true,
-        );
+        };
+        self.state.show_message(reason.to_string(), true);
         self.pending_mode = Some(Mode::Normal);
     }
 
