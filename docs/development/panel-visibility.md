@@ -14,7 +14,10 @@ numbers).
   X11 delivers a `KeyPress` to the connection that owns the grab. The grab masks
   are the **configured** modifiers plus every lock combination (`Shift` alone
   grabs nothing but `Shift+…`): a `Control+Alt+…` hotkey grabbed under `Shift` is
-  a key that does nothing while the log says "captured".
+  a key that does nothing while the log says "captured". Not every combination is
+  always available — another client can own one — so the status distinguishes a
+  complete grab from a **partial** one, and the settings surface warns about the
+  latter and about any modifier token it had to ignore.
 * **`TogglePanel` on `io.lapsphere.Gui`**, which is what `lapsphere
   --toggle-panel` calls. The object is exported on the connection that owns that
   name (parked before `run_native`); on any other connection it would be reachable
@@ -140,6 +143,67 @@ is the designed status, so the per-variant `… is already grabbed by another
 client` line is now logged: without it, a partial grab is invisible and the run
 reads as "the code does not work".
 
+## The partial-grab pass — branch commit `9bcc6db`
+
+`9bcc6dba6868dcd078ca449cbe50ff6381ecdca1`: a grab is per lock combination and
+another client can own exactly one of them, so "captured" carried two different
+meanings. The outcomes are now four, decided by one rule,
+`grab_outcome(grabbed, busy, attempted)`: **Grabbed** when every unique mask was
+acquired, **Partial** when some were, **Busy** when none were and a `BadAccess`
+conflict is why, **Failed** otherwise. The comparison is against the unique masks
+the spec needs, never a constant eight — `CapsLock+F9` asks for a bit the variant
+table already adds, so it has four.
+
+**Two questions, two predicates**, because one cannot answer both:
+
+| question | predicate | `Partial` |
+|---|---|---|
+| must the watcher run, i.e. will some presses arrive? | `keeps_watcher()` | **yes** |
+| is the key a guaranteed way back? | `is_reliable_route()` | **no** |
+
+A partial grab keeps its watcher — the key is installed and does fire in the states
+that were acquired, so returning early would leave a grab nothing listens to — while
+hide-safety counts only the complete grab. Hiding stays allowed whenever the tray or
+the D-Bus method exists, and the settings surface says which route it is relying on
+rather than the hotkey. The refusal message and the "hidden" log line follow the
+same split: "no hotkey" and "a key that covers only some lock states" are different
+sentences.
+
+What the settings surface now shows under the status line:
+
+* **Partial** — "Only some lock-key combinations could be captured: another
+  application owns the rest, so this key may not work with CapsLock, NumLock or
+  ScrollLock on. Which combinations were refused is in the log." The per-mask detail
+  stays in the log: `panel: keycode 38 under none (mask 0x000c) is already grabbed by
+  another client; the hotkey does not fire in that lock state`.
+* **An ignored modifier token** — a spec of `Wibble+F9` is stored as typed and
+  grabbed as plain `F9`, and the status line alone would read as an exact match for
+  a shortcut that does not exist. The warning names the token and the **effective**
+  shortcut. Nothing is rewritten: the supported aliases (`Shift`/`Shift_L`/`Shift_R`,
+  `Control`/`Ctrl`, `Alt`/`Mod1`, `Lock`/`CapsLock`, `NumLock`, `ScrollLock`) parse
+  as before, so the warning means "this is a typo".
+
+### Session D — a partial grab, driven live
+
+Same isolation as session C (throwaway `:77`, private session and system bus, scratch
+`HOME`, no WM, every kill PID-scoped). A second client of mine held **one**
+combination — `Control|Mod1` at keycode 38, the plain state — before the app started.
+
+| Claim | Result | Evidence |
+|---|---|---|
+| a partially captured key is reported as partial, not as captured | **PASS** | `panel: keycode 38 under none (mask 0x000c) is already grabbed by another client; the hotkey does not fire in that lock state`, then `panel: hotkey `Control+Alt+A` captured for some lock states only (keycode 38, modifiers 0x000c); it may not fire with CapsLock, NumLock or ScrollLock on` |
+| the watcher still runs | **PASS** | `panel: watching keycode 38 on the connection that holds the grab`, and the press below arrived |
+| the missing state does not fire, and goes to the client that owns it | **PASS** | XTEST `Control+Alt+A` (delivered state `0x0c`): the map state stayed `IsViewable`, and my client's log shows `KeyPress delivered: detail=38 state=0x000c` |
+| an acquired state does fire | **PASS** | with CapsLock **and** NumLock on (delivered mask `0x1e`): `IsViewable` → `IsUnMapped` → `IsViewable`, with `panel: hotkey pressed` and `panel: shown again` |
+| hiding is still allowed because another route exists | **PASS** | that was `Hide`, not `ReturnToNormal` — the window was unmapped, and the object is exported on the run's own bus |
+| a second client cannot take either combination | **PASS** | `XGrabKey(0x000c, 38)` refused (my client owns it) and `XGrabKey(0x001e, 38)` refused (the app owns it) |
+
+Tests for this commit: focused GUI bin **223 passed, 0 failed** (208 at `408d1b0`);
+`cargo test --workspace` **337 passed, 0 failed, 6 ignored** (322 before). The two
+settings warnings are asserted on the painted frame — the text egui actually
+produced — with a negative control each: the same spec with a complete grab paints
+neither warning, and `Shift_R` / `Shift_L` alias specs paint none either.
+
 ## What is NOT claimed
 
 * **No global hotkey on native Wayland.** The grab is an X server grab: a native
@@ -181,11 +245,24 @@ debugging session when it was hit again:
   server delivers a `KeyPress` only for the mask the grab was made with, so a
   hardcoded `ShiftMask` makes every non-Shift hotkey dead while the capture log
   says it was captured.
-* **`Shift`, not `Shift_R`.** `XGrabKey` takes a `ModMask`, both Shift keys set
+* **`Shift`, not `Shift_R`.** `XGrabKey` takes one `ModMask`, both Shift keys set
   the same `ShiftMask` bit and the delivered event carries no distinction, so a
   right-hand-only key cannot be expressed. The shortcut is described as
   `Shift+F9` and either Shift key fires it (`Shift_L+F9` / `Shift_R+F9` stay
   accepted as spellings of the same mask).
+* **"Any variant succeeded" is not one status, and the two questions it hides need
+  two predicates.** A grab missing one combination *does* fire in the states it
+  acquired, so the watcher must run for it; it may not fire in the lock state the
+  user happens to be in, so it is not the route to leave the panel hidden behind.
+  Answering both with one predicate either kills a working key (returning early on
+  anything but a complete grab) or hides the panel behind a key that may not fire.
+  The comparison is against the **unique** masks a spec needs: a spec naming a lock
+  key as its modifier collapses the table, and measuring against a constant reports
+  its complete grab as partial forever.
+* **An ignored modifier token needs a warning on the surface, not only a log line.**
+  `Wibble+F9` is stored as typed and grabbed as plain `F9`, so the status line reads
+  as an exact match for a shortcut that does not exist. Keep the entered string, say
+  which token was dropped and what the effective shortcut is.
 * **A D-Bus object belongs to the connection that owns the name.** Exported on a
   fresh connection it is invisible through `io.lapsphere.Gui`, and every call
   hangs while the process looks healthy.
