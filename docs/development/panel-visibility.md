@@ -204,6 +204,31 @@ settings warnings are asserted on the painted frame — the text egui actually
 produced — with a negative control each: the same spec with a complete grab paints
 neither warning, and `Shift_R` / `Shift_L` alias specs paint none either.
 
+## The parser is side-effect free — branch commit `624702d`
+
+`624702d53e0d75c49c7d1dc3aba95fed2c702e80`. `parse_spec` is also the settings
+surface's read path: `ignored_modifiers_warning` calls it while rendering, so an open
+settings window emitted the ignored-modifier warning and the Shift-alias info line on
+every repaint. The parser now only parses — the ignored tokens and the
+`Shift_L`/`Shift_R` spelling travel in the value it returns
+(`ParsedSpec::ignored`, `ParsedSpec::named_shift_key`) — and the two notes are emitted
+by `log_applied_spec`, whose only production caller is `start_hotkey`: the initial grab
+and every re-grab after a settings change. The settings warning says exactly what it
+said before and has no side effect; the spelling table and every parsing behaviour are
+unchanged, and `Hotkey::parse` stays as a test-only wrapper.
+
+| claim | evidence |
+|---|---|
+| the render path logs nothing | a capturing `log` logger in the test binary: parsing, `Hotkey::parse` and `ignored_modifiers_warning` produce no line about a spec, and twenty render-path calls produce none either |
+| the notes still happen where they belong | the positive control: the same two records are visible when `log_applied_spec` runs (one `Warn` naming the dropped token and the effective shortcut, one `Info` about the single `ShiftMask` bit) |
+| the tests discriminate | both silence tests fail when one `log::warn!` is put back into `parse_spec`, and pass once it is reverted |
+| the app still says it once | live run with `hotkey: "Wibble+Shift_R+F9"` on the throwaway `:77` session: exactly one `ignores unknown modifier(s) \`Wibble\`; the effective shortcut is `Shift+F9`` and one `names one Shift key` line, both at startup, none repeated over the following ten seconds — and the grab came from the effective shortcut, `captured (keycode 75, modifiers 0x0001)` |
+
+Tests for this commit: focused GUI bin **226 passed, 0 failed**; `cargo test
+--workspace` **340 passed, 0 failed, 6 ignored**. `rustfmt --check` on
+`gui/src/panel/visibility.rs` is clean, and the build reports the same 29 warnings as
+at `367a36c` (`Hotkey::parse` is `#[cfg(test)]`, so the move adds none).
+
 ## What is NOT claimed
 
 * **No global hotkey on native Wayland.** The grab is an X server grab: a native
@@ -263,6 +288,14 @@ debugging session when it was hit again:
   `Wibble+F9` is stored as typed and grabbed as plain `F9`, so the status line reads
   as an exact match for a shortcut that does not exist. Keep the entered string, say
   which token was dropped and what the effective shortcut is.
+* **A parser called from a render path must not log.** The settings surface re-parses
+  the configured spec on every repaint, so a parser that emits its own warnings turns
+  an open window into a stream of identical lines. Return what the parse learned
+  (ignored tokens, spelling flags) and let the caller that APPLIES the value do the
+  talking — one caller, one note per apply. Assert the silence, and assert the note
+  too: a "nothing was logged" test proves nothing unless the same harness can see a
+  line that was emitted, and it is only worth having if it fails when the log call
+  comes back.
 * **A D-Bus object belongs to the connection that owns the name.** Exported on a
   fresh connection it is invisible through `io.lapsphere.Gui`, and every call
   hangs while the process looks healthy.
