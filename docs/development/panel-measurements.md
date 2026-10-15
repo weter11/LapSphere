@@ -303,7 +303,7 @@ reading, not by a live click — see "Not verified".
 
 | Item | Why |
 |---|---|
-| fps, frametime, frametime graph, 1 % low, 0.1 % low, game name | Not implemented anywhere, and **not measured here**. Whether they belong in the FIRST release is an **unresolved owner decision**: PR #111 (open, unmerged) records an owner decision dated 2026-10-03 that they do, while the merged change that introduced the panel describes them as later work. Recorded as an open question in `gui/src/panel/mod.rs`; this page does not decide it. |
+| fps, frametime, frametime graph, 1 % low, 0.1 % low, game name | **Implemented** (stage 6: `gui/src/panel/frames/`, registry rows under `Group::Frame`, the two settings in `panel.json`) and covered by unit tests, but **not measured here and never observed live**: this page's numbers were all taken without those rows. The owner's decision that they are first-release elements is settled, not open. What is measured about their source, and what is not, is on `panel-frames.md` and §5 row 1 of `panel-v1-baseline.md`. |
 | The in-window Close button | Takes the same path as WM_DELETE, which is verified, but the click itself was not confirmed. |
 | A row checkbox changing the panel height | Covered by unit tests on the layout function; the live click was not performed. |
 | Compositing transparency | PR 2. The owner checks this by hand; nothing is claimed here. The environment's own compositing state is **UNRESOLVED** — see "Compositing: unresolved". |
