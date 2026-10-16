@@ -263,10 +263,12 @@ client in the middle, **the panel last, i.e. topmost**. Activating the fullscree
 window did not lift it above the panel.
 
 The covering client here is an `xterm`, **not a game**: a Vulkan client cannot
-present on this Xvfb display (measured — `vkcube` exits without a window:
-`MESA: info: vulkan: No DRI3 support detected - required for presentation`, and the
-lavapipe path exits before creating a surface). The real-game version of this check
-is §8.3's blocker, not a silent substitution.
+present on this Xvfb display, and both attempts were measured rather than assumed —
+`vkcube --wsi xlib` printed `MESA: info: vulkan: No DRI3 support detected - required
+for presentation` and **never created a window** (killed by its timeout, exit 124),
+and the lavapipe path (`VK_ICD_FILENAMES=…/lvp_icd.json`, which did select
+`llvmpipe (LLVM 21.1.8, 256 bits)`) also never created one (exit 124). The real-game
+version of this check is §8.3's blocker, not a silent substitution.
 
 ### 5.2 On the host session (`:0`, xfwl4) — both halves fail, measurably
 
@@ -386,6 +388,15 @@ launcher pipeline — `steamflow test-launch 317400`, which runs the game as
 with `-windowed -noborder -width 1280 -height 720`. The layer's activation variable
 was injected through SteamFlow's own env block (`~/.config/SteamFlow/debug.json`,
 backed up and **restored** afterwards).
+
+**Why that pipeline and not the Steam client.** The Steam client binary cannot run on
+this host at all: `env LAPSPHERE_FRAMES=1 DISPLAY=:0 ~/.steam/steam/ubuntu12_32/steam
+-silent` exits **127** with `env: '…/ubuntu12_32/steam': No such file or directory`,
+and `/lib/ld-linux.so.2` — the interpreter that 32-bit ELF needs — is absent
+(`ls: cannot access '/lib/ld-linux.so.2'`). `steam -applaunch` was therefore not
+available as a route, and the game was launched through SteamFlow's own pipeline,
+which runs its own Windows Steam runtime inside Wine (`steamflow test-steam` brings up
+`steam.exe` + `steamwebhelper.exe` in the master prefix).
 
 **What is proven to work.** The implicit layer **is** found and loaded inside the
 container, and the variable does reach the game: the game's log contains six lines of
