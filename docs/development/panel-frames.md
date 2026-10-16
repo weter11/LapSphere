@@ -238,10 +238,25 @@ The frame features' own tests:
 
 ## 7. NOT TESTED — read this before quoting anything above
 
-* **No live run.** This reader has never been pointed at a real Vulkan game on this
-  host in this commit: every claim above is unit-test evidence against synthetic
-  segments, or the spike's own measurements of the *layer*. The panel showing real
-  fps over a running game is stage 7's acceptance, and it has not happened.
+**Revision 8 (the stage-7 acceptance run on `bbe0c4f`) narrows two of the items
+below and leaves the rest exactly as written.** The six elements were driven live
+against a real Vulkan client — `vkcube` with the layer installed and
+`LAPSPHERE_FRAMES=1`, vsync'd on the host session — and the panel painted
+`Game vkcube`, `FPS 164.8 fps`, `Frame 6.07 ms`, `1%low 131.2 fps`, `0.1% 98.4 fps`
+and a drawn strip; when that source exited, all six read `—` with an **empty** strip
+and the availability announcement stayed at one line per source. The panel's own cost
+with the frame rows on was measured against the same live source: **+0.23 jiffies/s**
+(13 → 27 jiffies in 60 s), i.e. ~+0.23 % of one core, and the window is 531x450 px
+with the strip against 531x186 px without it. **The first item below is not narrowed:
+a real *game* was attempted and could not be brought to a rendering state, so the
+elements have still never been observed over one.** The run, its commands and its
+blocker: [`panel-stage7-acceptance.md`](./panel-stage7-acceptance.md) §8.
+
+* **No live run against a real game.** This reader has never been pointed at a real
+  Vulkan game on this host in this commit: every claim above is unit-test evidence
+  against synthetic segments, or the spike's own measurements of the *layer*, or
+  (revision 8) a live Vulkan client that is not a game. The panel showing real fps
+  over a running game remains the open half of stage 7.
 * **No measurement of the panel's cost with the frame elements on.** The panel's
   own idle-CPU and latency numbers on
   [`panel-measurements.md`](./panel-measurements.md) were taken without these rows;
