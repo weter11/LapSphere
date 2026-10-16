@@ -3,14 +3,26 @@
 What is merged, what exists only on an unmerged branch, what has evidence, and what
 still has to be done before the panel's first version can be called accepted.
 
-**Base:** `17ece901754fb2cfcaf0b509dcb8d56e3639eea6` (= merge of PR #122,
-`origin/lapsphere`, 2026-10-14 10:11 +0200). Re-check it before quoting anything
-here; every path and line number below is as of that commit.
+**Base (current):** `bbe0c4f6d573f544fc70bdaf8fe4fad5b1878be5` (= merge of PR #131,
+`origin/lapsphere`, 2026-10-15 23:28:46 +0000). This is the commit every verdict in §5
+is stated against, and the stage-7 acceptance run on it is
+[`panel-stage7-acceptance.md`](./panel-stage7-acceptance.md). Re-check it before
+quoting anything here.
+
+**Base of revisions 1–7 (historical):** `17ece901754fb2cfcaf0b509dcb8d56e3639eea6`
+(= merge of PR #122, `origin/lapsphere`, 2026-10-14 10:11 +0200). Every path and line
+number quoted *inside those revisions* is as of that commit, and so is their own
+statement that nothing on the page had been re-measured. They are kept as written
+because they record what was known then; they are **not** the current state. The
+revision notes below are separated from the current base by this paragraph, and
+revision 8 is the one that re-ran the measurements and re-stated the rows.
 
 This page **records status; it does not settle design**, with one exception stated
 in §4: the owner's decision on the composition of the first version is **taken as
-settled** and is used below as a requirement, not as an open question. Nothing on
-this page was re-measured to write it, and no number below is re-confirmed by it.
+settled** and is used below as a requirement, not as an open question. **Revisions 1–7
+re-measured nothing to write themselves, and no number in them is re-confirmed by
+them**; revision 8 re-ran the stage-1 gate on the merged source and the live checks
+behind §5's rows, and says in each row which artifact carries the result.
 
 *Revision 2 (second commit on PR #123): the acceptance table in §5 is re-aligned to
 the agreed first-version stages 1–7. Revision 1 used `panel-design.md`'s staged-plan
@@ -91,7 +103,7 @@ structural-assertion changes, so row 6's `NOT TESTED` half is unchanged and noth
 here has been observed against a live game.*
 
 *Revision 8 (the stage-7 acceptance run, on the merged tree at `bbe0c4f` = the merge of
-PR #131): the page's base moves, four rows change, and the acceptance run itself is on
+PR #131): the page's base moves, six rows change, and the acceptance run itself is on
 its own page, [`panel-stage7-acceptance.md`](./panel-stage7-acceptance.md). Stage 1 is
 re-run on the merged source (§3.3, §5 row 1): the layer implementation is byte-identical
 between `bbe0c4f` and PR #125's branch (empty two-dot diff; the same source stamp
@@ -111,9 +123,9 @@ blocked, with its reproduction recorded. Stage 7 is therefore **INCOMPLETE, not 
 Three runtime defects found by the run (a hide/show cycle losing and overwriting the stored
 position, the EWMH state not being re-requested after a hide/show, and a partial refusal
 logged as a total one) are reported with reproduction on that page and are **not** fixed by
-it. Rows 2, 3 and 5 are re-stated by this revision from the run's own evidence, not from
-the older stage notes; §1's table gains the merges of PRs #126–#131; §8's environment
-statements are updated to what the run measured.
+it. Rows 1, 2, 3, 5, 6 and 7 are re-stated by this revision from the run's own
+evidence, not from the older stage notes; §1's table gains the merges of PRs #126–#131;
+§8's environment statements are updated to what the run measured.
 
 Companion pages: [`panel-measurements.md`](./panel-measurements.md) holds the
 measurements taken for the merged panel (PR 1) and their own limits;
@@ -419,7 +431,7 @@ requirement itself is undecided, or the merged scope contradicts it.
 | 3 | **Window flags and behaviour over other windows**: runtime always-on-top, no taskbar/switcher entry, no-op-tolerant where the platform cannot do it | **PASS on X11 for the combination; FAIL on the host's own session — re-stated by revision 8** | Provably absent in the merged tree: `apply_spec` sends only `MinInnerSize`, `Resizable`, `Decorations`, `InnerSize` (`gui/src/panel/window.rs:124-131`); no `WindowLevel` anywhere in `gui/src`; no `ClientMessage`, no `_NET_WM_STATE`, no X11 code at all; `stacking` and `hide_from_taskbar` are parsed, clamped and normalized only. `gui/src/panel/mod.rs:30-33` assigns the atoms to a later PR and states that nothing claims they are applied. Historical (not evidence about the merged tree), from #111's overlay tests on xfwm4 4.20 with **no compositor**: the **runtime** `WindowLevel(AlwaysOnTop)` is honoured where the startup builder hint is ignored (B9/B14), and ADD of `SKIP_TASKBAR`+`SKIP_PAGER` by EWMH `ClientMessage` is honoured on a `Normal` window once the message arrives after the window settles (0 ms and 50 ms fail, 100 ms+ works — B18/B18d) | Implement, then measure the **combination** — one window that is both always-on-top *and* skip-taskbar, over a borderless-fullscreen game — which is **NOT TESTED anywhere**; each half was proven separately. No claim about another WM, about a compositor-on session, or about Wayland (`_NET_WM_STATE` is X11-only, and a Wayland client may not set it) |
 | 4 | **Real transparency** (an actual translucent surface, not a drawn rectangle) | **PASS** on the merge commit `565930e` | In the merged tree at this page's base `background_opacity` is a config field only: defined with `MIN_BACKGROUND_OPACITY = 0.25`, clamped and normalized (`gui/src/panel/config.rs`), and **nothing applies it** — no `with_transparent`, no ARGB or alpha path anywhere in `gui/src`, and the panel's frame is left at egui's default opaque `CentralPanel` because "the opaque background and its transparency are PR 2's work" (`gui/src/app.rs:1252`). Historical: #111's B8 measured that a transparent window shows the root window's black rather than the desktop **when no compositor is present**. Implemented and measured on **PR #128 (unmerged, head `098c740`)**, in a session that composites — X11 on Xwayland under xfwl4: the window holds an ARGB visual (`Depth 32`), its own surface carries the configured alpha (one value `255` at 1.0; `128` at 0.5 with the glyph pixels still `255`), the screen at 50 % blends the fill with the measured backdrop (which is not visible through it at 100 %) while the text does not fade, and the ordinary window's surface is alpha `255` in every sampled pixel. Numbers, session and limits: [`panel-transparency.md`](./panel-transparency.md). **This is now `PASS`**: the implementation landed in the merge commit `565930e` (PR #128, 2026-10-14), and the acceptance run on that commit is the section "The acceptance run — merge commit `565930e`" on that page — clean worktree at `565930e`, `cargo build -p lapsphere --bin lapsphere` + `cargo test -p lapsphere --bin lapsphere` (163 passed), binary sha256 `81ab06c7…f6896`, session X11 on Xwayland under xfwl4, `Depth 32` surface, `255` in every surface pixel at 100 % with **0** of 87 271 sampled screen pixels inside the panel showing the green backdrop behind it (screen == surface exactly for 81 005, within ±2 for a further 5 426, and 840 further apart — the values repainted between the two captures); the slider dragged live to 0.48 gives a `(13,14,15)` fill at alpha `122` with the glyph pixels still `255` and reading `(219,220,219)` on screen (text sharing the opacity would read `(105,183,105)`) and the backdrop showing through at `B_eff`/backdrop = 0.748; one drag back to the right end returns every surface pixel to `255` and `panel.json` to `1.0` **with the process never restarting** (`pid 2475744` throughout, `panel.json` written by the app); the context menu is alpha `255` over 30 163 of 31 832 sampled pixels of its rectangle while the background behind it is `122`; and without `--panel` the ordinary window is `Depth 32` with all 1 107 882 surface pixels alpha `255` and **0** pixels showing the backdrop | Still NOT TESTED anywhere: a compositor other than xfwl4, a session without a compositor, and native Wayland. The slider's live path is claimed for a session in which injected pointer input reaches the X11 client; the condition that has to hold for that — and the state of this session in which it did not — is named on the transparency page ("The input route") |
 | 5 | **Hotkey and D-Bus** control (mode toggle by key and over the bus, with the hide-safety rule) | **PASS for the routes a live run reaches — re-stated by revision 8** | Absent from the merged tree: no hotkey handling (no `F8`/`Shift_R` code; `gui/src/panel/mod.rs:30-31` assigns it to a later PR), no panel D-Bus method in `daemon/src` or the GUI, no `--toggle-panel`; mode is switched by restarting with `--panel` or from the in-window button and menu. `gui/src/panel/config.rs:29-30`: "**No hotkey or D-Bus fields.** Those arrive with the visibility work (PR 3)". Historical, branch-only: #115 recorded 20/20 `--toggle-panel` runs and the hotkey firing under XTEST with NumLock/CapsLock/ScrollLock, and found three defects that exist **only** as its fixes — the D-Bus object exported on a second connection (the toggle hung), the key grabbed on one X connection and polled on another, and a function-key keysym/keycode error | Implement; carry those three fixes instead of rediscovering them. NOT TESTED anywhere: the "key already taken" (`BadAccess`) path, keyboard pass-through, and every Wayland claim |
-| 6 | **Integration of the metrics into the panel** (the six frame elements, their config block, the shm reader) | **ACCEPTED IN PART — live against a real Vulkan client, NOT TESTED against a real game (blocked) — revision 8** | Six registry rows with the decision's ids under `rows::Group::Frame`, a reserved fixed-height slot (`layout::Slot::GraphStrip`, `GRAPH_STRIP_ROWS` = 3 row heights, at every font size), the two config keys with backwards-compatible defaults and clamps, a settings section, and the reader: protocol-v1 validation in a fixed order with the offending value named, a seqlock read that **discards** a snapshot whose sequence moved, ADR-5's selection rule (`STALE_AFTER = 2 s`, larger pid on ties, `CLOCK_MONOTONIC`), statistics ported from the reference definitions, `-` and an empty strip for an absent source, and no file operation on the rendering path. Evidence: **438 tests pass, 0 fail, 6 ignored** on this commit's tree (`cargo test`; 341 before this work, 324 of them in the GUI binary), including the absence paths, the ring-wraparound and seqlock cases, a real writer thread whose every accepted snapshot must be self-consistent, the geometry-invariance test, the reference-script parity test, and the four review remediations (revision 7): the strip covers the whole statistics window with peak-preserving columns so an early spike survives 2000 later samples; a window the 4096-interval ring cannot fill is reported as partly covered rather than presented as full; availability is announced per source instead of per sample count; and all six elements read one snapshot per frame. Each of those four guards was mutation-checked to fail (the strip fetching its own snapshot, a row fetching its own, the newest-120 series, and a per-poll re-announcement) and the mutations were reverted. The blocking non-conformance is settled (below) | A **live** observation: the panel over a running Vulkan game, with the layer installed and `LAPSPHERE_FRAMES=1`, on a named commit. Nothing in this PR observes the behaviour, so this row is **not** `PASS` under §3.4's rule — unit tests are not an observation of behaviour. Also unmeasured: the panel's own cost with these rows on, and whether 4 Hz is enough for the strip to look like a graph rather than a staircase. Details, activation requirements and the limits: [`panel-frames.md`](./panel-frames.md) |
+| 6 | **Integration of the metrics into the panel** (the six frame elements, their config block, the shm reader) | **ACCEPTED IN PART — live against a real Vulkan client, NOT TESTED against a real game (blocked) — revision 8** | Six registry rows with the decision's ids under `rows::Group::Frame`, a reserved fixed-height slot (`layout::Slot::GraphStrip`, `GRAPH_STRIP_ROWS` = 3 row heights, at every font size), the two config keys with backwards-compatible defaults and clamps, a settings section, and the reader: protocol-v1 validation in a fixed order with the offending value named, a seqlock read that **discards** a snapshot whose sequence moved, ADR-5's selection rule (`STALE_AFTER = 2 s`, larger pid on ties, `CLOCK_MONOTONIC`), statistics ported from the reference definitions, `-` and an empty strip for an absent source, and no file operation on the rendering path. Evidence: **438 tests pass, 0 fail, 6 ignored** on this commit's tree (`cargo test`; 341 before this work, 324 of them in the GUI binary), including the absence paths, the ring-wraparound and seqlock cases, a real writer thread whose every accepted snapshot must be self-consistent, the geometry-invariance test, the reference-script parity test, and the four review remediations (revision 7): the strip covers the whole statistics window with peak-preserving columns so an early spike survives 2000 later samples; a window the 4096-interval ring cannot fill is reported as partly covered rather than presented as full; availability is announced per source instead of per sample count; and all six elements read one snapshot per frame. Each of those four guards was mutation-checked to fail (the strip fetching its own snapshot, a row fetching its own, the newest-120 series, and a per-poll re-announcement) and the mutations were reverted. The blocking non-conformance is settled (below) | A **live** observation: the panel over a running Vulkan game, with the layer installed and `LAPSPHERE_FRAMES=1`, on a named commit. Nothing in this PR observes the behaviour, so this row is **not** `PASS` under §3.4's rule — unit tests are not an observation of behaviour. Also unmeasured: whether 4 Hz is enough for the strip to look like a graph rather than a staircase. **Revision 8's run supplied two of the three things this column asked for**: the elements were driven live against a real Vulkan client, and the panel's own cost with these rows on was measured (**+0.23 jiffies/s**, §8.4 of the acceptance page). The live observation *over a game* remains outstanding — a game was attempted and never reached a rendering state (§8.3 there). Details, activation requirements and the limits: [`panel-frames.md`](./panel-frames.md) |
 | 7 | **Final acceptance of the first version** | **RUN — INCOMPLETE, not PASS (revision 8)** | No end-to-end acceptance run exists on any commit. The evidence behind stages 1–6 is now a mix that must be kept apart when it is used: measured on an unmerged PR (1 — overhead, MangoHud agreement, robustness), merged and measured (1 — interception), implemented and unit-tested with no live observation (6), and absent from the merged tree or held by other PRs (2–5). No acceptance criteria for the agreed stages existed in the merged tree before this page, and no environment matrix has been recorded for an acceptance run | Close stages 1–6 first. The run must name the commit and the build, state per-criterion evidence, name the environment it ran in (WM, compositing state, GPU, X11 or Wayland), and keep its `NOT TESTED` items visible instead of summarising them away. A pass in one of the three independent areas (transparency / window behaviour / fps) says nothing about the others |
 
 **Stage-7 restatement (revision 8) — what each row's state now rests on.** The rows
@@ -452,8 +464,10 @@ whether real frames can be captured at all: the layer and its reader live outsid
 UI, and nothing in the panel — the layout included — may block it. Stage 6 needs the
 layout decision, and it needed it **after** frame capture was confirmed — which is now
 the case: presets are intercepted, the intervals are recorded, and the reservation the
-integration needed is in the layout. Stage 7 gates on stages 1–6, and stage 7 still
-cannot start. The order of work stays the one already agreed; this table records status
+integration needed is in the layout. Stage 7 gates on stages 1–6, and **that gate has
+now been run** (revision 8): it did not produce a `PASS` — stage 6's real-game half is
+blocked and stage 3 does not hold on the host's session — so the gate is exercised, not
+cleared. The order of work stays the one already agreed; this table records status
 against it and does not re-plan it.
 
 ## 6. Already-merged infrastructure (context, not a stage)
@@ -526,7 +540,10 @@ the first version, and none of them may be counted as one:
   compositor is claimed for that stage and for nothing else.
 * **Three areas need three separate verdicts, on separate evidence:**
   *transparency* (stage 4 — `PASS` on the merge commit `565930e`, in one
-  compositing session: X11 on Xwayland under xfwl4), *window behaviour* (stage 3: stacking,
+  compositing session: X11 on Xwayland under xfwl4 — and re-verified on `bbe0c4f` by
+  the stage-7 run, which measured the panel's own ARGB surface at two opacities; the
+  screen-level blend was not repeated there, §6 of the acceptance page), *window
+  behaviour* (stage 3: stacking,
   taskbar/switcher, position, drag, multi-monitor placement), and *fps/frametime*
   (stages 1 and 6: layer, reader, elements, statistics). None of them can be carried
   by the panel's geometry or idle-CPU measurements, and a pass in one says nothing
@@ -537,7 +554,8 @@ the first version, and none of them may be counted as one:
 
 | Claim | Source |
 |---|---|
-| Base commit, what it is | `git rev-parse origin/lapsphere`, `git log -1 17ece90` |
+| Base commit, what it is (current) | `git rev-parse origin/lapsphere` = `bbe0c4f` (merge of PR #131); the run on it is [`panel-stage7-acceptance.md`](./panel-stage7-acceptance.md) |
+| Base commit of revisions 1–7 (historical) | `git rev-parse origin/lapsphere`, `git log -1 17ece90` |
 | #115 not merged, not patch-equivalent | `git cherry -v origin/lapsphere origin/feat/panel-ui` (18 × `+`), `git merge-base` = `be77233` |
 | PR #116 supersedes #115 | PR #116 body, first paragraph |
 | Merged X11 half absent | `gui/src/panel/window.rs:124-131`, `gui/src/panel/mod.rs:30-33` |

@@ -276,7 +276,7 @@ version of this check is §8.3's blocker, not a silent substitution.
 |---|---|
 | always-on-top | the app's request is refused: `panel EWMH state: could not apply _NET_WM_STATE_ABOVE, _NET_WM_STATE_SKIP_TASKBAR, _NET_WM_STATE_SKIP_PAGER to window 0xc00003 after 6 attempt(s); the window manager did not accept the request…`. Independently, `xprop` shows `_NET_WM_STATE_ABOVE` **did** land — the refusal is the other two atoms (see defect C) |
 | taskbar exclusion | **refused.** `wmctrl -i -r <win> -b add,skip_taskbar` (single atom, source 2) leaves `_NET_WM_STATE` unchanged and the window in `_NET_CLIENT_LIST`. xfwl4 **advertises** `_NET_WM_STATE_SKIP_TASKBAR` and `_NET_WM_STATE_SKIP_PAGER` in the root's `_NET_SUPPORTED` and does not apply them |
-| behavioural consequence | with the panel running, the top panel (xfce4-panel) shows a **LapSphere** button; with the process stopped there is no LapSphere button. Captures: `shots/taskbar-with-panel-strip.png` / `shots/taskbar-without-panel-strip.png` (a `grim -g "0,0 2560x64"` pair, read by eye) |
+| behavioural consequence | with the panel running, the top panel (xfce4-panel) shows a **LapSphere** button; with the process stopped there is no LapSphere button. Committed captures: [`taskbar-with-panel.png`](./panel-stage7-acceptance/taskbar-with-panel.png) / [`taskbar-without-panel.png`](./panel-stage7-acceptance/taskbar-without-panel.png) — both are the *same* `grim -g "0,0 2560x64"` pair, cropped to the region that differs between them (found by differencing the pair, not guessed) so that the rest of the user's taskbar is not published |
 | stacking | with `_NET_WM_STATE_ABOVE` set, `_NET_CLIENT_LIST_STACKING` still lists another X11 client above the panel (`0x140001e, 0x800003`) — the atom is set and the compositor's own order does not follow it. A screen capture during that run did not show that other client where its X geometry said it was, so the *visual* half of this cell is inconclusive on this session rather than disproved |
 
 **Stage 3 verdict: PASS for the mechanism and for the combination over a
@@ -351,9 +351,11 @@ game was attempted; this section must not be read as that run.
 ### 8.2 What the panel showed, read off its own surface
 
 Captures are `xwd` of the panel window, converted to PNG (`xwd2png.py`, §11) and read
-by eye; the row list is the config's: five hardware rows plus the six frame elements.
+by eye; both are committed beside this page. The row list is the config's: five
+hardware rows plus the six frame elements.
 
-With the live source running (window 531x450 px — 11 rows including the strip):
+With the live source running (window 531x450 px — 11 rows including the strip;
+committed capture [`panel-frame-rows-live.png`](./panel-stage7-acceptance/panel-frame-rows-live.png)):
 
 ```
 CPU —   Load —   GPU —   Load —   Usage —
@@ -365,7 +367,8 @@ Graph  <a drawn line: flat with small upward spikes>
 0.1%   98.4 fps
 ```
 
-After the source exited (killed, then 6 s later):
+After the source exited (killed, then 6 s later; committed capture
+[`panel-frame-rows-source-gone.png`](./panel-stage7-acceptance/panel-frame-rows-source-gone.png)):
 
 ```
 Game —   FPS —   Frame —   Graph <empty strip, no line>   1%low —   0.1% —
@@ -521,18 +524,29 @@ already computes them) instead of the wanted set.
 
 ## 11. Raw artifacts, and where they are
 
+**Committed with this page** (the evidence a reviewer cannot re-derive from the text):
+
 | Artifact | Path |
 |---|---|
-| Stage-1 battery console + per-check output | `spike/vk-layer/results/stage7-*.txt`, `results/{verify,overhead/overhead.txt,agreement/agreement.txt,robustness/robustness.txt,primitives.txt}` |
-| Battery header (commit, dirty count, loadavg, governor, loader, session) | `results/stage7-battery-header.txt` |
-| Reader-cost addendum (fixed vs merged reader) | the transcript of §3.4; the scratch copy it ran in is not part of the tree |
-| `:77` session harness and per-step output | not in the tree; the commands and their raw output are quoted in §4, §5.1, §7 |
-| Transparency alpha histograms (`xwd` → per-pixel alpha) | `/tmp/panel-100.xwd`, `/tmp/panel-050.xwd`; analyser `xwdalpha.py` |
-| Taskbar captures (`grim`) | `shots/taskbar-with-panel-strip.png`, `shots/taskbar-without-panel-strip.png` |
-| Panel surface captures (`xwd` → PNG) | `shots/panel-rows-on.png` (live source), `shots/panel-rows-gone.png` (source gone) |
-| Cost run | transcript of §8.4 (jiffies per arm) |
-| Real-game attempt | `/tmp/steamflow-launch2.log`, `~/.config/SteamFlow/logs/wine_317400.log` |
+| The taskbar pair behind §5.2 — the panel's button present and absent, cropped to the region that differs between the two captures | [`panel-stage7-acceptance/taskbar-with-panel.png`](./panel-stage7-acceptance/taskbar-with-panel.png), [`taskbar-without-panel.png`](./panel-stage7-acceptance/taskbar-without-panel.png) |
+| The panel's own surface behind §8.2 — the six elements live, and `—` with an empty strip after the source exits | [`panel-stage7-acceptance/panel-frame-rows-live.png`](./panel-stage7-acceptance/panel-frame-rows-live.png), [`panel-frame-rows-source-gone.png`](./panel-stage7-acceptance/panel-frame-rows-source-gone.png) |
+
+**Local to the machine the run happened on, and deliberately not committed.** For each
+one, the record above already quotes the output the artifact carries, so a reviewer is
+not asked to take a file on trust:
+
+| Artifact | Where it is | What it carries, quoted above |
+|---|---|---|
+| Stage-1 battery console, per-check output, battery header | `spike/vk-layer/results/stage7-*.txt`, `results/{verify,overhead/overhead.txt,agreement/agreement.txt,robustness/robustness.txt,primitives.txt,stage7-battery-header.txt}` | every PASS/FAIL line and every number in §3 — these are build/test output and are not committed |
+| Reader-cost addendum | the transcript of §3.4 | the fixed-vs-merged reader medians; the scratch crate copy it ran in is not part of the tree |
+| `:77` session harness and per-step output | not in the tree | the commands and their raw output are quoted in §4, §5.1 and §7 |
+| Transparency alpha histograms (`xwd` → per-pixel alpha) | `/tmp/panel-100.xwd`, `/tmp/panel-050.xwd`; analyser `xwdalpha.py` | the alpha histograms and pixel values in §6 |
+| Full-screen captures from the stacking cell (the green-backdrop pair and the full taskbar strip) | `/tmp` and the run's scratch directory | they contain the user's unrelated desktop; only the cropped, differenced pair above is published |
+| Cost run | the transcript of §8.4 | jiffies per arm and the resulting +0.23 jiffies/s |
+| Real-game attempt | `/tmp/steamflow-launch2.log`, `~/.config/SteamFlow/logs/wine_317400.log` | the six `[lapsphere-frames] negotiate` lines and the game's exit, quoted in §8.3 |
 
 The analysers used here (`xwdalpha.py`, `xwd2png.py`, an XTEST injector, the session
 harnesses) are throwaway instruments kept outside the repository; they are described
-in enough detail above to be re-created, and none of them is committed.
+in enough detail above to be re-created, and none of them is committed. No build
+output and no harness copy is committed — the four PNGs above are the whole of what
+this change adds to the tree besides text.
