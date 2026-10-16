@@ -238,20 +238,50 @@ The frame features' own tests:
 
 ## 7. NOT TESTED — read this before quoting anything above
 
-* **No live run.** This reader has never been pointed at a real Vulkan game on this
-  host in this commit: every claim above is unit-test evidence against synthetic
-  segments, or the spike's own measurements of the *layer*. The panel showing real
-  fps over a running game is stage 7's acceptance, and it has not happened.
-* **No measurement of the panel's cost with the frame elements on.** The panel's
-  own idle-CPU and latency numbers on
-  [`panel-measurements.md`](./panel-measurements.md) were taken without these rows;
-  the 4 Hz cadence is a proposal whose cost under a compositor is unmeasured.
+**Revision 8 (the stage-7 acceptance run on `bbe0c4f`) narrows two of the items
+below — the cost figure, and one fact inside the DXVK/Proton/Wine cell — and leaves
+the rest exactly as written.** The six elements were driven live
+against a real Vulkan client — `vkcube` with the layer installed and
+`LAPSPHERE_FRAMES=1`, vsync'd on the host session — and the panel painted
+`Game vkcube`, `FPS 164.8 fps`, `Frame 6.07 ms`, `1%low 131.2 fps`, `0.1% 98.4 fps`
+and a drawn strip; when that source exited, all six read `—` with an **empty** strip
+and the availability announcement stayed at one line per source. The panel's own cost
+with the frame rows on was **measured** against that same live source: **+0.23
+jiffies/s** (13 → 27 jiffies in 60 s, `/proc/<pid>/stat` utime+stime), i.e. about
++0.23 % of one core, with the window 531x450 px against 531x186 px without the rows.
+
+**That cost is one reading from one environment, not a benchmark.** One machine, one
+session, 60 s per arm, one live Vulkan client as the source, and a test instance on a
+private system bus (so its hardware rows polled nothing) — it is the difference the
+frame rows make *here* and must not be quoted as the panel's cost in general. It also
+does not settle the cadence: **what is measured is the price of 4 Hz, not that 4 Hz is
+the right rate.** `refresh_hz` stays a proposal (§4), and whether 4 Hz is *useful* —
+whether the strip reads as a graph rather than a staircase over a real game whose
+frame rate moves — is still not established by anything here. The run, its commands,
+its raw numbers and its blocker: [`panel-stage7-acceptance.md`](./panel-stage7-acceptance.md) §8.
+
+* **No live run against a real game.** This reader has never been pointed at a real
+  Vulkan game on this host in this commit: every claim above is unit-test evidence
+  against synthetic segments, or the spike's own measurements of the *layer*, or
+  (revision 8) a live Vulkan client that is not a game. The panel showing real fps
+  over a running game remains the open half of stage 7.
+* **The cost is measured; the cadence's usefulness is not.** The panel's other
+  numbers on [`panel-measurements.md`](./panel-measurements.md) — idle CPU and
+  repaint latency — were taken without these rows, and the +0.23 jiffies/s above is
+  the only cost figure that includes them. It was taken with `vkcube` as the source
+  and a private system bus, not with a game and a live daemon, and it says nothing
+  about whether the strip is legible at that rate.
 * **240 Hz as a *present* rate** is not tested anywhere: the panel is 165 Hz, and the
   spike's 240 Hz figure is a reader poll rate or a synthetic writer.
-* **Vulkan only.** No OpenGL hook, no 32-bit games, no Proton/DXVK/Wine, no
-  anti-cheat coverage, no GPU-bound title. A game outside those is not "unsupported
-  by the panel" — nothing claims it is supported by the layer, and the elements
-  render `—`.
+* **Vulkan only.** No OpenGL hook, no 32-bit games, no anti-cheat coverage, no
+  GPU-bound title. A game outside those is not "unsupported by the panel" — nothing
+  claims it is supported by the layer, and the elements render `—`. **Revision 8 adds
+  one measured fact inside the DXVK/Proton/Wine cell**: the layer *is* enumerated and
+  loaded in a containerised game process (`SteamLinuxRuntime_4` + Proton, six
+  `[lapsphere-frames] negotiate` lines, `LAPSPHERE_FRAMES=1` in the game's environ),
+  while **no present was ever measured there** — that game never reached a rendering
+  state. Loading is not interception; the cell stays uncovered
+  ([`panel-stage7-acceptance.md`](./panel-stage7-acceptance.md) §8.3).
 * **No native-Wayland presentation claim.** The layer contains no WSI code; the
   spike's Wayland runs went through `vkcube`'s Wayland WSI on this host's xfwl4 +
   Xwayland session, and Wayland presentation *timing* was not studied.
