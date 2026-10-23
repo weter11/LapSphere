@@ -61,13 +61,6 @@ investigation candidates from the daemon lifecycle deep-dive.
 5. One temporary shutdown thread per non-systemd D-Bus shutdown request.
    `[assumed]`
 
-## Open architectural question (not a bug)
-
-- **`nvidia/` orphan directory:** Provides GPU VRAM/hotspot temperature through
-  an undocumented NVIDIA interface plus other driver features, but is not wired
-  into the workspace build. Track the integration decision separately; see
-  [`docs/architecture/modules.md`](../architecture/modules.md). `[verified]`
-
 ## Maintenance
 
 Add an entry when an invariant violation is confirmed but not yet fixed.

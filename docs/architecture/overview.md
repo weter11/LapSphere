@@ -33,8 +33,7 @@ This is a high-level repository map, not a file-scoped call-chain analysis. Each
 ### NVIDIA support
 
 - The daemon's active NVIDIA path uses NVML for GPU metrics/control and direct NVIDIA device ioctls plus `libnvidia-api.so.1` access for additional GPU information. `[verified]` (`daemon/Cargo.toml`; `daemon/src/hardware_detection.rs`; `daemon/src/hardware_control.rs`)
-- The top-level `nvidia/` directory contains Rust NVIDIA implementation files, but it is not a workspace member and no daemon module declaration references those files. `[verified]` (`Cargo.toml`; source/module search)
-- Therefore, the maintained runtime boundary is the daemon's in-tree NVIDIA code; the role of the top-level `nvidia/` directory is not established by current workspace wiring. `[assumed]`
+- Hotspot and memory-sensor temperatures come from NVAPI and the RM control API, because the open kernel module does not expose them. `[maintainer-confirmed]` (`daemon/src/hardware_detection.rs`)
 
 ## Runtime boundaries and flow
 

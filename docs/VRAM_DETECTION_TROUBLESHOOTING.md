@@ -165,7 +165,7 @@ export RUST_LOG=hw.detect=debug
 
 ## Constants Verification
 
-The daemon uses the following NVIDIA RM API constants, verified against NVIDIA headers and LACT implementation:
+The daemon uses the following NVIDIA RM API constants, verified against NVIDIA's open kernel driver headers:
 
 - `NV2080_CTRL_CMD_FB_GET_INFO = 0x20800101` - Framebuffer info query command
 - `NV2080_CTRL_FB_INFO_INDEX_RAM_TYPE = 0x01` - RAM type query index

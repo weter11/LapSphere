@@ -36,15 +36,6 @@ Every statement is marked `[verified]` when traced in source/manifests or `[assu
 - **Dependencies in:** Daemon and GUI imports. `[verified]` (both crate manifests; source imports)
 - **Dependencies out:** Serde and Serde JSON only. `[verified]` (`common/Cargo.toml`)
 
-## `nvidia/`
-
-- **Responsibility:** Provide GPU VRAM usage and hotspot temperature through an undocumented NVIDIA interface, a community-discovered method that is not part of NVIDIA's public API, plus additional NVIDIA driver features not currently used elsewhere. `[maintainer-confirmed]`
-- **Status:** This is not dead or unwanted code; it is an integration gap because it is currently disconnected from the build. `[maintainer-confirmed]`
-- **Wiring:** It is not a workspace member and has no `mod` references from `daemon/` or `gui/`. `[verified]` (root manifest and module search)
-- **Open question:** Whether and how to wire this into `daemon/`'s NVIDIA path remains undecided. `[maintainer-confirmed]`
-- **Dependencies in:** No repository dependency was found. `[verified]` (workspace/module search)
-- **Dependencies out:** External crates and a Linux NVIDIA userspace/device interface are referenced by the files. `[verified]` (`nvidia/*.rs`)
-
 ## `drivers_src/` — external driver boundary
 
 - **Responsibility:** Provide the kernel-side `/dev/tuxedo_io` interface consumed by the daemon. `[verified]` (`drivers_src/tuxedo_io/tuxedo_io_ioctl.h`; `daemon/src/tuxedo_io.rs`)
