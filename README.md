@@ -1,71 +1,77 @@
 # LapSphere
 
-A hardware control and monitoring application for Uniwill/Clevo laptops on Linux.
+A hardware control and monitoring application for Uniwill and Clevo laptops on Linux.
 
-LapSphere provides a modern GUI for tuning CPU and GPU performance, configuring fan curves, controlling keyboard backlighting, managing battery charge thresholds, and viewing live system statistics — all through a root daemon with a per-user GUI frontend.
+A root daemon owns the hardware and an egui GUI talks to it over D-Bus. The GUI never writes to hardware itself; per-user settings, profiles and panel layout live under `~/.config/lapsphere/`.
 
 ---
 
 ## Features
 
-### Hardware Monitoring (Statistics)
-- **CPU** — per-core frequency, load, temperature, power draw (RAPL, amdgpu, zenpower), governor, boost state, AMD/Intel P-State, EPP
-- **Memory** — used/available/total, type and speed (via dmidecode)
-- **GPU** — frequency, memory frequency, temperature, hotspot/VRAM temps (via NVAPI), load, power, voltage, clock offsets, runtime power state, VRAM usage and per-process GPU memory. The daemon does not wake a suspended dGPU
-- **Battery** — charge %, voltage, current, status, power (computed as voltage × current), charge start/end thresholds; health and capacity are shown under Settings → Hardware info
-- **WiFi** — SSID, signal level, channel, PHY rate, actual throughput, temperature
-- **Storage** — read/write speed, IOPS, temperature, mount usage
-- **Fans** — speed, temperature per fan, control mode
-- **Gamepads** — connection type, battery level, power status; gamepads with a stable identifier are remembered across sessions (`remembered_gamepads` in `settings.json`)
+### Hardware monitoring
 
-### CPU Tuning
-- Scaling governor selection
-- Frequency min/max limits
-- CPU boost / Turbo toggle
-- SMT / Hyperthreading toggle
-- AMD P-State mode (active / passive / guided)
-- Intel P-State mode (active / passive)
+- **CPU** — per-core frequency, load and temperature; package temperature; power from RAPL, `amdgpu` or `zenpower` when present; governor, boost, SMT, AMD/Intel P-State status and EPP
+- **Memory** — used, available and total; type and speed come from `dmidecode` when it is installed
+- **GPU** — core and memory clocks, load, power, voltage, temperature, hotspot and VRAM temperatures, VRAM usage, runtime power state and per-process GPU memory. NVIDIA values come from NVML, the RM ioctl path and `libnvidia-api.so.1`; the daemon does not query a suspended dGPU
+- **Battery** — charge, voltage, current, status, power (voltage × current) and charge thresholds; health and capacity are under Settings → Hardware info
+- **WiFi** — SSID, signal, channel, width and frequency, PHY rates, throughput, temperature, driver and firmware versions
+- **Storage** — read/write speed, IOPS and temperature per block device, plus mount usage
+- **Fans** — speed, temperature and control mode for system fans (via `tuxedo_io`) and NVIDIA GPU fans
+- **Gamepads** — connection type, battery level and power status; devices with a stable ID are remembered in `settings.json`
+
+### CPU tuning
+
+- Scaling governor and frequency min/max limits
+- CPU boost and SMT toggles
+- AMD P-State (active / passive / guided) and Intel P-State (active / passive)
 - Energy Performance Preference (EPP)
-- Uniwill TDP control (PL1 / PL2 / PL4) with per-device ranges
-- TDP performance profile — Uniwill: `power_save` / `enthusiast` (+ `overboost` when the firmware reports support); Clevo: `quiet` / `power_saving` / `performance` / `entertainment`
+- Uniwill TDP control (PL1 / PL2 / PL4) within the ranges the firmware reports
+- Vendor performance profile — Uniwill: `power_save` / `enthusiast`, plus `overboost` when the firmware reports it; Clevo: `quiet` / `power_saving` / `performance` / `entertainment`
 
-### GPU Tuning (NVIDIA)
-- GPU core locked clock range
-- Core clock offset (static, applied immediately via NVML)
-- Memory clock offset
-- Power limit
-- **Advanced dynamic overclocking** — requires Advanced mode with manual clock control enabled; on each `gpu_overclock` poll the daemon recalculates the offset from live temperature, frequency, and power draw (configurable drain/power/critical-temp control zones, smart rounding) and writes it only when it changes. Skipped while the dGPU is suspended
-- NVIDIA fan speed control (manual per-fan or auto)
-- PRIME profile switching (on-demand / nvidia / intel) via optimus-manager or prime-select
+### GPU tuning (NVIDIA)
 
-### Keyboard Backlight
-- Supports single-zone RGB, 3-zone RGB, 4-zone RGB, per-key RGB, white-only keyboards
-- Modes: Static color, multiple zones, per-key painting, Breathe, Cycle, Dance, Flash, Random Color, Tempo, Wave
-- Live preview without saving
+- Locked core clock range, core offset, memory offset and power limit
+- **Dynamic offset** — only in Advanced mode with manual clocks enabled. On every `gpu_overclock` poll the daemon computes an offset from live temperature, frequency and power (drain and power control zones, optional critical-temperature range), rounds it to a configurable step and writes it only when it changed. The offset is cleared when the GPU leaves P0 or the daemon may not query it
+- NVIDIA fan control (manual per fan or auto)
+- PRIME profile switching (on-demand / nvidia / intel) through `optimus-manager` when it exists, otherwise `prime-select`
 
-### Fan Control
-- Custom fan curves per fan with a graphical editor (2–16 points)
-- Drag points or edit numerically
-- Curves are applied by the daemon through `/dev/tuxedo_io`; disabling custom curves restores automatic fan control
+### Keyboard backlight
 
-### Battery Charge Control
-- Charge type (Standard / Custom) and charge start/end thresholds via the `charge_type` and `charge_control_{start,end}_threshold` sysfs files of `BAT0`/`BAT1`
-- Available threshold values are read from `charge_control_*_available_thresholds` when present, with built-in fallback lists
-- Clevo legacy and CC4 flexicharger interfaces are implemented by the vendored kernel module sources in `drivers_src/`, not by the daemon
+- Single-zone, 3-zone, 4-zone and per-key RGB keyboards, detected from the `tuxedo_keyboard` LED sysfs (brightness-only keyboards are detected but expose only brightness)
+- Modes: Static color, Multiple zones, Per-key, Breathe, Cycle, Dance, Flash, Random Color, Tempo, Wave
+- Live preview without saving to the profile
 
-### Profile System
-- Multiple named profiles (create, edit, delete; the built-in Standard profile can be reset but not deleted), each storing CPU, GPU, keyboard, screen brightness, and fan settings
-- Instant apply on switch (hardware settings sent to daemon via DBus); the current profile is also applied at GUI startup
-- Profiles persist to `~/.config/lapsphere/profiles.json`
+### Fan control
+
+- Per-fan curves with 2–16 points, edited graphically or entered numerically
+- The daemon evaluates the curves and writes them through `/dev/tuxedo_io`; disabling custom curves sets the fans back to auto
+- Requires `tuxedo-drivers` (see [Kernel driver](#kernel-driver))
+
+### Battery charge control
+
+- Charge type (Standard / Custom) and start/end thresholds through `charge_type` and `charge_control_{start,end}_threshold` on `BAT0` / `BAT1`
+- Available values are read from `charge_control_*_available_thresholds` when present, otherwise from built-in fallback lists
+- The attributes and the Clevo legacy / CC4 flexicharger logic live in the kernel module (`drivers_src/`); the daemon only reads and writes the sysfs files
+
+### Profiles
+
+- Named profiles holding CPU, GPU, keyboard, screen brightness and fan settings; the built-in Standard profile can be reset but not deleted
+- Switching applies the profile immediately over D-Bus, and the active profile is applied again when the GUI starts
+- Persisted to `~/.config/lapsphere/profiles.json`
+
+### Panel mode (experimental)
+
+The panel is a compact column of the same statistics the Statistics page shows, drawn by the GUI's window and reached with the `📈 Panel` button, `lapsphere --panel`, or `lapsphere --toggle-panel` on a running GUI. Its settings (row visibility, width, background opacity, stacking, hide from the taskbar and pager) are stored in `panel.json`; the hotkey and taskbar handling are X11 only. The frame rows read a shared-memory segment written by the Vulkan layer in `spike/vk-layer/`, which the packages neither build nor install, so those rows show `—` until it is built and enabled separately.
 
 ### Other
-- System tray (ksni) with Profiles submenu, Show Window, Statistics, and Quit
+
+- System tray (ksni) with a Profiles submenu, Show Window, Statistics and Quit
 - Configurable per-section polling rates
-- Log viewer with level filtering, search, pause, and copy; button to open the crash-reports folder
+- Log viewer with level filters, search, pause, copy, and a button to open the crash-report folder
 - Crash reports written to `~/.config/lapsphere/crash_<timestamp>.log`
-- Auto-start: Settings → Enable autostart writes `~/.config/autostart/io.lapsphere.LapSphere.desktop` (`lapsphere --tray`); disabling it writes an override with `Hidden=true`. Packages also ship `/etc/xdg/autostart/io.lapsphere.LapSphere.desktop` with `--tray`
-- Update checker — on GUI startup queries the GitHub releases API and shows a notice when the latest tag differs from the running version; Settings → About offers the changelog and "Open Download Page" (no automatic install)
-- Keyboard shortcuts: `Ctrl+1`–`Ctrl+4` switch pages, `F1` opens the NVIDIA overclocking help
+- Autostart: Settings → Enable autostart writes `~/.config/autostart/io.lapsphere.LapSphere.desktop` with `lapsphere --tray`; disabling it writes the same file with `Hidden=true`
+- Update check: on startup the GUI asks the GitHub releases API and shows a notice when the latest tag differs from the running version; Settings → About shows the changelog and an "Open Download Page" button (no automatic install)
+- Keyboard shortcuts: `Ctrl+1`–`Ctrl+4` switch pages, `F1` toggles the NVIDIA overclocking help
 - Webcam toggle (Clevo interface only)
 
 ---
@@ -74,54 +80,68 @@ LapSphere provides a modern GUI for tuning CPU and GPU performance, configuring 
 
 ```
 ┌──────────────────────────────────┐
-│         lapsphere (GUI)          │  runs as regular user
-│  egui frontend, DBus client      │
+│         lapsphere (GUI)          │  runs as a regular user
+│  egui frontend, D-Bus client     │
 └────────────┬─────────────────────┘
-             │ DBus (io.lapsphere.Control)
+             │ D-Bus (io.lapsphere.Control)
              │ system bus
 ┌────────────▼─────────────────────┐
 │      lapsphere-daemon            │  runs as root
-│  Hardware polling, sysfs writes  │
-│  NVML, tuxedo_io ioctl, NVAPI    │
+│  hardware polling, sysfs writes  │
+│  NVML, tuxedo_io ioctls, NVAPI   │
 └──────────────────────────────────┘
 ```
 
-The daemon owns the system-bus name `io.lapsphere.Control` (object path `/io/lapsphere/Control`) and runs three polling jobs: `hardware_monitor`, `fan_control`, and `gpu_overclock` (defaults 1000 / 2000 / 1000 ms, read from `~/.config/lapsphere/settings.json` and updated by the GUI over DBus). The GUI communicates exclusively through DBus — it never writes to hardware directly. The daemon does not wake a suspended dGPU.
+The daemon owns the system-bus name `io.lapsphere.Control` (object path `/io/lapsphere/Control`, interface of the same name) and runs three polling jobs: `hardware_monitor`, `fan_control` and `gpu_overclock`. Their defaults are 1000 / 2000 / 1000 ms, read from `~/.config/lapsphere/settings.json`, and the GUI updates them over D-Bus. The GUI talks to the daemon only over D-Bus; apart from its own configuration, crash reports and autostart files it writes nothing.
 
 The bus policy (`data/io.lapsphere.Control.conf`) lets only root own the name and lets any user call it. The activation file (`data/io.lapsphere.Control.service`) starts `/usr/bin/lapsphere-daemon` as root.
 
-**Single-instance GUI.** The GUI requests the session-bus name `io.lapsphere.Gui`; a second instance prints a message and exits.
+**Single instance.** The GUI requests the session-bus name `io.lapsphere.Gui`; a second instance prints a message and exits.
 
-**Daemon unit.** `data/lapsphere-daemon.service` is a `Type=dbus` unit (`BusName=io.lapsphere.Control`) that runs `lapsphere-daemon` without flags, with `Restart=on-failure`, `CPUQuota=50%`, `MemoryMax=768M`, and `TasksMax=256`. Packages install it to `/usr/lib/systemd/system/`; it is not enabled by the packaging scripts.
+**Daemon unit.** `data/lapsphere-daemon.service` is a `Type=dbus` unit (`BusName=io.lapsphere.Control`) that runs `lapsphere-daemon` without flags, with `Restart=on-failure`, `CPUQuota=50%`, `MemoryMax=768M`, `TasksMax=256` and `MALLOC_ARENA_MAX=2`. Packages install it to `/usr/lib/systemd/system/` but do not enable it.
 
 **Flags.**
-- `--gui` — the daemon spawns the GUI as the user given by `SUDO_UID` or `PKEXEC_UID` (so start it with `sudo` or `pkexec`), forwarding any other arguments (e.g. `--tray`) to it. When that GUI process exits, the daemon shuts down.
-- `--tray` — starts the window hidden in the tray. On the GUI it is a standalone flag; on the daemon it is only forwarded together with `--gui`.
-- Without flags the daemon requires root; as a regular user it prints limited statistics and exits.
 
-When the GUI closes it sets all fans to auto and asks the daemon to shut down; the request is ignored if the daemon is managed by systemd.
+- `--gui` — the daemon spawns the GUI as the user given by `SUDO_UID`, or `PKEXEC_UID` if that is not set (so start it with `sudo` or `pkexec`), forwarding every other argument to it. When that GUI process exits, the daemon shuts down.
+- `--tray` — on the GUI, start with the window hidden. On the daemon it is only forwarded to the GUI; without `--gui` it merely suppresses the startup statistics print.
+- `--panel` — on the GUI, start in panel mode.
+- `--toggle-panel` — on the GUI, ask the already-running instance to show or hide its panel; exits non-zero if no GUI answers (Linux only).
+- Without flags the daemon requires root; as a regular user it prints limited statistics and exits with status 1.
+
+When the GUI exits it sets all fans to auto and asks the daemon to shut down; the daemon ignores that request when it is managed by systemd.
 
 ---
 
 ## Requirements
 
 ### Runtime
-- Linux kernel with tuxedo-drivers loaded (provides `/dev/tuxedo_io` for fan/TDP/webcam control and keyboard LEDs on Clevo/Uniwill hardware); the daemon still starts without `/dev/tuxedo_io`
-- `dbus`
-- `lscpu` (util-linux, for CPU info)
-- `dmidecode` (for memory type/speed detection)
-- `iw`, `ethtool` (for WiFi info)
-- `pciutils` (`lspci`, for WiFi controller info)
-- NVIDIA driver + NVML (`libnvidia-ml.so`) for GPU tuning
-- `libnvidia-api.so.1` for hotspot/VRAM temperatures and voltage (optional)
-- `optimus-manager` or `prime-select` for PRIME profile switching (optional)
+
+- Linux with a D-Bus system bus
+- `tuxedo-drivers` for `/dev/tuxedo_io` — required for fan control, TDP profiles, the webcam toggle and the LED interface (see [Kernel driver](#kernel-driver))
+- An X11 or Wayland session for the GUI
+- Optional helpers, each used when present: `lscpu` (CPU topology), `dmidecode` (memory type/speed), `iw` and `ethtool` (WiFi link and driver info), `lspci` (WiFi controller)
+- NVIDIA driver with `libnvidia-ml.so.1` for GPU tuning and NVIDIA statistics; `libnvidia-api.so.1` adds the NVAPI hotspot/VRAM temperature and voltage queries
+- `optimus-manager` or `prime-select` for PRIME switching, `xdg-open` and `systemctl` for the crash-report folder button and the Settings restart button
+
+Libraries are loaded at runtime: NVML through `libloading`, NVAPI by name (`libnvidia-api.so.1`). `/dev/tuxedo_io`, `/dev/nvidia*`, `/dev/dri/*` and sysfs (`/sys/class/...`, `/sys/devices/system/cpu/...`, `/sys/class/dmi/id/...`) are the device and kernel interfaces the code uses.
 
 ### Build
-- Rust toolchain (stable, tested with recent versions)
-- C compiler (for the bundled mimalloc allocator)
-- `pkg-config` and OpenSSL development headers (the update checker uses `ureq` with `native-tls`)
 
-The Debian package recipe (`debian/control`) and the CI workflow additionally install `libdbus-1-dev`, GTK3/libadwaita, pango/cairo/gdk-pixbuf/atk/graphene, `libwayland-dev`, and `libxkbcommon-dev`. `Cargo.lock` contains no GTK or libdbus crates (DBus goes through `zbus`), and Wayland/X11 support in `eframe` is enabled through Rust crates.
+- Rust toolchain (edition 2021, workspace resolver 2)
+- A C compiler, for mimalloc's vendored C library in the GUI
+- `pkg-config` and OpenSSL development headers (`ureq` → `native-tls` → `openssl-sys`)
+
+`cargo tree --target x86_64-unknown-linux-gnu` resolves no GTK, glib, gdk, atk or libdbus crate: D-Bus is `zbus`, and the Wayland/X11 bindings (`wayland-sys`, `x11-dl`, `xkbcommon-dl`) load their libraries with `dlopen`, so no Wayland, X11 or xkbcommon development package is needed to build. The only build script with a hard `pkg-config` requirement is `openssl-sys`; `libmimalloc-sys` uses the C compiler. `debian/control`, `PKGBUILD` and the CI workflow still install `libdbus-1-dev`, the GTK3/libadwaita/pango/cairo/gdk-pixbuf/atk/graphene packages and `libwayland-dev`/`libxkbcommon-dev`, but those are not required by the crate graph.
+
+---
+
+## Kernel driver
+
+Fan control, TDP profiles, the webcam toggle and the keyboard LED sysfs interface come from TUXEDO Computers' [tuxedo-drivers](https://github.com/tuxedocomputers/tuxedo-drivers) kernel modules, which provide `/dev/tuxedo_io` and the `tuxedo_keyboard` LED class devices.
+
+This repository vendors the module sources in `drivers_src/` (with their `Kbuild` files) but contains no `Makefile`, `dkms.conf` or packaging rule that builds or installs them, and neither the Debian package nor the `PKGBUILD` ships a module. The module therefore has to be installed separately, from TUXEDO's tuxedo-drivers; the Debian package lists `tuxedo-drivers` under `Recommends`.
+
+Without `/dev/tuxedo_io` the daemon logs `/dev/tuxedo_io not available - some features will be disabled` (debug level) and keeps running: monitoring and the sysfs-based CPU paths are unaffected, while fan control, TDP profiles and the webcam toggle return `tuxedo_io not available`.
 
 ---
 
@@ -131,26 +151,18 @@ The Debian package recipe (`debian/control`) and the CI workflow additionally in
 cargo build --release --all
 ```
 
-Binaries are placed in `target/release/`:
-- `lapsphere` — GUI
-- `lapsphere-daemon` — system daemon
+Cargo produces two binaries in `target/release/`:
 
-### GitHub Actions artifacts
+- `lapsphere` — the GUI
+- `lapsphere-daemon` — the daemon
 
-The CI workflow uploads two package artifacts per successful run:
-
-- `lapsphere-ubuntu-24.04-deb` — a Debian package containing both binaries and their service, DBus, desktop, and icon files.
-- `lapsphere-arch-pkg` — an Arch package containing the same application files.
-
-`cargo test` runs in CI before the packages are built; the Debian package build itself skips tests (`debian/rules`).
-
-The package artifacts are the supported CI outputs. A workflow run also has a source commit, so an artifact created by an older run is an older snapshot even when its package version remains `0.1.0`. The date shown in `debian/changelog` is package release metadata and does not identify when a CI artifact was built.
+CI builds a Debian package and an Arch package on every push to `main`/`lapsphere` and on pull requests; download them as the `lapsphere-ubuntu-24.04-deb` and `lapsphere-arch-pkg` artifacts of a workflow run.
 
 ---
 
 ## Installation (Debian/Ubuntu)
 
-A `debian/` directory is included for building a `.deb` package:
+A `debian/` directory is included for building a `.deb`:
 
 ```bash
 dpkg-buildpackage -us -uc -b
@@ -158,146 +170,175 @@ sudo dpkg -i ../lapsphere_*.deb
 ```
 
 This installs:
-- `/usr/bin/lapsphere` and `/usr/bin/lapsphere-daemon`
-- DBus policy `/usr/share/dbus-1/system.d/io.lapsphere.Control.conf`
-- DBus activation service `/usr/share/dbus-1/system-services/io.lapsphere.Control.service`
-- systemd unit `/usr/lib/systemd/system/lapsphere-daemon.service`
-- Desktop entry, autostart entry `/etc/xdg/autostart/io.lapsphere.LapSphere.desktop` (`Exec=lapsphere --tray`), and icon
 
-The package depends on `dbus`, `policykit-1`, `libxkbcommon-x11-0`, `dmidecode`, `pciutils`, `ethtool`, and `iw`, and recommends `tuxedo-drivers`. The root `PKGBUILD` installs the same files for Arch Linux.
+- `/usr/bin/lapsphere` and `/usr/bin/lapsphere-daemon`
+- D-Bus policy `/usr/share/dbus-1/system.d/io.lapsphere.Control.conf`
+- D-Bus activation file `/usr/share/dbus-1/system-services/io.lapsphere.Control.service`
+- systemd unit `/usr/lib/systemd/system/lapsphere-daemon.service`
+- desktop entry and icon under `/usr/share/applications` and `/usr/share/icons/hicolor/scalable/apps`, and the autostart entry `/etc/xdg/autostart/io.lapsphere.LapSphere.desktop` (`Exec=lapsphere --tray`)
+
+The package depends on `dbus`, `policykit-1`, `libxkbcommon-x11-0`, `dmidecode`, `pciutils`, `ethtool` and `iw`, and recommends `tuxedo-drivers`.
+
+### Arch Linux
+
+The root `PKGBUILD` builds the same two binaries and installs the same files:
+
+```bash
+makepkg -si
+```
+
+`tuxedo-drivers` is not part of this package and has to be installed separately here as well, exactly as described under [Kernel driver](#kernel-driver); without it `/dev/tuxedo_io` and the `tuxedo_keyboard` LED devices are missing.
 
 ---
 
 ## Running
 
-### Recommended (via daemon)
+### Recommended (through the daemon)
 
 ```bash
-# Start daemon (requires root)
 sudo lapsphere-daemon --gui
 ```
 
-The `--gui` flag causes the daemon to launch the GUI as the original user (read from `SUDO_UID` or `PKEXEC_UID`). The daemon exits when that GUI exits.
+The daemon starts, owns `io.lapsphere.Control`, and launches the GUI as the invoking user. It exits when that GUI exits.
 
 ### Manual
 
 ```bash
-# Terminal 1 (root)
+# terminal 1 (root)
 sudo lapsphere-daemon
 
-# Terminal 2 (user)
+# terminal 2 (user)
 lapsphere
 ```
 
-### Start minimized to tray
+### Start hidden, or in the panel
 
 ```bash
-lapsphere --tray
+lapsphere --tray      # window hidden, use the tray icon to show it
+lapsphere --panel     # start in panel mode
+lapsphere --toggle-panel   # toggle the panel of the running GUI
 ```
-
-The window starts hidden and the tray icon is used to show it.
 
 ---
 
 ## Configuration
 
-Settings are split into files under `~/.config/lapsphere/`, one per subsystem:
+All user configuration lives in `~/.config/lapsphere/`:
 
 | File | Contents |
 |---|---|
-| `settings.json` | Theme, font size, start minimized, tray (minimize on close), autostart, CPU scheduler, statistics sections (polling rates, order, visibility), tuning section order, battery settings, log limit/filter, remembered gamepads |
-| `profiles.json` | All tuning profiles and the active profile name |
+| `settings.json` | Theme, font size, autostart, CPU scheduler name, statistics sections (visibility, order, per-section polling rates), tuning section order, battery settings, log limit and trace filter, remembered gamepads |
+| `profiles.json` | All profiles and the active profile name; the previous file is kept as `profiles.json.bak` |
+| `tray.json` | `start_minimized` and `tray_enabled` (minimize on close), plus a schema `version` |
+| `panel.json` | Panel width, background opacity, stacking, hide-from-taskbar, last position, hotkey, frame window and refresh rate, per-row visibility, plus a schema `version` |
+| `config.json` | Legacy single-file configuration, read only when `settings.json` or `profiles.json` is missing |
+| `crash_<timestamp>.log` | GUI panic reports (backtrace and panic message) |
 
-Crash reports (`crash_<timestamp>.log`) are also written to this directory.
+`settings.json` is written atomically; a corrupt `tray.json` or `panel.json` is moved aside to `tray.json.corrupt` / `panel.json.corrupt` instead of being deleted, and an existing pre-split backup is kept as `settings.json.pre-tray-split`.
 
-A legacy single-file format (`config.json`) is read on startup and used to fill in whichever of `settings.json` / `profiles.json` is missing; the new files are then written and `config.json` is left in place. If both new files exist, `config.json` is ignored.
-
-The daemon reads its polling rates from `$HOME/.config/lapsphere/settings.json` (under `sudo` this is root's `$HOME`) and receives updates from the GUI over DBus.
-
-### Tray settings
-
-`tray.json` is created on first run. Upgrading from a build that kept the tray
-fields in `settings.json` copies those values into `tray.json` once, backs the
-original file up to `settings.json.pre-tray-split`, and removes the tray keys
-from it. To go back to an older build, restore the backup:
-
-```bash
-cp ~/.config/lapsphere/settings.json.pre-tray-split ~/.config/lapsphere/settings.json
-```
-
-See [`docs/development/config-files.md`](docs/development/config-files.md) for
-the full file layout, the migration order, and the corruption-handling rules.
+The daemon reads only the poll rates from `$HOME/.config/lapsphere/settings.json` (root's `$HOME` under `sudo`) and receives live updates from the GUI over D-Bus; everything else in that directory belongs to the GUI.
 
 ---
 
-## Project Structure
+## Project structure
 
 ```
-Cargo.toml       Workspace (members: common, daemon, gui)
-PKGBUILD         Arch Linux package recipe
-common/          Shared types (CpuInfo, GpuInfo, Profile, AppConfig, …)
-daemon/          System daemon
-  com.tuxedo.Control.conf  Older DBus policy copy (not used by the packages)
-  src/
-    main.rs              Startup, CLI flags, polling jobs, GPU overclock loop
-    dbus_interface.rs    Exposed DBus methods
-    daemon_settings.rs   Poll-rate settings read from settings.json
-    gpu_activity.rs      Passive inventory of processes holding GPU device nodes
-    hardware_detection.rs  Read-only hardware queries
-    hardware_control.rs    Write paths (sysfs, NVML, tuxedo_io)
-    tuxedo_io.rs         ioctl wrapper for /dev/tuxedo_io
-    battery_control.rs   Charge threshold sysfs control
-    polling_scheduler.rs Tokio-based job scheduler
-gui/             egui GUI
-  src/
-    main.rs              Entry point, single-instance check, --tray
-    app.rs               App state, update loop, config load/migration, hardware channel
-    dbus_client.rs       Async DBus command dispatch
-    pages/               Statistics, Profiles, Tuning, Settings views
-    widgets/             Fan curve editor
-    theme.rs             Dark/light theme definitions
-    polling_scheduler.rs Client-side refresh coordinator
-    system_tray.rs       ksni system tray integration
-    gamepad_registry.rs  Remembered gamepads
-    keyboard_shortcuts.rs  Ctrl+1–4 / F1 shortcuts
-nvidia/          NVIDIA driver/NVAPI sources (not a workspace member and not built; see docs/architecture/modules.md)
-data/            DBus policy/activation files, systemd unit, desktop entry, icon
-debian/          Debian packaging
-docs/            Architecture, subsystem, and development documentation
-drivers_src/     Vendored tuxedo-drivers kernel module sources (not built by cargo)
-screenshots/     Screenshots
-.github/workflows/rust.yml  CI (tests, Debian and Arch packages)
+Cargo.toml            workspace (members: common, daemon, gui)
+common/               shared types (CpuInfo, GpuInfo, Profile, AppConfig, …)
+daemon/               root daemon
+  src/main.rs         CLI flags, startup, the three poll jobs, dynamic GPU offset
+  src/dbus_interface.rs   exported D-Bus methods
+  src/hardware_detection.rs  read paths and capability detection
+  src/hardware_control.rs    write paths (sysfs, NVML, tuxedo_io)
+  src/tuxedo_io.rs    ioctl wrapper for /dev/tuxedo_io
+  src/battery_control.rs
+  src/daemon_settings.rs
+  src/gpu_activity.rs
+  src/polling_scheduler.rs
+gui/                  egui GUI
+  src/main.rs         entry point, single-instance guard, --tray/--panel/--toggle-panel
+  src/app.rs          state, config load/migration, update loop
+  src/dbus_client.rs  D-Bus command dispatch
+  src/system_tray.rs  ksni tray
+  src/tray_config.rs  tray.json
+  src/gamepad_registry.rs
+  src/pages/          statistics, profiles, tuning, settings
+  src/panel/          panel mode: config, layout, rows, rendering, X11 EWMH, frame reader
+  src/widgets/        fan curve editor
+nvidia/               NVIDIA RM/NVAPI code adapted from LACT; not a crate and not built
+data/                 D-Bus policy and activation file, systemd unit, desktop entry, icon
+debian/               Debian packaging
+drivers_src/          vendored tuxedo-drivers sources (Kbuild only; not built here)
+spike/vk-layer/       standalone Vulkan layer that feeds the panel's frame rows
+docs/                 architecture, subsystem and development notes
+screenshots/          images
+PKGBUILD              Arch Linux package recipe
 ```
 
 ---
 
-## Hardware Support
+## Hardware support
 
 | Feature | Clevo | Uniwill |
 |---|---|---|
-| Fan control | ✅ | ✅ |
-| TDP profiles | ✅ | ✅ |
-| Uniwill TDP (PL1/PL2/PL4) | — | ✅ |
-| Keyboard RGB | ✅ (3-zone, 1-zone) | ✅ (1-zone) |
-| Webcam toggle | ✅ | — |
-| Battery thresholds | ✅ (flexicharger) | via sysfs |
+| Fan control | yes, up to 3 fans | yes, 1–2 fans |
+| Performance profile | `quiet` / `power_saving` / `performance` / `entertainment` | `power_save` / `enthusiast`, plus `overboost` when reported |
+| TDP PL1 / PL2 / PL4 | — | yes |
+| Keyboard backlight | LED sysfs, plus Clevo ioctl modes | single-zone `rgb:` LED |
+| Webcam toggle | yes | — |
+| Battery charge thresholds | if the battery exposes `charge_type` (the Clevo module adds it) | only if the battery exposes `charge_type` |
 
-NVIDIA GPU features require a supported NVIDIA driver and card. AMD and Intel iGPUs are read-only (stats only).
+The vendor interface is probed once when `/dev/tuxedo_io` is opened; if neither Clevo nor Uniwill answers, vendor-specific features report themselves as unavailable. NVIDIA features need an NVIDIA GPU with NVML; AMD and Intel iGPUs are read-only (statistics only).
+
+Hardware coverage is limited — the features above are gated on what the code probes for, not on a list of validated models — and reports from other models are welcome.
+
+TODO(maintainer): list the laptop models and BIOS versions LapSphere has actually been run on.
+
+---
+
+## Caution for Uniwill
+
+On Uniwill laptops the fan number is not a verified percentage. The fan curves produce 0–100, `hardware_control::set_fan_speed` clamps D-Bus requests to 100, and `TuxedoIo::set_fan_speed` (`daemon/src/tuxedo_io.rs`) passes the number to the `W_UW_FANSPEED` ioctl with a 200 ceiling. The kernel side, `uw_set_fan` in `drivers_src/tuxedo_io/tuxedo_io.c`, treats it as a raw EC fan level and rejects values above `NB02_FAN_SPEED_MAX` (200); the read path returns the same raw level, which the GUI labels `%`. Nothing converts between that level, RPM and a percentage, and the 200 is the kernel's ceiling rather than 200 %. The unit is therefore unverified: commands of 0–100 reach the EC as levels 0–100, half of the 200 the kernel accepts. Treat the percentages shown for Uniwill fans as approximate, and prefer the automatic fan curve unless you can watch the fans.
+
+---
+
+## Reporting problems
+
+A bug report is useful when it includes:
+
+- the laptop model as the app reports it, from `/sys/class/dmi/id/product_name` (shown under Settings → Hardware info)
+- the daemon log: `journalctl -u lapsphere-daemon` when the daemon runs as a systemd service, otherwise the terminal output or the GUI's View Logs tab
+- the crash report from `~/.config/lapsphere/crash_<timestamp>.log`, if the GUI crashed
+- the LapSphere version shown in Settings → About
 
 ---
 
 ## Documentation
 
-- [`docs/architecture/`](docs/architecture/) — overview, modules, invariants, design decisions
-- [`docs/subsystems/`](docs/subsystems/) — daemon lifecycle, GUI state sync, hardware detection, `nvidia/` crate, `tuxedo_io`
-- [`docs/development/`](docs/development/) — known problems
+- [`docs/architecture/`](docs/architecture/) — overview, modules, invariants, decisions
+- [`docs/subsystems/`](docs/subsystems/) — daemon lifecycle, GUI state sync, hardware detection, the `nvidia/` code, `tuxedo_io`
+- [`docs/development/known-problems.md`](docs/development/known-problems.md)
 - [`docs/VRAM_DETECTION_TROUBLESHOOTING.md`](docs/VRAM_DETECTION_TROUBLESHOOTING.md) and [`docs/gpu-process-memory-statistics.md`](docs/gpu-process-memory-statistics.md)
 
 ---
 
-## Caution for Uniwill
-Be carefully if your laptop is Uniwill to use it with, where speed limit in RPM instead of percent, that feature is hard to implement correctly, Tuxedo know speed limits on every there laptop, I'm lacking that info.
+## Credits
+
+- `drivers_src/` is TUXEDO Computers' [tuxedo-drivers](https://github.com/tuxedocomputers/tuxedo-drivers), GPL-2.0-or-later (SPDX headers in the source files).
+- `nvidia/` is adapted from [LACT](https://github.com/ilya-zlobintsev/LACT) by Ilya Zlobintsev, MIT licensed. It is reference material, not part of the Cargo workspace.
+
+---
+
+## Status
+
+Version 0.1.0 (`Cargo.toml`). There are no git tags and no GitHub releases; the project is early-stage.
+
+---
+
+## Disclaimer
+
+LapSphere is an independent project and is not affiliated with TUXEDO Computers, Clevo or Uniwill. It writes to hardware — fan curves, power limits, clock offsets, charge thresholds and keyboard settings — so a wrong value can affect stability, cooling or the battery. It comes with no warranty; see `LICENSE`.
 
 ## License
 
-GPL-2.0 — see `debian/copyright`.
+GPL-2.0 — see `LICENSE` and `debian/copyright`.
