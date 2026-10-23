@@ -38,7 +38,7 @@ The magic values match the header exactly: general `0xEC`, Clevo read
 |---|---|---|
 | Interface/fan detection | general `0x05/0x06`; CL read `0x10..`; UW read `0x10..0x11` | Platform checks and fan probes `[verified]` |
 | `get_fan_speed`, `get_fan_temperature` | CL read `0x10..0x12`; UW read `0x10..0x13` | Clevo packed fan info; Uniwill fan speed/temp `[verified]` |
-| `set_fan_speed`, `set_fan_auto` | CL write `0x10/0x11`; UW write `0x10/0x11/0x14` | Manual speed and return-to-auto `[verified]` |
+| `set_fan_speed`, `set_fan_auto` | CL write `0x10/0x11`; UW write `0x10/0x11/0x12/0x14` | Manual speed (Uniwill: clears the `0x40` ownership bit through `0x12` first) and return-to-auto `[verified]` |
 | TDP reads/writes | UW read `0x18..0x20`; UW write `0x15..0x17` | TDP0..2 current/min/max and setters `[verified]` |
 | Performance profiles | UW read `0x21`, mode read `0x14`; CL write `0x15`, UW write `0x18` | Available/current profile and profile setter `[verified]` |
 | Webcam | CL read `0x13`, write `0x12` | Webcam state `[verified]` |
@@ -57,6 +57,15 @@ fan/profile IDs. `[verified]` Detection intentionally treats probe errors as
 negative evidence, while operational read/write errors propagate to callers.
 `[verified]` Clevo manual control uses a process-global atomic to disable auto
 mode once and re-enables it when `set_fan_auto()` succeeds. `[verified]`
+
+On a board with universal EC fan control the driver's `uw_set_fan()` reads
+`0x0751` and returns success without touching the EC while bit `0x40` is set,
+so a manual duty is dropped silently. The bit is sticky: `uw_init_fan()` clears
+it, but only after that same check has already passed. `set_fan_speed()`
+therefore clears it first with a `0x14`/`0x12` read-modify-write that keeps the
+profile bits (`0xa0`/`0x10`), and a failed read or clear is propagated instead
+of being reported as a successful write. `uw_set_fan_auto()` clears the bit on
+its own. `[verified]`
 
 If `/dev/tuxedo_io` is missing, `is_available()` returns false, but
 `TuxedoIo::new()` returns the underlying open error; there is no internal
