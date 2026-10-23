@@ -13,6 +13,12 @@ const MAGIC_WRITE_CL: u8 = IOCTL_MAGIC + 2;
 const MAGIC_READ_UW: u8 = IOCTL_MAGIC + 3;
 const MAGIC_WRITE_UW: u8 = IOCTL_MAGIC + 4;
 
+/// Bit `0x40` of Uniwill EC RAM `0x0751`. While it is set, the driver's `uw_set_fan()`
+/// returns success without writing the EC, so a manual duty is dropped silently. It is
+/// sticky: the only code that clears it runs after the check that it blocks, so userspace
+/// has to clear it before the first fan write after the EC takes the fan.
+const UNIWILL_FAN_OWNERSHIP_BIT: i32 = 0x40;
+
 // Hardware check ioctls
 // nix::ioctl_read!(ioctl_cl_hw_interface_id, MAGIC_READ_CL, 0x00, [u8; 30]);
 // nix::ioctl_read!(ioctl_hwcheck_cl, IOCTL_MAGIC, 0x05, i32);
@@ -189,6 +195,25 @@ impl TuxedoIo {
         Ok(())
     }
     
+    /// Clear the Uniwill fan-ownership bit so the next `uw_set_fan()` reaches the EC.
+    ///
+    /// Read-modify-write through `R_UW_MODE`/`W_UW_MODE`: the value is written back with
+    /// only `0x40` removed, so the performance-profile bits (`0xa0`/`0x10`) survive.
+    /// Errors propagate: a failed read or clear would leave the fan write that follows as
+    /// a no-op the driver still reports as success, which is the failure this avoids.
+    fn clear_fan_ownership(fd: i32) -> Result<()> {
+        let mode_request = Self::ior(MAGIC_READ_UW, 0x14, Self::PTR_SIZE);
+        let mode = Self::ioctl_read_i32(fd, mode_request)?;
+        if mode & UNIWILL_FAN_OWNERSHIP_BIT == 0 {
+            return Ok(());
+        }
+
+        let write_request = Self::iow(MAGIC_WRITE_UW, 0x12, Self::PTR_SIZE);
+        Self::ioctl_write_i32(fd, write_request, mode & !UNIWILL_FAN_OWNERSHIP_BIT)?;
+        log::debug!(target: "hw.fan", "cleared Uniwill fan-ownership bit (0x0751 was {:#04x})", mode);
+        Ok(())
+    }
+
     /// Process-wide shared instance.
     ///
     /// Opening `/dev/tuxedo_io` also runs interface detection (two hardware-check
@@ -542,6 +567,8 @@ impl TuxedoIo {
                 };
 
                 log::debug!(target: "hw.fan", "Setting Uniwill fan {} to {}%", fan_id, speed_percent);
+
+                Self::clear_fan_ownership(fd)?;
 
                 let request = Self::iow(MAGIC_WRITE_UW, seq, Self::PTR_SIZE);
                 Self::ioctl_write_i32(fd, request, val)?;
