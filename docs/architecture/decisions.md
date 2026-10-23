@@ -44,6 +44,22 @@ means directly traced; `[assumed]` means inferred.
 - **References:** [Architecture overview](overview.md), [module map](modules.md),
   and [GUI state synchronization](../subsystems/gui-state-sync.md).
 
+## ADR-004: Drop the LACT-derived NVIDIA tree and keep the sensors in the daemon
+
+- **Status:** Accepted `[maintainer-confirmed]`
+- **Decision:** The top-level NVIDIA directory that was adapted from LACT is
+  removed from the repository. NVIDIA support stays entirely on the daemon's
+  in-tree paths, which read hotspot and memory-sensor temperatures from NVAPI
+  (`daemon/src/hardware_detection.rs`). `[verified]`
+- **Reason:** The NVIDIA open kernel module now covers nearly all of the
+  telemetry that directory duplicated. The part NVIDIA has not opened is the
+  hotspot and memory-sensor temperatures, and the daemon already reads those
+  itself. `[maintainer-confirmed]`
+- **Rejected alternatives:** wiring the LACT controller into the workspace — it
+  needs LACT's controller framework, generated bindings and `lact_schema`, and
+  duplicates telemetry the daemon already publishes. `[verified]`
+- **References:** [Architecture overview](overview.md), [module map](modules.md).
+
 ## Considered but excluded
 
 - **One process-local polling scheduler:** excluded because its execution,
@@ -52,5 +68,3 @@ means directly traced; `[assumed]` means inferred.
 - **Tuxedo ioctl boundary:** excluded because the existing
   [Tuxedo I/O subsystem document](../subsystems/tuxedo-io.md) already describes
   that boundary rather than recording a separate project-shaping choice.
-- **NVIDIA `nvidia/` wiring:** excluded because the repository explicitly treats
-  integration as an open question; no decision has been made.

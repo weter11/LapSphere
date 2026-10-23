@@ -2377,8 +2377,7 @@ fn get_vram_info(minor_number: u32) -> (Option<String>, Option<String>, Option<u
             }
 
             // Values from NV2080_CTRL_FB_INFO_RAM_TYPE_* in the driver's open
-            // headers (ctrl2080fb.h). Matches the enum used by nvidia/driver.rs
-            // and upstream LACT, so the two paths cannot drift apart again.
+            // headers (ctrl2080fb.h).
             let ram_type = ram_type_val.map(|v| match v {
                 0x00000000 => "Unknown",
                 0x00000001 => "SDRAM",
@@ -2425,8 +2424,8 @@ fn get_vram_info(minor_number: u32) -> (Option<String>, Option<String>, Option<u
 
             // Bandwidth calculation: (Clock * 2 (for DDR) * BusWidth) / 8 / 1000?
             // Actually bandwidth is complex to calculate without current clock.
-            // NVML already provides memory bandwidth in some versions but not all.
-            // nvidia/nvidia.rs doesn't seem to calculate it, just returns None.
+            // NVML already provides memory bandwidth in some versions but not all,
+            // and nothing here calculates it, so it stays None.
 
             // The elements of the FB-info list are not documented in the driver's
             // open headers, so a returned word is only used when it is a value the

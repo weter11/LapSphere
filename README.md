@@ -265,7 +265,6 @@ gui/                  egui GUI
   src/pages/          statistics, profiles, tuning, settings
   src/panel/          panel mode: config, layout, rows, rendering, X11 EWMH, frame reader
   src/widgets/        fan curve editor
-nvidia/               NVIDIA RM/NVAPI code adapted from LACT; not a crate and not built
 data/                 D-Bus policy and activation file, systemd unit, desktop entry, icon
 debian/               Debian packaging
 drivers_src/          vendored tuxedo-drivers sources (Kbuild only; not built here)
@@ -288,7 +287,7 @@ PKGBUILD              Arch Linux package recipe
 | Webcam toggle | yes | — |
 | Battery charge thresholds | if the battery exposes `charge_type` (the Clevo module adds it) | only if the battery exposes `charge_type` |
 
-The vendor interface is probed once when `/dev/tuxedo_io` is opened; if neither Clevo nor Uniwill answers, vendor-specific features report themselves as unavailable. NVIDIA features need an NVIDIA GPU with NVML; AMD and Intel iGPUs are read-only (statistics only).
+The vendor interface is probed once when `/dev/tuxedo_io` is opened; if neither Clevo nor Uniwill answers, vendor-specific features report themselves as unavailable. NVIDIA features need an NVIDIA GPU with NVML; AMD and Intel iGPUs are read-only (statistics only). Hotspot and memory-sensor temperatures are not exposed by the open kernel module, so the daemon reads them through NVAPI and the RM control API.
 
 Hardware coverage is limited — the features above are gated on what the code probes for, not on a list of validated models — and reports from other models are welcome.
 
@@ -316,7 +315,7 @@ A bug report is useful when it includes:
 ## Documentation
 
 - [`docs/architecture/`](docs/architecture/) — overview, modules, invariants, decisions
-- [`docs/subsystems/`](docs/subsystems/) — daemon lifecycle, GUI state sync, hardware detection, the `nvidia/` code, `tuxedo_io`
+- [`docs/subsystems/`](docs/subsystems/) — daemon lifecycle, GUI state sync, hardware detection, `tuxedo_io`
 - [`docs/development/known-problems.md`](docs/development/known-problems.md)
 - [`docs/VRAM_DETECTION_TROUBLESHOOTING.md`](docs/VRAM_DETECTION_TROUBLESHOOTING.md) and [`docs/gpu-process-memory-statistics.md`](docs/gpu-process-memory-statistics.md)
 
@@ -325,7 +324,7 @@ A bug report is useful when it includes:
 ## Credits
 
 - `drivers_src/` is TUXEDO Computers' [tuxedo-drivers](https://github.com/tuxedocomputers/tuxedo-drivers), GPL-2.0-or-later (SPDX headers in the source files).
-- `nvidia/` is adapted from [LACT](https://github.com/ilya-zlobintsev/LACT) by Ilya Zlobintsev, MIT licensed. It is reference material, not part of the Cargo workspace.
+- NVIDIA hotspot and memory-sensor temperatures follow the approach of [LACT](https://github.com/ilya-zlobintsev/LACT) by Ilya Zlobintsev (MIT): the open kernel module does not expose them, so the daemon reads them from NVAPI and the RM control API itself. No LACT code is vendored in this repository.
 
 ---
 

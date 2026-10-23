@@ -53,7 +53,7 @@ VRAM type, vendor and bus width come from the driver's RM control interface (`NV
 
 On driver 610.57.04 with the correct FB-info indices, the query returns the RAM type, memory vendor and bus width directly (GA104 Mobile: RAM type 0x11 = GDDR6, vendor 0x01 = Samsung, bus width 256 bits). Earlier the query was sent to `NV2080_CTRL_CMD_GPU_GET_INFO` (`0x20800101`) instead of `NV2080_CTRL_CMD_FB_GET_INFO` (`0x20801301`), and the RAM type / bus width / vendor indices were `0x01`/`0x02`/`0x06` — values from no released driver — so the driver answered with garbage (`ram_type=0xd1d915c4`, `bus=93`) or `NV_ERR_NOT_SUPPORTED` and type/vendor fell back to unknown. Only when the query is genuinely unavailable does the bus width fall back to NVML (`memoryBusWidth`), which also restores the bandwidth figure. That failure is reported once per daemon run, not once per poll.
 
-The indices and enum values now mirror the driver's open header `src/common/sdk/nvidia/inc/ctrl/ctrl2080/ctrl2080fb.h`: `RAM_TYPE=0x0D`, `BUS_WIDTH=0x0B`, `MEMORYINFO_VENDOR_ID=0x1C`, and the RAM type / vendor decode tables match `NV2080_CTRL_FB_INFO_RAM_TYPE_*` / `NV2080_CTRL_FB_INFO_MEMORYINFO_VENDOR_ID_*` exactly. The same tables are used by the vendored LACT `nvidia/driver.rs`, so the two paths cannot drift apart again.
+The indices and enum values now mirror the driver's open header `src/common/sdk/nvidia/inc/ctrl/ctrl2080/ctrl2080fb.h`: `RAM_TYPE=0x0D`, `BUS_WIDTH=0x0B`, `MEMORYINFO_VENDOR_ID=0x1C`, and the RAM type / vendor decode tables match `NV2080_CTRL_FB_INFO_RAM_TYPE_*` / `NV2080_CTRL_FB_INFO_MEMORYINFO_VENDOR_ID_*` exactly. These tables exist once, in the daemon, so the decode has no second copy that could drift.
 
 ## Verification
 
