@@ -2,9 +2,12 @@
 
 ## Scope and evidence
 
-This document covers `daemon/src/tuxedo_io.rs` and the matching declarations
-in `drivers_src/tuxedo_io/tuxedo_io_ioctl.h`. Claims are marked `[verified]`
-when directly traced and `[assumed]` when inferred. No fixes are proposed.
+This document covers `daemon/src/tuxedo_io.rs`. The request numbers in
+[Request-number reference](#request-number-reference) are this repository's
+in-repo ABI reference for the device; the driver sources are no longer vendored
+here and come from the `tuxedo-drivers` kernel modules installed separately.
+Claims are marked `[verified]` when directly traced and `[assumed]` when
+inferred. No fixes are proposed.
 
 ## Device lifecycle and interface selection
 
@@ -44,10 +47,39 @@ The magic values match the header exactly: general `0xEC`, Clevo read
 | Webcam | CL read `0x13`, write `0x12` | Webcam state `[verified]` |
 | Clevo keyboard | CL write `0x67` | Packed RGB mode/color/brightness command `[verified]` |
 
-The header also declares Clevo flight-mode/touchpad calls and additional
-Uniwill mode/fan capability calls that this Rust client does not invoke.
-`[verified]` The client therefore covers a subset of the documented external
-contract, with extra keyboard handling at the documented `0x67` sequence.
+## Request-number reference
+
+The table below is the ABI reference kept in this repository: one row per request the client actually
+issues, with the call site that builds it. Families are `0xEC` general, `0xED` Clevo read, `0xEE`
+Clevo write, `0xEF` Uniwill read, `0xF0` Uniwill write (`daemon/src/tuxedo_io.rs:11-14`); each request
+is built by `ior`/`iow` with an 8-byte pointer size (`:164-171`).
+
+| Request | Daemon call site | Purpose |
+|---|---|---|
+| `_IOR(0xEC, 0x05)` / `_IOR(0xEC, 0x06)` | `:277-278` | Clevo / Uniwill platform check |
+| `_IOR(0xED, 0x10)` | `:309` | Clevo fan-info probe (interface detection) |
+| `_IOR(0xED, 0x10 + fan)` | `:342`, `:382`, `:454`, `:703` | Clevo fan count, fan speed, read-back, fan temperature |
+| `_IOR(0xED, 0x13)` | `:805` | Clevo webcam state |
+| `_IOW(0xEE, 0x10)` | `:536` | Clevo fan speed write |
+| `_IOW(0xEE, 0x11)` | `:432`, `:592` | Clevo fan auto (before a manual write, and `set_fan_auto`) |
+| `_IOW(0xEE, 0x12)` | `:819` | Clevo webcam write |
+| `_IOW(0xEE, 0x15)` | `:774` | Clevo performance profile |
+| `_IOW(0xEE, 0x67)` | `:831` | Clevo keyboard RGB / effect value — **local patch, not in upstream tuxedo-drivers nor in the maintainer's fork; the daemon ignores the result and repeats the write through sysfs** (see [`docs/archive/drivers_src-local-patches.md`](../archive/drivers_src-local-patches.md)) |
+| `_IOR(0xEF, 0x10)` / `_IOR(0xEF, 0x11)` | `:359-363`, `:394` | Uniwill fan count probe and fan speed |
+| `_IOR(0xEF, 0x12 + fan)` | `:720` | Uniwill fan temperature |
+| `_IOR(0xEF, 0x14)` | `:205`, `:669` | Uniwill mode read (fan-ownership bit, performance profile) |
+| `_IOW(0xF0, 0x12)` | `:211` | Uniwill mode write (clears the `0x40` fan-ownership bit) |
+| `_IOW(0xF0, 0x10 + fan)` | `:573` | Uniwill fan speed write |
+| `_IO(0xF0, 0x14)` | `:609` | Uniwill fan auto (no data argument) |
+| `_IOR(0xEF, 0x18 + i)` / `_IOR(0xEF, 0x1b + i)` / `_IOR(0xEF, 0x1e + i)` | `:627`, `:638`, `:649` | Uniwill TDP current / min / max for TDP index `i` |
+| `_IOW(0xF0, 0x15 + i)` | `:660` | Uniwill TDP write for TDP index `i` |
+| `_IOR(0xEF, 0x21)` | `:746` | Uniwill available performance profiles |
+| `_IOW(0xF0, 0x18)` | `:787` | Uniwill performance profile write |
+
+The daemon does not issue the header's Clevo flight-mode/touchpad calls or its additional Uniwill
+mode/fan capability calls. `[verified]` (call sites in `daemon/src/tuxedo_io.rs` against the archived
+patch record); the client therefore covers a subset of the driver's published interface, plus the
+local `0x67` keyboard request described above.
 
 ## Error and state assumptions
 
