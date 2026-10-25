@@ -36,11 +36,11 @@ Every statement is marked `[verified]` when traced in source/manifests or `[assu
 - **Dependencies in:** Daemon and GUI imports. `[verified]` (both crate manifests; source imports)
 - **Dependencies out:** Serde and Serde JSON only. `[verified]` (`common/Cargo.toml`)
 
-## `drivers_src/` — external driver boundary
+## tuxedo-drivers (external) — driver boundary
 
-- **Responsibility:** Provide the kernel-side `/dev/tuxedo_io` interface consumed by the daemon. `[verified]` (`drivers_src/tuxedo_io/tuxedo_io_ioctl.h`; `daemon/src/tuxedo_io.rs`)
-- **Owns:** The external ioctl contract for platform checks, Clevo/Uniwill reads, and Clevo/Uniwill writes. `[verified]` (`drivers_src/tuxedo_io/tuxedo_io_ioctl.h`)
+- **Responsibility:** Provide the kernel-side `/dev/tuxedo_io` interface consumed by the daemon. `[verified]` (`daemon/src/tuxedo_io.rs:9`, `:230-259`)
+- **Owns:** The external ioctl contract for platform checks, Clevo/Uniwill reads, and Clevo/Uniwill writes. `[verified]` (`daemon/src/tuxedo_io.rs:11-14`, `:164-171`, `:277-282`, `:204-212`, `:831`; request numbers in `docs/subsystems/tuxedo-io.md`)
 - **Does not own:** Daemon scheduling, DBus, GUI state, shared Rust types, or userspace policy. `[verified]` (repository module boundaries)
 - **Dependencies in:** Daemon `TuxedoIo` calls through `/dev/tuxedo_io`. `[verified]` (`daemon/src/tuxedo_io.rs`)
-- **Dependencies out:** Kernel/device support and the external tuxedo-drivers build environment. `[verified]` (`drivers_src/Kbuild`; driver interface header)
-- **Boundary note:** This entry documents only the exposed device path and ioctl families; driver internals are intentionally out of scope. `[verified]` (task scope; header and daemon boundary)
+- **Dependencies out:** Kernel/device support and the externally installed `tuxedo-drivers` package, which provides the module and builds it through its own DKMS packaging. `[verified]` (`daemon/src/tuxedo_io.rs`; no build step in this repository compiles a module — `.github/workflows/rust.yml`, `debian/rules:6-7`, `PKGBUILD:15-33`)
+- **Boundary note:** This entry documents only the exposed device path and ioctl families; driver internals are intentionally out of scope. `[verified]` (task scope; `daemon/src/tuxedo_io.rs` call sites)

@@ -51,7 +51,7 @@ A root daemon owns the hardware and an egui GUI talks to it over D-Bus. The GUI 
 
 - Charge type (Standard / Custom) and start/end thresholds through `charge_type` and `charge_control_{start,end}_threshold` on `BAT0` / `BAT1`
 - Available values are read from `charge_control_*_available_thresholds` when present, otherwise from built-in fallback lists
-- The attributes and the Clevo legacy / CC4 flexicharger logic live in the kernel module (`drivers_src/`); the daemon only reads and writes the sysfs files
+- The attributes and the Clevo legacy / CC4 flexicharger logic live in the kernel module provided by `tuxedo-drivers` (installed separately); the daemon only reads and writes the sysfs files
 
 ### Profiles
 
@@ -139,7 +139,9 @@ Libraries are loaded at runtime: NVML through `libloading`, NVAPI by name (`libn
 
 Fan control, TDP profiles, the webcam toggle and the keyboard LED sysfs interface come from TUXEDO Computers' [tuxedo-drivers](https://github.com/tuxedocomputers/tuxedo-drivers) kernel modules, which provide `/dev/tuxedo_io` and the `tuxedo_keyboard` LED class devices.
 
-This repository vendors the module sources in `drivers_src/` (with their `Kbuild` files) but contains no `Makefile`, `dkms.conf` or packaging rule that builds or installs them, and neither the Debian package nor the `PKGBUILD` ships a module. The module therefore has to be installed separately, from TUXEDO's tuxedo-drivers; the Debian package lists `tuxedo-drivers` under `Recommends`.
+The module is provided by the `tuxedo-drivers` kernel modules (installed separately). This repository contains no `Makefile`, `dkms.conf` or packaging rule that builds or installs a module, and neither the Debian package nor the `PKGBUILD` ships one; the module therefore has to be installed separately, from TUXEDO's tuxedo-drivers, which the Debian package lists under `Recommends`.
+
+The maintainer's fork ([weter11/tuxedo-drivers](https://github.com/weter11/tuxedo-drivers)) is not part of the upstream project. One change in it is relevant here: its commit `899801d3` lowers the fan-on floor by setting `FAN_ON_MIN_SPEED_PERCENT` to `0` in `src/tuxedo_io/tuxedo_io.c:50`, `src/tuxedo_nb05/tuxedo_nb05_fan_control.c:32` and `src/tuxedo_tuxi/tuxedo_tuxi_fan_control.c:32`. That change is not in upstream tuxedo-drivers and is not in this repository. See [`docs/archive/drivers_src-local-patches.md`](docs/archive/drivers_src-local-patches.md).
 
 Without `/dev/tuxedo_io` the daemon logs `/dev/tuxedo_io not available - some features will be disabled` (debug level) and keeps running: monitoring and the sysfs-based CPU paths are unaffected, while fan control, TDP profiles and the webcam toggle return `tuxedo_io not available`.
 
@@ -267,7 +269,6 @@ gui/                  egui GUI
   src/widgets/        fan curve editor
 data/                 D-Bus policy and activation file, systemd unit, desktop entry, icon
 debian/               Debian packaging
-drivers_src/          vendored tuxedo-drivers sources (Kbuild only; not built here)
 spike/vk-layer/       standalone Vulkan layer that feeds the panel's frame rows
 docs/                 architecture, subsystem and development notes
 screenshots/          images
@@ -297,7 +298,7 @@ TODO(maintainer): list the laptop models and BIOS versions LapSphere has actuall
 
 ## Caution for Uniwill
 
-On Uniwill laptops the fan number is not a verified percentage. The fan curves produce 0–100, `hardware_control::set_fan_speed` clamps D-Bus requests to 100, and `TuxedoIo::set_fan_speed` (`daemon/src/tuxedo_io.rs`) passes the number to the `W_UW_FANSPEED` ioctl with a 200 ceiling. The kernel side, `uw_set_fan` in `drivers_src/tuxedo_io/tuxedo_io.c`, treats it as a raw EC fan level and rejects values above `NB02_FAN_SPEED_MAX` (200); the read path returns the same raw level, which the GUI labels `%`. Nothing converts between that level, RPM and a percentage, and the 200 is the kernel's ceiling rather than 200 %. The unit is therefore unverified: commands of 0–100 reach the EC as levels 0–100, half of the 200 the kernel accepts. Treat the percentages shown for Uniwill fans as approximate, and prefer the automatic fan curve unless you can watch the fans.
+On Uniwill laptops the fan number is not a verified percentage. The fan curves produce 0–100, `hardware_control::set_fan_speed` clamps D-Bus requests to 100, and `TuxedoIo::set_fan_speed` (`daemon/src/tuxedo_io.rs`) passes the number to the `W_UW_FANSPEED` ioctl with a 200 ceiling. The kernel side, `uw_set_fan` in the tuxedo-drivers `tuxedo_io` module, treats it as a raw EC fan level and rejects values above `NB02_FAN_SPEED_MAX` (200); the read path returns the same raw level, which the GUI labels `%`. Nothing converts between that level, RPM and a percentage, and the 200 is the kernel's ceiling rather than 200 %. The unit is therefore unverified: commands of 0–100 reach the EC as levels 0–100, half of the 200 the kernel accepts. Treat the percentages shown for Uniwill fans as approximate, and prefer the automatic fan curve unless you can watch the fans.
 
 ---
 
@@ -323,7 +324,7 @@ A bug report is useful when it includes:
 
 ## Credits
 
-- `drivers_src/` is TUXEDO Computers' [tuxedo-drivers](https://github.com/tuxedocomputers/tuxedo-drivers), GPL-2.0-or-later (SPDX headers in the source files).
+- The `tuxedo-drivers` kernel modules are TUXEDO Computers' [tuxedo-drivers](https://github.com/tuxedocomputers/tuxedo-drivers), GPL-2.0-or-later (SPDX headers in their source files). No part of that project is vendored in this repository.
 - NVIDIA hotspot and memory-sensor temperatures follow the approach of [LACT](https://github.com/ilya-zlobintsev/LACT) by Ilya Zlobintsev (MIT): the open kernel module does not expose them, so the daemon reads them from NVAPI and the RM control API itself. No LACT code is vendored in this repository.
 
 ---

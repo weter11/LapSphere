@@ -43,12 +43,12 @@ This is a high-level repository map, not a file-scoped call-chain analysis. Each
 4. Shared payloads cross the DBus boundary as JSON strings and are converted to `lapsphere-common` types by the client. `[verified]` (`daemon/src/dbus_interface.rs`; `gui/src/dbus_client.rs`)
 5. The daemon's hardware boundary includes Linux sysfs/procfs, battery sysfs, NVML/NVAPI, NVIDIA device nodes, and `/dev/tuxedo_io`. `[verified]` (`daemon/src/hardware_detection.rs`; `daemon/src/hardware_control.rs`; `daemon/src/battery_control.rs`; `daemon/src/tuxedo_io.rs`)
 
-## `drivers_src/` external boundary
+## tuxedo-drivers (external) driver boundary
 
-`drivers_src/` is treated here as an out-of-tree kernel-driver boundary; its implementation is intentionally not described. `[verified]` (`drivers_src` layout; `drivers_src/tuxedo_io/tuxedo_io_ioctl.h`)
+`/dev/tuxedo_io` is provided by the externally installed `tuxedo-drivers` kernel modules. The driver sources are not vendored in this repository, and their implementation is intentionally not described here. `[verified]` (`daemon/src/tuxedo_io.rs:9`; installation notes in `README.md`)
 
-- The daemon opens `/dev/tuxedo_io` and sends ioctl requests using magic `0xEC` and Clevo/Uniwill read/write command families. `[verified]` (`daemon/src/tuxedo_io.rs`; `drivers_src/tuxedo_io/tuxedo_io_ioctl.h`)
-- The exposed interface covers platform checks, interface/model identification, fan speed/temperature and automatic fan mode, Clevo webcam/flight/touchpad/performance/keyboard controls, Uniwill mode/fan/TDP/profile controls, and module version reporting. `[verified]` (`drivers_src/tuxedo_io/tuxedo_io_ioctl.h`; `daemon/src/tuxedo_io.rs`)
+- The daemon opens `/dev/tuxedo_io` and sends ioctl requests using magic `0xEC` and Clevo/Uniwill read/write command families. `[verified]` (`daemon/src/tuxedo_io.rs:11-14`, `:164-171`; request numbers in [`docs/subsystems/tuxedo-io.md`](../subsystems/tuxedo-io.md))
+- The requests the daemon issues cover platform checks, fan speed/temperature and automatic fan mode, Clevo webcam/performance/keyboard controls, and Uniwill mode/fan/TDP/profile controls. `[verified]` (`daemon/src/tuxedo_io.rs` call sites; request-number reference in `docs/subsystems/tuxedo-io.md`)
 - The daemon treats `/dev/tuxedo_io` as optional and disables dependent features when it is absent or cannot be initialized. `[verified]` (`daemon/src/main.rs`; `daemon/src/tuxedo_io.rs`)
 
 ## Deep-dive priorities
@@ -56,5 +56,5 @@ This is a high-level repository map, not a file-scoped call-chain analysis. Each
 1. **Hardware detection and cache freshness** — highest priority because it aggregates nearly all monitoring sources and contains GPU power-state/cache behavior. `[verified]` (`daemon/src/hardware_detection.rs`)
 2. **Hardware control and profile application** — high priority because it writes CPU sysfs, battery settings, NVIDIA controls, keyboard state, fans, and profiles. `[verified]` (`daemon/src/hardware_control.rs`; `daemon/src/battery_control.rs`)
 3. **DBus contract and client worker** — high priority because it is the sole GUI/daemon boundary and carries both JSON data and mutations. `[verified]` (`daemon/src/dbus_interface.rs`; `gui/src/dbus_client.rs`)
-4. **Tuxedo ioctl compatibility** — next because fan, TDP, webcam, and keyboard behavior depends on platform-specific command mappings at the driver boundary. `[verified]` (`daemon/src/tuxedo_io.rs`; `drivers_src/tuxedo_io/tuxedo_io_ioctl.h`)
+4. **Tuxedo ioctl compatibility** — next because fan, TDP, webcam, and keyboard behavior depends on platform-specific command mappings at the driver boundary. `[verified]` (`daemon/src/tuxedo_io.rs`; request-number reference in `docs/subsystems/tuxedo-io.md`)
 5. **Polling schedulers** — next because both daemon jobs and GUI refresh cadence are expected to influence responsiveness and hardware/power behavior. `[assumed]` (`daemon/src/polling_scheduler.rs`; `gui/src/polling_scheduler.rs`)
