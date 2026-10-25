@@ -11,23 +11,25 @@ date of its merge commit; a direct commit's entry carries that commit's date; an
 several commits carries the date of the group's last commit. Unit commit counts are `git rev-list`
 on `lapsphere` restricted to the window by author date — the same basis the entry dates use.
 
-How entries are cited: work that landed through a pull request cites `PR #N`. Work that landed as
-direct commits cites short SHAs, and each one resolves with `git cat-file -t` to `commit` and is an
-ancestor of `lapsphere`. The first pull request appears on 2026-01-01, so every entry in unit 1 is
-SHA-cited.
+How entries are cited: work that landed through a pull request cites `PR #N`, its merge commit and the
+branch commits that arrived with it, so every commit in a window is either named by an entry or
+listed as excluded. Work that landed as direct commits cites short SHAs, and each one resolves with
+`git cat-file -t` to `commit` and is an ancestor of `lapsphere`. The first pull request appears on
+2026-01-01, so every entry in unit 1 is SHA-cited.
 
-Covered up to: a06e5a2c17b9e0fa894540f61541e4996f666aa8 (2025-12-30)
+Covered up to: 9cbecab8df11bbb03c907b724e693e04c2d632fe (2026-01-07)
 
 ## Unit accounting
 
-The history is split into twelve chronological units plus a final unit for the commits after
-2026-10-23, which is not written yet. The twelve bands partition 668 of the 671 commits on
-`lapsphere`; no commit falls in two bands.
+The history is split into twelve chronological units (unit 2 is written in two halves) plus a final
+unit for the commits after 2026-10-23, which is not written yet. The twelve bands partition 668 of
+the 671 commits on `lapsphere`; no commit falls in two bands.
 
 | Unit | Window | Commits | Written |
 |------|--------|---------|---------|
 | 1 | 2025-12-16 → 2025-12-30 | 71 | this pass: 30 commits in 13 entries + 41 excluded = 71 |
-| 2 | 2026-01-01 → 2026-01-08 | 148 | pending |
+| 2a | 2026-01-01 → 2026-01-07 | 86 | this pass: 86 commits = 38 in entries + 48 excluded |
+| 2b | 2026-01-06 → 2026-01-08 | 62 | pending |
 | 3 | 2026-01-09 → 2026-01-17 | 95 | pending |
 | 4 | 2026-01-18 → 2026-01-26 | 55 | pending |
 | 5 | 2026-01-27 → 2026-01-31 | 61 | pending |
@@ -39,6 +41,10 @@ The history is split into twelve chronological units plus a final unit for the c
 | 11 | 2026-10-11 → 2026-10-16 | 63 | pending |
 | 12 | 2026-10-17 → 2026-10-23 | 8 | pending |
 | final unit | 2026-10-24 → 2026-10-25 | 3 | not written |
+
+Unit 2 is split at `9cbecab`, the merge of PR #15, so the two halves are bounded by commit rather
+than by date: 2b begins at the commit after that merge, and its author dates reach back to
+2026-01-06 in the branches merged later.
 
 ---
 
@@ -240,3 +246,185 @@ Files: `daemon/src/fan_daemon.rs`, `gui/src/ui/tuning_page.rs`
 - 1 fix — `f86da8f` drops the current-profile ioctl lookup and falls back to the first profile.
 
 No pull requests were merged in this window; all 71 commits are direct commits to the base line.
+
+## 2026-01-01 → 2026-01-07 — Unit 2a (86 commits, first half of unit 2)
+
+Unit 2 opens with the repository's first pull requests and closes on 2026-01-08; it is written in two
+halves split at the merge of PR #15. This half holds PRs #5, #6, #9, #10, #11 and #15 plus the direct
+commits of the `new_variant` line, and ends before the egui migration.
+
+### 2026-01-01 — `FanCurveEditor` widget module
+
+SHAs: `43ab7d8`
+
+`gui/src/ui/fan_curve_editor` adds the `FanCurveEditor` widget: a `DrawingArea` whose `draw_curve`
+renders the points, one row per curve point with a temperature and a speed `SpinButton`, and a
+`get_curve` accessor for the edited curve. The file is committed without the `.rs` extension and
+`gui/src/ui/mod.rs` declares no module for it, so the tree does not compile it until PR #10 renames
+the file and adds `pub mod fan_curve_editor;`.
+
+Files: `gui/src/ui/fan_curve_editor`
+
+### 2026-01-01 — Eight keyboard effect modes and per-section polling rates (PR #5)
+
+SHAs: `ec7c584` `6220efa` `9d3e259` `d38e711` `85ead46` `564d2d1`
+
+PR #5 (merge `ec7c584`). `KeyboardMode` drops its `Effect { effect, speed }` variant for eight
+concrete ones — `SingleColor`, `Breathe`, `Cycle`, `Dance`, `Flash`, `RandomColor`, `Tempo` and
+`Wave` — carrying colour and brightness where the hardware takes them, and
+`RgbKeyboardControl::set_mode` writes the variant's keyword (`breathing`, `wave`, `cycle`, `dance`,
+`flash`, `random`, `tempo`) into the backlight's `mode` node, setting colour and brightness where the
+variant carries them and failing when the node is absent. The tuning page gains a mode `ComboRow`
+that rebuilds its controls for the selected mode. `StatisticsSections` gains seven polling rates with
+defaults (`system_info_poll_rate` 60000 ms, `cpu_poll_rate` 1000,
+`gpu_poll_rate` 2000, `battery_poll_rate` 5000, `wifi_poll_rate` 5000, `storage_poll_rate` 30000,
+`fans_poll_rate` 1000) and the settings page gains the rows that edit them. `WiFiInfo` gains
+`signal_level`, `channel`, `channel_width`, `tx_rate` and `rx_rate`; `FanInfo` gains `temperature` and
+`is_rpm`. The same merge deletes the committed `Cargo.lock` (1967 lines removed) and adds a 21-line
+`.gitignore`.
+
+Files: `common/src/types.rs`, `daemon/src/hardware_control.rs`,
+`gui/src/ui/{tuning_page,settings_page,statistics_page}.rs`, `.gitignore`, `Cargo.lock`
+
+### 2026-01-01 — Keyboard preview, inline profile creation and per-section polling (PR #6)
+
+SHAs: `d164c3f` `954ebd6` `3c026a3` `e639bff` `161b54f` `2b8f356` `25a9e22`
+
+PR #6 (merge `d164c3f`). `PreviewKeyboardSettings` applies a `KeyboardSettings` value to the backlight
+without storing it in a profile, and the tuning page's RGB, brightness and speed rows call it on every
+change so the keyboard follows the sliders. The profiles page gains an inline creation group — a name
+entry and a `Create` button — that answers a duplicate name with an `adw::Toast` found through a
+`get_toast_overlay`/`find_toast_overlay_recursive` walk of the widget tree. Statistics polling is split
+into `start_background_poll_system`, `_cpu`, `_battery` and `_fans`; the first, second and fourth
+spawn a `std::thread` that sleeps for its section's poll rate, `_battery` uses
+`glib::timeout_add_seconds_local`. `hardware_detection` adds `get_wifi_info` with
+`read_wifi_signal`, `read_wifi_channel` and `read_wifi_rates`, the tuning page gains add and update
+handlers for fan-curve points, and the window answers a close request. `AppConfig` gains
+`auto_profile_switching` and the settings page a switch that saves it; nothing in the tree reads the
+flag to switch profiles.
+
+Files: `daemon/src/{dbus_interface,hardware_control,hardware_detection}.rs`, `gui/src/dbus_client.rs`,
+`gui/src/ui/{profiles_page,settings_page,statistics_page,tuning_page,window}.rs`, `common/src/types.rs`
+
+### 2026-01-03 — `GetWifiInfo` and `GetFanInfo` on the daemon (PR #10)
+
+SHAs: `08e4ca2` `34b1761` `99e0888` `3b494cf` `66767d0` `0c5ac7c` `8f20b11` `85c3668`
+
+PR #10 (merge `08e4ca2`). The daemon publishes `GetWifiInfo`, which serialises the WiFi rows to JSON,
+and `GetFanInfo`, which walks `TuxedoIo::get_fan_count` and reads each fan's speed and temperature into
+a `FanInfo` with `is_rpm: false` because the ioctl reports percent, returning `[]` when
+`/dev/tuxedo_io` is absent; `DbusClient` gains `get_wifi_info` and `get_fan_info`. The fan curve editor
+enters the build: `gui/src/ui/mod.rs` declares `pub mod fan_curve_editor;` and the file is renamed from
+`fan_curve_editor` to `fan_curve_editor.rs`.
+
+Files: `daemon/src/{dbus_interface,fan_daemon,hardware_detection}.rs`, `gui/src/dbus_client.rs`,
+`gui/src/ui/{mod,fan_curve_editor,statistics_page}.rs`
+
+### 2026-01-04 — Clevo fan scale conversion and four performance profiles
+
+SHAs: `b7d7a9c` `70b7a00` `47adae7`
+
+`TuxedoIo` gains `clevo_raw_to_percent` and `clevo_percent_to_raw`, mapping Clevo's 0–255 fan byte onto
+the 0–100 percentage the D-Bus surface uses. `get_available_profiles` returns four Clevo entries —
+`quiet` (0x00), `power_saving` (0x01), `performance` (0x02), `entertainment` (0x03) — in place of the
+earlier three-name list, and `set_performance_profile` rejects an id above 3 and stops adding 1 before
+the Clevo ioctl. The Clevo fan reads log their raw `faninfo` words.
+
+Files: `daemon/src/tuxedo_io.rs`
+
+### 2026-01-05 — Manual fan mode from the ioctl layer
+
+SHAs: `da0c83d`
+
+`TuxedoIo::set_fan_manual` writes 0 to the auto register — `ioctl_cl_fanauto` on Clevo,
+`ioctl_uw_fanauto` on Uniwill — and `set_fan_speed` calls it first so the EC stops overwriting the
+written value. A `Drop` impl puts the fans back to auto when the handle goes away; it is deleted the
+same day in `92c29a4` (excluded below).
+
+Files: `daemon/src/tuxedo_io.rs`
+
+### 2026-01-06 — Fan curve loop in the daemon process
+
+SHAs: `b2bba7f` `953c9f9`
+
+`daemon/src/main.rs` gains `FAN_DAEMON_STATE`, a
+`once_cell::sync::Lazy<Arc<Mutex<Option<FanSettings>>>>` (the `once_cell` dependency is added to
+`daemon/Cargo.toml` by `b2bba7f`), and a `tokio::spawn` task that wakes every two seconds and re-applies
+the stored curves through `apply_fan_curves`. `apply_fan_settings` fills the state when an applied
+profile enables fan control and clears it when it does not. `FanCurveManager` in `fan_daemon.rs` is
+still not instantiated anywhere in the tree; the loop calls the free function in `main.rs`.
+
+Files: `daemon/src/main.rs`, `daemon/src/hardware_control.rs`, `daemon/Cargo.toml`
+
+### 2026-01-06 — Battery charge control in the GUI
+
+SHAs: `afce3b7` `60500fd`
+
+The settings page gains a `Battery Charge Control` group: a charge-type `ComboRow` over
+`standard`/`express`/`primarily_ac`, and start and end threshold rows built from
+`GetBatteryAvailableStartThresholds`/`GetBatteryAvailableEndThresholds` as `Scale` widgets that write
+back through `DbusClient`. The statistics page gains a battery section whose charge-type and threshold
+rows are created hidden and filled only when the daemon answers. PR #15 withdraws the editable group
+from the settings page again (`gui/src/ui/settings_page.rs` +1/−121 there); the read-only statistics
+rows are what survives this half.
+
+Files: `gui/src/ui/settings_page.rs`, `gui/src/ui/statistics_page.rs`
+
+### 2026-01-06 — Points list in the fan curve editor, edits applied live
+
+SHAs: `ba7a262` `0c85931`
+
+`FanCurveEditor` moves its canvas into a `gtk::Frame` sized 600×400 and keeps the points in a
+`gtk::ListBox` that `rebuild_points_list` refills whenever a row changes. `build_tuning_content` takes
+the page's `ScrolledWindow`; the keyboard mode selector calls `PreviewKeyboardSettings` and rebuilds
+the page so the controls for that mode appear, the brightness slider previews as it moves, and the
+screen section writes the percentage into `/sys/class/backlight/*/brightness`, scaled against
+`max_brightness`, unless the profile leaves the display under system control.
+
+Files: `gui/src/ui/fan_curve_editor.rs`, `gui/src/ui/tuning_page.rs`
+
+### 2026-01-07 — Fan curve editor integrated into the tuning page (PR #15)
+
+SHAs: `9cbecab` `2cbf57d` `3c5480e` `d0c6b7e` `5b359bb` `26a7175`
+
+PR #15 (merge `9cbecab`). The editor is rebuilt as two panes — a points `ListBox` with add and remove on
+the left, a 500×400 `DrawingArea` on the right that renders the curve from `set_draw_func` — capped at
+16 points, a new point starting 10 °C above the last. `create_fans_tuning_section` creates one
+`FanCurveEditor` per fan, two when the profile defines no curves, and copies each editor's `get_curve`
+back into the profile when it is saved. The battery charge group leaves the settings page for a
+`create_battery_section` on the statistics page, whose CPU rows are now shown or hidden from
+`CpuInfo::capabilities`; `apply_curves` skips the ioctl when the computed speed equals the last one
+written, kept per fan in `last_speeds`. The branch merges `new_variant` (`26a7175`) before it lands.
+
+Files: `gui/src/ui/{fan_curve_editor,tuning_page,statistics_page,settings_page,window}.rs`,
+`daemon/src/fan_daemon.rs`
+
+### Unit 2a accounting
+
+86 commits = 38 named in the 10 entries above + 48 excluded:
+
+- 5 CI workflow edits — dependency lists, branch triggers and the merge of PR #9, whose branch commits
+  carry 2025-12-28/29 author dates and are counted in unit 1
+  (`cd13c4e` +4/−1, `1984acc` +3/−2, `a6adc6d` +2/−1, `14a2592` +5/−1, `d661428` +2/−1).
+- 3 commits of PR #11, a fix with no new functionality — the merge `a2acf15` (+4/−4), `174a55c`
+  (+4/−4), and the empty `7fc8159` (+0/−0).
+- 2 fix commits — `ea557c5` (+1/−1) downcast check, `ac31131` (+2/−1) profile-not-found handling.
+- 28 refactors, plumbing and UI restructuring — `695a42c` (+67/−45), `c0afcdd` (+37/−44),
+  `c036e9e` (+23/−17), `361eb61` (+126/−138), `f17f80e` (+163/−167), `74966d1` (+15/−9),
+  `ac0dee0` (+27/−56), `603eddb` (+121/−109), `a6c0a2a` (+18/−14), `b9e0b6c` (+23/−29),
+  `7555e06` (+79/−117), `f2414fb` (+116/−109), `c8e6bb3` (+35/−31), `c5654f8` (+32/−35),
+  `4c4d878` (+20/−6), `4eb946b` (+51/−41), `91c3a0d` (+211/−225), `d9cc2cd` (+3/−3),
+  `4d4af2a` (+14/−70), `3d541a5` (+1/−1), `cf793f1` (+2/−2), `d71c234` (+55/−96), `28791f6` (+1/−1),
+  `7533981` (+147/−123), `c4a9069` (+79/−67), `92c29a4` (+0/−9), `22fc78b` (+51/−9) and
+  `8352728` (+37/−106). Two of them are a pair: `22fc78b` makes the tuning page rebuild itself on a
+  profile change and `8352728` takes the rebuild out again, leaving the header-only update. `92c29a4`
+  removes the `Drop` guard that the manual-fan-mode entry above describes.
+- 5 label and icon edits — `e4fddfb` (+4/−4), `e02fa86` (+2/−2), `1d0cb80` (+9/−11),
+  `b318824` (+1/−1), `90bcdfc` (+1/−1).
+- 5 formatting and logging edits — `9e0efe6` (+0/−3), `40dadea` (+0/−1), `7c8ead9` (+0/−1),
+  `0fb8fd0` (+1/−0), `c9f35df` (+8/−0).
+
+Six pull requests are merged in this half: #5, #6, #9, #10, #11 and #15 — of which #5, #6, #10 and #15
+carry entries and #9 (a workflow-only merge of `main`) and #11 (a fix) are excluded above. The
+four empty `Initial plan` commits sit inside those branches: three are counted with the PRs above and
+the one in PR #11 is in the excluded list.
