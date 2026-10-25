@@ -19,6 +19,46 @@ listed as excluded. Work that landed as direct commits cites short SHAs, and eac
 
 Covered up to: 9cbecab8df11bbb03c907b724e693e04c2d632fe (2026-01-07)
 
+## Maintainer's recollections
+
+Stated 2026-10-25. Not derived from commits, and not verified unless a line says so.
+
+- Early branch experiments: the maintainer did not yet know how to work with branches and created
+  extra ones (`main`, `master`, others) to separate experiments from the main line; `lapsphere` later
+  became the main line.
+- UI toolkit: GTK4 and Qt6 were both tried; because of many problems the maintainer moved to a
+  Rust-only UI and settled on egui.
+- Manual fan mode and keyboard backlight each took a long time to get working; the maintainer knew
+  little at the time, the agents' code was weak, tests were run by hand and what was tried was not
+  written down. Agents did not run live tests on the laptop.
+
+## Repository evidence
+
+What the repository records of those recollections, as the commands return it.
+
+- `master` is a single orphan commit `ba34072` (2025-12-16, "Initial commit with my project") with no
+  parent, and it is not an ancestor of `lapsphere`; `git diff --stat ba34072 f67d26b` reports 50 files
+  changed, 339 insertions, 5466 deletions.
+- `main` was folded into the main line by `cd13c4e` ("Merge pull request #9 from weter11/main") on
+  2026-01-03; its tip `47cc586` is dated 2025-12-29 and is an ancestor of `lapsphere`.
+- 145 refs under `refs/remotes/origin` (excluding `HEAD`), counted 2026-10-25.
+- The workflow's push triggers name these branches in four commits: `5a62c30` (`main` →
+  `dev-fan-logic-clean`), `8ba5787` (`dev-fan-logic-clean` → `new_variant`), `b949274` (`main` and
+  `new_variant`), `47cc586` (adds `perplexity`).
+- `gui/Cargo.toml` at `5d52662` declares `gtk = { version = "0.9", package = "gtk4", features =
+  ["v4_14"] }` and `libadwaita = { version = "0.7", features = ["v1_5"] }`.
+- PR #16 (`e0935b5`) replaces those two lines with `egui = { workspace = true }` and
+  `eframe = { workspace = true }`; the merge commit's whole message is "Convert UI from GTK4 to egui",
+  and no reason is recorded.
+- No Qt6 trace in the repository: across all 145 refs, 0 `*Cargo.toml` files match
+  `cxx-qt|qt6|qml|qt_core`, 0 paths match `qml` or `qt*.rs`/`qt*.toml`/`qt*.ui`, and 0 commit messages
+  match `--grep=qt`.
+- At `9cbecab` the tree holds 0 test files (paths matching `tests/` or `*_test.rs`).
+
+To be placed in unit 2b, egui entry: "the maintainer's account of 2026-10-25 records that GTK4 and a
+Qt6 attempt were both tried and that the UI moved to egui because of problems with both; no commit or
+ADR records a reason."
+
 ## Unit accounting
 
 The history is split into twelve chronological units (unit 2 is written in two halves) plus a final
@@ -271,14 +311,15 @@ SHAs: `ec7c584` `6220efa` `9d3e259` `d38e711` `85ead46` `564d2d1`
 
 PR #5 (merge `ec7c584`). `KeyboardMode` drops its `Effect { effect, speed }` variant for eight
 concrete ones — `SingleColor`, `Breathe`, `Cycle`, `Dance`, `Flash`, `RandomColor`, `Tempo` and
-`Wave` — carrying colour and brightness where the hardware takes them, and
-`RgbKeyboardControl::set_mode` writes the variant's keyword (`breathing`, `wave`, `cycle`, `dance`,
-`flash`, `random`, `tempo`) into the backlight's `mode` node, setting colour and brightness where the
-variant carries them and failing when the node is absent. The tuning page gains a mode `ComboRow`
-that rebuilds its controls for the selected mode. `StatisticsSections` gains seven polling rates with
-defaults (`system_info_poll_rate` 60000 ms, `cpu_poll_rate` 1000,
-`gpu_poll_rate` 2000, `battery_poll_rate` 5000, `wifi_poll_rate` 5000, `storage_poll_rate` 30000,
-`fans_poll_rate` 1000) and the settings page gains the rows that edit them. `WiFiInfo` gains
+`Wave`. `RgbKeyboardControl::set_mode` writes an effect variant's keyword (`breathing`, `wave`,
+`cycle`, `dance`, `flash`, `random`, `tempo`) into the backlight's `mode` node where that node exists,
+sets colour and brightness for the variants that carry those fields, and returns `Err` for `wave`,
+`cycle`, `dance`, `random` and `tempo` where it does not. The tuning page gains a mode `ComboRow` that
+rebuilds its controls for the selected mode. Hardware support is not established by the diff.
+`StatisticsSections` gains seven polling rates with defaults (`system_info_poll_rate` 60000 ms,
+`cpu_poll_rate` 1000, `gpu_poll_rate` 2000, `battery_poll_rate` 5000, `wifi_poll_rate` 5000,
+`storage_poll_rate` 30000 and `fans_poll_rate` 1000), and the settings page gains the rows that edit
+them. `WiFiInfo` gains
 `signal_level`, `channel`, `channel_width`, `tx_rate` and `rx_rate`; `FanInfo` gains `temperature` and
 `is_rpm`. The same merge deletes the committed `Cargo.lock` (1967 lines removed) and adds a 21-line
 `.gitignore`.
@@ -327,8 +368,9 @@ SHAs: `b7d7a9c` `70b7a00` `47adae7`
 `TuxedoIo` gains `clevo_raw_to_percent` and `clevo_percent_to_raw`, mapping Clevo's 0–255 fan byte onto
 the 0–100 percentage the D-Bus surface uses. `get_available_profiles` returns four Clevo entries —
 `quiet` (0x00), `power_saving` (0x01), `performance` (0x02), `entertainment` (0x03) — in place of the
-earlier three-name list, and `set_performance_profile` rejects an id above 3 and stops adding 1 before
-the Clevo ioctl. The Clevo fan reads log their raw `faninfo` words.
+earlier three-name list, and `set_performance_profile` changes the Clevo profile id mapping from 1–3
+(`a8dcaff` wrote `profile_id + 1`) to 0–3, rejecting an id above 3. The Clevo fan reads log their raw
+`faninfo` words.
 
 Files: `daemon/src/tuxedo_io.rs`
 
@@ -337,9 +379,10 @@ Files: `daemon/src/tuxedo_io.rs`
 SHAs: `da0c83d`
 
 `TuxedoIo::set_fan_manual` writes 0 to the auto register — `ioctl_cl_fanauto` on Clevo,
-`ioctl_uw_fanauto` on Uniwill — and `set_fan_speed` calls it first so the EC stops overwriting the
-written value. A `Drop` impl puts the fans back to auto when the handle goes away; it is deleted the
-same day in `92c29a4` (excluded below).
+`ioctl_uw_fanauto` on Uniwill — and `set_fan_speed` calls it before the speed ioctl, the comment at
+that call giving EC overwrite as the reason. A `Drop` impl calls `set_fan_auto` when the handle goes
+away; it is deleted the same day in `92c29a4` (excluded below). Hardware support is not established by
+the diff.
 
 Files: `daemon/src/tuxedo_io.rs`
 
@@ -388,8 +431,8 @@ Files: `gui/src/ui/fan_curve_editor.rs`, `gui/src/ui/tuning_page.rs`
 SHAs: `9cbecab` `2cbf57d` `3c5480e` `d0c6b7e` `5b359bb` `26a7175`
 
 PR #15 (merge `9cbecab`). The editor is rebuilt as two panes — a points `ListBox` with add and remove on
-the left, a 500×400 `DrawingArea` on the right that renders the curve from `set_draw_func` — capped at
-16 points, a new point starting 10 °C above the last. `create_fans_tuning_section` creates one
+the left, a 500×400 `DrawingArea` on the right that renders the curve from `set_draw_func`.
+`create_fans_tuning_section` creates one
 `FanCurveEditor` per fan, two when the profile defines no curves, and copies each editor's `get_curve`
 back into the profile when it is saved. The battery charge group leaves the settings page for a
 `create_battery_section` on the statistics page, whose CPU rows are now shown or hidden from
@@ -418,7 +461,8 @@ Files: `gui/src/ui/{fan_curve_editor,tuning_page,statistics_page,settings_page,w
   `7533981` (+147/−123), `c4a9069` (+79/−67), `92c29a4` (+0/−9), `22fc78b` (+51/−9) and
   `8352728` (+37/−106). Two of them are a pair: `22fc78b` makes the tuning page rebuild itself on a
   profile change and `8352728` takes the rebuild out again, leaving the header-only update. `92c29a4`
-  removes the `Drop` guard that the manual-fan-mode entry above describes.
+  removes the `Drop` guard that the manual-fan-mode entry above describes. `f2414fb` introduces the
+  16-point cap on a curve and the 10 °C step for a new point, both kept by PR #15.
 - 5 label and icon edits — `e4fddfb` (+4/−4), `e02fa86` (+2/−2), `1d0cb80` (+9/−11),
   `b318824` (+1/−1), `90bcdfc` (+1/−1).
 - 5 formatting and logging edits — `9e0efe6` (+0/−3), `40dadea` (+0/−1), `7c8ead9` (+0/−1),
