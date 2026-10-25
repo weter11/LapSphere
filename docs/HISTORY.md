@@ -26,7 +26,7 @@ The history is split into twelve chronological units plus a final unit for the c
 
 | Unit | Window | Commits | Written |
 |------|--------|---------|---------|
-| 1 | 2025-12-16 → 2025-12-30 | 71 | this pass: 13 entries + 41 excluded = 71 |
+| 1 | 2025-12-16 → 2025-12-30 | 71 | this pass: 30 commits in 13 entries + 41 excluded = 71 |
 | 2 | 2026-01-01 → 2026-01-08 | 148 | pending |
 | 3 | 2026-01-09 → 2026-01-17 | 95 | pending |
 | 4 | 2026-01-18 → 2026-01-26 | 55 | pending |
@@ -141,13 +141,17 @@ Files: `common/src/types.rs`, `daemon/src/{hardware_control,dbus_interface}.rs`,
 
 SHAs: `4793968` `132a2be` `392b8f3` `9d0f1f3` `7bb8eca`
 
-`hardware_detection` gains `get_fan_speeds`, `get_fan_temperatures` and `get_tdp_info` reading
-through `TuxedoIo` rather than sysfs, and `hardware_control` gains `set_tdp_profile` (profile name to
-index), `set_fan_speed` (clamped to 100), `set_fan_auto`, a piecewise-linear
-`calculate_fan_speed_from_curve`, and webcam get/set. The daemon publishes `GetFanSpeeds`,
-`GetFanTemperature`, `SetFanSpeed`, `SetFanAuto`, `GetWebcamState` and `SetWebcamState`, and the
-client mirrors them. The statistics fan rows then show RPM and temperature read from the daemon,
-falling back to `hwmon` inputs and hiding the rows when no fan is found.
+`hardware_detection` adds `get_fan_speeds`, `get_fan_temperatures` and `get_tdp_info` (no earlier
+form of these exists in the file) and repoints `get_tdp_profiles` and `get_current_tdp_profile` from
+the `performance_profiles_available` and `performance_profile` nodes under
+`/sys/devices/platform/tuxedo_io` to `TuxedoIo` ioctls — `TuxedoIo` itself arrives in `5258d35` the
+same day (next entry), and until `7bb8eca` the statistics page read fan speeds directly from
+`/sys/devices/platform/tuxedo_io/fan{N}_input` with an `hwmon` fallback. `hardware_control` gains
+`set_tdp_profile` (profile name to index), `set_fan_speed` (clamped to 100), `set_fan_auto`, a
+piecewise-linear `calculate_fan_speed_from_curve`, and webcam get/set. The daemon publishes
+`GetFanSpeeds`, `GetFanTemperature`, `SetFanSpeed`, `SetFanAuto`, `GetWebcamState` and
+`SetWebcamState`, and the client mirrors them. The statistics fan rows then show RPM and temperature
+read from the daemon, falling back to `hwmon` inputs and hiding the rows when no fan is found.
 
 Files: `daemon/src/{hardware_detection,hardware_control,dbus_interface}.rs`, `gui/src/dbus_client.rs`, `gui/src/ui/statistics_page.rs`
 
@@ -156,11 +160,13 @@ Files: `daemon/src/{hardware_detection,hardware_control,dbus_interface}.rs`, `gu
 SHAs: `5258d35` `9f1c998` `a8dcaff`
 
 A new `daemon/src/tuxedo_io.rs` wraps `/dev/tuxedo_io` with `nix` ioctl macros on magic `0xEC`,
-covering fan speed, fan temperature, fan auto, performance profiles, three TDP indices and the
-webcam switch. The second revision splits the commands into a Clevo set (`0xEC+1` read, `0xEC+2`
-write) and a Uniwill set (`0xEC+3`/`0xEC+4`), asks the kernel module which interface it is, probes
-the fan count instead of assuming four, and packs Clevo's single all-fans write and the 1-based
-profile ids.
+covering fan speed (`0x10` read, `0x11` write), fan temperature (`0x12`), the webcam switch (`0x13`
+read, `0x14` write), TDP get/set/min/max with no index argument (`0x20`–`0x23`) and performance
+profiles (`0x30`–`0x32`); fan auto and the per-index TDP commands are not in this revision. The
+second revision splits the commands into a Clevo set (`0xEC+1` read, `0xEC+2` write) and a Uniwill
+set (`0xEC+3`/`0xEC+4`), asks the kernel module which interface it is, probes the fan count instead
+of assuming four, and packs Clevo's single all-fans write and the 1-based profile ids, adding fan
+auto and the three TDP indices.
 
 Files: `daemon/src/tuxedo_io.rs`, `daemon/Cargo.toml`
 
