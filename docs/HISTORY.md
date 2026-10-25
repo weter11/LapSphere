@@ -68,7 +68,7 @@ the 671 commits on `lapsphere`; no commit falls in two bands.
 | Unit | Window | Commits | Written |
 |------|--------|---------|---------|
 | 1 | 2025-12-16 → 2025-12-30 | 71 | this pass: 30 commits in 13 entries + 41 excluded = 71 |
-| 2a | 2026-01-01 → 2026-01-07 | 86 | this pass: 86 commits = 38 in entries + 48 excluded |
+| 2a | 2026-01-01 → 2026-01-07 | 86 | unit 2a: 86 = 39 in 11 entries + 47 excluded |
 | 2b | 2026-01-06 → 2026-01-08 | 62 | pending |
 | 3 | 2026-01-09 → 2026-01-17 | 95 | pending |
 | 4 | 2026-01-18 → 2026-01-26 | 55 | pending |
@@ -381,10 +381,23 @@ SHAs: `da0c83d`
 `TuxedoIo::set_fan_manual` writes 0 to the auto register — `ioctl_cl_fanauto` on Clevo,
 `ioctl_uw_fanauto` on Uniwill — and `set_fan_speed` calls it before the speed ioctl, the comment at
 that call giving EC overwrite as the reason. A `Drop` impl calls `set_fan_auto` when the handle goes
-away; it is deleted the same day in `92c29a4` (excluded below). Hardware support is not established by
-the diff.
+away; it is deleted the same day in `92c29a4` (excluded below). `7533981` removes that call from
+`set_fan_speed`, its comment at line 289 saying the speed write implicitly disables auto mode;
+`91c3a0d` puts an explicit auto write back in the Clevo arm, so at `9cbecab` the Clevo arm writes 0 to
+request `0x11` (lines 274–276) and the Uniwill arm writes only its speed request (lines 313–327),
+nothing to the auto request `0x14`. Hardware support is not established by the diff.
 
 Files: `daemon/src/tuxedo_io.rs`
+
+### 2026-01-05 — `Reset to Saved` applies the stored profile from the tuning page
+
+SHAs: `22fc78b`
+
+The `↺ Reset to Saved` button on the tuning page, present since `32de2b6` with no handler, gains one: it
+reloads `Config` from disk, replaces the in-memory data and applies the named profile through
+`ApplyProfile`.
+
+Files: `gui/src/ui/tuning_page.rs`
 
 ### 2026-01-06 — Fan curve loop in the daemon process
 
@@ -444,7 +457,7 @@ Files: `gui/src/ui/{fan_curve_editor,tuning_page,statistics_page,settings_page,w
 
 ### Unit 2a accounting
 
-86 commits = 38 named in the 10 entries above + 48 excluded:
+86 commits = 39 in 11 entries + 47 excluded:
 
 - 5 CI workflow edits — dependency lists, branch triggers and the merge of PR #9, whose branch commits
   carry 2025-12-28/29 author dates and are counted in unit 1
@@ -452,17 +465,17 @@ Files: `gui/src/ui/{fan_curve_editor,tuning_page,statistics_page,settings_page,w
 - 3 commits of PR #11, a fix with no new functionality — the merge `a2acf15` (+4/−4), `174a55c`
   (+4/−4), and the empty `7fc8159` (+0/−0).
 - 2 fix commits — `ea557c5` (+1/−1) downcast check, `ac31131` (+2/−1) profile-not-found handling.
-- 28 refactors, plumbing and UI restructuring — `695a42c` (+67/−45), `c0afcdd` (+37/−44),
+- 27 refactors, plumbing and UI restructuring — `695a42c` (+67/−45), `c0afcdd` (+37/−44),
   `c036e9e` (+23/−17), `361eb61` (+126/−138), `f17f80e` (+163/−167), `74966d1` (+15/−9),
   `ac0dee0` (+27/−56), `603eddb` (+121/−109), `a6c0a2a` (+18/−14), `b9e0b6c` (+23/−29),
   `7555e06` (+79/−117), `f2414fb` (+116/−109), `c8e6bb3` (+35/−31), `c5654f8` (+32/−35),
   `4c4d878` (+20/−6), `4eb946b` (+51/−41), `91c3a0d` (+211/−225), `d9cc2cd` (+3/−3),
   `4d4af2a` (+14/−70), `3d541a5` (+1/−1), `cf793f1` (+2/−2), `d71c234` (+55/−96), `28791f6` (+1/−1),
-  `7533981` (+147/−123), `c4a9069` (+79/−67), `92c29a4` (+0/−9), `22fc78b` (+51/−9) and
-  `8352728` (+37/−106). Two of them are a pair: `22fc78b` makes the tuning page rebuild itself on a
-  profile change and `8352728` takes the rebuild out again, leaving the header-only update. `92c29a4`
-  removes the `Drop` guard that the manual-fan-mode entry above describes. `f2414fb` introduces the
-  16-point cap on a curve and the 10 °C step for a new point, both kept by PR #15.
+  `7533981` (+147/−123), `c4a9069` (+79/−67), `92c29a4` (+0/−9) and `8352728` (+37/−106). `8352728`
+  removes the tuning page's full-page rebuild, leaving the header-label update, and the inline per-row
+  delete button that unit 1's fan-curve editor added. `92c29a4` removes the `Drop` guard that the manual-fan-mode entry
+  above describes. `f2414fb` introduces the 16-point cap on a curve and the 10 °C step for a new point,
+  both kept by PR #15.
 - 5 label and icon edits — `e4fddfb` (+4/−4), `e02fa86` (+2/−2), `1d0cb80` (+9/−11),
   `b318824` (+1/−1), `90bcdfc` (+1/−1).
 - 5 formatting and logging edits — `9e0efe6` (+0/−3), `40dadea` (+0/−1), `7c8ead9` (+0/−1),
