@@ -24,7 +24,7 @@ same states and only their arguments, parsing or formatting change. A change tha
 documented for the new functionality alone, and a wholly repair-only pull request goes to the unit's
 excluded commits.
 
-Covered up to: 8ed5ae3bb8e10e672d838373a5ad35df68a828f9 (2026-02-03)
+Covered up to: a1b958a008b87585a0ce3816c02e7f6416dac1d1 (2026-02-10)
 
 ## Maintainer's recollections
 
@@ -81,7 +81,7 @@ halves" is split at a merge when that unit is written.
 | 3b | 2026-01-14 → 2026-01-19 | 48 | unit 3b: 48 = 44 in 6 entries + 4 excluded (unit 3: 48 + 48 = 96) |
 | 4 | 2026-01-19 → 2026-01-26 | 51 | unit 4: 51 = 43 in 9 entries + 8 excluded |
 | 5 | 2026-01-26 → 2026-02-03 | 77 | unit 5a: 40 = 40 in 7 entries + 0 excluded; unit 5b: 37 = 25 in 3 entries + 12 excluded |
-| 6 | 2026-02-03 → 2026-02-10 | 24 | pending — `15fb5fe` (#78) to `a1b958a` (#81) |
+| 6 | 2026-02-03 → 2026-02-10 | 24 | unit 6: 24 = 18 in 3 entries + 6 excluded |
 | 7 | 2026-05-14 → 2026-05-22 | 8 | pending — `d16d79f` to `a453a75` (#84) |
 | 8 | 2026-08-22 → 2026-08-29 | 41 | pending — `a4ae466` (#86) to `4965305` (#97) |
 | 9 | 2026-08-25 → 2026-09-29 | 35 | pending — `4444c43` (#99) to `5c57bc7` (#109) |
@@ -1379,3 +1379,71 @@ Files: `daemon/src/{main,dbus_interface,hardware_control,hardware_detection}.rs`
 
 Five pull requests are merged in this half — #73, #74, #75, #76 and #77 — of which #75 and #77 carry
 no entry.
+
+## 2026-02-03 → 2026-02-10 — Unit 6 (24 commits)
+
+Two halves of the same week: gamepad monitoring and the statistics settings land on 2026-02-03, the
+hardware cache on 2026-02-04, and PR #81 on 2026-02-10. All twenty-four commits belong to the four
+pull requests.
+
+### 2026-02-03 — Gamepad monitoring from sysfs and the udev database (PR #78)
+
+SHAs: `15fb5fe` `eb9dc2e` `96acf9d` `7067fc0`
+
+PR #78 (merge `15fb5fe`, 7 files, +425/−1) adds `get_gamepad_info`, which walks `/sys/class/input`
+(`daemon/src/hardware_detection.rs:3063`), reads each `event*` child's `uevent` for MAJOR/MINOR and
+then the udev record `/run/udev/data/c{maj}:{min}` (`:3088`), and calls a device a gamepad when
+that record holds `E:ID_INPUT_JOYSTICK=1` (`:3090`) or its name names a controller, gamepad or
+joystick and not a keyboard (`:3120`), with touchpad and sensor names removed (`:3133`). Each
+device becomes `GamepadInfo` — name, `id`, `uid`, status, battery level, connection type, power
+status (`common/src/types.rs:202`) — its `uid` being `E:ID_PATH`, else `E:ID_SERIAL`, else the
+sysfs path (`:3104`, `:3146`); battery comes from `/sys/class/power_supply` (`:3219`), no
+`/dev/input` node is opened, and the GUI remembers devices by `uid` (`gui/src/app.rs:538`).
+
+Files: `common/src/types.rs`, `daemon/src/{dbus_interface,hardware_detection}.rs`,
+`gui/src/{app,dbus_client}.rs`, `gui/src/pages/{settings,statistics}.rs`
+
+### 2026-02-03 — Average CPU figures, WiFi channel frequency, log limit (PR #79)
+
+SHAs: `9ecc62a` `193f352` `4130368` `9bf65d5` `2a228a9` `158e596` `5d7f8fe`
+
+PR #79 (merge `9ecc62a`, 9 files, +153/−63) replaces `CpuInfo.median_frequency`/`median_load` with
+`average_frequency`/`average_load` (`common/src/types.rs:24-25`), the mean of the per-core values
+(`daemon/src/hardware_detection.rs:827`, `:834`), drawn as Average Frequency and Average Load
+(`gui/src/pages/statistics.rs:178`, `:186`). `WiFiInfo` gains `channel_freq`
+(`common/src/types.rs:178`) and the WiFi block a Channel Info row
+(`gui/src/pages/statistics.rs:572`). `AppConfig` gains `log_limit` (default 100) and
+`log_filter_trace` (`common/src/types.rs:441-444`), and the daemon gains `read_hw_frequency_limits`
+and `restore_cpu_frequency_limits` (`daemon/src/hardware_detection.rs:601`,
+`daemon/src/hardware_control.rs:77`).
+
+Files: `common/src/types.rs`, `daemon/src/{hardware_control,hardware_detection,main,tuxedo_io}.rs`,
+`gui/src/{app,main}.rs`, `gui/src/pages/{settings,statistics}.rs`
+
+### 2026-02-04 — Hardware statistics served from a one-second cache (PR #80)
+
+SHAs: `bfad0e2` `1232f63` `79b56ad` `7f2b8ff` `88964f5` `19e9fcf` `b3a9ac6`
+
+PR #80 (merge `bfad0e2`, 8 files, +390/−174) moves hardware detection off the D-Bus request path: a
+`hardware_monitor` job refreshes `HARDWARE_CACHE` every second (`daemon/src/main.rs:269-273`,
+`:458`), one refresh runs at startup (`:265`), and the getters return clones of that snapshot
+instead of reading the hardware (`daemon/src/dbus_interface.rs:47`, `:58`, `:69`, `:80`). `GpuInfo`
+gains `vram_total` (`common/src/types.rs:136`), filled from the cached NVIDIA metadata
+(`daemon/src/hardware_detection.rs:2080`); CPU name and topology, memory metadata and system info
+are computed once into `Lazy` statics.
+
+Files: `common/src/types.rs`, `daemon/src/{dbus_interface,hardware_detection,main,tuxedo_io}.rs`,
+`gui/src/app.rs`, `gui/src/pages/{settings,tuning}.rs`
+
+### Unit 6 accounting
+
+24 commits = 18 named in the 3 entries above + 6 excluded:
+
+- 6 commits of PR #81, logging and GPU-metadata repairs — the merge `a1b958a` (+420/−213) and its
+  branch commits `cba3bdc` (+137/−87), `3fe7b21` (+165/−57), `c3eeae0` (+60/−50), `e997653`
+  (+280/−367) and `2942b0f` (+363/−237): log verbosity lowered across daemon and GUI, GPU metadata
+  read from `NVIDIA_METADATA_CACHE` with a retry when the cached entry is incomplete, and `e997653`
+  reorders `MODULE_DESCRIPTION` in `drivers_src/tuxedo_io/tuxedo_io.c:37` from "Clevo/Uniwill" to
+  "Uniwill/Clevo".
+
+Four pull requests are merged in this block — #78, #79, #80 and #81 — of which #81 carries no entry.
