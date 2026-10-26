@@ -5,16 +5,16 @@ control path, a UI surface, an architecture change. Defects are not recorded her
 repairs behaviour gets no entry, and no entry describes an error, a crash or a regression. Fixes and
 their diagnostics live in the commit log and the issue tracker.
 
-How entries are dated: from the base branch `lapsphere`, never from the GitHub API's `merged_at`,
-which is UTC and can land a day or a month away from the commit. A pull request's entry carries the
+How entries are dated: from `origin/lapsphere` at 79abeab51f8295828d7bd65f49a067df049d0ba2, never
+from the GitHub API's `merged_at`, which is UTC and can land a day or a month away from the commit. A pull request's entry carries the
 date of its merge commit; a direct commit's entry carries that commit's date; an entry that groups
 several commits carries the date of the group's last commit. Unit commit counts are `git rev-list`
-on `lapsphere` restricted to the window by author date — the same basis the entry dates use.
+on `origin/lapsphere` restricted to the window by author date — the same basis the entry dates use.
 
 How entries are cited: work that landed through a pull request cites `PR #N`, its merge commit and the
 branch commits that arrived with it, so every commit in a window is either named by an entry or
 listed as excluded. Work that landed as direct commits cites short SHAs, and each one resolves with
-`git cat-file -t` to `commit` and is an ancestor of `lapsphere`. The first pull request appears on
+`git cat-file -t` to `commit` and is an ancestor of `origin/lapsphere`. The first pull request appears on
 2026-01-01, so every entry in unit 1 is SHA-cited.
 
 Covered up to: 9cbecab8df11bbb03c907b724e693e04c2d632fe (2026-01-07)
@@ -192,9 +192,11 @@ form of these exists in the file) and repoints `get_tdp_profiles` and `get_curre
 the `performance_profiles_available` and `performance_profile` nodes under
 `/sys/devices/platform/tuxedo_io` to `TuxedoIo` ioctls — `TuxedoIo` itself arrives in `5258d35` the
 same day (next entry), and until `7bb8eca` the statistics page read fan speeds directly from
-`/sys/devices/platform/tuxedo_io/fan{N}_input` with an `hwmon` fallback. `hardware_control` gains
-`set_tdp_profile` (profile name to index), `set_fan_speed` (clamped to 100), `set_fan_auto`, a
-piecewise-linear `calculate_fan_speed_from_curve`, and webcam get/set. The daemon publishes
+`/sys/devices/platform/tuxedo_io/fan{N}_input` with an `hwmon` fallback. `hardware_control` rewrites
+`set_tdp_profile` to look the profile name up in `get_performance_profiles` and pass its index to
+`set_performance_profile` — the function first exists in `4720cb1`, writing the name to the sysfs node
+— and gains `set_fan_speed` (clamped to 100), `set_fan_auto`, a piecewise-linear
+`calculate_fan_speed_from_curve`, and webcam get/set. The daemon publishes
 `GetFanSpeeds`, `GetFanTemperature`, `SetFanSpeed`, `SetFanAuto`, `GetWebcamState` and
 `SetWebcamState`, and the client mirrors them. The statistics fan rows then show RPM and temperature
 read from the daemon, falling back to `hwmon` inputs and hiding the rows when no fan is found.
@@ -419,8 +421,8 @@ SHAs: `afce3b7` `60500fd`
 The settings page gains a `Battery Charge Control` group: a charge-type `ComboRow` over
 `standard`/`express`/`primarily_ac`, and start and end threshold rows built from
 `GetBatteryAvailableStartThresholds`/`GetBatteryAvailableEndThresholds` as `Scale` widgets that write
-back through `DbusClient`. The statistics page gains a battery section whose charge-type and threshold
-rows are created hidden and filled only when the daemon answers. PR #15 withdraws the editable group
+back through `DbusClient`. The statistics page's battery section, which exists since `1122a38`, gains
+charge-type and threshold rows, created hidden and filled only when the daemon answers. PR #15 withdraws the editable group
 from the settings page again (`gui/src/ui/settings_page.rs` +1/−121 there); the read-only statistics
 rows are what survives this half.
 
@@ -430,8 +432,9 @@ Files: `gui/src/ui/settings_page.rs`, `gui/src/ui/statistics_page.rs`
 
 SHAs: `ba7a262` `0c85931`
 
-`FanCurveEditor` moves its canvas into a `gtk::Frame` sized 600×400 and keeps the points in a
-`gtk::ListBox` that `rebuild_points_list` refills whenever a row changes. `build_tuning_content` takes
+`FanCurveEditor` moves its canvas into a `gtk::Frame` sized 600×400, makes its points `gtk::ListBox`
+— present since `603eddb` — a struct field, and adds `rebuild_points_list`, which refills it whenever a
+row changes. `build_tuning_content` takes
 the page's `ScrolledWindow`; the keyboard mode selector calls `PreviewKeyboardSettings` and rebuilds
 the page so the controls for that mode appear, the brightness slider previews as it moves, and the
 screen section writes the percentage into `/sys/class/backlight/*/brightness`, scaled against
@@ -447,10 +450,11 @@ PR #15 (merge `9cbecab`). The editor is rebuilt as two panes — a points `ListB
 the left, a 500×400 `DrawingArea` on the right that renders the curve from `set_draw_func`.
 `create_fans_tuning_section` creates one
 `FanCurveEditor` per fan, two when the profile defines no curves, and copies each editor's `get_curve`
-back into the profile when it is saved. The battery charge group leaves the settings page for a
-`create_battery_section` on the statistics page, whose CPU rows are now shown or hidden from
-`CpuInfo::capabilities`; `apply_curves` skips the ioctl when the computed speed equals the last one
-written, kept per fan in `last_speeds`. The branch merges `new_variant` (`26a7175`) before it lands.
+back into the profile when it is saved. The battery charge group leaves the settings page for the
+statistics page's `create_battery_section`, which is rewritten with a signature that drops the client
+argument, and the statistics page's CPU rows keep the capability-driven visibility present since
+`1122a38`; `apply_curves` skips the ioctl when the computed speed equals the last one written, kept per
+fan in `last_speeds`. The branch merges `new_variant` (`26a7175`) before it lands.
 
 Files: `gui/src/ui/{fan_curve_editor,tuning_page,statistics_page,settings_page,window}.rs`,
 `daemon/src/fan_daemon.rs`
