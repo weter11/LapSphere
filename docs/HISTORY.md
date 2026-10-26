@@ -578,8 +578,10 @@ SHAs: `dc1e53b` `9e126ec` `f07a516` `7d73c21` `bd8ecb8` `638f684` `e5291bc`
 page's "Fan curve editor coming soon... For now, use the GTK version to create fan curves."
 placeholder with one editor per fan, creating a curve for every fan the daemon reports. `bd8ecb8` adds
 `egui_plot = "0.29.0"`, which the editor uses for `Plot`, `Line`, `Points` and `Polygon`, and
-`f07a516` and `7d73c21` declare the `widgets` module and its `fan_curve_editor`. `638f684` and
-`e5291bc` refactor the editor's methods and the tuning page's curve handling.
+`f07a516` and `7d73c21` declare the `widgets` module and its `fan_curve_editor`. `638f684` refactors
+the editor's methods, and `e5291bc` refactors the tuning page's curve handling while cutting its
+keyboard section to four modes whose only controls are `SingleColor`'s (+36/−86) — the state the
+page keeps until PR #42.
 
 Files: `gui/src/widgets/{fan_curve_editor,mod}.rs`, `gui/src/pages/tuning.rs`, `gui/Cargo.toml`
 
@@ -731,7 +733,9 @@ SHAs: `223b57b` `504e9da`
 (writes the config, then applies that profile over D-Bus) and Reset to Default; the CPU section gains
 an AMD P-State mode combo — `active`, `passive`, `guided` — above the governor, energy-performance
 preference, boost and SMT controls and the frequency sliders; keyboard, screen and fan sections
-follow, the fan section instantiating one `FanCurveEditor` per fan out of `fan_info.len().max(2)`.
+follow — the keyboard section listing the four modes and offering the colour-channel and brightness
+controls of `SingleColor` alone — with the fan section instantiating one `FanCurveEditor` per fan out
+of `fan_info.len().max(2)`.
 `504e9da` takes the governor's default from `available_governors` and clamps the min and max sliders
 against each other.
 
@@ -919,10 +923,11 @@ daemon reports. The configuration is split into `settings.json` and `profiles.js
 with a `from`/`apply_to` pair over `AppConfig` (`SettingsConfig`, `ProfilesConfig`) and its own
 `save_settings`/`save_profiles`. The statistics page draws its sections in
 `statistics_sections.section_order`, normalised against the eight `STATISTICS_SECTIONS` entries,
-and the polling controls gain a Memory slider. The colour-channel, brightness and speed controls that
-`e5291bc` dropped return to the keyboard section with `write_effect_mode`/`write_effect_speed` in
-`hardware_control.rs`, and `channel_from_frequency_mhz` (first in `b7fec24`) derives channel numbers
-from the frequency.
+and the polling controls gain a Memory slider. The four effect modes that `e5291bc` removed — `Dance`,
+`Flash`, `RandomColor`, `Tempo` — return to the keyboard combo, whose `Breathe` and `Flash` arms regain
+their colour channels and whose effect arms regain the `Speed:` slider, with
+`write_effect_mode`/`write_effect_speed` in `hardware_control.rs`; `channel_from_frequency_mhz` (first
+in `b7fec24`) derives channel numbers from the frequency.
 
 Files: `common/src/types.rs`, `daemon/src/{hardware_control,hardware_detection}.rs`,
 `gui/src/{app,dbus_client}.rs`, `gui/src/pages/{settings,statistics,tuning,profiles}.rs`,
