@@ -17,7 +17,7 @@ listed as excluded. Work that landed as direct commits cites short SHAs, and eac
 `git cat-file -t` to `commit` and is an ancestor of `origin/lapsphere`. The first pull request appears on
 2026-01-01, so every entry in unit 1 is SHA-cited.
 
-Covered up to: e6b1476010937a83b59acee9f6c0225e3f5a0c49 (2026-01-30)
+Covered up to: 8ed5ae3bb8e10e672d838373a5ad35df68a828f9 (2026-02-03)
 
 ## Maintainer's recollections
 
@@ -73,7 +73,7 @@ halves" is split at a merge when that unit is written.
 | 3a | 2026-01-09 → 2026-01-13 | 48 | unit 3a: 48 = 30 in 11 entries + 18 excluded |
 | 3b | 2026-01-14 → 2026-01-19 | 48 | unit 3b: 48 = 44 in 6 entries + 4 excluded (unit 3: 48 + 48 = 96) |
 | 4 | 2026-01-19 → 2026-01-26 | 51 | unit 4: 51 = 43 in 9 entries + 8 excluded |
-| 5 | 2026-01-26 → 2026-02-03 | 77 | unit 5a: 40 = 40 in 7 entries + 0 excluded; 5b pending — `35db664` (#63) to `8ed5ae3` (#77), split after `e6b1476` (#72) |
+| 5 | 2026-01-26 → 2026-02-03 | 77 | unit 5a: 40 = 40 in 7 entries + 0 excluded; unit 5b: 37 = 25 in 3 entries + 12 excluded |
 | 6 | 2026-02-03 → 2026-02-10 | 24 | pending — `15fb5fe` (#78) to `a1b958a` (#81) |
 | 7 | 2026-05-14 → 2026-05-22 | 8 | pending — `d16d79f` to `a453a75` (#84) |
 | 8 | 2026-08-22 → 2026-08-29 | 41 | pending — `a4ae466` (#86) to `4965305` (#97) |
@@ -1308,3 +1308,69 @@ Files: `common/src/types.rs`, `daemon/src/{main,dbus_interface,hardware_control,
 
 No commit in this half is excluded. Six pull requests are merged in this half — #63, #64, #69, #70,
 #71 and #72 — and each carries an entry; the four `nvidia/` commits belong to none of them.
+
+## 2026-01-29 → 2026-02-03 — Unit 5b (37 commits, second half of unit 5)
+
+This half runs from the commit after `e6b1476` to `8ed5ae3`: PRs #73, #74, #75, #76 and #77 plus one
+direct commit that widens a slider. The halves are bounded by commit, not by date: `24d2fd3` carries
+a 2026-01-29 author date, inside 5a's window.
+
+### 2026-01-30 — Structured daemon logging with per-call durations (PR #73)
+
+SHAs: `956d14b` `43470f4` `d77637f` `2e8e39e` `09f2d98` `dbef16d`
+
+PR #73 (merge `956d14b`, 9 files, +558/−348) adds a structured log stream to the daemon: `LogEntry`
+gains `target` (`common/src/types.rs:16`), `DaemonLogger::log` keeps the last 1000 records at
+`Info` or above in `DAEMON_LOGS` whether or not `RUST_LOG` admits them (`daemon/src/main.rs:69`),
+and an unset `RUST_LOG` defaults to `Info` with `zbus` at `Warn` (`:91`). `log_api!` and
+`log_api_json!` (`daemon/src/dbus_interface.rs:9`, `:23`) wrap each D-Bus method so it logs
+`api.call`, `api.ok` or `api.fail` with `duration_ms`.
+
+Files: `common/src/types.rs`, `daemon/src/{main,dbus_interface,hardware_control,hardware_detection,tuxedo_io}.rs`,
+`gui/src/app.rs`, `gui/src/pages/{settings,statistics}.rs`
+
+### 2026-01-30 — VRAM bandwidth for a suspended card and a log search field (PR #74)
+
+SHAs: `bedfede` `64ff2c1` `1033cfc` `952d2cc` `18a2867` `133cf1e` `2c51fc2` `2303b2f` `28c5d87`
+
+PR #74 (merge `bedfede`, 4 files, +237/−59) fills `GpuInfo.vram_bandwidth` for a suspended card
+from `NVIDIA_METADATA_CACHE`: `calculate_vram_bandwidth` multiplies the top memory clock by 16 for
+GDDR6X, 8 for GDDR6, 4 for GDDR5 and 2 otherwise, times the bus width, over 8000
+(`daemon/src/hardware_detection.rs:1713`, `:1978`). The Logs tab gains a case-insensitive search
+field with a Clear button (`gui/src/pages/settings.rs:87`, `gui/src/app.rs:66`).
+
+Files: `daemon/src/{main,hardware_detection}.rs`, `gui/src/app.rs`, `gui/src/pages/settings.rs`
+
+### 2026-02-03 — Tiered GPU polling and P0 core-offset feedback (PR #76)
+
+SHAs: `2519afe` `a7184e0` `d6b1601` `d98ecfa` `8b3b8e6` `0bfdc82` `50763ec` `fab8e08` `077159a` `2854f6f`
+
+PR #76 (merge `2519afe`, 8 files, +290/−317) reworks GPU overclocking around P0: each one-second
+`gpu_overclock` tick reads the card's P-state, temperature, power and frequency, with the NVAPI
+extended statistics only in P0–P3 and NVML alone from P4 (`daemon/src/hardware_detection.rs:2197`),
+and writes `set_gpu_core_offset` only while the state is `P0` and the smart-rounded total differs
+from `LAST_APPLIED_OFFSET` (`daemon/src/main.rs:587`). `get_gpu_clock_ranges` returns the P0 range
+shifted by the current offset (`daemon/src/hardware_detection.rs:1427`), and the core-offset slider
+applies on change and re-queries that range (`gui/src/pages/tuning.rs:615`, `:617`); the memory
+locked-clock and memory-clock-range D-Bus methods and their client commands are removed. Hardware
+support is not established by the diff.
+
+Files: `daemon/src/{main,dbus_interface,hardware_control,hardware_detection}.rs`,
+`gui/src/{app,dbus_client,system_tray}.rs`, `gui/src/pages/tuning.rs`
+
+### Unit 5b accounting
+
+37 commits = 25 named in the 3 entries above + 12 excluded:
+
+- 5 commits of PR #75, a repair with no new functionality — the merge `d854801` (+14/−3) and its
+  branch commits `4d1b8c0` (+0/−0), `84ace8a` (+26/−3), `613064d` (+9/−21) and `b3f9230` (+4/−4):
+  `NvidiaDriverHandle` gains a `device_fd` field so the `/dev/nvidiaN` descriptor opened in `open()`
+  outlives that function, and the three `get_fb_info` calls gain `inspect_err` logging.
+- 6 commits of PR #77, diagnostics and a document — the merge `8ed5ae3` (+303/−29) and its branch
+  commits `ca708bf` (+0/−0), `74bf511` (+101/−23), `ba8978d` (+17/−6), `61e86ed` (+1/−1) and
+  `4fd8f58` (+185/−0): VRAM detection logging with decoded RM status codes, and
+  `docs/VRAM_DETECTION_TROUBLESHOOTING.md`.
+- 1 direct commit `24d2fd3` (+1/−1) — a fan-control slider width.
+
+Five pull requests are merged in this half — #73, #74, #75, #76 and #77 — of which #75 and #77 carry
+no entry.
