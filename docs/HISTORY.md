@@ -24,7 +24,7 @@ same states and only their arguments, parsing or formatting change. A change tha
 documented for the new functionality alone, and a wholly repair-only pull request goes to the unit's
 excluded commits.
 
-Covered up to: 5c57bc7efa20d6b840bf8d0ea474c087ba0fee17 (2026-09-29)
+Covered up to: 3686f1c41a4797be37ac68418308dc8958e2f195 (2026-10-10)
 
 ## Maintainer's recollections
 
@@ -95,7 +95,7 @@ halves" is split at a merge when that unit is written.
 | 7 | 2026-05-14 → 2026-05-22 | 8 | unit 7: 8 = 6 in 1 entry + 2 excluded |
 | 8 | 2026-08-22 → 2026-08-29 | 41 | unit 8: 41 = 4 in 2 entries + 37 excluded |
 | 9 | 2026-08-25 → 2026-09-29 | 35 | unit 9: 35 = 29 in 5 entries + 6 excluded |
-| 10 | 2026-09-30 → 2026-10-10 | 25 | pending — `f0dac95` (#112) to `3686f1c` (#117) |
+| 10 | 2026-09-30 → 2026-10-10 | 25 | unit 10: 25 = 16 named in the 4 entries above + 9 excluded |
 | 11 | 2026-10-10 → 2026-10-16 | 84 | written in two halves; boundary chosen when written — `b1c8719` (#120) to `f174a8e` (#132) |
 | 12 | 2026-10-23 | 8 | pending — `75d8767` (#133) to `2ff246f` (#136) |
 | final unit | 2026-10-25 | 3 | not written — `79abeab` (#140) |
@@ -1667,3 +1667,85 @@ Files: `daemon/src/{hardware_control,main,tuxedo_io}.rs`, `data/lapsphere-daemon
 
 Seven pull requests are merged in this block — #99, #100, #101, #105, #106, #109 and #91 — of which
 five carry an entry.
+## 2026-09-30 → 2026-10-10 — Unit 10 (25 commits)
+
+Seven pull requests land in this window: four carry an entry — the repaint trigger, the in-flight poll
+guard, the tray settings file and the first panel release — and three are documentation or repairs.
+
+### 2026-10-03 — Repaint on polled data, coalesced per frame (PR #112)
+
+SHAs: `f0dac95` `97d8134`
+
+PR #112 (merge `f0dac95`, 1 file, +89/−17) adds a repaint trigger to the GUI's poll path:
+`REPAINT_PENDING` (`gui/src/app.rs:273`) is a one-shot latch behind `request_repaint_now` (`:276`),
+`send_update` (`:284`) asks for a frame only when its send succeeded, and `handle_hardware_updates`
+clears the latch at the start of each drain (`:616`), so a burst of updates costs one request per
+frame. Every polled component sends through it, so an arrived update is drawn in the next frame
+instead of waiting for the 500 ms fallback timer; the comment at `:257-264` gives the measured
+update→draw latency (min 0.1, avg 226, max 484 ms) as the reason.
+
+Files: `gui/src/app.rs`
+
+### 2026-10-04 — One in-flight poll request per component, stale replies dropped (PR #113)
+
+SHAs: `be77233` `2a88fa2` `b2c59fe` `2deb3e3`
+
+PR #113 (merge `be77233`, 3 files, +467/−12) bounds the GUI's poll concurrency in
+`gui/src/polling_scheduler.rs`: `InFlightSet::try_begin` (`:42`) issues an `InFlightPermit` (`:78`)
+whose `Drop` releases the component's claim (`:83`), a refused claim counts a skipped tick (`:58`),
+and the coordinator skips a component whose request is still in flight (`gui/src/app.rs:451`).
+Polled replies go through `try_send` (`:344`), so an update the UI has no room for is dropped as
+stale instead of parking the fetch task on a full channel; `gui/examples/poll_queue_probe.rs`
+measures the queue growth the comment at `:12-19` describes.
+
+Files: `gui/examples/poll_queue_probe.rs`, `gui/src/app.rs`, `gui/src/polling_scheduler.rs`
+
+### 2026-10-04 — Tray settings in their own `tray.json` (PR #114)
+
+SHAs: `ffb4caa` `ba219f7` `70cd176` `7c95cd7` `c1765bf`
+
+PR #114 (merge `ffb4caa`, 6 files, +1163/−14) moves the tray settings into
+`~/.config/lapsphere/tray.json` (`gui/src/tray_config.rs:30`): a versioned file
+(`TRAY_CONFIG_VERSION` = 1, `:27`) holding `start_minimized` and `tray_enabled` (`TRAY_KEYS`, `:101`),
+written through a same-directory temporary and a `rename` (`write_atomic`, `:119`).
+`migrate_tray_config` (`:229`) copies the two fields out of `settings.json` once, backs that file up
+as `settings.json.pre-tray-split` (`:33`) and drops them from it only after `tray.json` is written; a
+corrupt `tray.json` is renamed aside instead of deleted. `docs/development/config-files.md` documents
+the split.
+
+Files: `README.md`, `docs/development/config-files.md`, `gui/src/app.rs`, `gui/src/main.rs`,
+`gui/src/pages/settings.rs`, `gui/src/tray_config.rs`
+
+### 2026-10-04 — Panel mode: a compact column on the app's window (PR #116)
+
+SHAs: `e296679` `0292b70` `a71e39a` `5e58928` `f94499f`
+
+PR #116 (merge `e296679`, 13 files, +3619/−113) adds `gui/src/panel/`: `config` (its own
+`panel.json`, `PanelConfig` at `gui/src/panel/config.rs:185`), `rows` (one row per quantity the
+Statistics tab shows), `layout`, `render`, `menu` and `window`, with the tab's formatters moved to
+`gui/src/stat_format.rs`, and a `--panel` start flag (`gui/src/main.rs:227`) that opens the column in
+the app's single window. Width, `background_opacity`, `stacking`, `hide_from_taskbar` and the row
+list are stored and normalized; the module comment says the X11 stacking and taskbar atoms are not
+applied here (`gui/src/panel/mod.rs:26-28`), and `docs/development/panel-measurements.md` records the
+first release's measurements.
+
+Files: `docs/development/panel-measurements.md`, `gui/src/app.rs`, `gui/src/main.rs`,
+`gui/src/pages/statistics.rs`, `gui/src/panel/{config,layout,menu,mod,render,rows,window}.rs`,
+`gui/src/polling_scheduler.rs`, `gui/src/stat_format.rs`
+
+### Unit 10 accounting
+
+25 commits = 16 named in the 4 entries above + 9 excluded:
+
+- 3 commits of PR #110, README documentation — merge `08f6bb5` (+81/−34), `ed2be44` (+81/−33) and the
+  sync merge `3d53701` (+1707/−32): the README rewritten against the current sources, no code.
+- 2 commits of PR #118, FB-info indices — merge `8e215fb` (+47/−30) and `8040a39` (+47/−30):
+  `get_fb_info` asks for the driver's real struct indices and enum values; the same call in the same
+  states.
+- 4 commits of PR #117, idle allocation churn — merge `3686f1c` (+2/−4), `8ed4948` (+63/−1),
+  `62439d8` (+5/−41) and `43d82fa` (+0/−28): `SystemdService=lapsphere-daemon.service` in both unit
+  files, then the removal of the `ui_is_alive()` gate that `8ed4948` adds, with its test, and comment
+  and dead-code trimming.
+
+Seven pull requests are merged in this block — #110, #112, #113, #114, #116, #117 and #118 — of which
+four carry an entry.
