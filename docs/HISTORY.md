@@ -17,7 +17,7 @@ listed as excluded. Work that landed as direct commits cites short SHAs, and eac
 `git cat-file -t` to `commit` and is an ancestor of `origin/lapsphere`. The first pull request appears on
 2026-01-01, so every entry in unit 1 is SHA-cited.
 
-Covered up to: 9cbecab8df11bbb03c907b724e693e04c2d632fe (2026-01-07)
+Covered up to: c8189d39cd747f7ba9ef01bb128dd9fb55ac9a01 (2026-01-08)
 
 ## Maintainer's recollections
 
@@ -55,10 +55,6 @@ What the repository records of those recollections, as the commands return it.
   match `--grep=qt`.
 - At `9cbecab` the tree holds 0 test files (paths matching `tests/` or `*_test.rs`).
 
-To be placed in unit 2b, egui entry: "the maintainer's account of 2026-10-25 records that GTK4 and a
-Qt6 attempt were both tried and that the UI moved to egui because of problems with both; no commit or
-ADR records a reason."
-
 ## Unit accounting
 
 The history is split into twelve chronological units (unit 2 is written in two halves) plus a final
@@ -69,7 +65,7 @@ the 671 commits on `lapsphere`; no commit falls in two bands.
 |------|--------|---------|---------|
 | 1 | 2025-12-16 → 2025-12-30 | 71 | this pass: 30 commits in 13 entries + 41 excluded = 71 |
 | 2a | 2026-01-01 → 2026-01-07 | 86 | unit 2a: 86 = 39 in 11 entries + 47 excluded |
-| 2b | 2026-01-06 → 2026-01-08 | 62 | pending |
+| 2b | 2026-01-06 → 2026-01-08 | 62 | unit 2b: 62 = 43 in 9 entries + 19 excluded (unit 2: 86 + 62 = 148) |
 | 3 | 2026-01-09 → 2026-01-17 | 95 | pending |
 | 4 | 2026-01-18 → 2026-01-26 | 55 | pending |
 | 5 | 2026-01-27 → 2026-01-31 | 61 | pending |
@@ -489,3 +485,165 @@ Six pull requests are merged in this half: #5, #6, #9, #10, #11 and #15 — of w
 carry entries and #9 (a workflow-only merge of `main`) and #11 (a fix) are excluded above. The
 four empty `Initial plan` commits sit inside those branches: three are counted with the PRs above and
 the one in PR #11 is in the excluded list.
+
+## 2026-01-06 → 2026-01-08 — Unit 2b (62 commits, second half of unit 2)
+
+This half carries the egui migration (PR #16 and the direct commits that follow it), the system tray
+(PR #17), battery charge thresholds as a setting (PR #18), and the deletion of the repository's
+packaging and service files. Its author dates reach back to 2026-01-06 because four commits that
+restore the pre-PR-#15 GUI state are dated then, although they land after that merge.
+
+### 2026-01-07 — egui dependencies and the first egui modules (PR #16)
+
+SHAs: `e0935b5` `f8030d2`
+
+PR #16 (merge `e0935b5`) is the net diff `e0935b5^1..e0935b5`: 10 files, 6 added, 4 modified, 0
+deleted, +255/−23. The workspace manifest gains the `[workspace.dependencies]` block that is absent at
+`e0935b5^1` — `egui = "0.28.0"` and `eframe = "0.28.0"` — `gui/Cargo.toml` replaces
+`gtk = { version = "0.9", package = "gtk4", features = ["v4_14"] }` and
+`libadwaita = { version = "0.7", features = ["v1_5"] }` with `egui = { workspace = true }` and
+`eframe = { workspace = true }`, and `common/src/types.rs` adds `PartialEq` to `Theme`. The six added
+files are `gui/src/egui_ui/{app,mod,profiles_page,settings_page,statistics_page,tuning_page}.rs`, run
+from an eframe entry point in `gui/src/main.rs`; no GTK file is deleted here, and `egui_ui/` contains
+no fan-curve code — the GTK editor goes with its directory in `2d3f26e` (next entry) and a fan-curve
+editor returns in `dc1e53b`. The merge message is "Convert UI from GTK4 to egui", the reason is not
+recorded in any commit or ADR, and the maintainer's account of 2026-10-25 records that GTK4 and a Qt6
+attempt were both tried and that the UI moved to egui because of problems with both, the Qt6 attempt
+leaving no trace in the 145 refs.
+
+Files: `Cargo.toml`, `gui/Cargo.toml`, `gui/src/main.rs`,
+`gui/src/egui_ui/{app,mod,profiles_page,settings_page,statistics_page,tuning_page}.rs`,
+`common/src/types.rs`
+
+### 2026-01-07 — GTK tree deleted, egui shell rebuilt as flat modules
+
+SHAs: `2d3f26e` `a96d7f3` `28b2f99` `2b5c6d6` `5c24903` `794fe31` `730d6ac` `07e307f` `672e659`
+
+`2d3f26e` deletes the seven files of the GTK UI —
+`gui/src/ui/{fan_curve_editor,mod,profiles_page,settings_page,statistics_page,tuning_page,window}.rs`,
+3570 lines — and `07e307f` and `672e659` delete the two GTK-era files outside that directory,
+`gui/src/application.rs` (126 lines) and `gui/src/config.rs` (49). `a96d7f3` deletes the `egui_ui/`
+scaffold PR #16 had just added (6 files, 234 lines), and the UI is rebuilt as flat modules:
+`gui/src/app.rs` with `Page`, `AppState`, `StatusMessage` and `PollTimers`, `gui/src/theme.rs` with
+`TuxedoTheme` (`apply`, `temp_color`, `load_color`, `power_color`), and a `gui/src/main.rs` reduced to
+the module list and the eframe entry point. `28b2f99` pins `egui = "0.29"`, `eframe = "0.29"` and
+`egui_extras = { version = "0.29", features = ["all_plots"] }` in `gui/Cargo.toml`, adds `tokio` with
+`rt-multi-thread`/`sync`/`time` and `chrono = "0.4"`, sets a release profile and renames the package to
+`tuxedo-control-center-egui`. `794fe31` writes a second copy of the app structures into `main.rs` (386
+lines, the file at 415), so the types exist twice until `464ab11` removes the copy.
+
+Files: `gui/src/{app,theme,main,application,config}.rs`, `gui/src/ui/`, `gui/src/egui_ui/`,
+`gui/Cargo.toml`
+
+### 2026-01-07 — egui pages: statistics, profiles, tuning, settings
+
+SHAs: `12e94e3` `68de3f0` `cf8c21e` `64d287d` `2ef9fc4`
+
+`12e94e3` builds the statistics page as `draw` plus `draw_system_info`, `draw_cpu_info`,
+`draw_gpu_info`, `draw_battery_info` and `draw_fan_info`, all reading `AppState`; `68de3f0` adds
+`profiles::draw`, `cf8c21e` the tuning page with `draw_cpu_tuning`, `draw_keyboard_tuning`,
+`draw_screen_tuning` and `draw_fan_tuning`, `64d287d` the settings page, and `2ef9fc4` declares the
+four page modules.
+
+Files: `gui/src/pages/{statistics,profiles,tuning,settings,mod}.rs`
+
+### 2026-01-07 — WiFi and storage rows in the egui statistics page
+
+SHAs: `ca95165` `881f023` `ba741a9`
+
+`ca95165` adds `draw_wifi_info` to the egui statistics page, `ba741a9` adds `read_storage_info` and
+`find_storage_temp` to `gui/src/app.rs`, and `881f023` adds `draw_storage_info` beside the WiFi rows.
+
+Files: `gui/src/pages/statistics.rs`, `gui/src/app.rs`
+
+### 2026-01-08 — Fan curve editor on egui_plot
+
+SHAs: `dc1e53b` `9e126ec` `f07a516` `7d73c21` `bd8ecb8` `638f684` `e5291bc`
+
+`dc1e53b` adds `FanCurveEditor` with `new`, `show` and `get_curve`, and `9e126ec` replaces the tuning
+page's "Fan curve editor coming soon... For now, use the GTK version to create fan curves."
+placeholder with one editor per fan, creating a curve for every fan the daemon reports. `bd8ecb8` adds
+`egui_plot = "0.29.0"`, which the editor uses for `Plot`, `Line`, `Points` and `Polygon`, and
+`f07a516` and `7d73c21` declare the `widgets` module and its `fan_curve_editor`. `638f684` and
+`e5291bc` refactor the editor's methods and the tuning page's curve handling.
+
+Files: `gui/src/widgets/{fan_curve_editor,mod}.rs`, `gui/src/pages/tuning.rs`, `gui/Cargo.toml`
+
+### 2026-01-08 — Async D-Bus client with a command enum
+
+SHAs: `5c7423f` `2a03b02` `f5f5950` `6732403`
+
+`5c7423f` rewrites `gui/src/dbus_client.rs` around async calls (+120/−382) and `2a03b02` adds a
+`DbusCommand` enum whose variants carry `oneshot::Sender` replies, with `set_battery_settings`,
+`get_battery_available_start_thresholds` and `get_battery_available_end_thresholds` among the request
+methods. `f5f5950` adds pending-reply checks before a request is sent, and `6732403` removes
+`dbus_client: Option<DbusClient>` from `AppState`, leaving the client outside the state and the
+pending receivers inside it.
+
+Files: `gui/src/dbus_client.rs`, `gui/src/app.rs`
+
+### 2026-01-08 — Keyboard shortcuts and a help window
+
+SHAs: `1b0bb1d` `8cd4b4c` `4a4fe2f` `464ab11` `1a8531e`
+
+`1b0bb1d` adds `KeyboardShortcuts` with `handle_shortcuts`, which maps `Ctrl+S` to
+`state.save_config()` and opens a help window; `8cd4b4c` and `4a4fe2f` add the field to the app and
+call it from the update method. `464ab11` declares `mod keyboard_shortcuts;` and removes the 387-line
+duplicate of the app structures from `main.rs` (415 lines to 29), and `1a8531e` trims the module.
+
+Files: `gui/src/keyboard_shortcuts.rs`, `gui/src/app.rs`, `gui/src/main.rs`
+
+### 2026-01-08 — System tray module (PR #17)
+
+SHAs: `af26127` `6b69096`
+
+PR #17 (merge `af26127`) is a four-file net diff — 1 added, 3 modified, +141/−11 — whose payload is
+`gui/src/system_tray.rs` (121 lines: `SystemTray`, `TrayEvent`, `load_tray_icon`) and
+`tray-icon = "0.18"` in `gui/Cargo.toml`. `gui/src/main.rs` at `c8189d3` declares `mod app; mod
+dbus_client; mod theme; mod pages; mod keyboard_shortcuts; mod widgets;` and no `mod system_tray;`, so
+the module is not compiled or called at that tree. The PR's title also names WiFi and storage, which
+are not in its net diff: those rows arrive in the direct commits of the entry above.
+
+Files: `gui/src/system_tray.rs`, `gui/src/app.rs`, `gui/src/pages/tuning.rs`, `gui/Cargo.toml`
+
+### 2026-01-08 — Battery charge thresholds as a setting (PR #18)
+
+SHAs: `c8189d3` `180105d` `8f74f89` `0aa2fd5` `b2d9daa` `eca1941`
+
+PR #18 (merge `c8189d3`). `BatterySettings` enters `common/src/types.rs` with `charge_start_threshold`
+(default 40) and `charge_end_threshold` (default 80), and `set_battery_settings` — first in `eca1941` —
+applies `set_charge_type("Custom")` plus both thresholds through `BatteryControl`, returning to
+"Standard" when the setting is off. `gui/src/dbus_client.rs` gains `set_battery_settings`,
+`get_battery_available_start_thresholds` and `get_battery_available_end_thresholds` over oneshot
+channels, and `gui/src/pages/settings.rs` gains the threshold controls. The branch also carries
+`0aa2fd5` (binary renamed to `tuxedo-control-center`), `8f74f89` (the workflow's binary name) and
+`b2d9daa` (a Tokio runtime entered in `main`).
+
+Files: `common/src/types.rs`, `daemon/src/{dbus_interface,hardware_control}.rs`,
+`gui/src/{dbus_client,app,main}.rs`, `gui/src/pages/{settings,tuning,profiles}.rs`, `gui/Cargo.toml`
+
+### Unit 2b accounting
+
+62 commits = 43 in 9 entries + 19 excluded:
+
+- 4 commits that restore the pre-PR-#15 GUI — `a408870` (+105/−97), `a371d2b` (+236/−111), `61330a8`
+  (+1/−1) and `1bffbea` (+121/−1). `a408870`'s diff is patch-identical to the reverse of PR #15's
+  `statistics_page.rs` change (`git patch-id` 525a143bbb7b on both) and `a371d2b`'s to the reverse of
+  its `tuning_page.rs` change (3e6eaef70993), so each rewrites its page back to the `new_variant`
+  shape; `1bffbea` is patch-identical to the unit 2a commit that first added the battery group
+  (`git patch-id` 674de0dce8ed) and puts `Battery Charge Control` back into
+  `gui/src/ui/settings_page.rs`, where PR #15 had removed it; `61330a8` passes the client to the
+  settings page again.
+- 4 CI workflow edits — `221ab9c` (+1/−1), `0c503f0` (+1/−1), `50b5b0f` (+2/−2), `fb0c4f9` (+1/−1).
+- 3 import-only edits — `4713f35` (+2/−0) `oneshot`, `b813a20` (+1/−0) `Color32`, `a65adff` (+1/−0)
+  `Profile`.
+- 1 dependency with no caller — `b26946a` (+1/−0) adds `rfd = "0.15"` to `gui/Cargo.toml`, and
+  `git grep rfd c8189d3 -- gui/src` returns nothing.
+- 7 repository cleanups that delete stray and packaging files — `582520e` (−115, a Russian-named
+  markdown file of GTK build instructions), `73ba58d` (−321, `setup-debian-packaging.sh`), `c293805`
+  (−84, `build-deb.sh`), `4cc5beb` (−13, `tuxedo-daemon.conf`), `d127175` (−12,
+  `tuxedo-daemo.service`), `e2b4633` (−5, `com.tuxedo.Control.service`) and `5c3288c` (0, the binary
+  `tcc_claude.zip`).
+
+Three pull requests are merged in this half — #16, #17 and #18 — and all three carry entries. Unit 2
+closes at 86 + 62 = 148 commits, the count the inventory gives for 2026-01-01..2026-01-08.
