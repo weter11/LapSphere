@@ -24,7 +24,7 @@ same states and only their arguments, parsing or formatting change. A change tha
 documented for the new functionality alone, and a wholly repair-only pull request goes to the unit's
 excluded commits.
 
-Covered up to: a1b958a008b87585a0ce3816c02e7f6416dac1d1 (2026-02-10)
+Covered up to: a453a7522f277e8c5727dea47c491c57e9e66609 (2026-05-22)
 
 ## Maintainer's recollections
 
@@ -82,7 +82,7 @@ halves" is split at a merge when that unit is written.
 | 4 | 2026-01-19 → 2026-01-26 | 51 | unit 4: 51 = 43 in 9 entries + 8 excluded |
 | 5 | 2026-01-26 → 2026-02-03 | 77 | unit 5a: 40 = 40 in 7 entries + 0 excluded; unit 5b: 37 = 25 in 3 entries + 12 excluded |
 | 6 | 2026-02-03 → 2026-02-10 | 24 | unit 6: 24 = 18 in 3 entries + 6 excluded |
-| 7 | 2026-05-14 → 2026-05-22 | 8 | pending — `d16d79f` to `a453a75` (#84) |
+| 7 | 2026-05-14 → 2026-05-22 | 8 | unit 7: 8 = 6 in 1 entry + 2 excluded |
 | 8 | 2026-08-22 → 2026-08-29 | 41 | pending — `a4ae466` (#86) to `4965305` (#97) |
 | 9 | 2026-08-25 → 2026-09-29 | 35 | pending — `4444c43` (#99) to `5c57bc7` (#109) |
 | 10 | 2026-09-30 → 2026-10-10 | 25 | pending — `f0dac95` (#112) to `3686f1c` (#117) |
@@ -1447,3 +1447,32 @@ Files: `common/src/types.rs`, `daemon/src/{dbus_interface,hardware_detection,mai
   "Uniwill/Clevo".
 
 Four pull requests are merged in this block — #78, #79, #80 and #81 — of which #81 carries no entry.
+
+## 2026-05-14 → 2026-05-22 — Unit 7 (8 commits)
+
+A README and an egui upgrade: two direct commits on 2026-05-14, then the five commits of PR #84.
+
+### 2026-05-22 — egui and eframe upgraded to 0.34.2 (PR #84)
+
+SHAs: `a453a75` `26b0725` `a27cd98` `ceef90b` `e02fb52` `5748f8c`
+
+PR #84 (merge `a453a75`, 10 files, +502/−559) carries the workspace from egui, eframe and
+egui_extras 0.29 to 0.34.2 and egui_plot 0.29 to 0.35 in five upgrade commits (`Cargo.toml:11-14`,
+`gui/Cargo.toml` keeping `default-features = false` with `default_fonts`, `glow`, `wayland`,
+`x11`). Forty changed lines in `gui/src` follow the new API — `egui::Panel::top(...).show_inside`
+for the top bar, status bar and update banner, `ui.global_style()`, `ui.ctx().fonts_mut()` — and
+the workflow moves `actions/checkout` to v6 and `actions/upload-artifact` to v7 with
+`compression-level: 0` (`.github/workflows/rust.yml`).
+
+Files: `.github/workflows/rust.yml`, `Cargo.lock`, `Cargo.toml`, `gui/src/{app,keyboard_shortcuts,theme}.rs`,
+`gui/src/pages/{profiles,settings,tuning}.rs`, `gui/src/widgets/fan_curve_editor.rs`
+
+### Unit 7 accounting
+
+8 commits = 6 named in the 1 entries above + 2 excluded:
+
+- 2 direct commits that create the README — `d16d79f` (+229/−0), the first `README.md` in the tree
+  (`git log --diff-filter=A -- README.md` returns it), and `4df8bb7` (+3/−0), a caution about Uniwill
+  laptop speed limits.
+
+One pull request is merged in this block — #84 — and it carries an entry.
