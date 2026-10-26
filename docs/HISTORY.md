@@ -1798,8 +1798,9 @@ One pull request in this half carries an entry — #120; #121 documents the pane
 
 ## 2026-10-14 → 2026-10-16 — Unit 11b (43 commits, second half of unit 11)
 
-Six of the ten panel stages, plus the Vulkan layer spike: position, stacking, transparency, visibility
-and frame metrics carry entries, and #122, #123, #129 and #132 are documentation or a contract repair.
+Five of the panel plan's seven stages — position, stacking, transparency, visibility and frame metrics —
+plus the Vulkan layer spike carry entries; #122, #123, #129 and #132 are documentation or a contract
+repair.
 
 ### 2026-10-14 — Vulkan implicit layer, stage 1: presents into a shared ring (PR #124)
 
