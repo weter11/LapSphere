@@ -17,7 +17,7 @@ listed as excluded. Work that landed as direct commits cites short SHAs, and eac
 `git cat-file -t` to `commit` and is an ancestor of `origin/lapsphere`. The first pull request appears on
 2026-01-01, so every entry in unit 1 is SHA-cited.
 
-Covered up to: 05a091838b9a82bedb7b97c9c27075778b08f6b1 (2026-01-19)
+Covered up to: 1d91b178d7dcea40880beabd0ccfc6ad939a3aa8 (2026-01-26)
 
 ## Maintainer's recollections
 
@@ -61,9 +61,9 @@ The history is split into twelve chronological units (units 2 and 3 are written 
 a final unit for the commits after 2026-10-23, which is not written yet. The bands are bounded by
 commit rather than by date, so adjacent windows overlap where a branch merged late. Together they
 partition the branch: units 1 and 2 hold the 219 commits behind `c8189d3`, unit 3 the 96 up to
-`05a0918`, and units 4 to 12 with the final unit the remaining 356 — 219 + 96 + 356 = 671, the
-commit count of `origin/lapsphere`. A row marked "written in two halves" is split at a merge when
-that unit is written.
+`05a0918`, unit 4 the 51 up to `1d91b17`, and units 5 to 12 with the final unit the remaining 305 —
+219 + 96 + 51 + 305 = 671, the commit count of `origin/lapsphere`. A row marked "written in two
+halves" is split at a merge when that unit is written.
 
 | Unit | Window | Commits | Written |
 |------|--------|---------|---------|
@@ -72,7 +72,7 @@ that unit is written.
 | 2b | 2026-01-06 → 2026-01-08 | 62 | unit 2b: 62 = 43 in 9 entries + 19 excluded (unit 2: 86 + 62 = 148) |
 | 3a | 2026-01-09 → 2026-01-13 | 48 | unit 3a: 48 = 30 in 11 entries + 18 excluded |
 | 3b | 2026-01-14 → 2026-01-19 | 48 | unit 3b: 48 = 44 in 6 entries + 4 excluded (unit 3: 48 + 48 = 96) |
-| 4 | 2026-01-19 → 2026-01-26 | 51 | pending — `9bb6517` (#51) to `1d91b17` (#62) |
+| 4 | 2026-01-19 → 2026-01-26 | 51 | unit 4: 51 = 42 in 9 entries + 9 excluded |
 | 5 | 2026-01-26 → 2026-02-03 | 77 | written in two halves; boundary chosen when written — `35db664` (#63) to `8ed5ae3` (#77) |
 | 6 | 2026-02-03 → 2026-02-10 | 24 | pending — `15fb5fe` (#78) to `a1b958a` (#81) |
 | 7 | 2026-05-14 → 2026-05-22 | 8 | pending — `d16d79f` to `a453a75` (#84) |
@@ -991,3 +991,190 @@ Files: `drivers_src/`
   replaces.
 - 1 duplicate removal — `814ca58` (+0/−16) deletes one of the two `normalize_ssid` definitions in
   `daemon/src/hardware_detection.rs`, keeping the copy at line 1562.
+
+## 2026-01-19 → 2026-01-26 — Unit 4 (51 commits)
+
+Unit 4 runs from the commit after `05a0918`, where unit 3b ends, to the merge of PR #62 (`1d91b17`).
+Its ten first-parent merges are #51, #52, #53, #55, #56, #57, #58, #60, #61 and #62; six direct
+commits sit between the merges of #52 and #53. Its first commit is dated 2026-01-19 and its last
+2026-01-26.
+
+### 2026-01-22 — Keyboard types, zones and Clevo per-zone writes (PR #51)
+
+SHAs: `9bb6517` `c9f2777` `9b76559` `78d9179`
+
+PR #51 (merge `9bb6517`, 9 files, +630/−317). `KeyboardType` — `None`, `WhiteOnly`, `SingleZoneRGB`,
+`ThreeZoneRGB`, `FourZoneRGB`, `PerKeyRGB` (`common/src/types.rs:207-214`) — and
+`KeyboardCapabilities` (`:217-223`) are filled by `get_keyboard_capabilities`, which counts
+`left`/`center`/`right:kbd_backlight` nodes under the `tuxedo_keyboard` LEDs, falls back to the
+`kbd_backlight` names in `/sys/class/leds`, and calls more than ten of them per-key
+(`daemon/src/hardware_detection.rs:836`, `:927`). `KeyboardMode::MultipleZones { zones, brightness }`
+carries a `Vec<ZoneColor>` (`common/src/types.rs:226`, `:235`); the tuning page offers it when
+`num_zones > 1` (`gui/src/pages/tuning.rs:555`) with one RGB row per zone (`:639-657`), and
+`set_zone_color` sends the Clevo request `0x67` with the prefix `0xF0`/`0xF1`/`0xF2`
+(`daemon/src/tuxedo_io.rs:613`, `:618`) before writing the zone's `multi_intensity`
+(`daemon/src/hardware_control.rs:529`). Hardware support is not established by
+the diff.
+
+Files: `common/src/types.rs`, `daemon/src/{hardware_control,hardware_detection,dbus_interface,tuxedo_io}.rs`,
+`gui/src/{app,dbus_client}.rs`, `gui/src/pages/{settings,tuning}.rs`
+
+### 2026-01-23 — Rename to LapSphere and a daemon-launched GUI (PR #52)
+
+SHAs: `4c211f2` `a6d64c5` `1a7d9a7` `420f0fa` `cb9be5c` `30c5868` `37d63d8` `68664ed` `786bb55`
+
+PR #52 (merge `4c211f2`, 44 files, +1093/−754) renames the project: the crates become
+`lapsphere-common`, `lapsphere-daemon` and `lapsphere` (`common/Cargo.toml:2`, `daemon/Cargo.toml:2`,
+`gui/Cargo.toml:2`), the D-Bus interface and bus name `com.tuxedo.Control` become
+`io.lapsphere.Control`, served at a new object path `/io/lapsphere/Control`
+(`daemon/src/dbus_interface.rs:11`, `:414-415`), the config directory becomes `~/.config/lapsphere`
+(`gui/src/app.rs:723`), and the desktop entries, Debian package and icon take the name
+(`data/io.lapsphere.LapSphere.desktop`, `debian/lapsphere.desktop`, `lapsphere.svg`).
+`daemon/tuxedo-daemon.service` and the old activation files are deleted rather than renamed. Not
+renamed: `daemon/src/tuxedo_io.rs` with `TuxedoIo` and `/dev/tuxedo_io`, the two
+`com.tuxedo.Control.conf` filenames, `drivers_src/`. The daemon gains `--gui`, spawning the GUI as
+`SUDO_UID`/`PKEXEC_UID` and raising `SIGINT` when it exits (`daemon/src/main.rs:134-197`).
+
+Files: `Cargo.lock`, `.github/workflows/rust.yml`, `common/{Cargo.toml,src/types.rs}`,
+`daemon/{Cargo.toml,src/{main,dbus_interface,hardware_control,hardware_detection,fan_daemon}}.rs`,
+`gui/{Cargo.toml,src/{app,dbus_client,main,system_tray,theme}.rs}`,
+`gui/src/pages/{profiles,settings,statistics,tuning}.rs`, `data/`, `debian/`
+
+### 2026-01-23 — Daemon CLI help, `--tray` and a console statistics mode (PR #53)
+
+SHAs: `a39b4f4` `6fca9bf` `fda00a1`
+
+PR #53 (merge `a39b4f4`, 10 files, +194/−62). `lapsphere-daemon` gains an argument surface:
+`--help`/`-h` prints the usage, the option list and the two configuration paths, then returns before
+any hardware access (`daemon/src/main.rs:31-45`). A run without `--gui` or `--tray` prints CPU name,
+load, package temperature and power, memory use and one row per GPU to stdout before the bus service
+starts (`:82-113`); without root the same block prints a `Limited` variant and exits 1 (`:58-79`).
+`--tray` suppresses those prints and is forwarded when `--gui` also launches the GUI.
+`data/io.lapsphere.Control.service` adds D-Bus activation (`Name=io.lapsphere.Control`, `User=root`),
+installed by `debian/rules:18`.
+
+Files: `daemon/src/{main,dbus_interface,hardware_detection}.rs`,
+`data/{io.lapsphere.Control.conf,io.lapsphere.Control.service,io.lapsphere.LapSphere.desktop}`,
+`debian/{io.lapsphere.Control.service,lapsphere.desktop,rules}`, `gui/src/app.rs`
+
+### 2026-01-23 — Memory module speed and a broader storage temperature lookup (PR #55)
+
+SHAs: `c1d547f` `9faca69`
+
+PR #55 (merge `c1d547f`, 4 files, +85/−47). `MemoryInfo` gains `memory_frequency`
+(`common/src/types.rs:82`), read from the first `Speed:` or `Configured Memory Speed:` line of
+`dmidecode -t memory`, ignoring an `Unknown` value (`daemon/src/hardware_detection.rs:868`, `:883`).
+Storage temperature reads through `find_storage_temperature`, which tries `temp1_input`–`temp3_input`
+under `device/hwmon`, then `device/device/hwmon`, then every `/sys/class/hwmon` entry whose `device`
+link matches the block device (`:1989`, `:2027`).
+
+Files: `common/src/types.rs`, `daemon/src/hardware_detection.rs`,
+`gui/src/pages/{settings,tuning}.rs`
+
+### 2026-01-24 — GPU tuning in Standard and Advanced modes (PR #57)
+
+SHAs: `6bce901` `86e0ecb` `f4dcba5` `e2028a7` `a12c6ec`
+
+PR #57 (merge `6bce901`, 11 files, +493/−228) splits GPU tuning into Standard and Advanced modes
+(`gui/src/pages/tuning.rs:397-398`). Standard bounds the locked minimum and maximum GPU and memory
+clocks and the core and memory offsets by ranges queried from the daemon (`:475-550`); Advanced edits
+the new `GpuSettings::advanced` table of ten min/max pairs — temperature, power limit, frequency,
+frequency offset, low and high frequency with their drain offsets, critical temperature, power offset
+(`common/src/types.rs:210`, `gui/src/pages/tuning.rs:552`, `:632`). Fan curves move to a per-fan
+selector (`gui/src/app.rs:62`, `gui/src/pages/tuning.rs:112`), and a top bar carries the clock, date
+and current profile (`gui/src/app.rs`); the battery group keeps its earlier content with tighter
+spacing.
+
+Files: `common/src/types.rs`, `gui/src/{app,main,theme,keyboard_shortcuts}.rs`,
+`gui/src/pages/{settings,statistics,tuning,profiles}.rs`, `gui/src/widgets/fan_curve_editor.rs`,
+`screenshots/ui-update.png`
+
+### 2026-01-25 — One-second NVIDIA offset loop with smart rounding (PR #58)
+
+SHAs: `6687160` `98d25ec` `f01a87b` `10f48c5` `fc6b8f6` `e388342` `b29d0f2`
+
+PR #58 (merge `6687160`, 12 files, +568/−33). The daemon registers a `gpu_overclock` `PollJob` at
+1000 ms (`daemon/src/main.rs:229`) whose `apply_gpu_overclocking` derives one offset from the card's
+frequency, temperature and power and writes it with `set_gpu_core_offset(0, offset)` →
+`set_clock_offset(Clock::Graphics, PerformanceState::Zero, offset)`, only while `advanced_control`
+and `manual_clocks` are set (`:353-364`), the card is not `suspended` (`:373`), the performance state
+is `Zero` (`:455`) and the value differs from `LAST_APPLIED_OFFSET` (`:477-479`). Voltage comes from
+`nvidia-smi -q -d VOLTAGE` or `--query-gpu=voltage.graphics` once a D-Bus `set_nvidia_smi_legacy_path`
+names the binary (`daemon/src/hardware_detection.rs:1253`, `:1259`). Its "dynamic overclocking" is this
+periodic re-application, not a changing clock request. Hardware support is not established by the
+diff.
+
+Files: `common/src/types.rs`, `daemon/src/{main,dbus_interface,hardware_detection}.rs`,
+`gui/src/{app,dbus_client,keyboard_shortcuts}.rs`, `gui/src/pages/{settings,statistics,tuning,profiles}.rs`,
+`gui/src/widgets/fan_curve_editor.rs`
+
+### 2026-01-26 — Help and About tabs, advanced clock fields, help window (PR #60)
+
+SHAs: `e2f2af5` `6662097` `51b3c6b` `7c385ff` `8619b7f`
+
+PR #60 (merge `e2f2af5`, 9 files, +344/−100) adds `SettingsTab::Help` and `SettingsTab::About`
+(`gui/src/app.rs:29-30`), `draw_help_info` with a static shortcut grid and `draw_about_info`
+(`gui/src/pages/settings.rs:38`, `:101`), and a separate egui viewport titled `Help` rendered by
+`draw_help_contents` (`gui/src/keyboard_shortcuts.rs:64`, `:94`). `GpuSettings` gains
+`advanced_min_gpu_clock`, `advanced_max_gpu_clock`, `advanced_min_mem_clock`, `advanced_max_mem_clock`
+and `advanced_memory_offset` (`common/src/types.rs:214`), bound in the advanced pane while the
+standard pane's core and memory offset sliders draw only when `advanced_control` is off
+(`gui/src/pages/tuning.rs:555-571`).
+
+Files: `common/src/types.rs`, `daemon/src/{main,hardware_detection}.rs`,
+`gui/src/{app,keyboard_shortcuts}.rs`, `gui/src/pages/{settings,statistics,tuning,profiles}.rs`
+
+### 2026-01-26 — Suspended NVIDIA cards answered from sysfs without NVML (PR #61)
+
+SHAs: `60bbbc0` `910480c` `53a0b1d` `81afbab`
+
+PR #61 (merge `60bbbc0`, 4 files, +254/−50). `get_nvidia_gpu_info` first lists the addresses under
+`/sys/bus/pci/drivers/nvidia` and reads each card's `power/runtime_status`; when every card reports
+`suspended` it builds the rows from `NVIDIA_NAMES_CACHE` with no metrics and returns without calling
+NVML (`daemon/src/hardware_detection.rs:1298-1312`), so a sleeping discrete GPU stays asleep across a
+poll. The cache is filled the first time a card is read awake (`:1346`). The same merge clamps each
+locked-clock slider to its partner (`gui/src/pages/tuning.rs:513`, `:522`) and moves the help text
+from a viewport into an in-app `NVIDIA Overclocking Help` window (`gui/src/keyboard_shortcuts.rs:75`).
+
+Files: `daemon/src/hardware_detection.rs`, `gui/src/{keyboard_shortcuts}.rs`,
+`gui/src/pages/{settings,tuning}.rs`
+
+### 2026-01-26 — Arch Linux package, optimus-manager and a `--tray` start (PR #62)
+
+SHAs: `1d91b17` `be2411a` `1c97206`
+
+PR #62 (merge `1d91b17`, 12 files, +110/−21) adds a `PKGBUILD` — `pkgname=lapsphere`,
+`arch=('x86_64')`, `optdepends` on `optimus-manager`, installing both binaries, the D-Bus policy and
+activation file, the desktop entry plus an `/etc/xdg/autostart` copy rewritten to
+`Exec=lapsphere --tray`, and `data/icon.svg` (`PKGBUILD:2`, `:10`, `:32-33`). `debian/rules:24-25`
+installs the same autostart file and takes the icon from `data/icon.svg`; the workflow builds a source
+tarball, runs `makepkg --noconfirm -s` as a new non-root `builduser` and uploads `*.pkg.tar.zst`.
+`set_prime_profile` prefers `optimus-manager --switch {hybrid,integrated,nvidia} --no-confirm` over
+`prime-select` (`daemon/src/hardware_control.rs:469-486`), and `--tray` opens the GUI hidden
+(`gui/src/main.rs:16`, `:28`).
+
+Files: `PKGBUILD`, `.github/workflows/rust.yml`, `debian/{control,rules,lapsphere.desktop}`,
+`data/{icon.svg,io.lapsphere.LapSphere.desktop}`, `daemon/src/{main,hardware_control}.rs`,
+`gui/src/{main}.rs`, `gui/src/pages/settings.rs`, `drivers_src/tuxedo_io/tuxedo_io.c`
+
+### Unit 4 accounting
+
+51 commits = 42 named in the 9 entries above + 9 excluded:
+
+- 2 commits of PR #56, a cleanup with no new functionality — the merge `52b57ec` (+21/−663) and its
+  branch commit `2486a3e` (+21/−663), which delete `FanCurveManager` and `FanDaemon` from
+  `daemon/src/fan_daemon.rs`, the fan-curve D-Bus methods, `set_fan_auto`, the unused `BatteryControl`
+  accessors, `get_fan_temperatures`/`get_tdp_info`, the `TuxedoIo` TDP getters,
+  `channel_from_frequency_mhz` (the mapping the unit 3b PR #42 entry credits) and the matching
+  `DbusClient` methods.
+- 6 direct commits of packaging, wording and workflow — `544346d` (+3/−3) desktop `Exec` and comment,
+  `701d3c2` (+2/−2) changelog wording, `35a7307` (+3/−3) `debian/control` maintainer, homepage and
+  description, `2c5a92d` (+2/−2) `debian/copyright`, `383915a` (+1/−1) and `50eae0a` (+1/−1) workflow
+  branch triggers from `egui_mod` to `lapsphere`.
+- 1 vendored `drivers_src/` edit — `5294cf3` (+13/−16) re-words `MODULE_DESCRIPTION` to "Hardware
+  interface for Clevo/Uniwill laptops" in `drivers_src/tuxedo_io/tuxedo_io.c:37`, a string that
+  reaches `modinfo` only, alongside the same wording in the desktop entries, `debian/control` and the
+  daemon's own banner.
+
+Ten pull requests are merged in this band — #51, #52, #53, #55, #56, #57, #58, #60, #61 and #62 — of
+which #56 carries no entry; #63 and #64 are dated 2026-01-27 and open unit 5.
