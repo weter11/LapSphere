@@ -59,8 +59,11 @@ What the repository records of those recollections, as the commands return it.
 
 The history is split into twelve chronological units (units 2 and 3 are written in two halves) plus
 a final unit for the commits after 2026-10-23, which is not written yet. The bands are bounded by
-commit rather than by date, so adjacent windows overlap where a branch merged late: the four written
-bands are consecutive and cover the 267 commits through the split point of unit 3.
+commit rather than by date, so adjacent windows overlap where a branch merged late. Together they
+partition the branch: units 1 and 2 hold the 219 commits behind `c8189d3`, unit 3 the 96 up to
+`05a0918`, and units 4 to 12 with the final unit the remaining 356 — 219 + 96 + 356 = 671, the
+commit count of `origin/lapsphere`. A row marked "written in two halves" is split at a merge when
+that unit is written.
 
 | Unit | Window | Commits | Written |
 |------|--------|---------|---------|
@@ -69,16 +72,16 @@ bands are consecutive and cover the 267 commits through the split point of unit 
 | 2b | 2026-01-06 → 2026-01-08 | 62 | unit 2b: 62 = 43 in 9 entries + 19 excluded (unit 2: 86 + 62 = 148) |
 | 3a | 2026-01-09 → 2026-01-13 | 48 | unit 3a: 48 = 30 in 11 entries + 18 excluded |
 | 3b | 2026-01-14 → 2026-01-19 | 48 | unit 3b: 48 = 44 in 6 entries + 4 excluded (unit 3: 48 + 48 = 96) |
-| 4 | 2026-01-18 → 2026-01-26 | 55 | pending |
-| 5 | 2026-01-27 → 2026-01-31 | 61 | pending |
-| 6 | 2026-02-01 → 2026-02-10 | 37 | pending |
-| 7 | 2026-05-14 → 2026-05-22 | 8 | pending |
-| 8 | 2026-08-22 → 2026-08-29 | 44 | pending |
-| 9 | 2026-09-12 → 2026-09-30 | 33 | pending |
-| 10 | 2026-10-03 → 2026-10-10 | 45 | pending |
-| 11 | 2026-10-11 → 2026-10-16 | 63 | pending |
-| 12 | 2026-10-17 → 2026-10-23 | 8 | pending |
-| final unit | 2026-10-24 → 2026-10-25 | 3 | not written |
+| 4 | 2026-01-19 → 2026-01-26 | 51 | pending — `9bb6517` (#51) to `1d91b17` (#62) |
+| 5 | 2026-01-26 → 2026-02-03 | 77 | written in two halves; boundary chosen when written — `35db664` (#63) to `8ed5ae3` (#77) |
+| 6 | 2026-02-03 → 2026-02-10 | 24 | pending — `15fb5fe` (#78) to `a1b958a` (#81) |
+| 7 | 2026-05-14 → 2026-05-22 | 8 | pending — `d16d79f` to `a453a75` (#84) |
+| 8 | 2026-08-22 → 2026-08-29 | 41 | pending — `a4ae466` (#86) to `4965305` (#97) |
+| 9 | 2026-08-25 → 2026-09-29 | 35 | pending — `4444c43` (#99) to `5c57bc7` (#109) |
+| 10 | 2026-09-30 → 2026-10-10 | 25 | pending — `f0dac95` (#112) to `3686f1c` (#117) |
+| 11 | 2026-10-10 → 2026-10-16 | 84 | written in two halves; boundary chosen when written — `b1c8719` (#120) to `f174a8e` (#132) |
+| 12 | 2026-10-23 | 8 | pending — `75d8767` (#133) to `2ff246f` (#136) |
+| final unit | 2026-10-25 | 3 | not written — `79abeab` (#140) |
 
 Unit 2 is split at `9cbecab`, the merge of PR #15, so the two halves are bounded by commit rather
 than by date: 2b begins at the commit after that merge, and its author dates reach back to
@@ -886,36 +889,40 @@ Files: `daemon/src/{main,polling_scheduler,dbus_interface}.rs`,
 
 ### 2026-01-15 — Status-notifier tray, runtime-status gating, storage speeds, daemon shutdown (PR #40)
 
-SHAs: `7699009` `c31c6aa` `b0c88ad` `e6b02d9` `ea25e94` `9d01051` `40fc45b` `2c7b212` `807aab0` `ba0b064` `01a884d` `f5f2c6c` `e702184` `06997c5` `35074b0`
+SHAs: `7699009` `c31c6aa` `b0c88ad` `e6b02d9` `ea25e94` `9d01051` `40fc45b` `2c7b212`
+`807aab0` `ba0b064` `01a884d` `f5f2c6c` `e702184` `06997c5` `35074b0`
 
-PR #40 (merge `7699009`, 14 files, +5585/−157). `tray-icon = "0.18"` becomes
+PR #40 (merge `7699009`, 14 files, +5585/−157, of which `Cargo.lock` is +4918/−0, the
+`.gitignore` entry dropped). `tray-icon = "0.18"` becomes
 `ksni = { version = "0.3.3", features = ["blocking"] }`: `SystemTray` wraps a
-`ksni::blocking::Handle<TrayState>`, `TrayState` implements `ksni::Tray` with a profile menu, and the
-app dispatches `TrayEvent::{ShowWindow, ShowStatistics, SwitchProfile, Quit}`. The daemon gains
-`shutdown_daemon`, which raises `SIGINT` on itself after 200 ms unless `INVOCATION_ID` or
-`SYSTEMD_EXEC_PID` marks a systemd-managed process. `get_gpu_info` reads
+`ksni::blocking::Handle<TrayState>`, `TrayState` implements `ksni::Tray` with a profile menu, and
+the app dispatches `TrayEvent::{ShowWindow, ShowStatistics, SwitchProfile, Quit}`.
+`mod system_tray` is declared in `gui/src/main.rs` first in `40fc45b`; `c8189d3` did not declare
+it. The daemon gains `shutdown_daemon`, raising `SIGINT` on itself after 200 ms unless
+`INVOCATION_ID` or `SYSTEMD_EXEC_PID` marks a systemd-managed process. `get_gpu_info` reads
 `/sys/bus/pci/devices/<id>/power/runtime_status` and skips the NVML metrics for a suspended card;
 `StorageDevice` gains `read_speed`/`write_speed` from `/sys/block/<dev>/stat` sector deltas and
-`hw_sector_size`, `WiFiInfo` gains `ssid` and `data_rate`, and `Cargo.lock` is committed after the
-`.gitignore` entry is dropped.
+`hw_sector_size`, and `WiFiInfo` gains `ssid` and `data_rate`.
 
 Files: `common/src/types.rs`, `daemon/src/{hardware_detection,dbus_interface}.rs`,
 `gui/src/{app,system_tray}.rs`, `gui/src/pages/{statistics,tuning}.rs`, `gui/Cargo.toml`, `Cargo.lock`
 
 ### 2026-01-16 — Settings split into tabs, configuration split into two files (PR #42)
 
-SHAs: `7143c95` `4a71320` `70b2322` `fd0f4dc` `d802693` `838a59d` `b7fec24` `9aaf7bc` `995ac5b` `08341b0` `8d77531` `d662106` `919b552`
+SHAs: `7143c95` `4a71320` `70b2322` `fd0f4dc` `d802693` `838a59d` `b7fec24` `9aaf7bc`
+`995ac5b` `08341b0` `8d77531` `d662106` `919b552`
 
-PR #42 (merge `7143c95`, 15 files, +1507/−417) restructures both the settings surface and its
-storage. The settings page becomes three tabs — `SettingsTab::{Main, StatsConfiguration,
-Hardware}` — and the `Hardware` tab draws System, CPU, Memory, GPU and Storage sections from the
-state the daemon already reports. The configuration is split into `settings.json` and
-`profiles.json`, each with a `from`/`apply_to` pair over `AppConfig` (`SettingsConfig`,
-`ProfilesConfig`) and its own `save_settings`/`save_profiles`. The statistics page draws its sections
-in `statistics_sections.section_order`, normalised against the eight-entry `STATISTICS_SECTIONS`
-table, and the polling controls gain a Memory slider. Keyboard effect controls return to the tuning
-page with `write_effect_mode`/`write_effect_speed` in `hardware_control.rs`, WiFi channel numbers are
-derived from the frequency across the 2.4, 5 and 6 GHz bands, and six screenshots are committed.
+PR #42 (merge `7143c95`, 15 files, +1507/−417) restructures the settings surface and its
+storage. The settings page becomes three tabs — `SettingsTab::{Main, StatsConfiguration, Hardware}`
+— and it draws System, CPU, Memory, GPU and Storage sections from the state the
+daemon reports. The configuration is split into `settings.json` and `profiles.json`, each
+with a `from`/`apply_to` pair over `AppConfig` (`SettingsConfig`, `ProfilesConfig`) and its own
+`save_settings`/`save_profiles`. The statistics page draws its sections in
+`statistics_sections.section_order`, normalised against the eight `STATISTICS_SECTIONS` entries,
+and the polling controls gain a Memory slider. The colour-channel, brightness and speed controls that
+`e5291bc` dropped return to the keyboard section with `write_effect_mode`/`write_effect_speed` in
+`hardware_control.rs`, and `channel_from_frequency_mhz` (first in `b7fec24`) derives channel numbers
+from the frequency.
 
 Files: `common/src/types.rs`, `daemon/src/{hardware_control,hardware_detection}.rs`,
 `gui/src/{app,dbus_client}.rs`, `gui/src/pages/{settings,statistics,tuning,profiles}.rs`,
@@ -931,7 +938,7 @@ SKU, Board and TUXEDO Kernel Modules rows. The daemon's WiFi reading is consolid
 `get_wifi_details` (one `iw dev <if> link` and one `iw dev <if> info` pass, the channel falling back
 to `channel_from_frequency_mhz`, SSID to `iwgetid -r`) beside `read_wifi_temperature` and
 `read_wifi_signal`. Its title's "Display WiFi Stats" is not in the net diff: no statistics file is
-touched, and the WiFi rows it names were added in PR #42.
+touched, and `draw_wifi_info` first appears in `ca95165` (2026-01-07), whose rows PR #42 extends.
 
 Files: `common/src/types.rs`, `daemon/src/hardware_detection.rs`, `gui/src/pages/settings.rs`
 
@@ -943,10 +950,11 @@ PR #47 (merge `6e85f27`, 4 files, +349/−197). `find_binary` resolves `iw`, `iw
 `lspci` and `ethtool` from six fixed directories before falling back to the bare name;
 `get_pci_info` turns `/sys/class/net/<if>/device` into a PCI address and runs `lspci -s <addr> -k`
 for the "Network controller" and "Subsystem" lines, and the driver and firmware versions come from
-`ethtool -i`. `channel_from_frequency_mhz` maps 2412–2472, 5000–5900 and 5955–7115 MHz to channel
-numbers plus 2484 MHz to 14. The statistics page gains network controller, subsystem, driver version,
-firmware, PHY rate, actual throughput and adapter temperature rows, and the file carries three unit
-tests (`test_parse_wifi_rate`, `test_normalize_ssid`, `test_ethtool_parsing`).
+`ethtool -i`. Channel numbers come from the `iw dev <if> info` line alone, which leaves
+`channel_from_frequency_mhz` without a caller. The statistics page gains network controller,
+subsystem, driver version, firmware, PHY rate, actual throughput and adapter temperature rows, and
+the file carries three unit tests (`test_parse_wifi_rate`, `test_normalize_ssid`,
+`test_ethtool_parsing`).
 
 Files: `common/src/types.rs`, `daemon/src/hardware_detection.rs`,
 `gui/src/pages/{statistics,settings}.rs`
