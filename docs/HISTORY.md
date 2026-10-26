@@ -26,7 +26,7 @@ of values, thresholds or options of an existing mechanism is a repair. A change 
 documented for the new functionality alone, and a wholly repair-only pull request goes to the unit's
 excluded commits.
 
-Covered up to: f174a8ed6c5b29ade29d8ecec2f102c91e8b735a (2026-10-16)
+Covered up to: 2ff246f3ad67706cbaf9a89c4259edb68b98ab9c (2026-10-23)
 
 ## Maintainer's recollections
 
@@ -77,9 +77,9 @@ What the repository records of those recollections, as the commands return it.
 ## Unit accounting
 
 The history is split into twelve chronological units (units 2, 3, 5 and 11 are written in two
-halves) plus a final unit for the commits after 2026-10-23; unit 12 and the final unit are still to
-be written. The bands are bounded by commit rather than by date, so adjacent windows overlap where a
-branch merged late.
+halves) plus a final unit for the commits after 2026-10-23; the final unit is still to be written.
+The bands are bounded by commit rather than by date, so adjacent windows overlap where a branch
+merged late.
 Together they partition the branch: units 1 and 2 hold the 219 commits behind `c8189d3`, unit 3 the
 96 up to `05a0918`, unit 4 the 51 up to `1d91b17`, and units 5 to 12 with the final unit the
 remaining 305 — 219 + 96 + 51 + 305 = 671, the commit count of `origin/lapsphere`. A row marked
@@ -101,7 +101,7 @@ remaining 305 — 219 + 96 + 51 + 305 = 671, the commit count of `origin/lapsphe
 | 10 | 2026-09-30 → 2026-10-10 | 25 | unit 10: 25 = 16 named in the 4 entries above + 9 excluded |
 | 11a | 2026-10-10 → 2026-10-14 | 41 | unit 11a: 41 = 39 named in the 1 entry above + 2 excluded |
 | 11b | 2026-10-14 → 2026-10-16 | 43 | unit 11b: 43 = 31 named in the 6 entries above + 12 excluded |
-| 12 | 2026-10-23 | 8 | pending — `75d8767` (#133) to `2ff246f` (#136) |
+| 12 | 2026-10-23 | 8 | unit 12: 8 = 0 named in the 0 entries above + 8 excluded |
 | final unit | 2026-10-25 | 3 | not written — `79abeab` (#140) |
 
 Unit 2 is split at `9cbecab`, the merge of PR #15, so the two halves are bounded by commit rather
@@ -1920,3 +1920,35 @@ Files: `Cargo.lock`, `docs/development/panel-{frames,measurements,v1-baseline}.m
 
 Ten pull requests are merged in this half — #122, #123, #124, #126, #127, #128, #129, #130, #131 and
 #132 — of which six carry an entry; #122 is a contract repair and #123, #129 and #132 are documentation.
+
+## 2026-10-23 — Unit 12 (8 commits, every commit dated 2026-10-23)
+
+None of the four pull requests leaves the application producing anything it did not produce before: a
+README sync, the removal of a vendored tree no build referenced, a preparatory write in the fan path and
+a CI toolchain change. The tree that goes is one unit 5a records as an entry — `nvidia/`, first added by
+`4cc8df5` (2026-01-27) and grown to three files by the commits that follow it.
+
+### Unit 12 accounting
+
+8 commits = 0 named in the 0 entries above + 8 excluded:
+
+- 2 commits of PR #133 — merge `75d8767` (+216/−175) and `cc17707` (+216/−175): `README.md` rewritten
+  against the code and packaging on the base; one file, no source, Cargo, packaging or `docs/` change.
+- 2 commits of PR #134 — merge `ef19986` (+25/−1769) and `323b8ab` (+25/−1769): deletes the LACT-derived
+  `nvidia/` tree — `nvidia/driver.rs` (357 lines), `nvidia/nvidia.rs` (1051) and `nvidia/nvapi.rs` (246)
+  — together with `docs/subsystems/nvidia-crate.md` (85), four files and 1739 lines, then the references
+  in `README.md`, `docs/architecture/{decisions,modules,overview}.md`,
+  `docs/development/known-problems.md` and two comments in `daemon/src/hardware_detection.rs` (`:2380`,
+  `:2429`). Nothing in the workspace referenced it: no `Cargo.toml` member, no module declaration, and
+  `README.md:268` at the parent already called it "not a crate and not built".
+- 2 commits of PR #135 — merge `80dee7a` (+37/−1) and `9667538` (+37/−1): `clear_fan_ownership`
+  (`daemon/src/tuxedo_io.rs:204`) reads Uniwill mode `0x14` and writes it back through `0x12` with bit
+  `0x40` cleared before each fan-speed write (`:571`), with the ioctl table in
+  `docs/subsystems/tuxedo-io.md` updated to match; the speed ioctl itself, its arguments and the state it
+  runs in are unchanged. Hardware support is not established by the diff.
+- 2 commits of PR #136 — merge `2ff246f` (+6/−5) and `6543963` (+6/−5): `.github/workflows/rust.yml`
+  moves the runner from `ubuntu-24.04` to `ubuntu-26.04`, drops `cargo` and `rustc` from the `apt` line
+  for `dtolnay/rust-toolchain@stable`, builds with `dpkg-buildpackage -d` and renames the artifact.
+
+Four pull requests are merged in this block — #133, #134, #135 and #136 — and none of them carries an
+entry.
