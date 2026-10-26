@@ -661,7 +661,7 @@ Files: `common/src/types.rs`, `daemon/src/{dbus_interface,hardware_control}.rs`,
 Three pull requests are merged in this half — #16, #17 and #18 — and all three carry entries. Unit 2
 closes at 86 + 62 = 148 commits, the count the inventory gives for 2026-01-01..2026-01-08.
 
-## 2026-01-09 → 2026-01-19 — Unit 3a (48 commits, first half of unit 3)
+## 2026-01-09 → 2026-01-13 — Unit 3a (48 commits, first half of unit 3)
 
 Unit 3 begins at the commit after the cursor and ends at the last first-parent commit before PR #51's
 merge; this half stops at the merge of PR #25, and the second half carries the remaining 48 commits.
@@ -677,8 +677,8 @@ the tree; `09208be` adds `TuxedoTheme::apply_with_font_size`, which derives the 
 the variant (heading 18/22/26, body 12/14/16); and `abff151` gives the settings page a three-way
 selector that writes the config and resizes the text at once, drops the page's Save button, and adds
 a slider for each statistics section's polling rate — 0.5 s steps, WiFi and storage added, the
-system-info slider dropped. Those sliders write `*_poll_rate` fields that nothing reads at this
-tree: the poll loop in `gui/src/app.rs` keeps hardcoded intervals.
+system-info slider dropped. Those sliders write `*_poll_rate` fields that nothing reads at
+1532df6: the poll loop in `gui/src/app.rs` keeps hardcoded intervals.
 
 Files: `common/src/types.rs`, `gui/src/theme.rs`, `gui/src/pages/settings.rs`
 
@@ -754,7 +754,10 @@ SHAs: `d83b33d` `66edd60`
 `get_gpu_info` had pushed all five metrics as `None`; `d83b33d` reads them from the card's `device`
 directory — frequency from `pp_dpm_sclk` (AMD) or `gt_cur_freq_mhz` (Intel), temperature from
 `hwmon/*/temp1_input`, load from `gpu_busy_percent`, power from `hwmon/power1_average` or
-`power1_input`, voltage from `hwmon/in0_input` — and names each card after its vendor id. It also
+`power1_input`, voltage from `hwmon/in0_input` — and names each card after its vendor id. Two of the
+readers take a second path the metric does not justify: `read_gpu_temperature` falls back to
+`/gpu_busy_percent` and returns that number as a temperature (`hardware_detection.rs:913`), and
+`read_gpu_load`'s Intel branch opens `gt_RP0_freq_mhz` and falls through to `None` (`:931`). It also
 adds `get_scheduler_info`, which reports CFS or EEVDF according to whether the `sched_features` file
 mentions `EEVDF`, and `66edd60` carries `scheduler` and `available_schedulers` in `CpuInfo`.
 
@@ -821,14 +824,16 @@ Files: `common/src/types.rs`,
 SHAs: `1532df6` `584f7e0` `7541fbd` `7969c69` `bac5293` `fdfe3b8`
 
 PR #25 (merge `1532df6`, 6 files, +302/−68). `get_gpu_info` no longer returns NVML's NVIDIA list
-alone: the `/sys/class/drm` iGPUs are listed too, named from their PCI device ids by
-`get_amd_gpu_name` (Vega 8/3, Renoir, Cezanne, 680M, 660M, 780M, 760M) and `get_intel_gpu_name`
-(UHD 620, Tiger Lake, Rocket Lake, Iris Xe, Iris Plus, Arc DG2), and NVIDIA's status reads
-`performance_state()` with `power_state()` as the fallback. `GpuInfo.memory_frequency` is added, filled
-from NVML `Clock::Memory` or the AMD iGPU's `pp_dpm_mclk`, and drawn in the statistics page. The Prime
-selector moves to the settings page, applied over D-Bus and saved into every profile, behind a
-two-step restart confirmation that runs `systemctl reboot`. Hardware behaviour is not established by
-the diff.
+alone: the `/sys/class/drm` iGPUs are listed too, named from their device id by `get_amd_gpu_name`
+(`daemon/src/hardware_detection.rs:909`, eight arms from Vega 8 to 760M) and `get_intel_gpu_name`
+(`:927`, seven arms from UHD Graphics 620 to Arc Graphics (DG2)); NVIDIA's status is
+`device.performance_state()` (`:1008`), `device.power_state()` (`:1012`), `"Active"` (`:1014`).
+`GpuInfo.memory_frequency` is added, from NVML `Clock::Memory` or `pp_dpm_mclk`. The Prime selector
+moves to Settings: Apply writes `gpu_settings.prime_profile` into every profile
+(`gui/src/pages/settings.rs:407-409`), saves and calls `set_prime_profile` over D-Bus (`:414`), and the
+restart confirmation's "Yes" spawns `systemctl reboot` from the GUI process itself,
+`std::process::Command::new("systemctl").args(["reboot"]).spawn()` (`:439`). Hardware behaviour is not
+established by the diff.
 
 Files: `common/src/types.rs`, `daemon/src/hardware_detection.rs`, `gui/src/app.rs`,
 `gui/src/pages/{settings,statistics,tuning}.rs`
