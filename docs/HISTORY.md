@@ -72,7 +72,7 @@ halves" is split at a merge when that unit is written.
 | 2b | 2026-01-06 → 2026-01-08 | 62 | unit 2b: 62 = 43 in 9 entries + 19 excluded (unit 2: 86 + 62 = 148) |
 | 3a | 2026-01-09 → 2026-01-13 | 48 | unit 3a: 48 = 30 in 11 entries + 18 excluded |
 | 3b | 2026-01-14 → 2026-01-19 | 48 | unit 3b: 48 = 44 in 6 entries + 4 excluded (unit 3: 48 + 48 = 96) |
-| 4 | 2026-01-19 → 2026-01-26 | 51 | unit 4: 51 = 42 in 9 entries + 9 excluded |
+| 4 | 2026-01-19 → 2026-01-26 | 51 | unit 4: 51 = 43 in 9 entries + 8 excluded |
 | 5 | 2026-01-26 → 2026-02-03 | 77 | written in two halves; boundary chosen when written — `35db664` (#63) to `8ed5ae3` (#77) |
 | 6 | 2026-02-03 → 2026-02-10 | 24 | pending — `15fb5fe` (#78) to `a1b958a` (#81) |
 | 7 | 2026-05-14 → 2026-05-22 | 8 | pending — `d16d79f` to `a453a75` (#84) |
@@ -1033,7 +1033,9 @@ PR #52 (merge `4c211f2`, 44 files, +1093/−754) renames the project: the crates
 `daemon/tuxedo-daemon.service` and the old activation files are deleted rather than renamed. Not
 renamed: `daemon/src/tuxedo_io.rs` with `TuxedoIo` and `/dev/tuxedo_io`, the two
 `com.tuxedo.Control.conf` filenames, `drivers_src/`. The daemon gains `--gui`, spawning the GUI as
-`SUDO_UID`/`PKEXEC_UID` and raising `SIGINT` when it exits (`daemon/src/main.rs:134-197`).
+`SUDO_UID`/`PKEXEC_UID` and raising `SIGINT` when it exits (`daemon/src/main.rs:134-197`). It also
+adds `get_cpu_topology` (`lscpu`), `read_intel_pstate_status` with `has_intel_pstate`, and a drawn
+tray icon (`daemon/src/hardware_detection.rs:161`, `:483`, `:552`, `gui/src/system_tray.rs:187`).
 
 Files: `Cargo.lock`, `.github/workflows/rust.yml`, `common/{Cargo.toml,src/types.rs}`,
 `daemon/{Cargo.toml,src/{main,dbus_interface,hardware_control,hardware_detection,fan_daemon}}.rs`,
@@ -1082,8 +1084,7 @@ the new `GpuSettings::advanced` table of ten min/max pairs — temperature, powe
 frequency offset, low and high frequency with their drain offsets, critical temperature, power offset
 (`common/src/types.rs:210`, `gui/src/pages/tuning.rs:552`, `:632`). Fan curves move to a per-fan
 selector (`gui/src/app.rs:62`, `gui/src/pages/tuning.rs:112`), and a top bar carries the clock, date
-and current profile (`gui/src/app.rs`); the battery group keeps its earlier content with tighter
-spacing.
+and current profile (`gui/src/app.rs`).
 
 Files: `common/src/types.rs`, `gui/src/{app,main,theme,keyboard_shortcuts}.rs`,
 `gui/src/pages/{settings,statistics,tuning,profiles}.rs`, `gui/src/widgets/fan_curve_editor.rs`,
@@ -1141,17 +1142,18 @@ Files: `daemon/src/hardware_detection.rs`, `gui/src/{keyboard_shortcuts}.rs`,
 
 ### 2026-01-26 — Arch Linux package, optimus-manager and a `--tray` start (PR #62)
 
-SHAs: `1d91b17` `be2411a` `1c97206`
+SHAs: `1d91b17` `be2411a` `5294cf3` `1c97206`
 
-PR #62 (merge `1d91b17`, 12 files, +110/−21) adds a `PKGBUILD` — `pkgname=lapsphere`,
-`arch=('x86_64')`, `optdepends` on `optimus-manager`, installing both binaries, the D-Bus policy and
-activation file, the desktop entry plus an `/etc/xdg/autostart` copy rewritten to
-`Exec=lapsphere --tray`, and `data/icon.svg` (`PKGBUILD:2`, `:10`, `:32-33`). `debian/rules:24-25`
-installs the same autostart file and takes the icon from `data/icon.svg`; the workflow builds a source
-tarball, runs `makepkg --noconfirm -s` as a new non-root `builduser` and uploads `*.pkg.tar.zst`.
-`set_prime_profile` prefers `optimus-manager --switch {hybrid,integrated,nvidia} --no-confirm` over
-`prime-select` (`daemon/src/hardware_control.rs:469-486`), and `--tray` opens the GUI hidden
-(`gui/src/main.rs:16`, `:28`).
+PR #62 (merge `1d91b17`, 12 files, +110/−21) adds a `PKGBUILD` — `pkgname=lapsphere`, both
+binaries, the D-Bus policy and activation file, the desktop entry plus an `/etc/xdg/autostart` copy
+rewritten to `Exec=lapsphere --tray`, and `data/icon.svg` (`:2`, `:10`, `:32-33`); `debian/rules:24-25`
+installs the same autostart file. `set_prime_profile` tries
+`optimus-manager --switch {hybrid,integrated,nvidia} --no-confirm` before `prime-select`
+(`daemon/src/hardware_control.rs:469-486`), and `--tray` opens the GUI hidden (`gui/src/main.rs:16`,
+`:28`). Its follow-up `5294cf3` excludes the tarball from itself, moves `rustup` into the `builduser`
+step, makes `optimus-manager` an `optdepends`, and carries the "Clevo/Uniwill laptops" wording into
+`PKGBUILD`, both desktop entries, `debian/control`, the daemon banner, the About text and
+`MODULE_DESCRIPTION` (`drivers_src/tuxedo_io/tuxedo_io.c:37`).
 
 Files: `PKGBUILD`, `.github/workflows/rust.yml`, `debian/{control,rules,lapsphere.desktop}`,
 `data/{icon.svg,io.lapsphere.LapSphere.desktop}`, `daemon/src/{main,hardware_control}.rs`,
@@ -1159,7 +1161,7 @@ Files: `PKGBUILD`, `.github/workflows/rust.yml`, `debian/{control,rules,lapspher
 
 ### Unit 4 accounting
 
-51 commits = 42 named in the 9 entries above + 9 excluded:
+51 commits = 43 named in the 9 entries above + 8 excluded:
 
 - 2 commits of PR #56, a cleanup with no new functionality — the merge `52b57ec` (+21/−663) and its
   branch commit `2486a3e` (+21/−663), which delete `FanCurveManager` and `FanDaemon` from
@@ -1171,10 +1173,6 @@ Files: `PKGBUILD`, `.github/workflows/rust.yml`, `debian/{control,rules,lapspher
   `701d3c2` (+2/−2) changelog wording, `35a7307` (+3/−3) `debian/control` maintainer, homepage and
   description, `2c5a92d` (+2/−2) `debian/copyright`, `383915a` (+1/−1) and `50eae0a` (+1/−1) workflow
   branch triggers from `egui_mod` to `lapsphere`.
-- 1 vendored `drivers_src/` edit — `5294cf3` (+13/−16) re-words `MODULE_DESCRIPTION` to "Hardware
-  interface for Clevo/Uniwill laptops" in `drivers_src/tuxedo_io/tuxedo_io.c:37`, a string that
-  reaches `modinfo` only, alongside the same wording in the desktop entries, `debian/control` and the
-  daemon's own banner.
 
 Ten pull requests are merged in this band — #51, #52, #53, #55, #56, #57, #58, #60, #61 and #62 — of
 which #56 carries no entry; #63 and #64 are dated 2026-01-27 and open unit 5.
