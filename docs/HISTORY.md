@@ -24,7 +24,7 @@ same states and only their arguments, parsing or formatting change. A change tha
 documented for the new functionality alone, and a wholly repair-only pull request goes to the unit's
 excluded commits.
 
-Covered up to: 3686f1c41a4797be37ac68418308dc8958e2f195 (2026-10-10)
+Covered up to: 3b7bd8f25fc96f07c7ad76de0607a2e1f171193f (2026-10-14)
 
 ## Maintainer's recollections
 
@@ -74,13 +74,13 @@ What the repository records of those recollections, as the commands return it.
 
 ## Unit accounting
 
-The history is split into twelve chronological units (units 2 and 3 are written in two halves) plus
-a final unit for the commits after 2026-10-23, which is not written yet. The bands are bounded by
-commit rather than by date, so adjacent windows overlap where a branch merged late. Together they
-partition the branch: units 1 and 2 hold the 219 commits behind `c8189d3`, unit 3 the 96 up to
-`05a0918`, unit 4 the 51 up to `1d91b17`, and units 5 to 12 with the final unit the remaining 305 —
-219 + 96 + 51 + 305 = 671, the commit count of `origin/lapsphere`. A row marked "written in two
-halves" is split at a merge when that unit is written.
+The history is split into twelve chronological units (units 2, 3, 5 and 11 are written in two
+halves) plus a final unit for the commits after 2026-10-23, which is not written yet. The bands
+are bounded by commit rather than by date, so adjacent windows overlap where a branch merged late.
+Together they partition the branch: units 1 and 2 hold the 219 commits behind `c8189d3`, unit 3 the
+96 up to `05a0918`, unit 4 the 51 up to `1d91b17`, and units 5 to 12 with the final unit the
+remaining 305 — 219 + 96 + 51 + 305 = 671, the commit count of `origin/lapsphere`. A row marked
+"written in two halves" is split at a merge when that unit is written.
 
 | Unit | Window | Commits | Written |
 |------|--------|---------|---------|
@@ -96,7 +96,8 @@ halves" is split at a merge when that unit is written.
 | 8 | 2026-08-22 → 2026-08-29 | 41 | unit 8: 41 = 4 in 2 entries + 37 excluded |
 | 9 | 2026-08-25 → 2026-09-29 | 35 | unit 9: 35 = 29 in 5 entries + 6 excluded |
 | 10 | 2026-09-30 → 2026-10-10 | 25 | unit 10: 25 = 16 named in the 4 entries above + 9 excluded |
-| 11 | 2026-10-10 → 2026-10-16 | 84 | written in two halves; boundary chosen when written — `b1c8719` (#120) to `f174a8e` (#132) |
+| 11a | 2026-10-10 → 2026-10-14 | 41 | unit 11a: 41 = 39 named in the 1 entry above + 2 excluded |
+| 11b | 2026-10-14 → 2026-10-16 | 43 | pending — `17ece90` (#122) to `f174a8e` (#132) |
 | 12 | 2026-10-23 | 8 | pending — `75d8767` (#133) to `2ff246f` (#136) |
 | final unit | 2026-10-25 | 3 | not written — `79abeab` (#140) |
 
@@ -106,7 +107,8 @@ than by date: 2b begins at the commit after that merge, and its author dates rea
 from the commit after `c8189d3` to that merge, 48 commits, and 3b from there to the last first-parent
 commit before the merge of PR #51, also 48; that boundary commit is dated 2026-01-19, so 3b's window
 reaches past 3a's. Unit 5 is split at `e6b1476`, the merge of PR #72: 5a runs from `35db664` to that
-merge, 40 commits, and 5b the remaining 37.
+merge, 40 commits, and 5b the remaining 37. Unit 11 is split at `3b7bd8f`, the merge of PR #121:
+11a runs from `b1c8719`'s branch to that merge, 41 commits, and 11b the remaining 43.
 
 ---
 
@@ -1749,3 +1751,45 @@ Files: `docs/development/panel-measurements.md`, `gui/src/app.rs`, `gui/src/main
 
 Seven pull requests are merged in this block — #110, #112, #113, #114, #116, #117 and #118 — of which
 four carry an entry.
+
+## 2026-10-10 → 2026-10-14 — Unit 11a (41 commits, first half of unit 11)
+
+Unit 11 runs from the merge of PR #120 to that of PR #132 and is written in two halves split at the
+merge of PR #121 (`3b7bd8f`): 41 commits here, 43 in the second half. The halves are bounded by commit
+rather than by date: PR #120's branch commits carry 2026-10-10 author dates, inside the previous
+unit's window.
+
+### 2026-10-12 — CPU frequency limits clamped, GPU writes gated, overclock released at idle (PR #120)
+
+SHAs: `b1c8719` `46faa7f` `4693295` `b3b8cec` `3182c5a` `0f7b97e` `176fba3`
+`12a2a74` `14aecbc` `20efeb8` `b730246` `de57f74` `145b1a0` `ba65a91`
+`bb5a3f0` `a4688e8` `2d2f670` `71046e9` `d7edb62` `bcf1f6d` `f1bb358`
+`bccc389` `32f8d1b` `d544db1` `4befd0e` `8b072cd` `5398c21` `dd4af45`
+`ed7368e` `d06bc47` `21f6917` `7851c43` `cfd9722` `5163a42` `16ab74b`
+`a2f7d2f` `8dea03e` `51867d4` `8f3a5fa`
+
+PR #120 (merge `b1c8719`, 9 files, +2119/−254) clamps CPU frequency requests to the hardware range:
+`normalize_freq_limits` (`common/src/types.rs:1221`) and `normalize_profiles_freq` (`:1241`) run
+through `normalize_cpu_frequency_request` (`daemon/src/hardware_control.rs:296`) inside
+`set_cpu_frequency_limits` (`:580`, reached from the D-Bus method at `daemon/src/dbus_interface.rs:171`),
+on profile load and save (`gui/src/app.rs:893`) and at the tuning page's two controls
+(`gui/src/pages/tuning.rs:372`, `:403`). GPU writes pass `gpu_write_allowed`
+(`daemon/src/hardware_detection.rs:5060`), which reads `power/runtime_status`; an apply that meets a
+closed gate is deferred and reports `gpu_deferred` (`common/src/types.rs:80`, rule at
+`daemon/src/hardware_control.rs:1052`), and `release_oc_when_idle` (`:617`) releases the dynamic
+overclock after measured idle, restoring it on load (`daemon/src/main.rs:1007`). Hardware support is
+not established by the diff.
+
+Files: `common/src/types.rs`,
+`daemon/src/{dbus_interface,hardware_control,hardware_detection,main}.rs`, `gui/src/app.rs`,
+`gui/src/dbus_client.rs`, `gui/src/pages/{profiles,tuning}.rs`
+
+### Unit 11a accounting
+
+41 commits = 39 named in the 1 entry above + 2 excluded:
+
+- 2 commits of PR #121, panel documentation — merge `3b7bd8f` (+120/−25) and `411f68a` (+120/−25): the
+  panel module documentation and the PR 1 measurements reconciled, with doc comments in `menu.rs`,
+  `mod.rs` and `window.rs`; no behaviour changes.
+
+One pull request in this half carries an entry — #120; #121 documents the panel and is excluded above.
