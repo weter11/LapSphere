@@ -26,7 +26,7 @@ of values, thresholds or options of an existing mechanism is a repair. A change 
 documented for the new functionality alone, and a wholly repair-only pull request goes to the unit's
 excluded commits.
 
-Covered up to: 2ff246f3ad67706cbaf9a89c4259edb68b98ab9c (2026-10-23)
+Covered up to: 79abeab51f8295828d7bd65f49a067df049d0ba2 (2026-10-25). Commits after this point, including this document's own, are not covered.
 
 ## Maintainer's recollections
 
@@ -77,9 +77,8 @@ What the repository records of those recollections, as the commands return it.
 ## Unit accounting
 
 The history is split into twelve chronological units (units 2, 3, 5 and 11 are written in two
-halves) plus a final unit for the commits after 2026-10-23; the final unit is still to be written.
-The bands are bounded by commit rather than by date, so adjacent windows overlap where a branch
-merged late.
+halves) plus a final unit for the commits after 2026-10-23. The bands are bounded by commit
+rather than by date, so adjacent windows overlap where a branch merged late.
 Together they partition the branch: units 1 and 2 hold the 219 commits behind `c8189d3`, unit 3 the
 96 up to `05a0918`, unit 4 the 51 up to `1d91b17`, and units 5 to 12 with the final unit the
 remaining 305 — 219 + 96 + 51 + 305 = 671, the commit count of `origin/lapsphere`. A row marked
@@ -102,7 +101,7 @@ remaining 305 — 219 + 96 + 51 + 305 = 671, the commit count of `origin/lapsphe
 | 11a | 2026-10-10 → 2026-10-14 | 41 | unit 11a: 41 = 39 named in the 1 entry above + 2 excluded |
 | 11b | 2026-10-14 → 2026-10-16 | 43 | unit 11b: 43 = 31 named in the 6 entries above + 12 excluded |
 | 12 | 2026-10-23 | 8 | unit 12: 8 = 0 named in the 0 entries above + 8 excluded |
-| final unit | 2026-10-25 | 3 | not written — `79abeab` (#140) |
+| final unit | 2026-10-25 | 3 | final unit: 3 = 0 named in the 0 entries above + 3 excluded |
 
 Unit 2 is split at `9cbecab`, the merge of PR #15, so the two halves are bounded by commit rather
 than by date: 2b begins at the commit after that merge, and its author dates reach back to
@@ -1952,3 +1951,27 @@ a CI toolchain change. The tree that goes is one unit 5a records as an entry —
 
 Four pull requests are merged in this block — #133, #134, #135 and #136 — and none of them carries an
 entry.
+
+## 2026-10-25 — Final unit (3 commits, every commit dated 2026-10-25)
+
+One pull request: #140 removes the vendored `drivers_src/` kernel-module tree that the unit 5a entry
+records, and keeps what the tree held — its local patches and the ioctl request numbers — as
+documentation. Nothing in the workspace built or installed that tree, so nothing the application
+produces changes.
+
+### Final unit accounting
+
+3 commits = 0 named in the 0 entries above + 3 excluded:
+
+- 3 commits of PR #140 — merge `79abeab` (+255/−14549), `d80cbb7` (+0/−14527) and `af9e5d7` (+255/−22):
+  `d80cbb7` deletes 55 files and 14527 lines — `drivers_src/`'s 24 root entries (`Kbuild`,
+  `clevo_acpi.c`, `clevo_keyboard.h`, `tuxedo_keyboard.c`, `uniwill_wmi.c`, the interface headers) and
+  its twelve module directories (`gxtp7380` … `tuxedo_tuxi`), `tuxedo_io/tuxedo_io_ioctl.h` among them —
+  which no build input referenced: `README.md:142` at the parent states the repository carries no
+  `Makefile`, `dkms.conf`, packaging rule or unit that builds or installs a module, and `debian/` and
+  `PKGBUILD` name none. `af9e5d7` puts the tree's content into documentation instead:
+  `docs/archive/drivers_src-local-patches.md` for the local patches and a request-number reference table
+  in `docs/subsystems/tuxedo-io.md` (+39/−7), with `README.md` and
+  `docs/architecture/{modules,overview}.md` re-pointed to it. Documentation carries no entry.
+
+One pull request is merged in this block — #140 — and it carries no entry.
