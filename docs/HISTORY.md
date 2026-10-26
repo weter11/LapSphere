@@ -20,7 +20,9 @@ listed as excluded. Work that landed as direct commits cites short SHAs, and eac
 How entries are classified: a change is a feature when the net diff leaves the application producing
 something it did not produce before — a value, a row, a log stream, a control, or a hardware call
 withheld in a state where it was previously issued — and a repair when the same calls happen in the
-same states and only their arguments, parsing or formatting change. A change that is both is
+same states and only their arguments, parsing or formatting change. A new named mechanism — a
+scheduler, a latch, a queue bound — counts as a feature even when its purpose is performance; a change
+of values, thresholds or options of an existing mechanism is a repair. A change that is both is
 documented for the new functionality alone, and a wholly repair-only pull request goes to the unit's
 excluded commits.
 
