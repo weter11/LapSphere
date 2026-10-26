@@ -1214,7 +1214,7 @@ SHAs: `9509c52` `436d689` `73b0b5d` `ed6d5e4` `256471d`
 PR #64 (merge `9509c52`, 12 files, +295/−692) claims the session-bus name `io.lapsphere.Gui` with
 `DoNotQueue`, exits when another process owns it and installs a panic hook writing
 `~/.config/lapsphere/crashes/crash_<timestamp>.log`; `get_config_dir`/`get_crash_dir` centralise
-the paths and the settings save rewrites the autostart desktop file (`gui/src/main.rs:59`, `:72`,
+the paths and the settings save rewrites the autostart desktop file (`gui/src/main.rs:59`, `:72-74`,
 `:15`; `gui/src/app.rs:877`, `:887`, `:952`). `73b0b5d` names the Clevo effect words — 0x1002a000
 breathe, 0xB0000000 wave, 0x33010000 cycle, 0x80000000 dance, 0xA0000000 flash, 0x70000000 random,
 0x90000000 tempo (`daemon/src/hardware_control.rs:705`, `:719`, `:730`, `:741`, `:752`, `:766`,
