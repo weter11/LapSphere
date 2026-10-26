@@ -11,11 +11,12 @@ date of its merge commit; a direct commit's entry carries that commit's date; an
 several commits carries the date of the group's last commit. Unit commit counts are `git rev-list`
 on `origin/lapsphere` restricted to the window by author date — the same basis the entry dates use.
 
-How entries are cited: work that landed through a pull request cites `PR #N`, its merge commit and the
-branch commits that arrived with it, so every commit in a window is either named by an entry or
+How entries are cited: work that landed through a pull request cites `PR #N`, its merge commit and
+the branch commits that arrived with it, so every commit in a window is either named by an entry or
 listed as excluded. Work that landed as direct commits cites short SHAs, and each one resolves with
-`git cat-file -t` to `commit` and is an ancestor of `origin/lapsphere`. The first pull request appears on
-2026-01-01, so every entry in unit 1 is SHA-cited.
+`git cat-file -t` to `commit` and is an ancestor of `origin/lapsphere`. The first pull request
+appears on 2026-01-01, so every entry in unit 1 is SHA-cited. File:line citations refer to the tree
+of the cited commit (the merge for pull requests), not to the branch tip.
 
 How entries are classified: a change is a feature when the net diff leaves the application producing
 something it did not produce before — a value, a row, a log stream, a control, or a hardware call
@@ -47,6 +48,44 @@ unless a line says so.
   running machine.
 - (Stated 2026-10-26.) Development paused after February 2026 and again between May and August while
   the maintainer worked on another project.
+
+## Table of contents
+
+- [Unit 1 — 2025-12-16 → 2025-12-30, 71 commits](#2025-12-16--2025-12-30--unit-1-71-commits-no-pull-requests)
+- [Unit 2a — 2026-01-01 → 2026-01-07, 86 commits](#2026-01-01--2026-01-07--unit-2a-86-commits-first-half-of-unit-2)
+- [Unit 2b — 2026-01-06 → 2026-01-08, 62 commits](#2026-01-06--2026-01-08--unit-2b-62-commits-second-half-of-unit-2)
+- [Unit 3a — 2026-01-09 → 2026-01-13, 48 commits](#2026-01-09--2026-01-13--unit-3a-48-commits-first-half-of-unit-3)
+- [Unit 3b — 2026-01-14 → 2026-01-19, 48 commits](#2026-01-14--2026-01-19--unit-3b-48-commits-second-half-of-unit-3)
+- [Unit 4 — 2026-01-19 → 2026-01-26, 51 commits](#2026-01-19--2026-01-26--unit-4-51-commits)
+- [Unit 5a — 2026-01-26 → 2026-01-30, 40 commits](#2026-01-26--2026-01-30--unit-5a-40-commits-first-half-of-unit-5)
+- [Unit 5b — 2026-01-29 → 2026-02-03, 37 commits](#2026-01-29--2026-02-03--unit-5b-37-commits-second-half-of-unit-5)
+- [Unit 6 — 2026-02-03 → 2026-02-10, 24 commits](#2026-02-03--2026-02-10--unit-6-24-commits)
+- [Unit 7 — 2026-05-14 → 2026-05-22, 8 commits](#2026-05-14--2026-05-22--unit-7-8-commits)
+- [Unit 8 — 2026-08-22 → 2026-08-29, 41 commits](#2026-08-22--2026-08-29--unit-8-41-commits)
+- [Unit 9 — 2026-08-25 → 2026-09-29, 35 commits](#2026-08-25--2026-09-29--unit-9-35-commits)
+- [Unit 10 — 2026-09-30 → 2026-10-10, 25 commits](#2026-09-30--2026-10-10--unit-10-25-commits)
+- [Unit 11a — 2026-10-10 → 2026-10-14, 41 commits](#2026-10-10--2026-10-14--unit-11a-41-commits-first-half-of-unit-11)
+- [Unit 11b — 2026-10-14 → 2026-10-16, 43 commits](#2026-10-14--2026-10-16--unit-11b-43-commits-second-half-of-unit-11)
+- [Unit 12 — 2026-10-23, 8 commits](#2026-10-23--unit-12-8-commits-every-commit-dated-2026-10-23)
+- [Final unit — 2026-10-25, 3 commits](#2026-10-25--final-unit-3-commits-every-commit-dated-2026-10-25)
+
+## Overview by era
+
+- **December 2025, inception (unit 1: 71 commits, 13 entries).** A Cargo workspace, a D-Bus daemon
+  and a GTK4 shell on 2025-12-16, then statistics, tuning and profiles pages, TDP/EPP control, fan
+  and webcam access, `/dev/tuxedo_io` ioctls, battery and RGB keyboard control.
+- **January 2026, egui migration and the GPU and keyboard wave (units 2–4: 295 commits).** Pull
+  requests from 2026-01-01; 2026-01-07 replaces GTK4 with `egui`/`eframe`; then NVML locked clocks,
+  GPU offsets, a polling scheduler, a tray, effect modes, settings tabs.
+- **February 2026, caching and gamepads (unit 6: 24 commits).** Gamepad monitoring from sysfs and
+  udev, a one-second hardware cache, per-GPU offset limits, NVML withheld while suspended.
+- **Pause.** No unit row between 2026-02-10 (unit 6) and 2026-05-14 (unit 7).
+- **May 2026, the egui 0.34 upgrade (unit 7: 8 commits).** One entry, 2026-05-22: egui and eframe
+  upgraded to 0.34.2.
+- **August–October 2026, RTD3, panel mode, the Vulkan layer and the vendored trees (units 8–12,
+  final: 196 commits).** From 2026-08-23 the RTD3 gate, GUI-set poll intervals, the daemon-owned
+  ioctl handle and the GPU live tier; then panel mode, the Vulkan layer stage 1 and the panel's
+  visibility; unit 12 and the final unit remove the vendored `nvidia/` and `drivers_src/` trees.
 
 ## Repository evidence
 
