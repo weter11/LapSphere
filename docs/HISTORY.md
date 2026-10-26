@@ -1190,7 +1190,8 @@ SHAs: `35db664` `000a86b` `4231bf7` `83e7549` `7bb7c06` `11c1746` `053950a` `131
 
 PR #63 (merge `35db664`, 16 files, +1140/−173). `KeyboardMode::PerKeyRGB { keys, brightness }`
 (`common/src/types.rs:314`) becomes selectable when `get_keyboard_capabilities` counts more than ten
-`kbd_backlight` LEDs (`daemon/src/hardware_detection.rs:1046`); `set_mode` walks the list through
+`kbd_backlight` LEDs (`daemon/src/hardware_detection.rs:1046`, `gui/src/pages/tuning.rs:967`);
+`set_mode` walks the list through
 `set_zone_color`, which writes `multi_intensity` under each LED path and also sends the Clevo `0x67`
 request (`daemon/src/hardware_control.rs:678`, `:624`). Uniwill TDP reads the performance profile
 with request `0x14` (`daemon/src/tuxedo_io.rs:416`), reads current, minimum and maximum with
@@ -1210,7 +1211,7 @@ SHAs: `9509c52` `436d689` `ed6d5e4` `256471d`
 
 PR #64 (merge `9509c52`, 12 files, +295/−692). The GUI requests the session-bus name
 `io.lapsphere.Gui` with `DoNotQueue` and exits when another process owns it
-(`gui/src/main.rs:59`, `:71`), and installs a panic hook that writes
+(`gui/src/main.rs:59`, `:72`), and installs a panic hook that writes
 `~/.config/lapsphere/crashes/crash_<timestamp>.log` with the message, the source location and a
 captured backtrace (`:15`). `get_config_dir` and `get_crash_dir` centralise the two paths
 (`gui/src/app.rs:877`, `:887`), and the settings save writes or removes
