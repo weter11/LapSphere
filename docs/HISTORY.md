@@ -17,7 +17,7 @@ listed as excluded. Work that landed as direct commits cites short SHAs, and eac
 `git cat-file -t` to `commit` and is an ancestor of `origin/lapsphere`. The first pull request appears on
 2026-01-01, so every entry in unit 1 is SHA-cited.
 
-Covered up to: 1532df6b5ee9622a1c9e58619dd9f4e62dfb18cb (2026-01-13)
+Covered up to: 05a091838b9a82bedb7b97c9c27075778b08f6b1 (2026-01-19)
 
 ## Maintainer's recollections
 
@@ -68,7 +68,7 @@ bands are consecutive and cover the 267 commits through the split point of unit 
 | 2a | 2026-01-01 → 2026-01-07 | 86 | unit 2a: 86 = 39 in 11 entries + 47 excluded |
 | 2b | 2026-01-06 → 2026-01-08 | 62 | unit 2b: 62 = 43 in 9 entries + 19 excluded (unit 2: 86 + 62 = 148) |
 | 3a | 2026-01-09 → 2026-01-13 | 48 | unit 3a: 48 = 30 in 11 entries + 18 excluded |
-| 3b | 2026-01-13 → 2026-01-19 | 48 | pending |
+| 3b | 2026-01-14 → 2026-01-19 | 48 | unit 3b: 48 = 44 in 6 entries + 4 excluded (unit 3: 48 + 48 = 96) |
 | 4 | 2026-01-18 → 2026-01-26 | 55 | pending |
 | 5 | 2026-01-27 → 2026-01-31 | 61 | pending |
 | 6 | 2026-02-01 → 2026-02-10 | 37 | pending |
@@ -859,3 +859,122 @@ Files: `common/src/types.rs`, `daemon/src/hardware_detection.rs`, `gui/src/app.r
   `daemon/Cargo.toml` and `ab75063` is the exact reverse of that addition; `3b14869` adds both to
   `gui/Cargo.toml` and `a6197a3` removes them again. The only dependency of this group in the tree at
   the merge of PR #20 is `systemstat`, which `a6197a3` adds to `gui/Cargo.toml`.
+
+## 2026-01-14 → 2026-01-19 — Unit 3b (48 commits, second half of unit 3)
+
+This half begins at the commit after PR #25's merge and ends at `05a0918`, the last first-parent
+commit before PR #51; it carries five pulls (#37, #40, #42, #43, #47), three direct edits of the
+WiFi paths, one CI workflow edit and the `drivers_src/` upload.
+
+### 2026-01-14 — Polling scheduler in the daemon, refresh coordinator in the GUI (PR #37)
+
+SHAs: `d5c5a6d` `df1edd5` `581a978` `de376ef` `9111140` `de8e544` `fd4bada`
+
+PR #37 (merge `d5c5a6d`, 7 files, +608/−104). `daemon/src/polling_scheduler.rs` adds `PollJob`
+(id, `next_run`, interval, `poll_fn`) in a `BinaryHeap` ordered by `next_run`, run by
+`PollingScheduler::run` and driven through `SchedulerHandle::{add_job, update_interval}`; the daemon
+keeps one in a `SCHEDULER_HANDLE` `OnceCell`, runs its fan loop as a job, and exposes
+`update_polling_interval(component, interval_ms)` over D-Bus. `gui/src/polling_scheduler.rs` adds a
+`RefreshCoordinator` with `register`, `update_interval`, `unregister` and `shutdown`. The
+`*_poll_rate` fields that nothing read before this are read from here: `gui/src/app.rs:251-258`
+registers cpu, gpu, memory, fans, battery, wifi, storage and mount with intervals taken from
+`statistics_sections` (`memory` from `cpu_poll_rate`, `mount` from `storage_poll_rate`), and
+`fd4bada` makes each job's first refresh immediate.
+
+Files: `daemon/src/{main,polling_scheduler,dbus_interface}.rs`,
+`gui/src/{app,main,polling_scheduler}.rs`, `gui/src/pages/settings.rs`
+
+### 2026-01-15 — Status-notifier tray, runtime-status gating, storage speeds, daemon shutdown (PR #40)
+
+SHAs: `7699009` `c31c6aa` `b0c88ad` `e6b02d9` `ea25e94` `9d01051` `40fc45b` `2c7b212` `807aab0` `ba0b064` `01a884d` `f5f2c6c` `e702184` `06997c5` `35074b0`
+
+PR #40 (merge `7699009`, 14 files, +5585/−157). `tray-icon = "0.18"` becomes
+`ksni = { version = "0.3.3", features = ["blocking"] }`: `SystemTray` wraps a
+`ksni::blocking::Handle<TrayState>`, `TrayState` implements `ksni::Tray` with a profile menu, and the
+app dispatches `TrayEvent::{ShowWindow, ShowStatistics, SwitchProfile, Quit}`. The daemon gains
+`shutdown_daemon`, which raises `SIGINT` on itself after 200 ms unless `INVOCATION_ID` or
+`SYSTEMD_EXEC_PID` marks a systemd-managed process. `get_gpu_info` reads
+`/sys/bus/pci/devices/<id>/power/runtime_status` and skips the NVML metrics for a suspended card;
+`StorageDevice` gains `read_speed`/`write_speed` from `/sys/block/<dev>/stat` sector deltas and
+`hw_sector_size`, `WiFiInfo` gains `ssid` and `data_rate`, and `Cargo.lock` is committed after the
+`.gitignore` entry is dropped.
+
+Files: `common/src/types.rs`, `daemon/src/{hardware_detection,dbus_interface}.rs`,
+`gui/src/{app,system_tray}.rs`, `gui/src/pages/{statistics,tuning}.rs`, `gui/Cargo.toml`, `Cargo.lock`
+
+### 2026-01-16 — Settings split into tabs, configuration split into two files (PR #42)
+
+SHAs: `7143c95` `4a71320` `70b2322` `fd0f4dc` `d802693` `838a59d` `b7fec24` `9aaf7bc` `995ac5b` `08341b0` `8d77531` `d662106` `919b552`
+
+PR #42 (merge `7143c95`, 15 files, +1507/−417) restructures both the settings surface and its
+storage. The settings page becomes three tabs — `SettingsTab::{Main, StatsConfiguration,
+Hardware}` — and the `Hardware` tab draws System, CPU, Memory, GPU and Storage sections from the
+state the daemon already reports. The configuration is split into `settings.json` and
+`profiles.json`, each with a `from`/`apply_to` pair over `AppConfig` (`SettingsConfig`,
+`ProfilesConfig`) and its own `save_settings`/`save_profiles`. The statistics page draws its sections
+in `statistics_sections.section_order`, normalised against the eight-entry `STATISTICS_SECTIONS`
+table, and the polling controls gain a Memory slider. Keyboard effect controls return to the tuning
+page with `write_effect_mode`/`write_effect_speed` in `hardware_control.rs`, WiFi channel numbers are
+derived from the frequency across the 2.4, 5 and 6 GHz bands, and six screenshots are committed.
+
+Files: `common/src/types.rs`, `daemon/src/{hardware_control,hardware_detection}.rs`,
+`gui/src/{app,dbus_client}.rs`, `gui/src/pages/{settings,statistics,tuning,profiles}.rs`,
+`screenshots/`
+
+### 2026-01-16 — SKU, board and kernel modules in the hardware tab (PR #43)
+
+SHAs: `b2627dc` `8021990` `3c9127d`
+
+PR #43 (merge `b2627dc`, 3 files, +125/−251). `SystemInfo` gains `product_sku`, `board_name` and
+`tuxedo_kernel_modules`, the last filled by `get_tuxedo_kernel_modules`, and the hardware tab shows
+SKU, Board and TUXEDO Kernel Modules rows. The daemon's WiFi reading is consolidated into
+`get_wifi_details` (one `iw dev <if> link` and one `iw dev <if> info` pass, the channel falling back
+to `channel_from_frequency_mhz`, SSID to `iwgetid -r`) beside `read_wifi_temperature` and
+`read_wifi_signal`. Its title's "Display WiFi Stats" is not in the net diff: no statistics file is
+touched, and the WiFi rows it names were added in PR #42.
+
+Files: `common/src/types.rs`, `daemon/src/hardware_detection.rs`, `gui/src/pages/settings.rs`
+
+### 2026-01-17 — WiFi detection through resolved binaries, PCI ids and ethtool (PR #47)
+
+SHAs: `6e85f27` `7c61c33` `5521bcb` `42d5af0` `bc79df2`
+
+PR #47 (merge `6e85f27`, 4 files, +349/−197). `find_binary` resolves `iw`, `iwconfig`, `iwgetid`,
+`lspci` and `ethtool` from six fixed directories before falling back to the bare name;
+`get_pci_info` turns `/sys/class/net/<if>/device` into a PCI address and runs `lspci -s <addr> -k`
+for the "Network controller" and "Subsystem" lines, and the driver and firmware versions come from
+`ethtool -i`. `channel_from_frequency_mhz` maps 2412–2472, 5000–5900 and 5955–7115 MHz to channel
+numbers plus 2484 MHz to 14. The statistics page gains network controller, subsystem, driver version,
+firmware, PHY rate, actual throughput and adapter temperature rows, and the file carries three unit
+tests (`test_parse_wifi_rate`, `test_normalize_ssid`, `test_ethtool_parsing`).
+
+Files: `common/src/types.rs`, `daemon/src/hardware_detection.rs`,
+`gui/src/pages/{statistics,settings}.rs`
+
+### 2026-01-19 — Vendored `drivers_src/` kernel-module tree
+
+SHAs: `05a0918`
+
+`05a0918` ("Add files via upload") adds `drivers_src/` — 55 files, 12 module directories and 12
+top-level files around a `Kbuild`, no `Makefile` and no `dkms.conf` — a copy of TUXEDO Computers'
+`tuxedo-drivers` kernel modules, GPL-2.0-or-later, identified in the 2026-10-25 audit as release
+v4.18.2 with 51 of the 55 files byte-identical to it and local edits in the other four. Nothing in
+the tree builds, packages, installs or loads it: there is no `build.rs` and no `cc`/`bindgen`
+dependency, and CI, Debian and Arch packaging never reference the path; at 2026-10-25 only fifteen
+documentation lines in four files do. PR #140 (merged 2026-10-25) deletes all 55 files (−14527)
+and re-points five documents.
+
+Files: `drivers_src/`
+
+### Unit 3b accounting
+
+48 commits = 44 named in the 6 entries above + 4 excluded:
+
+- 1 CI workflow edit — `8a1388a` (+3/−4) drops the `-v` flags from the workflow's build and test
+  commands and one development package.
+- 2 refinements of the WiFi rows between PR #43 and PR #47 — `641a9f8` (+75/−44) styles the SSID cell
+  and reorders the signal rows; `a6ac5b6` (+53/−5) rewrites the `iw` parsing as explicit branches with
+  debug logging and adds a second copy of `normalize_ssid`. Both sit inside the display that PR #47
+  replaces.
+- 1 duplicate removal — `814ca58` (+0/−16) deletes one of the two `normalize_ssid` definitions in
+  `daemon/src/hardware_detection.rs`, keeping the copy at line 1562.
