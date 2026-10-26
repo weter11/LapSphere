@@ -450,7 +450,9 @@ back into the profile when it is saved. The battery charge group leaves the sett
 statistics page's `create_battery_section`, which is rewritten with a signature that drops the client
 argument, and the statistics page's CPU rows keep the capability-driven visibility present since
 `1122a38`; `apply_curves` skips the ioctl when the computed speed equals the last one written, kept per
-fan in `last_speeds`. The branch merges `new_variant` (`26a7175`) before it lands.
+fan in `last_speeds`. The branch merges `new_variant` (`26a7175`) before it lands. The files this PR
+edits under `gui/src/ui` are restored to their pre-PR content by `a408870`, `a371d2b` and `1bffbea` —
+except `fan_curve_editor.rs`, which keeps the PR's version — and deleted by `2d3f26e` (unit 2b).
 
 Files: `gui/src/ui/{fan_curve_editor,tuning_page,statistics_page,settings_page,window}.rs`,
 `daemon/src/fan_daemon.rs`
@@ -490,23 +492,26 @@ the one in PR #11 is in the excluded list.
 
 This half carries the egui migration (PR #16 and the direct commits that follow it), the system tray
 (PR #17), battery charge thresholds as a setting (PR #18), and the deletion of the repository's
-packaging and service files. Its author dates reach back to 2026-01-06 because four commits that
-restore the pre-PR-#15 GUI state are dated then, although they land after that merge.
+packaging and service files. Its author dates start at 2026-01-06 because four commits dated then
+restore the pre-PR-#15 content of files under `gui/src/ui/`; they are first-parent commits and sit
+between `9cbecab` and PR #16's merge.
 
 ### 2026-01-07 — egui dependencies and the first egui modules (PR #16)
 
 SHAs: `e0935b5` `f8030d2`
 
 PR #16 (merge `e0935b5`) is the net diff `e0935b5^1..e0935b5`: 10 files, 6 added, 4 modified, 0
-deleted, +255/−23. The workspace manifest gains the `[workspace.dependencies]` block that is absent at
-`e0935b5^1` — `egui = "0.28.0"` and `eframe = "0.28.0"` — `gui/Cargo.toml` replaces
+deleted, +255/−23; the GTK deletion is the direct commit `2d3f26e`, not part of this PR. The workspace
+manifest gains the `[workspace.dependencies]` block that is absent at `e0935b5^1` — `egui = "0.28.0"`
+and `eframe = "0.28.0"` — `gui/Cargo.toml` replaces
 `gtk = { version = "0.9", package = "gtk4", features = ["v4_14"] }` and
 `libadwaita = { version = "0.7", features = ["v1_5"] }` with `egui = { workspace = true }` and
 `eframe = { workspace = true }`, and `common/src/types.rs` adds `PartialEq` to `Theme`. The six added
 files are `gui/src/egui_ui/{app,mod,profiles_page,settings_page,statistics_page,tuning_page}.rs`, run
-from an eframe entry point in `gui/src/main.rs`; no GTK file is deleted here, and `egui_ui/` contains
-no fan-curve code — the GTK editor goes with its directory in `2d3f26e` (next entry) and a fan-curve
-editor returns in `dc1e53b`. The merge message is "Convert UI from GTK4 to egui", the reason is not
+from an eframe entry point in `gui/src/main.rs`; `gui/src/egui_ui/` is removed in `a96d7f3` and is
+not present at `c8189d3`, where `gui/src` holds no `egui_ui` path and no `mod egui_ui`, and it
+contains no fan-curve code — the GTK editor goes with its directory in `2d3f26e` (next entry) and a
+fan-curve editor returns in `dc1e53b`. The merge message is "Convert UI from GTK4 to egui", the reason is not
 recorded in any commit or ADR, and the maintainer's account of 2026-10-25 records that GTK4 and a Qt6
 attempt were both tried and that the UI moved to egui because of problems with both, the Qt6 attempt
 leaving no trace in the 145 refs.
@@ -526,10 +531,11 @@ SHAs: `2d3f26e` `a96d7f3` `28b2f99` `2b5c6d6` `5c24903` `794fe31` `730d6ac` `07e
 scaffold PR #16 had just added (6 files, 234 lines), and the UI is rebuilt as flat modules:
 `gui/src/app.rs` with `Page`, `AppState`, `StatusMessage` and `PollTimers`, `gui/src/theme.rs` with
 `TuxedoTheme` (`apply`, `temp_color`, `load_color`, `power_color`), and a `gui/src/main.rs` reduced to
-the module list and the eframe entry point. `28b2f99` pins `egui = "0.29"`, `eframe = "0.29"` and
+the module list and the eframe entry point. `28b2f99` moves `egui` and `eframe` from the workspace's
+`0.28.0` to `0.29`, pinning `egui = "0.29"`, `eframe = "0.29"` and
 `egui_extras = { version = "0.29", features = ["all_plots"] }` in `gui/Cargo.toml`, adds `tokio` with
-`rt-multi-thread`/`sync`/`time` and `chrono = "0.4"`, sets a release profile and renames the package to
-`tuxedo-control-center-egui`. `794fe31` writes a second copy of the app structures into `main.rs` (386
+`rt-multi-thread`/`sync`/`time` and `chrono = "0.4"`, sets a release profile and renames the package
+to `tuxedo-control-center-egui`. `794fe31` writes a second copy of the app structures into `main.rs` (386
 lines, the file at 415), so the types exist twice until `464ab11` removes the copy.
 
 Files: `gui/src/{app,theme,main,application,config}.rs`, `gui/src/ui/`, `gui/src/egui_ui/`,
@@ -599,10 +605,11 @@ SHAs: `af26127` `6b69096`
 
 PR #17 (merge `af26127`) is a four-file net diff — 1 added, 3 modified, +141/−11 — whose payload is
 `gui/src/system_tray.rs` (121 lines: `SystemTray`, `TrayEvent`, `load_tray_icon`) and
-`tray-icon = "0.18"` in `gui/Cargo.toml`. `gui/src/main.rs` at `c8189d3` declares `mod app; mod
-dbus_client; mod theme; mod pages; mod keyboard_shortcuts; mod widgets;` and no `mod system_tray;`, so
-the module is not compiled or called at that tree. The PR's title also names WiFi and storage, which
-are not in its net diff: those rows arrive in the direct commits of the entry above.
+`tray-icon = "0.18"` in `gui/Cargo.toml`. `gui/src/main.rs` at `c8189d3` does not declare
+`mod system_tray` — its module list is `mod app; mod dbus_client; mod theme; mod pages; mod
+keyboard_shortcuts; mod widgets;` — so the module is not compiled at that tree. The PR's title also
+names WiFi and storage, which are not in its net diff: those rows arrive in the direct commits of the
+entry above.
 
 Files: `gui/src/system_tray.rs`, `gui/src/app.rs`, `gui/src/pages/tuning.rs`, `gui/Cargo.toml`
 
@@ -626,14 +633,15 @@ Files: `common/src/types.rs`, `daemon/src/{dbus_interface,hardware_control}.rs`,
 
 62 commits = 43 in 9 entries + 19 excluded:
 
-- 4 commits that restore the pre-PR-#15 GUI — `a408870` (+105/−97), `a371d2b` (+236/−111), `61330a8`
-  (+1/−1) and `1bffbea` (+121/−1). `a408870`'s diff is patch-identical to the reverse of PR #15's
-  `statistics_page.rs` change (`git patch-id` 525a143bbb7b on both) and `a371d2b`'s to the reverse of
-  its `tuning_page.rs` change (3e6eaef70993), so each rewrites its page back to the `new_variant`
-  shape; `1bffbea` is patch-identical to the unit 2a commit that first added the battery group
-  (`git patch-id` 674de0dce8ed) and puts `Battery Charge Control` back into
-  `gui/src/ui/settings_page.rs`, where PR #15 had removed it; `61330a8` passes the client to the
-  settings page again.
+- 4 commits that restore the pre-PR-#15 content of files under `gui/src/ui/` — `a408870` (+105/−97),
+  `a371d2b` (+236/−111), `61330a8` (+1/−1) and `1bffbea` (+121/−1). `a408870`'s diff is patch-identical
+  to the reverse of PR #15's `statistics_page.rs` change (`git patch-id` 525a143bbb7b on both) and
+  `a371d2b`'s to the reverse of its `tuning_page.rs` change (3e6eaef70993); `1bffbea` is
+  patch-identical to the unit 2a commit that first added the battery group (`git patch-id`
+  674de0dce8ed) and restores the pre-PR-#15 content of `gui/src/ui/settings_page.rs`, while `61330a8`
+  restores the client argument in that page's `create_page` (+1/−1). At `1bffbea` four of the five
+  files PR #15 edits under `gui/src/ui/` are identical to `9cbecab^1`, and `fan_curve_editor.rs`
+  keeps the PR's version until the directory is deleted in the next entry.
 - 4 CI workflow edits — `221ab9c` (+1/−1), `0c503f0` (+1/−1), `50b5b0f` (+2/−2), `fb0c4f9` (+1/−1).
 - 3 import-only edits — `4713f35` (+2/−0) `oneshot`, `b813a20` (+1/−0) `Color32`, `a65adff` (+1/−0)
   `Profile`.
