@@ -17,7 +17,7 @@ listed as excluded. Work that landed as direct commits cites short SHAs, and eac
 `git cat-file -t` to `commit` and is an ancestor of `origin/lapsphere`. The first pull request appears on
 2026-01-01, so every entry in unit 1 is SHA-cited.
 
-Covered up to: c8189d39cd747f7ba9ef01bb128dd9fb55ac9a01 (2026-01-08)
+Covered up to: 1532df6b5ee9622a1c9e58619dd9f4e62dfb18cb (2026-01-13)
 
 ## Maintainer's recollections
 
@@ -57,16 +57,18 @@ What the repository records of those recollections, as the commands return it.
 
 ## Unit accounting
 
-The history is split into twelve chronological units (unit 2 is written in two halves) plus a final
-unit for the commits after 2026-10-23, which is not written yet. The twelve bands partition 668 of
-the 671 commits on `lapsphere`; no commit falls in two bands.
+The history is split into twelve chronological units (units 2 and 3 are written in two halves) plus
+a final unit for the commits after 2026-10-23, which is not written yet. The bands are bounded by
+commit rather than by date, so adjacent windows overlap where a branch merged late: the four written
+bands are consecutive and cover the 267 commits through the split point of unit 3.
 
 | Unit | Window | Commits | Written |
 |------|--------|---------|---------|
 | 1 | 2025-12-16 → 2025-12-30 | 71 | this pass: 30 commits in 13 entries + 41 excluded = 71 |
 | 2a | 2026-01-01 → 2026-01-07 | 86 | unit 2a: 86 = 39 in 11 entries + 47 excluded |
 | 2b | 2026-01-06 → 2026-01-08 | 62 | unit 2b: 62 = 43 in 9 entries + 19 excluded (unit 2: 86 + 62 = 148) |
-| 3 | 2026-01-09 → 2026-01-17 | 95 | pending |
+| 3a | 2026-01-09 → 2026-01-13 | 48 | unit 3a: 48 = 30 in 11 entries + 18 excluded |
+| 3b | 2026-01-13 → 2026-01-19 | 48 | pending |
 | 4 | 2026-01-18 → 2026-01-26 | 55 | pending |
 | 5 | 2026-01-27 → 2026-01-31 | 61 | pending |
 | 6 | 2026-02-01 → 2026-02-10 | 37 | pending |
@@ -80,7 +82,10 @@ the 671 commits on `lapsphere`; no commit falls in two bands.
 
 Unit 2 is split at `9cbecab`, the merge of PR #15, so the two halves are bounded by commit rather
 than by date: 2b begins at the commit after that merge, and its author dates reach back to
-2026-01-06 in the branches merged later.
+2026-01-06 in the branches merged later. Unit 3 is split at `1532df6`, the merge of PR #25: 3a runs
+from the commit after `c8189d3` to that merge, 48 commits, and 3b from there to the last first-parent
+commit before the merge of PR #51, also 48; that boundary commit is dated 2026-01-19, so 3b's window
+reaches past 3a's.
 
 ---
 
@@ -655,3 +660,197 @@ Files: `common/src/types.rs`, `daemon/src/{dbus_interface,hardware_control}.rs`,
 
 Three pull requests are merged in this half — #16, #17 and #18 — and all three carry entries. Unit 2
 closes at 86 + 62 = 148 commits, the count the inventory gives for 2026-01-01..2026-01-08.
+
+## 2026-01-09 → 2026-01-19 — Unit 3a (48 commits, first half of unit 3)
+
+Unit 3 begins at the commit after the cursor and ends at the last first-parent commit before PR #51's
+merge; this half stops at the merge of PR #25, and the second half carries the remaining 48 commits.
+The half holds the 31 direct commits of 2026-01-09 and the four pulls merged up to 2026-01-13; 3b
+holds the boundary commit's 2026-01-19 author date.
+
+### 2026-01-09 — Font size setting and per-section polling sliders
+
+SHAs: `b27f9ca` `abff151` `09208be`
+
+`b27f9ca` puts a `FontSize` enum — Small, Medium, Large — into `AppConfig`, its first appearance in
+the tree; `09208be` adds `TuxedoTheme::apply_with_font_size`, which derives the five text styles from
+the variant (heading 18/22/26, body 12/14/16); and `abff151` gives the settings page a three-way
+selector that writes the config and resizes the text at once, drops the page's Save button, and adds
+a slider for each statistics section's polling rate — 0.5 s steps, WiFi and storage added, the
+system-info slider dropped. Those sliders write `*_poll_rate` fields that nothing reads at this
+tree: the poll loop in `gui/src/app.rs` keeps hardcoded intervals.
+
+Files: `common/src/types.rs`, `gui/src/theme.rs`, `gui/src/pages/settings.rs`
+
+### 2026-01-09 — WiFi rows and storage temperature read in the GUI process
+
+SHAs: `0090b90`
+
+`read_wifi_info` walks `/sys/class/net`, keeps the interfaces that carry a `wireless` node, and takes
+the driver from the module symlink and the temperature from `device/hwmon/temp1_input`; the signal
+level comes from `/proc/net/wireless`, the channel, width and rates from `iw dev <if> info` and
+`iw dev <if> link`. `read_storage_info` fills the temperature it had left `None`, and `AppState`
+loses `config_dirty` and `PollTimers`. The poll loop becomes six independent intervals under
+`tokio::select!`; PR #20 below returns it to a single joint poll.
+
+Files: `gui/src/app.rs`
+
+### 2026-01-09 — Storage usage rows in the statistics page
+
+SHAs: `0bb7c5b` `ffc490f` `71fd960`
+
+`0bb7c5b` gives each storage device a usage row: `get_free_space` resolves the device's mount point
+with `findmnt -n -o TARGET --source <dev>` and reads `libc::statvfs`, the first `statvfs` use in the
+tree, and the page draws a progress bar of used of total beside the free and total figures. The same
+commit opens the system, GPU and storage sections by default. `ffc490f` and `71fd960` rewrite the
+mount lookup twice on the same day, the second through `systemstat`'s mount list. PR #20 below
+removes `get_free_space` from the GUI and computes usage in the daemon.
+
+Files: `gui/src/pages/statistics.rs`
+
+### 2026-01-09 — Draggable points in the fan curve editor
+
+SHAs: `07004cd` `257db20`
+
+`07004cd` makes the plot interactive: a drag starting within five units of a point moves it, clamped
+to 0–100 on both axes and written into `curve.points` as it moves; a click within eight units selects
+the nearest point; and a point added with "Add point" is selected on creation. The axes are pinned to
+0–100 with zoom, drag and boxed zoom disabled. `257db20` removes the "Remove Selected" button and
+returns the per-row delete button to every row while more than two points remain.
+
+Files: `gui/src/widgets/fan_curve_editor.rs`
+
+### 2026-01-09 — Tuning page rebuilt around the selected profile
+
+SHAs: `223b57b` `504e9da`
+
+`223b57b` rebuilds the page: a `TopBottomPanel` header names the profile being edited and carries Save
+(writes the config, then applies that profile over D-Bus) and Reset to Default; the CPU section gains
+an AMD P-State mode combo — `active`, `passive`, `guided` — above the governor, energy-performance
+preference, boost and SMT controls and the frequency sliders; keyboard, screen and fan sections
+follow, the fan section instantiating one `FanCurveEditor` per fan out of `fan_info.len().max(2)`.
+`504e9da` takes the governor's default from `available_governors` and clamps the min and max sliders
+against each other.
+
+Files: `gui/src/pages/tuning.rs`
+
+### 2026-01-09 — Profiles page: radio selection, Standard reset, save on switch
+
+SHAs: `12f4e46`
+
+Radio buttons replace the ●/○ labels and selecting one switches the profile. The Standard profile
+gains a "Reset to Default" button that rebuilds it from `create_standard_profile` (governor
+`schedutil`, EPP `balance_performance`, AMD P-State `active`), deleting the current profile switches
+to Standard first, a new profile is a copy of the current one instead of the default, and switching,
+resetting, deleting and creating all write the config at once where the page previously set
+`config_dirty`.
+
+Files: `gui/src/pages/profiles.rs`
+
+### 2026-01-09 — GPU frequency, temperature, load, power and voltage in the daemon
+
+SHAs: `d83b33d` `66edd60`
+
+`get_gpu_info` had pushed all five metrics as `None`; `d83b33d` reads them from the card's `device`
+directory — frequency from `pp_dpm_sclk` (AMD) or `gt_cur_freq_mhz` (Intel), temperature from
+`hwmon/*/temp1_input`, load from `gpu_busy_percent`, power from `hwmon/power1_average` or
+`power1_input`, voltage from `hwmon/in0_input` — and names each card after its vendor id. It also
+adds `get_scheduler_info`, which reports CFS or EEVDF according to whether the `sched_features` file
+mentions `EEVDF`, and `66edd60` carries `scheduler` and `available_schedulers` in `CpuInfo`.
+
+Files: `daemon/src/hardware_detection.rs`, `common/src/types.rs`
+
+### 2026-01-10 — Hardware reads move from the GUI into the daemon (PR #20)
+
+SHAs: `55531b6` `527a11d` `b90d3a6`
+
+PR #20 (merge `55531b6`, 12 files, +406/−451) is an architecture change: the GUI process stops
+reading sysfs. `gui/src/app.rs` loses `read_battery_info`, `read_wifi_info` with its three helpers,
+`read_storage_info` and the `read_sysfs_*` helpers (+54/−283 for the file), and the daemon gains
+`get_battery_info`, `get_storage_device_info` and `get_mount_info` beside the existing
+`get_wifi_info`; the three new readers are serialised to JSON and exposed as new D-Bus methods, and
+`gui/src/dbus_client.rs` gains a command for each of the four. `StorageInfo` becomes
+`StorageDevice` plus a separate `MountInfo` carrying mount point, filesystem type, total, used and
+percent, so usage is computed in the daemon from `systemstat`'s mount list. The poll loop collapses
+from per-section intervals to one 1 s `tokio::join!` of all seven requests, repaint becomes
+`request_repaint_after(500 ms)` instead of continuous, and the fan daemon holds one `Arc<TuxedoIo>`
+and caches the sorted curves instead of opening the io device on every pass.
+
+Files: `Cargo.toml`, `common/src/types.rs`,
+`daemon/src/{main,dbus_interface,hardware_detection,fan_daemon}.rs`, `gui/src/{app,dbus_client}.rs`,
+`gui/src/pages/{statistics,settings}.rs`
+
+### 2026-01-12 — NVIDIA locked clocks over NVML (PR #23)
+
+SHAs: `1d7da7f` `945711f`
+
+PR #23 (merge `1d7da7f`, 13 files, +697/−105). NVML arrives through `nvml_wrapper = "0.11"`: a
+`Lazy` `Nvml::init()` in `hardware_control.rs` and `set_gpu_locked_clocks`, which calls
+`device.set_gpu_locked_clocks(GpuLockedClocksSetting::Numeric { … })`, with
+`set_memory_locked_clocks`, the two reset calls and two clock-range queries behind D-Bus methods, and
+a GPU Tuning section of min/max sliders. `MemoryInfo` and a Memory (RAM) statistics section,
+`BatteryInfo.status` and the `GpuSettings` clock fields land in the same PR, and the service file
+becomes a systemd unit with `BusName=com.tuxedo.Control`, replacing the `[D-BUS Service]`
+registration. Its title's "overclocking" is not in the diff: it sets locked clock ranges, and offsets
+arrive in the next entry. Hardware behaviour is not established by the diff.
+
+Files: `common/src/types.rs`,
+`daemon/src/{hardware_control,hardware_detection,dbus_interface}.rs`, `daemon/tuxedo-daemon.service`,
+`gui/src/{app,dbus_client}.rs`, `gui/src/pages/{statistics,tuning,profiles}.rs`, `gui/Cargo.toml`
+
+### 2026-01-12 — GPU clock offsets and Prime profile selection (PR #24)
+
+SHAs: `d549b7a` `2245b71` `e62dc72` `067ec54` `c4548c8`
+
+PR #24 (merge `d549b7a`, 8 files, +319/−26). `GpuSettings` gains `core_offset`, `memory_offset` and
+`prime_profile`; `set_gpu_core_offset` and `set_gpu_memory_offset` call
+`device.set_clock_offset(Clock::Graphics|Clock::Memory, PerformanceState::Zero, offset)`, four D-Bus
+methods query the limits and apply them, and `set_prime_profile` checks the name against `on-demand`,
+`nvidia` and `intel` and runs `prime-select <profile>`. The branch first writes a hand-rolled
+`libloading` binding in `daemon/src/nvml.rs` — `nvmlDeviceSetClockOffsets` into an `nvmlClockOffset`
+struct, with a second file under `daemon/srcs/` — and `e62dc72` deletes both in favour of
+`nvml_wrapper`. `prime-select` appears first in `2245b71`. Hardware behaviour is not established by
+the diff.
+
+Files: `common/src/types.rs`,
+`daemon/src/{hardware_control,hardware_detection,dbus_interface}.rs`, `gui/src/{app,dbus_client}.rs`,
+`gui/src/pages/{tuning,profiles}.rs`
+
+### 2026-01-13 — iGPU detection, memory frequency and the Prime profile in Settings (PR #25)
+
+SHAs: `1532df6` `584f7e0` `7541fbd` `7969c69` `bac5293` `fdfe3b8`
+
+PR #25 (merge `1532df6`, 6 files, +302/−68). `get_gpu_info` no longer returns NVML's NVIDIA list
+alone: the `/sys/class/drm` iGPUs are listed too, named from their PCI device ids by
+`get_amd_gpu_name` (Vega 8/3, Renoir, Cezanne, 680M, 660M, 780M, 760M) and `get_intel_gpu_name`
+(UHD 620, Tiger Lake, Rocket Lake, Iris Xe, Iris Plus, Arc DG2), and NVIDIA's status reads
+`performance_state()` with `power_state()` as the fallback. `GpuInfo.memory_frequency` is added, filled
+from NVML `Clock::Memory` or the AMD iGPU's `pp_dpm_mclk`, and drawn in the statistics page. The Prime
+selector moves to the settings page, applied over D-Bus and saved into every profile, behind a
+two-step restart confirmation that runs `systemctl reboot`. Hardware behaviour is not established by
+the diff.
+
+Files: `common/src/types.rs`, `daemon/src/hardware_detection.rs`, `gui/src/app.rs`,
+`gui/src/pages/{settings,statistics,tuning}.rs`
+
+### Unit 3a accounting
+
+48 commits = 30 named in the 11 entries above + 18 excluded:
+
+- 3 commits withdrawing the automatic-profile-switching setting — `d862851` (+0/−7) removes the field
+  from `AppConfig`, `940b3ca` (+0/−4) its controls in the profiles page and `69d81cc` (+0/−4) the
+  remaining ones in the tuning page.
+- 1 commit hardening the existing CPU and backlight writes — `e219ac7` (+63/−19): it orders the min
+  and max frequency writes by the current values, adds the `amd_pstate/cpb_boost` boost path and
+  `amdgpu_bl1` to the backlight list, tries `actual_brightness` before `brightness`, and returns `Err`
+  where it previously returned `Ok` with no writable backlight.
+- 1 configuration-loading refactor — `be78b40` (+4/−13) reduces `load_config` to the disk read alone,
+  dropping the "Default"→"Standard" rename that the new defaults make unnecessary.
+- 1 window-size tweak — `adc3310` (+2/−2).
+- 1 agent-instruction file — `b4a8070` (+44/−0) adds `.github/agents/my-agent.agent.md`.
+- 11 manifest edits — `a48c286` (+1/−0), `012ab63` (+2/−0), `ab75063` (+0/−2), `3b14869` (+3/−1),
+  `cfec290` (+2/−0), `15cc7fc` (+1/−1), `a9fa9c0` (+1/−1), `edeb11b` (+0/−2), `a6197a3` (+4/−4),
+  `e49c6f3` (+1/−1), `11adc1d` (+1/−1). `012ab63` and `cfec290` add `ashpd` and `zvariant` to
+  `daemon/Cargo.toml` and `ab75063` is the exact reverse of that addition; `3b14869` adds both to
+  `gui/Cargo.toml` and `a6197a3` removes them again. The only dependency of this group in the tree at
+  the merge of PR #20 is `systemstat`, which `a6197a3` adds to `gui/Cargo.toml`.
