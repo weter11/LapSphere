@@ -24,7 +24,7 @@ same states and only their arguments, parsing or formatting change. A change tha
 documented for the new functionality alone, and a wholly repair-only pull request goes to the unit's
 excluded commits.
 
-Covered up to: 4965305ba41db72135e6ddda3db64d8f89ee3653 (2026-08-29)
+Covered up to: 5c57bc7efa20d6b840bf8d0ea474c087ba0fee17 (2026-09-29)
 
 ## Maintainer's recollections
 
@@ -94,7 +94,7 @@ halves" is split at a merge when that unit is written.
 | 6 | 2026-02-03 → 2026-02-10 | 24 | unit 6: 24 = 24 in 4 entries + 0 excluded |
 | 7 | 2026-05-14 → 2026-05-22 | 8 | unit 7: 8 = 6 in 1 entry + 2 excluded |
 | 8 | 2026-08-22 → 2026-08-29 | 41 | unit 8: 41 = 4 in 2 entries + 37 excluded |
-| 9 | 2026-08-25 → 2026-09-29 | 35 | pending — `4444c43` (#99) to `5c57bc7` (#109) |
+| 9 | 2026-08-25 → 2026-09-29 | 35 | unit 9: 35 = 29 in 5 entries + 6 excluded |
 | 10 | 2026-09-30 → 2026-10-10 | 25 | pending — `f0dac95` (#112) to `3686f1c` (#117) |
 | 11 | 2026-10-10 → 2026-10-16 | 84 | written in two halves; boundary chosen when written — `b1c8719` (#120) to `f174a8e` (#132) |
 | 12 | 2026-10-23 | 8 | pending — `75d8767` (#133) to `2ff246f` (#136) |
@@ -1569,3 +1569,98 @@ Files: `daemon/src/{daemon_settings,dbus_interface,main}.rs`, `gui/src/{app,dbus
 
 Eleven pull requests are merged in this block — #86, #87, #88, #89, #90 and #92 to #97 — of which two
 carry an entry.
+
+## 2026-08-25 → 2026-09-29 — Unit 9 (35 commits)
+
+Device ownership, an allocator change, a GPU poll model and a fan-write gate, plus two repair-only
+pull requests.
+
+### 2026-09-12 — Daemon-owned `/dev/tuxedo_io` handle and a supervising unit (PR #99)
+
+SHAs: `4444c43` `3fe0148`
+
+PR #99 (merge `4444c43`, 8 files, +80/−21) opens `/dev/tuxedo_io` once per run: `TuxedoIo::shared()`
+(`daemon/src/tuxedo_io.rs:136`) keeps one `Arc` in a `OnceLock`, and the D-Bus methods and poll loops
+use it instead of opening the device themselves, so interface detection no longer runs inside a poll
+tick. The same PR adds `data/lapsphere-daemon.service` — `Type=dbus`, `Restart=on-failure`,
+`CPUQuota=50%`, `MemoryMax=768M`, `TasksMax=256` (`:11-22`) — and installs it from `PKGBUILD` and
+`debian/rules`, so the daemon runs under systemd supervision and resource caps on both packaging
+paths.
+
+Files: `PKGBUILD`, `daemon/src/{dbus_interface,hardware_control,hardware_detection,main,tuxedo_io}.rs`,
+`data/lapsphere-daemon.service`, `debian/rules`
+
+### 2026-09-12 — mimalloc as the GUI's global allocator (PR #101)
+
+SHAs: `3bf1507` `e6eec43` `1f8af48`
+
+PR #101 (merge `3bf1507`, 3 files, +39/−0) adds `mimalloc = { version = "0.1", default-features =
+true }` to `gui/Cargo.toml:37` — the default features link the bundled C library statically — and sets
+`#[global_allocator] static ALLOCATOR: mimalloc::MiMalloc` in `gui/src/main.rs:125-126`, so the GUI
+process allocates through mimalloc instead of glibc malloc. `Cargo.lock` gains `mimalloc 0.1.52` and
+`libmimalloc-sys 0.1.49`; the daemon keeps the system allocator.
+
+Files: `Cargo.lock`, `gui/Cargo.toml`, `gui/src/main.rs`
+
+### 2026-09-17 — Work-driven GPU live tier, holder inventory, VRAM availability (PR #105)
+
+SHAs: `8105751` `b30aa91` `2b0b9a6` `e2d8642` `4c9cf6f` `02c3abf` `8575bdf` `f3e0f9e` `25fe846`
+`c235566` `a7680cb` `607a29a` `e2c313e` `04eaa6f` `8563b17` `854bb6f` `a19a35f`
+
+PR #105 (merge `8105751`, 15 files, +3604/−847) replaces the idle-snapshot gate with one GPU poll path
+over three tiers chosen from sysfs (`daemon/src/hardware_detection.rs:219`): `Suspended` (sysfs only,
+never probed), `Live` (P0 to P2, a wake from suspend, or any P-state while utilization exceeds 1 %,
+`:104`, `:249`) and `Quiet` (sysfs only, one bounded re-probe after `QUIET_REPROBE_SECS` = 45 s,
+`:98`). `GpuInfo` gains `pci_bus_id`, `process_snapshot` and `vram_memory`
+(`common/src/types.rs:185-191`); `gpu_activity.rs` fills the holder list from `/proc/*/fd` without
+opening a device (`:22`) and `hardware_detection.rs:1757` attaches it. The statistics page draws VRAM
+availability (`gui/src/pages/statistics.rs:489`); the holder rows it first had are removed again in
+the same PR (`04eaa6f`).
+
+Files: `.github/workflows/rust.yml`, `PKGBUILD`, `common/src/{lib,types}.rs`,
+`daemon/src/{dbus_interface,gpu_activity,hardware_control,hardware_detection,main}.rs`,
+`docs/`, `gui/src/pages/{settings,statistics}.rs`, `gui/tests/fixtures/gpu_legacy.json`
+
+### 2026-09-18 — Remembered gamepads keyed by session-scoped uids (PR #91)
+
+SHAs: `31e3a83` `7a041bc`
+
+PR #91 (merge `31e3a83`, one branch commit, 4 files, +258/−36) moves the GUI's remembered-pad
+reconciliation into `gui/src/gamepad_registry.rs`: `is_volatile_uid()` (`:21-22`) treats a `/sys/...`
+uid as session-scoped, `reconcile()` (`:39`) removes such a row once the pad is gone (`:43`) instead of
+keeping it as disconnected, and a connected pad whose stable uid is new adopts the row with the same
+name and connection type (`:86`) rather than appending another. The daemon's uid is unchanged: the
+commit labels the two sources (`udev`, `sysfs-path-volatile`) and logs which one produced it
+(`daemon/src/hardware_detection.rs:3953-3959`, `:3971`).
+
+Files: `daemon/src/hardware_detection.rs`, `gui/src/{app,gamepad_registry,main}.rs`
+
+### 2026-09-29 — Clevo fan speed written only when that fan needs it (PR #109)
+
+SHAs: `5c57bc7` `4e16cf7` `0b9a1b7` `003302e` `09ba397`
+
+PR #109 (merge `5c57bc7`, 4 files, +364/−24) puts a per-fan gate in front of the Clevo speed write.
+`set_fan_speed` (`daemon/src/tuxedo_io.rs:392`) still reads each fan's raw byte and packs all three
+into one `i32`, but issues the `W_CL_FANSPEED` ioctl (`MAGIC_WRITE_CL`, sequence `0x10`, `:511`) only
+when the request differs from the last commanded value for that fan, the readback differs from the
+request, or 30 s have passed (`clevo_should_write`, `:104`; `CLEVO_RECOMMAND_INTERVAL`, `:119`). A
+failed read skips the write, and an explicit `SetFanSpeed` bypasses the gate
+(`force_next_speed_write`, `:388`). Hardware support is not established by the diff.
+
+Files: `daemon/src/{hardware_control,main,tuxedo_io}.rs`, `data/lapsphere-daemon.service`
+
+### Unit 9 accounting
+
+35 commits = 29 named in the 5 entries above + 6 excluded:
+
+- 2 commits of PR #100, CI and README — merge `ca20c13` (+9/−40) and `b933b9e` (+9/−40): the workflow
+  uploads packages only and drops the unzipped-binary artifacts PR #87 added, and the README names the
+  two artifact types.
+- 4 commits of PR #106, allocator and log-ring retention — merge `4ba9711` (+274/−14), `eabb7c4`
+  (+25/−5), `d5b1e90` (+158/−9) and `8880716` (+116/−25): sets mimalloc's `arena_eager_commit`,
+  `allow_thp` and `purge_delay` from inside the GUI process, drops Trace records from the daemon log
+  ring, and fetches that ring only while the Logs tab is on screen. The allocator stays; which calls
+  are issued, and at which moments, is what changes.
+
+Seven pull requests are merged in this block — #99, #100, #101, #105, #106, #109 and #91 — of which
+five carry an entry.
