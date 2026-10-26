@@ -26,7 +26,7 @@ of values, thresholds or options of an existing mechanism is a repair. A change 
 documented for the new functionality alone, and a wholly repair-only pull request goes to the unit's
 excluded commits.
 
-Covered up to: 3b7bd8f25fc96f07c7ad76de0607a2e1f171193f (2026-10-14)
+Covered up to: f174a8ed6c5b29ade29d8ecec2f102c91e8b735a (2026-10-16)
 
 ## Maintainer's recollections
 
@@ -77,8 +77,9 @@ What the repository records of those recollections, as the commands return it.
 ## Unit accounting
 
 The history is split into twelve chronological units (units 2, 3, 5 and 11 are written in two
-halves) plus a final unit for the commits after 2026-10-23, which is not written yet. The bands
-are bounded by commit rather than by date, so adjacent windows overlap where a branch merged late.
+halves) plus a final unit for the commits after 2026-10-23; unit 12 and the final unit are still to
+be written. The bands are bounded by commit rather than by date, so adjacent windows overlap where a
+branch merged late.
 Together they partition the branch: units 1 and 2 hold the 219 commits behind `c8189d3`, unit 3 the
 96 up to `05a0918`, unit 4 the 51 up to `1d91b17`, and units 5 to 12 with the final unit the
 remaining 305 — 219 + 96 + 51 + 305 = 671, the commit count of `origin/lapsphere`. A row marked
@@ -99,7 +100,7 @@ remaining 305 — 219 + 96 + 51 + 305 = 671, the commit count of `origin/lapsphe
 | 9 | 2026-08-25 → 2026-09-29 | 35 | unit 9: 35 = 29 in 5 entries + 6 excluded |
 | 10 | 2026-09-30 → 2026-10-10 | 25 | unit 10: 25 = 16 named in the 4 entries above + 9 excluded |
 | 11a | 2026-10-10 → 2026-10-14 | 41 | unit 11a: 41 = 39 named in the 1 entry above + 2 excluded |
-| 11b | 2026-10-14 → 2026-10-16 | 43 | pending — `17ece90` (#122) to `f174a8e` (#132) |
+| 11b | 2026-10-14 → 2026-10-16 | 43 | unit 11b: 43 = 31 named in the 6 entries above + 12 excluded |
 | 12 | 2026-10-23 | 8 | pending — `75d8767` (#133) to `2ff246f` (#136) |
 | final unit | 2026-10-25 | 3 | not written — `79abeab` (#140) |
 
@@ -1795,3 +1796,127 @@ Files: `common/src/types.rs`,
   `mod.rs` and `window.rs`; no behaviour changes.
 
 One pull request in this half carries an entry — #120; #121 documents the panel and is excluded above.
+
+## 2026-10-14 → 2026-10-16 — Unit 11b (43 commits, second half of unit 11)
+
+Six of the ten panel stages, plus the Vulkan layer spike: position, stacking, transparency, visibility
+and frame metrics carry entries, and #122, #123, #129 and #132 are documentation or a contract repair.
+
+### 2026-10-14 — Vulkan implicit layer, stage 1: presents into a shared ring (PR #124)
+
+SHAs: `ec7a359` `df38d9b` `65fd5ee` `c88e68e` `0b427ef` `edbb096`
+
+PR #124 (merge `ec7a359`, 16 files, +2856/−0) adds `spike/vk-layer/`: the crate
+`lapsphere-frames-layer`, in its own empty workspace (`Cargo.toml:10`), with `src/lib.rs`, `shm.rs`,
+`vkraw.rs`, `buildid.rs`, `src/bin/frames_reader.rs` (an independent second-process reader), two layer
+manifests and build/install/run/verify scripts. The library exports fourteen loader and Vulkan entry
+points; only `vk_queue_present_khr` (`src/lib.rs:994`) records anything — the stamp is taken at entry
+from `CLOCK_MONOTONIC` (`:999`) and the present-to-present interval is written (`src/shm.rs:225`) into
+`$XDG_RUNTIME_DIR/lapsphere/frames-<pid>` (`:86`, `:108`), a 128-byte header and a 4096-slot ring
+(`:13`, `:16`). Its recorded run reads back 899 intervals for 900 presents (`STATUS.md:16-19`). Not
+built by the workspace: `Cargo.toml:2` still names `daemon`, `common` and `gui`, no CI step or package
+rule builds or installs it, and `install.sh` copies the manifest into
+`~/.local/share/vulkan/implicit_layer.d/` by hand.
+
+Files: `spike/vk-layer/{Cargo.toml,STATUS.md,TESTING.md,build.sh,install.sh,run.sh,verify.sh}`,
+`spike/vk-layer/manifests/`, `spike/vk-layer/src/`, `spike/vk-layer/src/bin/frames_reader.rs`
+
+### 2026-10-14 — Panel position stored, clamped and restored (PR #126)
+
+SHAs: `ecf9ac7` `ffb7c31`
+
+PR #126 (merge `ecf9ac7`, 4 files, +875/−26) makes where the panel sits a stored property:
+`PanelConfig::position` (`gui/src/panel/config.rs:263`) is written from the window's observed corner
+(`ViewportInfo::outer_rect`, `gui/src/app.rs:1531`) once it settles (`PositionWatch`,
+`gui/src/panel/window.rs:322`), never from the value requested, and on start `restore_position` (`:163`)
+clamps it into the monitor (`clamp_to_monitor`, `:185`) so a smaller screen moves the panel back into
+view. A request the window manager places elsewhere is reported rather than assumed
+(`position_matches`, `:285`); the drag itself is the window manager's.
+
+Files: `gui/src/app.rs`, `gui/src/panel/{config,mod,window}.rs`
+
+### 2026-10-14 — Panel stacking and taskbar state over EWMH (PR #127)
+
+SHAs: `7262c5b` `c729d4b` `10ddf93`
+
+PR #127 (merge `7262c5b`, 8 files, +1632/−35) adds `gui/src/panel/ewmh.rs` on `x11rb 0.13`
+(`gui/Cargo.toml:75`): the panel asks the window manager for three `_NET_WM_STATE` atoms —
+`_NET_WM_STATE_ABOVE` (`:62`), `_NET_WM_STATE_SKIP_TASKBAR` (`:64`) and `_NET_WM_STATE_SKIP_PAGER`
+(`:66`) — chosen from `stacking` and `hide_from_taskbar` (`wanted_state`, `:176`), sent one atom per
+`ClientMessage` to the root window (`send_change`, `:658`; the event at `:670`), read back
+(`get_property`, `:633`) and retried up to six times 300 ms apart (`:215`, `:219`). Rounds are
+serialised so the last request is the one the window keeps (`RoundLock`, `:319`).
+
+Files: `Cargo.lock`, `gui/Cargo.toml`, `gui/src/app.rs`, `gui/src/panel/{config,ewmh,menu,mod,window}.rs`
+
+### 2026-10-14 — Panel transparency from the surface's own alpha (PR #128)
+
+SHAs: `565930e` `098c740` `42d1551`
+
+PR #128 (merge `565930e`, 9 files, +557/−46) gives the panel a translucent background without an
+opacity atom. The root window is created `with_transparent(true)` (`gui/src/main.rs:268`), which obtains
+an ARGB visual on X11; `eframe::App::clear_color` (`gui/src/app.rs:1714`) clears the panel to zero alpha
+(`panel::window::clear_color`, `:216`) while the ordinary window stays opaque, and the panel's fill
+carries the configured alpha (`background_fill`, `:245`, called at `gui/src/panel/render.rs:230`). The
+`panel.json` key is `background_opacity`, default `1.0`, clamped to `0.25..=1.0`
+(`gui/src/panel/config.rs:66`, `:72-73`). `_NET_WM_WINDOW_OPACITY` is not used — it would fade the text
+with the background (`docs/development/panel-transparency.md:116`).
+
+Files: `docs/development/panel-transparency.md`, `docs/development/panel-{measurements,v1-baseline}.md`,
+`gui/src/app.rs`, `gui/src/main.rs`, `gui/src/panel/{menu,mod,render,window}.rs`
+
+### 2026-10-15 — Panel visibility: global hotkey, `TogglePanel`, and the way back (PR #130)
+
+SHAs: `b0b27e3` `ac70e5b` `760f178` `408d1b0` `9ea4245` `9bcc6db` `367a36c` `624702d`
+`3b97afa` `212ef85` `bb50974`
+
+PR #130 (merge `b0b27e3`, 8 files, +3708/−23) adds `gui/src/panel/visibility.rs`: a passive `XGrabKey`
+on the root window watched by a thread, with masks taken from the configured modifiers plus every lock
+combination (`lock_variants`, `:130`), and a `TogglePanel` method on `io.lapsphere.Gui.Panel` at
+`/io/lapsphere/Gui/Panel` (`:1125`, `:1127`) exported on the connection that owns `io.lapsphere.Gui`
+(`gui/src/bus_connection.rs:19`). Both routes set one latch (`request_toggle`, `:715`) that the frame
+loop drains once (`take_toggle`, `:737`; `gui/src/app.rs:1937`) through `apply_visibility_toggle`
+(`:1547`) into `ViewportCommand::Visible` (`:1560`, `:1574`). The `panel.json` key is `hotkey`, default
+`Shift+F9` (`gui/src/panel/config.rs:85`), and a hide is refused when no route back exists
+(`hide_outcome`, `:614`).
+
+Files: `docs/development/panel-visibility.md`, `gui/src/app.rs`, `gui/src/bus_connection.rs`,
+`gui/src/main.rs`, `gui/src/panel/{config,menu,mod,visibility}.rs`
+
+### 2026-10-15 — Six frame elements read from the layer's segment (PR #131)
+
+SHAs: `bbe0c4f` `3f43f41` `d9473b5` `639ed6d` `d725345` `f0d07ef`
+
+PR #131 (merge `bbe0c4f`, 21 files, +5668/−248) adds `gui/src/panel/frames/` — `shm` (protocol v1,
+read-only), `source`, `stats`, `graph` — and the six first-release elements: `game_name`, `fps`,
+`frametime_ms`, `frametime_graph`, `low_1pct` and `low_01pct` (`gui/src/panel/frames/mod.rs:4-5`). The
+source is the layer's `frames-<pid>` segment rather than a D-Bus call (`:14`), and `game_name` is the
+header's `exe_name` (`frames/shm.rs:145`). One worker polls at `refresh_hz`
+(`gui/src/panel/config.rs:128`) and publishes an immutable snapshot; `fps` and `frametime_ms` are
+`1000/mean` of the intervals and the two lows `1000/mean` of the worst `ceil(pct/100 × n)`, ported from
+`docs/development/tools/frametime_stats.py` (`frames/stats.rs:12-13`), over a `window_seconds` window
+(`config.rs:113`). An absent or stale segment renders every element unavailable.
+
+Files: `Cargo.lock`, `docs/development/panel-{frames,measurements,v1-baseline}.md`,
+`docs/development/tools/{README.md,frametime_stats.py}`, `gui/Cargo.toml`, `gui/src/app.rs`,
+`gui/src/panel/frames/{fake,graph,mod,shm,source,stats}.rs`, `gui/src/panel/{config,layout,menu,mod,render,rows,window}.rs`
+
+### Unit 11b accounting
+
+43 commits = 31 named in the 6 entries above + 12 excluded:
+
+- 2 commits of PR #122 — merge `17ece90` (+70/−6) and `c0b0056` (+70/−6): the panel's right-click target
+  is documented as `ui.max_rect()` and pinned by a test that compares the two rects; the commit states
+  no behaviour change, and the interaction surface is untouched.
+- 4 commits of PR #123, panel baseline documentation — merge `22c14a1` (+374/−0), `e0f0f6c` (+269/−0),
+  `06ef0cf` (+151/−66) and `9c35dad` (+27/−7): `docs/development/panel-v1-baseline.md` and five lines in
+  `docs/development/panel-measurements.md`.
+- 2 commits of PR #129, stage 4 acceptance — merge `ee759ef` (+115/−16) and `b2b73b1` (+115/−16): the
+  acceptance run recorded against the merge commit of PR #128, and stage 4 moved to PASS in
+  `docs/development/panel-v1-baseline.md`.
+- 4 commits of PR #132, stage 7 acceptance — merge `f174a8e` (+700/−35), `b67dfd7` (+624/−17),
+  `d9734d8` (+15/−4) and `c11f45d` (+91/−44): `docs/development/panel-stage7-acceptance.md` with four
+  screenshots, plus the baseline and frames pages.
+
+Ten pull requests are merged in this half — #122, #123, #124, #126, #127, #128, #129, #130, #131 and
+#132 — of which six carry an entry; #122 is a contract repair and #123, #129 and #132 are documentation.
