@@ -24,7 +24,7 @@ same states and only their arguments, parsing or formatting change. A change tha
 documented for the new functionality alone, and a wholly repair-only pull request goes to the unit's
 excluded commits.
 
-Covered up to: a453a7522f277e8c5727dea47c491c57e9e66609 (2026-05-22)
+Covered up to: 4965305ba41db72135e6ddda3db64d8f89ee3653 (2026-08-29)
 
 ## Maintainer's recollections
 
@@ -93,7 +93,7 @@ halves" is split at a merge when that unit is written.
 | 5 | 2026-01-26 → 2026-02-03 | 77 | unit 5a: 40 = 40 in 7 entries + 0 excluded; unit 5b: 37 = 25 in 3 entries + 12 excluded |
 | 6 | 2026-02-03 → 2026-02-10 | 24 | unit 6: 24 = 24 in 4 entries + 0 excluded |
 | 7 | 2026-05-14 → 2026-05-22 | 8 | unit 7: 8 = 6 in 1 entry + 2 excluded |
-| 8 | 2026-08-22 → 2026-08-29 | 41 | pending — `a4ae466` (#86) to `4965305` (#97) |
+| 8 | 2026-08-22 → 2026-08-29 | 41 | unit 8: 41 = 4 in 2 entries + 37 excluded |
 | 9 | 2026-08-25 → 2026-09-29 | 35 | pending — `4444c43` (#99) to `5c57bc7` (#109) |
 | 10 | 2026-09-30 → 2026-10-10 | 25 | pending — `f0dac95` (#112) to `3686f1c` (#117) |
 | 11 | 2026-10-10 → 2026-10-16 | 84 | written in two halves; boundary chosen when written — `b1c8719` (#120) to `f174a8e` (#132) |
@@ -1498,3 +1498,74 @@ Files: `.github/workflows/rust.yml`, `Cargo.lock`, `Cargo.toml`, `gui/src/{app,k
   laptop speed limits.
 
 One pull request is merged in this block — #84 — and it carries an entry.
+
+## 2026-08-22 → 2026-08-29 — Unit 8 (41 commits)
+
+Two GPU-polling features on 2026-08-23, three repairs, and six architecture-documentation pull
+requests that add 29 commits of prose and no code.
+
+### 2026-08-23 — RTD3-aware NVML gate: suspended, idle and working (PR #88)
+
+SHAs: `a33f83e` `35865a5`
+
+PR #88 (merge `a33f83e`, 3 files, +459/−4) puts a tier decision before every NVML touch. A tick
+serves the suspended stub untouched when every adapter reads `suspended`
+(`daemon/src/hardware_detection.rs:2222`); when every adapter is either suspended or holds a snapshot
+newer than `IDLE_CACHE_TTL_SECS` = 30 s (`:62`), it returns the last full pass's frequency, memory
+clock, temperature, load, power and voltage from `IDLE_METRICS_CACHE` (`:80`, `:2306-2313`) and issues
+no NVML call, so the kernel's autosuspend timer can expire. `GetGpuInfoFull`
+(`daemon/src/dbus_interface.rs:99`) arms `FULL_NVML_REFRESH_REQUESTED` (`daemon/src/main.rs:46`) for
+one forced pass that may wake a suspended card. PR #105 replaces the gate with a three-tier model.
+
+Files: `daemon/src/{dbus_interface,hardware_detection,main}.rs`
+
+### 2026-08-23 — Daemon poll intervals read from the GUI settings (PR #90)
+
+SHAs: `67bb939` `f3c48a8`
+
+PR #90 (merge `67bb939`, 5 files, +376/−4) adds `daemon/src/daemon_settings.rs`: the daemon reads
+`statistics_sections` from `~/.config/lapsphere/settings.json` (`:105`) and maps three jobs —
+`hardware_monitor` to `min(cpu_poll_rate, gpu_poll_rate)` (`:88`), `fan_control` to
+`fans_poll_rate` (`:89`), `gpu_overclock` to `gpu_overclock_poll_rate` (`:90`) — each floored at
+50 ms, over the previous hardcoded 1000/2000/1000 ms (`:31-33`). `SyncDaemonPollSettings`
+(`daemon/src/dbus_interface.rs:592`) reschedules only the intervals that changed, and the GUI calls it
+after writing settings, so a rate change needs no daemon restart.
+
+Files: `daemon/src/{daemon_settings,dbus_interface,main}.rs`, `gui/src/{app,dbus_client}.rs`
+
+### Unit 8 accounting
+
+41 commits = 4 named in the 2 entries above + 37 excluded:
+
+- 2 commits of PR #86, the GUI's D-Bus proxy — merge `a4ae466` (+94/−316) and `47d5beb` (+94/−316):
+  one `zbus::Proxy` per connection replaces one per call, and every call site passes it; the same
+  calls return the same values, so this is plumbing.
+- 3 commits of PR #87, CI — merge `3d76317` (+42/−2), `dd2bd4b` (+27/−2) and `3b516e1` (+20/−5):
+  `actions/checkout` to v7, and unzipped per-binary artifacts in `.github/workflows/rust.yml`. PR #100
+  later removes the unzipped-binary artifacts #87 adds.
+- 3 commits of PR #89, D-Bus reconnect classification — merge `360fb70` (+48/−9), `5ec121e`
+  (+49/−9) and `8649a64` (+0/−1): the worker reconnects on the service-absent error family and after
+  ten consecutive unrecognized failures, then backs off 2 s; the calls and the states they run in are
+  unchanged.
+- 10 commits of PR #92, architecture archaeology — merge `3d6f3d4` (+259/−0), `ff17801` (+49/−15),
+  `f30e4af` (+14/−0), `ea56d69` (+13/−0), `22845a6` (+18/−0), `e5b19e2` (+13/−0), `0a28b8e` (+6/−0),
+  `f1065f6` (+117/−0), `9b993ed` (+143/−0) and `b4c8d3d` (+1/−2): "Architecture overview", "Hardware
+  detection deep-dive", "Module and crate map", "Architecture invariants" and "Subsystem
+  documentation".
+- 5 commits of PR #93, subsystem documents — merge `5f4d1d4` (+265/−65), `0ba4245` (+222/−65),
+  `f746e6f` (+0/−1), `8615796` (+74/−30) and `bb1e336` (+4/−4): "Daemon lifecycle and concurrency".
+- 3 commits of PR #94 — merge `987d9cd` (+4/−42), `9c8f333` (+3/−42) and `aafafb9` (+2/−1):
+  "Correct architecture documentation", which removes ADR-001 "One process-local polling scheduler",
+  ADR-002 "Process-global locked state" and ADR-003 "Explicit blocking pool for full GPU refresh" from
+  `docs/architecture/decisions.md`.
+- 4 commits of PR #95 — merge `012913a` (+199/−0), `a038432` (+199/−0), `e23bd96` (+9/−9) and
+  `a124879` (+2/−2): "GUI state synchronization" and the gamepad section of "Architecture
+  invariants".
+- 4 commits of PR #96 — merge `9724e0a` (+238/−0), `d2782f9` (+241/−0), `8a0212e` (+2/−4) and
+  `b8cc784` (+0/−1): "NVIDIA crate archaeology" and "Tuxedo ioctl client archaeology".
+- 3 commits of PR #97 — merge `4965305` (+52/−0), `a5e022b` (+53/−0) and `b093ad9` (+1/−2): ADR-001
+  "Separate the privileged daemon from the per-user GUI", ADR-002 "Use system D-Bus as the daemon/GUI
+  IPC boundary" and ADR-003 "Keep daemon/GUI domain contracts in a shared Rust crate".
+
+Eleven pull requests are merged in this block — #86, #87, #88, #89, #90 and #92 to #97 — of which two
+carry an entry.
