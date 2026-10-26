@@ -17,6 +17,13 @@ listed as excluded. Work that landed as direct commits cites short SHAs, and eac
 `git cat-file -t` to `commit` and is an ancestor of `origin/lapsphere`. The first pull request appears on
 2026-01-01, so every entry in unit 1 is SHA-cited.
 
+How entries are classified: a change is a feature when the net diff leaves the application producing
+something it did not produce before — a value, a row, a log stream, a control, or a hardware call
+withheld in a state where it was previously issued — and a repair when the same calls happen in the
+same states and only their arguments, parsing or formatting change. A change that is both is
+documented for the new functionality alone, and a wholly repair-only pull request goes to the unit's
+excluded commits.
+
 Covered up to: 8ed5ae3bb8e10e672d838373a5ad35df68a828f9 (2026-02-03)
 
 ## Maintainer's recollections
@@ -1263,10 +1270,8 @@ SHAs: `2177d94` `e3f5524` `d0f2585`
 
 PR #70 (merge `2177d94`, 1 file, +64/−23) stops the NVAPI extended-statistics call while the card's
 performance state is `Eight`, `Twelve` or `Fifteen`, leaving the card to reach its suspended state
-(the comment at `daemon/src/hardware_detection.rs:1611` gives that as the reason) and polls as
-before in every other state (`:1606`, `:1613`, `:1620`). The same merge prints the state as
-`P0`–`P15` (`:1564`), types every card as `GpuType::Discrete` (`:1546`) and probes the thermals
-sensor mask bit by bit (`:1406`, `:1414`). Hardware support is not established by the diff.
+(the comment at `daemon/src/hardware_detection.rs:1611` gives that reason) and polls as before
+in every other state (`:1606`, `:1613`, `:1620`). Hardware support is not established by the diff.
 
 Files: `daemon/src/hardware_detection.rs`
 
