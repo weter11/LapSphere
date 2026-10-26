@@ -73,7 +73,7 @@ halves" is split at a merge when that unit is written.
 | 3a | 2026-01-09 → 2026-01-13 | 48 | unit 3a: 48 = 30 in 11 entries + 18 excluded |
 | 3b | 2026-01-14 → 2026-01-19 | 48 | unit 3b: 48 = 44 in 6 entries + 4 excluded (unit 3: 48 + 48 = 96) |
 | 4 | 2026-01-19 → 2026-01-26 | 51 | unit 4: 51 = 43 in 9 entries + 8 excluded |
-| 5 | 2026-01-26 → 2026-02-03 | 77 | unit 5a: 40 = 36 in 6 entries + 4 excluded; 5b pending — `35db664` (#63) to `8ed5ae3` (#77), split after `e6b1476` (#72) |
+| 5 | 2026-01-26 → 2026-02-03 | 77 | unit 5a: 40 = 40 in 7 entries + 0 excluded; 5b pending — `35db664` (#63) to `8ed5ae3` (#77), split after `e6b1476` (#72) |
 | 6 | 2026-02-03 → 2026-02-10 | 24 | pending — `15fb5fe` (#78) to `a1b958a` (#81) |
 | 7 | 2026-05-14 → 2026-05-22 | 8 | pending — `d16d79f` to `a453a75` (#84) |
 | 8 | 2026-08-22 → 2026-08-29 | 41 | pending — `a4ae466` (#86) to `4965305` (#97) |
@@ -1189,16 +1189,18 @@ Unit 5 is split at `e6b1476`, the merge of PR #72: this half holds PRs #63, #64,
 SHAs: `35db664` `000a86b` `4231bf7` `83e7549` `7bb7c06` `11c1746` `053950a` `13167fa` `d95920c`
 
 PR #63 (merge `35db664`, 16 files, +1140/−173). `KeyboardMode::PerKeyRGB { keys, brightness }`
-(`common/src/types.rs:314`) becomes selectable when `get_keyboard_capabilities` counts more than ten
-`kbd_backlight` LEDs (`daemon/src/hardware_detection.rs:1046`, `gui/src/pages/tuning.rs:967`);
-`set_mode` walks the list through
-`set_zone_color`, which writes `multi_intensity` under each LED path and also sends the Clevo `0x67`
-request (`daemon/src/hardware_control.rs:678`, `:624`). Uniwill TDP reads the performance profile
-with request `0x14` (`daemon/src/tuxedo_io.rs:416`), reads current, minimum and maximum with
-`0x18`/`0x1b`/`0x1e` plus index (`:373`, `:384`, `:395`) and writes a target with `0x15` plus index
-(`:406`); the tuning page draws one slider per index (`gui/src/pages/tuning.rs:175`). A `Logs`
-settings tab lists the daemon's log lines with level filters and a copy button
-(`gui/src/pages/settings.rs:40`). Hardware support is not established by the diff.
+(`common/src/types.rs:314`) becomes selectable when `get_keyboard_capabilities` counts more than
+ten `kbd_backlight` LEDs (`daemon/src/hardware_detection.rs:1046`, `gui/src/pages/tuning.rs:967`);
+`set_mode` walks the list through `set_zone_color`, which writes `multi_intensity` under each LED
+path and also sends the Clevo `0x67` request (`daemon/src/hardware_control.rs:678`, `:624`).
+Uniwill TDP reads the performance profile with request `0x14` (`daemon/src/tuxedo_io.rs:416`),
+reads current, minimum and maximum with `0x18`/`0x1b`/`0x1e` plus index (`:373`, `:384`, `:395`)
+and writes a target with `0x15` plus index (`:406`); the tuning page draws one slider per index
+(`gui/src/pages/tuning.rs:175`). A `Logs` settings tab lists the daemon's log lines with level
+filters and a copy button (`gui/src/pages/settings.rs:40`). Hardware support is not established by
+the diff. The client's background worker, in place since `2a03b02`, now opens the connection inside a
+retry loop and carries `GetWebcamState`, `SetWebcamState` and `GetDaemonLogs`
+(`gui/src/dbus_client.rs:302`, `:304`).
 
 Files: `common/src/types.rs`, `Cargo.lock`, `daemon/Cargo.toml`,
 `daemon/src/{main,dbus_interface,hardware_control,hardware_detection,tuxedo_io}.rs`,
@@ -1207,15 +1209,19 @@ Files: `common/src/types.rs`, `Cargo.lock`, `daemon/Cargo.toml`,
 
 ### 2026-01-27 — Single instance over the session bus, panic reports on disk (PR #64)
 
-SHAs: `9509c52` `436d689` `ed6d5e4` `256471d`
+SHAs: `9509c52` `436d689` `73b0b5d` `ed6d5e4` `256471d`
 
-PR #64 (merge `9509c52`, 12 files, +295/−692). The GUI requests the session-bus name
-`io.lapsphere.Gui` with `DoNotQueue` and exits when another process owns it
-(`gui/src/main.rs:59`, `:72`), and installs a panic hook that writes
-`~/.config/lapsphere/crashes/crash_<timestamp>.log` with the message, the source location and a
-captured backtrace (`:15`). `get_config_dir` and `get_crash_dir` centralise the two paths
-(`gui/src/app.rs:877`, `:887`), and the settings save writes or removes
-`~/.config/autostart/io.lapsphere.LapSphere.desktop` (`:952`).
+PR #64 (merge `9509c52`, 12 files, +295/−692) claims the session-bus name `io.lapsphere.Gui` with
+`DoNotQueue`, exits when another process owns it and installs a panic hook writing
+`~/.config/lapsphere/crashes/crash_<timestamp>.log`; `get_config_dir`/`get_crash_dir` centralise
+the paths and the settings save rewrites the autostart desktop file (`gui/src/main.rs:59`, `:72`,
+`:15`; `gui/src/app.rs:877`, `:887`, `:952`). `73b0b5d` names the Clevo effect words — 0x1002a000
+breathe, 0xB0000000 wave, 0x33010000 cycle, 0x80000000 dance, 0xA0000000 flash, 0x70000000 random,
+0x90000000 tempo (`daemon/src/hardware_control.rs:705`, `:719`, `:730`, `:741`, `:752`, `:766`,
+`:777`), packs colour as 0xBBRRGG (`daemon/src/tuxedo_io.rs:606`) and adds the `0x67` ioctl with
+its `CLEVO_CMD_SET_KB_RGB_LEDS` case (`drivers_src/tuxedo_io/tuxedo_io_ioctl.h:67`,
+`tuxedo_io.c:385`). The −692 is `Cargo.lock` −635 (52 packages leaving with `eframe`'s default
+features, `zbus` 4.4 and `nix` 0.27 replaced), 29 manifest lines and 28 code lines.
 
 Files: `Cargo.lock`, `Cargo.toml`, `daemon/{Cargo.toml,src/{hardware_control,hardware_detection,tuxedo_io}.rs}`,
 `gui/{Cargo.toml,src/{app,main}.rs}`, `gui/src/pages/statistics.rs`,
@@ -1227,9 +1233,10 @@ SHAs: `4cc8df5` `25ba93e` `f50d8d5` `07b7be1`
 
 Four direct commits add `nvidia/` — three files, 1654 lines: `driver.rs` (357, `NV01_DEVICE_0` and
 `NV2080_ALLOC_PARAMETERS` allocation with `NV2080_CTRL_CMD_FB_GET_INFO`), `nvidia.rs` (1051, a GPU
-controller) and `nvapi.rs` (246, NvAPI bindings). The directory is not a workspace member and no
-`mod` declares it; the files import `crate::bindings::nvidia` and `crate::server::gpu_controller`,
-which do not exist in this workspace, so nothing compiles it. `323b8ab` (2026-10-23) deletes
+controller) and `nvapi.rs` (246, NvAPI bindings). No `.rs` file at `3f59aee` declares a `nvidia`
+module, no `.toml` manifest names it, and the tree holds no `bindings/` or `server/gpu_controller`
+path; `driver.rs:10` and `nvapi.rs:4` import `crate::bindings::nvidia` and `nvidia.rs:4` imports
+`crate::server::gpu_controller`, so nothing compiles the directory. `323b8ab` (2026-10-23) deletes
 the tree.
 
 Files: `nvidia/{driver,nvidia,nvapi}.rs`
@@ -1250,16 +1257,31 @@ the diff.
 Files: `Cargo.lock`, `common/src/types.rs`, `daemon/{Cargo.toml,src/{main,dbus_interface,hardware_detection}.rs}`,
 `gui/src/{app,dbus_client}.rs`, `gui/src/pages/{settings,statistics}.rs`
 
+### 2026-01-29 — NVIDIA extended statistics gated by performance state (PR #70)
+
+SHAs: `2177d94` `e3f5524` `d0f2585`
+
+PR #70 (merge `2177d94`, 1 file, +64/−23) stops the NVAPI extended-statistics call while the card's
+performance state is `Eight`, `Twelve` or `Fifteen`, leaving the card to reach its suspended state
+(the comment at `daemon/src/hardware_detection.rs:1611` gives that as the reason) and polls as
+before in every other state (`:1606`, `:1613`, `:1620`). The same merge prints the state as
+`P0`–`P15` (`:1564`), types every card as `GpuType::Discrete` (`:1546`) and probes the thermals
+sensor mask bit by bit (`:1406`, `:1414`). Hardware support is not established by the diff.
+
+Files: `daemon/src/hardware_detection.rs`
+
 ### 2026-01-29 — Start minimized, and one all-fans-auto call (PR #71)
 
 SHAs: `aae8179` `d3b05e0` `2c0dc13` `9a57972`
 
 PR #71 (merge `aae8179`, 5 files, +58/−16). The `start_minimized` setting, carried since the
 initial import without effect, now hides the viewport for the first ten frames when it or `--tray`
-asks for it (`gui/src/app.rs:699-704`); when autostart is off the
-file under `~/.config/autostart/` is rewritten with `X-GNOME-Autostart-enabled=false`, `Hidden=true`
-and `NoDisplay=true` instead of being deleted (`:981`). `set_all_fans_auto` replaces the per-fan
-`SetFanAuto` on the D-Bus interface and in the client (`daemon/src/dbus_interface.rs:203`).
+asks for it (`gui/src/app.rs:699-704`); when autostart is off the file under `~/.config/autostart/`
+is rewritten with `X-GNOME-Autostart-enabled=false`, `Hidden=true` and `NoDisplay=true` instead of
+being deleted (`:981`). `set_all_fans_auto` replaces the per-fan `SetFanAuto` on the D-Bus
+interface and in the client (`daemon/src/dbus_interface.rs:203`). Its `on_exit` blocks on a fresh
+current-thread runtime to send `set_all_fans_auto` and `shutdown_daemon` (`gui/src/app.rs:760`,
+`:765`).
 
 Files: `daemon/src/dbus_interface.rs`, `gui/src/{app,dbus_client,main}.rs`, `gui/src/pages/settings.rs`
 
@@ -1282,22 +1304,7 @@ Files: `common/src/types.rs`, `daemon/src/{main,dbus_interface,hardware_control,
 
 ### Unit 5a accounting
 
-40 commits = 36 named in the 6 entries above + 4 excluded:
+40 commits = 40 named in the 7 entries above + 0 excluded:
 
-- 3 commits of PR #70, a fix with no new functionality — the merge `2177d94` (+64/−23) and its branch
-  commits `e3f5524` (+49/−17) and `d0f2585` (+17/−8): the thermals call probes its sensor mask bit by
-  bit instead of asking for `0xFFFF`, reads hotspot at index 9 and VRAM at index 15 of the returned
-  array, maps `PerformanceState` onto `P0`–`P15` strings and returns before any NVML call for a
-  suspended card.
-- 1 commit `73b0b5d` (+34/−10) — adds `#define W_CL_KBD_RGB _IOW(MAGIC_WRITE_CL, 0x67, int32_t*)` and
-  raises `MOD_API_MIN_VERSION` from `0.2.6` to `0.3.0` in `drivers_src/tuxedo_io/tuxedo_io_ioctl.h`,
-  with a `case W_CL_KBD_RGB:` that calls `clevo_evaluate_method(CLEVO_CMD_SET_KB_RGB_LEDS, …)` in
-  `drivers_src/tuxedo_io/tuxedo_io.c` (`docs/archive/drivers_src-local-patches.md:32`, `:168`); the
-  daemon first sends request `0x67` in the 2026-01-19 keyboard commit of unit 4 (PR #51), and in the tree
-  where that unit ends the only function issuing it is `TuxedoIo::set_clevo_keyboard_mode`
-  (`daemon/src/tuxedo_io.rs:511`), reached from `set_clevo_keyboard_color` (`:534`),
-  `set_clevo_keyboard_brightness` (`:545`) and nine `set_clevo_keyboard_mode` calls in
-  `RgbKeyboardControl::set_mode` (`daemon/src/hardware_control.rs:645`–`:742`).
-
-Six pull requests are merged in this half — #63, #64, #69, #70, #71 and #72 — of which #70 carries no
-entry; the four `nvidia/` commits belong to none of them.
+No commit in this half is excluded. Six pull requests are merged in this half — #63, #64, #69, #70,
+#71 and #72 — and each carries an entry; the four `nvidia/` commits belong to none of them.
