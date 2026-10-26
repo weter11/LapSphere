@@ -213,19 +213,17 @@ Files: `common/src/types.rs`, `daemon/src/{hardware_control,dbus_interface}.rs`,
 
 SHAs: `4793968` `132a2be` `392b8f3` `9d0f1f3` `7bb8eca`
 
-`hardware_detection` adds `get_fan_speeds`, `get_fan_temperatures` and `get_tdp_info` (no earlier
-form of these exists in the file) and repoints `get_tdp_profiles` and `get_current_tdp_profile` from
-the `performance_profiles_available` and `performance_profile` nodes under
-`/sys/devices/platform/tuxedo_io` to `TuxedoIo` ioctls — `TuxedoIo` itself arrives in `5258d35` the
-same day (next entry), and until `7bb8eca` the statistics page read fan speeds directly from
-`/sys/devices/platform/tuxedo_io/fan{N}_input` with an `hwmon` fallback. `hardware_control` rewrites
-`set_tdp_profile` to look the profile name up in `get_performance_profiles` and pass its index to
-`set_performance_profile` — the function first exists in `4720cb1`, writing the name to the sysfs node
-— and gains `set_fan_speed` (clamped to 100), `set_fan_auto`, a piecewise-linear
-`calculate_fan_speed_from_curve`, and webcam get/set. The daemon publishes
-`GetFanSpeeds`, `GetFanTemperature`, `SetFanSpeed`, `SetFanAuto`, `GetWebcamState` and
-`SetWebcamState`, and the client mirrors them. The statistics fan rows then show RPM and temperature
-read from the daemon, falling back to `hwmon` inputs and hiding the rows when no fan is found.
+`hardware_detection` adds `get_fan_speeds`, `get_fan_temperatures` and `get_tdp_info` and repoints
+`get_tdp_profiles` and `get_current_tdp_profile` from the `performance_profiles_available` and
+`performance_profile` nodes under `/sys/devices/platform/tuxedo_io` to `TuxedoIo` ioctls —
+`TuxedoIo` arrives in `5258d35` (next entry). `hardware_control` rewrites `set_tdp_profile` to look
+the profile name up in `get_performance_profiles` and pass its index to `set_performance_profile` —
+the function first exists in `4720cb1`, writing the name to the sysfs node — and gains
+`set_fan_speed` (clamped to 100), `set_fan_auto`, a piecewise-linear
+`calculate_fan_speed_from_curve`, and webcam get/set. The daemon publishes `GetFanSpeeds`,
+`GetFanTemperature`, `SetFanSpeed`, `SetFanAuto`, `GetWebcamState` and `SetWebcamState`, and the
+client mirrors them. The statistics fan rows show RPM and temperature read from the daemon, falling
+back to `hwmon` inputs and hiding the rows when no fan is found.
 
 Files: `daemon/src/{hardware_detection,hardware_control,dbus_interface}.rs`, `gui/src/dbus_client.rs`, `gui/src/ui/statistics_page.rs`
 
@@ -337,20 +335,16 @@ Files: `gui/src/ui/fan_curve_editor`
 
 SHAs: `ec7c584` `6220efa` `9d3e259` `d38e711` `85ead46` `564d2d1`
 
-PR #5 (merge `ec7c584`). `KeyboardMode` drops its `Effect { effect, speed }` variant for eight
-concrete ones — `SingleColor`, `Breathe`, `Cycle`, `Dance`, `Flash`, `RandomColor`, `Tempo` and
-`Wave`. `RgbKeyboardControl::set_mode` writes an effect variant's keyword (`breathing`, `wave`,
-`cycle`, `dance`, `flash`, `random`, `tempo`) into the backlight's `mode` node where that node exists,
-sets colour and brightness for the variants that carry those fields, and returns `Err` for `wave`,
-`cycle`, `dance`, `random` and `tempo` where it does not. The tuning page gains a mode `ComboRow` that
-rebuilds its controls for the selected mode. Hardware support is not established by the diff.
-`StatisticsSections` gains seven polling rates with defaults (`system_info_poll_rate` 60000 ms,
-`cpu_poll_rate` 1000, `gpu_poll_rate` 2000, `battery_poll_rate` 5000, `wifi_poll_rate` 5000,
-`storage_poll_rate` 30000 and `fans_poll_rate` 1000), and the settings page gains the rows that edit
-them. `WiFiInfo` gains
-`signal_level`, `channel`, `channel_width`, `tx_rate` and `rx_rate`; `FanInfo` gains `temperature` and
-`is_rpm`. The same merge deletes the committed `Cargo.lock` (1967 lines removed) and adds a 21-line
-`.gitignore`.
+PR #5 (merge `ec7c584`). `KeyboardMode` drops its `Effect { effect, speed }` variant for eight —
+`SingleColor`, `Breathe`, `Cycle`, `Dance`, `Flash`, `RandomColor`, `Tempo` and `Wave`.
+`RgbKeyboardControl::set_mode` writes an effect variant's keyword into the backlight's `mode` node
+where that node exists, sets colour and brightness for the variants carrying those fields, and
+returns `Err` for `wave`, `cycle`, `dance`, `random` and `tempo` where it does not. The tuning page
+gains a mode `ComboRow` rebuilding its controls per mode. Hardware support is not established by
+the diff. `StatisticsSections` gains seven polling rates with defaults (`system_info_poll_rate`
+60000 ms, `cpu_poll_rate` 1000, `gpu_poll_rate` 2000, `battery_poll_rate` 5000, `wifi_poll_rate`
+5000, `storage_poll_rate` 30000 and `fans_poll_rate` 1000). `WiFiInfo` gains `signal_level`,
+`channel`, `channel_width`, `tx_rate` and `rx_rate`; `FanInfo` gains `temperature` and `is_rpm`.
 
 Files: `common/src/types.rs`, `daemon/src/hardware_control.rs`,
 `gui/src/ui/{tuning_page,settings_page,statistics_page}.rs`, `.gitignore`, `Cargo.lock`
@@ -359,18 +353,16 @@ Files: `common/src/types.rs`, `daemon/src/hardware_control.rs`,
 
 SHAs: `d164c3f` `954ebd6` `3c026a3` `e639bff` `161b54f` `2b8f356` `25a9e22`
 
-PR #6 (merge `d164c3f`). `PreviewKeyboardSettings` applies a `KeyboardSettings` value to the backlight
-without storing it in a profile, and the tuning page's RGB, brightness and speed rows call it on every
-change so the keyboard follows the sliders. The profiles page gains an inline creation group — a name
-entry and a `Create` button — that answers a duplicate name with an `adw::Toast` found through a
-`get_toast_overlay`/`find_toast_overlay_recursive` walk of the widget tree. Statistics polling is split
-into `start_background_poll_system`, `_cpu`, `_battery` and `_fans`; the first, second and fourth
-spawn a `std::thread` that sleeps for its section's poll rate, `_battery` uses
+PR #6 (merge `d164c3f`). `PreviewKeyboardSettings` applies `KeyboardSettings` to the backlight
+without storing it in a profile, and the tuning page's RGB, brightness and speed rows call it on
+change. The profiles page gains an inline creation group — a name entry and a `Create` button —
+answering a duplicate name with an `adw::Toast`. Polling splits into
+`start_background_poll_system`, `_cpu`, `_battery` and `_fans`; the first, second and fourth spawn
+a `std::thread` sleeping for that section's poll rate, `_battery` uses
 `glib::timeout_add_seconds_local`. `hardware_detection` adds `get_wifi_info` with
 `read_wifi_signal`, `read_wifi_channel` and `read_wifi_rates`, the tuning page gains add and update
-handlers for fan-curve points, and the window answers a close request. `AppConfig` gains
-`auto_profile_switching` and the settings page a switch that saves it; nothing in the tree reads the
-flag to switch profiles.
+handlers for fan-curve points. `AppConfig` gains `auto_profile_switching` and the settings page a
+switch that saves it; nothing in the tree reads the flag to switch profiles.
 
 Files: `daemon/src/{dbus_interface,hardware_control,hardware_detection}.rs`, `gui/src/dbus_client.rs`,
 `gui/src/ui/{profiles_page,settings_page,statistics_page,tuning_page,window}.rs`, `common/src/types.rs`
@@ -408,11 +400,11 @@ SHAs: `da0c83d`
 
 `TuxedoIo::set_fan_manual` writes 0 to the auto register — `ioctl_cl_fanauto` on Clevo,
 `ioctl_uw_fanauto` on Uniwill — and `set_fan_speed` calls it before the speed ioctl, the comment at
-that call giving EC overwrite as the reason. A `Drop` impl calls `set_fan_auto` when the handle goes
-away; it is deleted the same day in `92c29a4` (excluded below). `7533981` removes that call from
-`set_fan_speed`, its comment at line 289 saying the speed write implicitly disables auto mode;
-`91c3a0d` puts an explicit auto write back in the Clevo arm, so at `9cbecab` the Clevo arm writes 0 to
-request `0x11` (lines 274–276) and the Uniwill arm writes only its speed request (lines 313–327),
+that call giving EC overwrite as the reason. A `Drop` impl calls `set_fan_auto` when the handle
+goes away; it is deleted the same day in `92c29a4` (excluded below). `7533981` removes that call
+from `set_fan_speed`, its comment at line 289 saying the speed write implicitly disables auto mode;
+`91c3a0d` puts an auto write back in the Clevo arm, so at `9cbecab` the Clevo arm writes 0 to
+request `0x11` (lines 274–276) and the Uniwill arm writes its speed request (lines 313–327),
 nothing to the auto request `0x14`. Hardware support is not established by the diff.
 
 Files: `daemon/src/tuxedo_io.rs`
@@ -472,17 +464,15 @@ Files: `gui/src/ui/fan_curve_editor.rs`, `gui/src/ui/tuning_page.rs`
 
 SHAs: `9cbecab` `2cbf57d` `3c5480e` `d0c6b7e` `5b359bb` `26a7175`
 
-PR #15 (merge `9cbecab`). The editor is rebuilt as two panes — a points `ListBox` with add and remove on
-the left, a 500×400 `DrawingArea` on the right that renders the curve from `set_draw_func`.
-`create_fans_tuning_section` creates one
-`FanCurveEditor` per fan, two when the profile defines no curves, and copies each editor's `get_curve`
-back into the profile when it is saved. The battery charge group leaves the settings page for the
-statistics page's `create_battery_section`, which is rewritten with a signature that drops the client
-argument, and the statistics page's CPU rows keep the capability-driven visibility present since
-`1122a38`; `apply_curves` skips the ioctl when the computed speed equals the last one written, kept per
-fan in `last_speeds`. The branch merges `new_variant` (`26a7175`) before it lands. The files this PR
-edits under `gui/src/ui` are restored to their pre-PR content by `a408870`, `a371d2b` and `1bffbea` —
-except `fan_curve_editor.rs`, which keeps the PR's version — and deleted by `2d3f26e` (unit 2b).
+PR #15 (merge `9cbecab`). The editor is two panes — a points `ListBox` with add and remove, a
+500×400 `DrawingArea` rendering the curve from `set_draw_func`. `create_fans_tuning_section`
+creates one `FanCurveEditor` per fan, two when the profile defines no curves, and copies each
+editor's `get_curve` into the profile on save. The battery charge group moves to the statistics
+page's `create_battery_section`, rewritten with a signature dropping the client argument, and its
+CPU rows keep the capability-driven visibility since `1122a38`; `apply_curves` skips the ioctl when
+the computed speed equals the last written, kept per fan in `last_speeds`. Its `gui/src/ui` files
+are restored to their pre-PR content by `a408870`, `a371d2b` and `1bffbea` — except
+`fan_curve_editor.rs` — and deleted by `2d3f26e` (unit 2b).
 
 Files: `gui/src/ui/{fan_curve_editor,tuning_page,statistics_page,settings_page,window}.rs`,
 `daemon/src/fan_daemon.rs`
@@ -531,20 +521,18 @@ between `9cbecab` and PR #16's merge.
 SHAs: `e0935b5` `f8030d2`
 
 PR #16 (merge `e0935b5`) is the net diff `e0935b5^1..e0935b5`: 10 files, 6 added, 4 modified, 0
-deleted, +255/−23; the GTK deletion is the direct commit `2d3f26e`, not part of this PR. The workspace
-manifest gains the `[workspace.dependencies]` block that is absent at `e0935b5^1` — `egui = "0.28.0"`
-and `eframe = "0.28.0"` — `gui/Cargo.toml` replaces
+deleted, +255/−23. The workspace manifest gains the `[workspace.dependencies]` block absent at
+`e0935b5^1` — `egui = "0.28.0"` and `eframe = "0.28.0"` — `gui/Cargo.toml` replaces
 `gtk = { version = "0.9", package = "gtk4", features = ["v4_14"] }` and
 `libadwaita = { version = "0.7", features = ["v1_5"] }` with `egui = { workspace = true }` and
-`eframe = { workspace = true }`, and `common/src/types.rs` adds `PartialEq` to `Theme`. The six added
-files are `gui/src/egui_ui/{app,mod,profiles_page,settings_page,statistics_page,tuning_page}.rs`, run
-from an eframe entry point in `gui/src/main.rs`; `gui/src/egui_ui/` is removed in `a96d7f3` and is
-not present at `c8189d3`, where `gui/src` holds no `egui_ui` path and no `mod egui_ui`, and it
-contains no fan-curve code — the GTK editor goes with its directory in `2d3f26e` (next entry) and a
-fan-curve editor returns in `dc1e53b`. The merge message is "Convert UI from GTK4 to egui", the reason is not
-recorded in any commit or ADR, and the maintainer's account of 2026-10-25 records that GTK4 and a Qt6
-attempt were both tried and that the UI moved to egui because of problems with both, the Qt6 attempt
-leaving no trace in the 145 refs.
+`eframe = { workspace = true }`, and `common/src/types.rs` adds `PartialEq` to `Theme`. The six
+added files are
+`gui/src/egui_ui/{app,mod,profiles_page,settings_page,statistics_page,tuning_page}.rs`, run from an
+eframe entry point in `gui/src/main.rs`; `gui/src/egui_ui/` is removed in `a96d7f3` and contains no
+fan-curve code — the GTK editor goes with its directory in `2d3f26e` (next entry) and a fan-curve
+editor returns in `dc1e53b`. The merge message is "Convert UI from GTK4 to egui"; the reason is not
+recorded in any commit or ADR, and the maintainer's account of 2026-10-25 records that GTK4 and a
+Qt6 attempt were both tried and that the UI moved to egui because of problems with both.
 
 Files: `Cargo.toml`, `gui/Cargo.toml`, `gui/src/main.rs`,
 `gui/src/egui_ui/{app,mod,profiles_page,settings_page,statistics_page,tuning_page}.rs`,
@@ -915,8 +903,14 @@ Files: `daemon/src/{main,polling_scheduler,dbus_interface}.rs`,
 
 ### 2026-01-15 — Status-notifier tray, runtime-status gating, storage speeds, daemon shutdown (PR #40)
 
-SHAs: `7699009` `c31c6aa` `b0c88ad` `e6b02d9` `ea25e94` `9d01051` `40fc45b` `2c7b212`
-`807aab0` `ba0b064` `01a884d` `f5f2c6c` `e702184` `06997c5` `35074b0`
+SHAs: `7699009` `c31c6aa` `b0c88ad` `e6b02d9`
+
+<details><summary>11 commits</summary>
+
+`ea25e94` `9d01051` `40fc45b` `2c7b212` `807aab0` `ba0b064` `01a884d` `f5f2c6c`
+`e702184` `06997c5` `35074b0`
+
+</details>
 
 PR #40 (merge `7699009`, 14 files, +5585/−157, of which `Cargo.lock` is +4918/−0, the
 `.gitignore` entry dropped). `tray-icon = "0.18"` becomes
@@ -935,8 +929,14 @@ Files: `common/src/types.rs`, `daemon/src/{hardware_detection,dbus_interface}.rs
 
 ### 2026-01-16 — Settings split into tabs, configuration split into two files (PR #42)
 
-SHAs: `7143c95` `4a71320` `70b2322` `fd0f4dc` `d802693` `838a59d` `b7fec24` `9aaf7bc`
-`995ac5b` `08341b0` `8d77531` `d662106` `919b552`
+SHAs: `7143c95` `4a71320` `70b2322` `fd0f4dc`
+
+<details><summary>9 commits</summary>
+
+`d802693` `838a59d` `b7fec24` `9aaf7bc` `995ac5b` `08341b0` `8d77531` `d662106`
+`919b552`
+
+</details>
 
 PR #42 (merge `7143c95`, 15 files, +1507/−417) restructures the settings surface and its
 storage. The settings page becomes three tabs — `SettingsTab::{Main, StatsConfiguration, Hardware}`
@@ -1210,17 +1210,16 @@ Unit 5 is split at `e6b1476`, the merge of PR #72: this half holds PRs #63, #64,
 SHAs: `35db664` `000a86b` `4231bf7` `83e7549` `7bb7c06` `11c1746` `053950a` `13167fa` `d95920c`
 
 PR #63 (merge `35db664`, 16 files, +1140/−173). `KeyboardMode::PerKeyRGB { keys, brightness }`
-(`common/src/types.rs:314`) becomes selectable when `get_keyboard_capabilities` counts more than
-ten `kbd_backlight` LEDs (`daemon/src/hardware_detection.rs:1046`, `gui/src/pages/tuning.rs:967`);
-`set_mode` walks the list through `set_zone_color`, which writes `multi_intensity` under each LED
-path and also sends the Clevo `0x67` request (`daemon/src/hardware_control.rs:678`, `:624`).
-Uniwill TDP reads the performance profile with request `0x14` (`daemon/src/tuxedo_io.rs:416`),
-reads current, minimum and maximum with `0x18`/`0x1b`/`0x1e` plus index (`:373`, `:384`, `:395`)
-and writes a target with `0x15` plus index (`:406`); the tuning page draws one slider per index
-(`gui/src/pages/tuning.rs:175`). A `Logs` settings tab lists the daemon's log lines with level
-filters and a copy button (`gui/src/pages/settings.rs:40`). Hardware support is not established by
-the diff. The client's background worker, in place since `2a03b02`, now opens the connection inside a
-retry loop and carries `GetWebcamState`, `SetWebcamState` and `GetDaemonLogs`
+(`common/src/types.rs:314`) is selectable when `get_keyboard_capabilities` counts more than ten
+`kbd_backlight` LEDs (`daemon/src/hardware_detection.rs:1046`, `gui/src/pages/tuning.rs:967`);
+`set_mode` walks the list through `set_zone_color`, writing `multi_intensity` under each LED path
+and sending the Clevo `0x67` request (`daemon/src/hardware_control.rs:678`, `:624`). Uniwill TDP
+reads the profile with `0x14` (`daemon/src/tuxedo_io.rs:416`), current/min/max with
+`0x18`/`0x1b`/`0x1e` plus index (`:373`, `:384`, `:395`) and writes a target with `0x15` plus index
+(`:406`); one slider per index (`gui/src/pages/tuning.rs:175`). A `Logs` tab lists daemon
+log lines with level filters and a copy button (`gui/src/pages/settings.rs:40`). Hardware support
+is not established by the diff. The client's background worker, since `2a03b02`, now opens the
+connection inside a retry loop and carries `GetWebcamState`, `SetWebcamState` and `GetDaemonLogs`
 (`gui/src/dbus_client.rs:302`, `:304`).
 
 Files: `common/src/types.rs`, `Cargo.lock`, `daemon/Cargo.toml`,
@@ -1611,8 +1610,14 @@ Files: `Cargo.lock`, `gui/Cargo.toml`, `gui/src/main.rs`
 
 ### 2026-09-17 — Work-driven GPU live tier, holder inventory, VRAM availability (PR #105)
 
-SHAs: `8105751` `b30aa91` `2b0b9a6` `e2d8642` `4c9cf6f` `02c3abf` `8575bdf` `f3e0f9e` `25fe846`
-`c235566` `a7680cb` `607a29a` `e2c313e` `04eaa6f` `8563b17` `854bb6f` `a19a35f`
+SHAs: `8105751` `b30aa91` `2b0b9a6` `e2d8642`
+
+<details><summary>13 commits</summary>
+
+`4c9cf6f` `02c3abf` `8575bdf` `f3e0f9e` `25fe846` `c235566` `a7680cb` `607a29a`
+`e2c313e` `04eaa6f` `8563b17` `854bb6f` `a19a35f`
+
+</details>
 
 PR #105 (merge `8105751`, 15 files, +3604/−847) replaces the idle-snapshot gate with one GPU poll path
 over three tiers chosen from sysfs (`daemon/src/hardware_detection.rs:219`): `Suspended` (sysfs only,
@@ -1763,12 +1768,17 @@ unit's window.
 
 ### 2026-10-12 — CPU frequency limits clamped, GPU writes gated, overclock released at idle (PR #120)
 
-SHAs: `b1c8719` `46faa7f` `4693295` `b3b8cec` `3182c5a` `0f7b97e` `176fba3`
-`12a2a74` `14aecbc` `20efeb8` `b730246` `de57f74` `145b1a0` `ba65a91`
-`bb5a3f0` `a4688e8` `2d2f670` `71046e9` `d7edb62` `bcf1f6d` `f1bb358`
-`bccc389` `32f8d1b` `d544db1` `4befd0e` `8b072cd` `5398c21` `dd4af45`
-`ed7368e` `d06bc47` `21f6917` `7851c43` `cfd9722` `5163a42` `16ab74b`
-`a2f7d2f` `8dea03e` `51867d4` `8f3a5fa`
+SHAs: `b1c8719` `46faa7f` `4693295` `b3b8cec`
+
+<details><summary>35 commits</summary>
+
+`3182c5a` `0f7b97e` `176fba3` `12a2a74` `14aecbc` `20efeb8` `b730246` `de57f74`
+`145b1a0` `ba65a91` `bb5a3f0` `a4688e8` `2d2f670` `71046e9` `d7edb62` `bcf1f6d`
+`f1bb358` `bccc389` `32f8d1b` `d544db1` `4befd0e` `8b072cd` `5398c21` `dd4af45`
+`ed7368e` `d06bc47` `21f6917` `7851c43` `cfd9722` `5163a42` `16ab74b` `a2f7d2f`
+`8dea03e` `51867d4` `8f3a5fa`
+
+</details>
 
 PR #120 (merge `b1c8719`, 9 files, +2119/−254) clamps CPU frequency requests to the hardware range:
 `normalize_freq_limits` (`common/src/types.rs:1221`) and `normalize_profiles_freq` (`:1241`) run
