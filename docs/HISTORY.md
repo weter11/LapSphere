@@ -485,7 +485,7 @@ Files: `gui/src/ui/{fan_curve_editor,tuning_page,statistics_page,settings_page,w
 
 ### Unit 2a accounting
 
-86 commits = 39 in 11 entries + 47 excluded:
+86 commits = 39 named in the 11 entries above + 47 excluded:
 
 - 5 CI workflow edits — dependency lists, branch triggers and the merge of PR #9, whose branch commits
   carry 2025-12-28/29 author dates and are counted in unit 1
@@ -659,7 +659,7 @@ Files: `common/src/types.rs`, `daemon/src/{dbus_interface,hardware_control}.rs`,
 
 ### Unit 2b accounting
 
-62 commits = 43 in 9 entries + 19 excluded:
+62 commits = 43 named in the 9 entries above + 19 excluded:
 
 - 4 commits that restore the pre-PR-#15 content of files under `gui/src/ui/` — `a408870` (+105/−97),
   `a371d2b` (+236/−111), `61330a8` (+1/−1) and `1bffbea` (+121/−1). `a408870`'s diff is patch-identical
@@ -675,11 +675,11 @@ Files: `common/src/types.rs`, `daemon/src/{dbus_interface,hardware_control}.rs`,
   `Profile`.
 - 1 dependency with no caller — `b26946a` (+1/−0) adds `rfd = "0.15"` to `gui/Cargo.toml`, and
   `git grep rfd c8189d3 -- gui/src` returns nothing.
-- 7 repository cleanups that delete stray and packaging files — `582520e` (−115, a Russian-named
-  markdown file of GTK build instructions), `73ba58d` (−321, `setup-debian-packaging.sh`), `c293805`
-  (−84, `build-deb.sh`), `4cc5beb` (−13, `tuxedo-daemon.conf`), `d127175` (−12,
-  `tuxedo-daemo.service`), `e2b4633` (−5, `com.tuxedo.Control.service`) and `5c3288c` (0, the binary
-  `tcc_claude.zip`).
+- 7 repository cleanups that delete stray and packaging files — `582520e` (+0/−115, a Russian-named
+  markdown file of GTK build instructions), `73ba58d` (+0/−321, `setup-debian-packaging.sh`), `c293805`
+  (+0/−84, `build-deb.sh`), `4cc5beb` (+0/−13, `tuxedo-daemon.conf`), `d127175` (+0/−12,
+  `tuxedo-daemo.service`), `e2b4633` (+0/−5, `com.tuxedo.Control.service`) and `5c3288c` (+0/−0, the
+  binary `tcc_claude.zip`).
 
 Three pull requests are merged in this half — #16, #17 and #18 — and all three carry entries. Unit 2
 closes at 86 + 62 = 148 commits, the count the inventory gives for 2026-01-01..2026-01-08.
@@ -1235,10 +1235,11 @@ the paths and the settings save rewrites the autostart desktop file (`gui/src/ma
 `:15`; `gui/src/app.rs:877`, `:887`, `:952`). `73b0b5d` names the Clevo effect words — 0x1002a000
 breathe, 0xB0000000 wave, 0x33010000 cycle, 0x80000000 dance, 0xA0000000 flash, 0x70000000 random,
 0x90000000 tempo (`daemon/src/hardware_control.rs:705`, `:719`, `:730`, `:741`, `:752`, `:766`,
-`:777`), packs colour as 0xBBRRGG (`daemon/src/tuxedo_io.rs:606`) and adds the `0x67` ioctl with
-its `CLEVO_CMD_SET_KB_RGB_LEDS` case (`drivers_src/tuxedo_io/tuxedo_io_ioctl.h:67`,
-`tuxedo_io.c:385`). The −692 is `Cargo.lock` −635 (52 packages leaving with `eframe`'s default
-features, `zbus` 4.4 and `nix` 0.27 replaced), 29 manifest lines and 28 code lines.
+`:777`; defined at `drivers_src/clevo_keyboard.h:126-132` since `05a0918`), packs colour as 0xBBRRGG
+(`daemon/src/tuxedo_io.rs:606`) and adds the `0x67` ioctl with its `CLEVO_CMD_SET_KB_RGB_LEDS` case
+(`drivers_src/tuxedo_io/tuxedo_io_ioctl.h:67`, `tuxedo_io.c:385`). The −692 is `Cargo.lock` −635 (52
+packages leaving with `eframe`'s default features, `zbus` 4.4 and `nix` 0.27 replaced), 29 manifest and
+28 code lines.
 
 Files: `Cargo.lock`, `Cargo.toml`, `daemon/{Cargo.toml,src/{hardware_control,hardware_detection,tuxedo_io}.rs}`,
 `gui/{Cargo.toml,src/{app,main}.rs}`, `gui/src/pages/statistics.rs`,
@@ -1513,9 +1514,11 @@ serves the suspended stub untouched when every adapter reads `suspended`
 (`daemon/src/hardware_detection.rs:2222`); when every adapter is either suspended or holds a snapshot
 newer than `IDLE_CACHE_TTL_SECS` = 30 s (`:62`), it returns the last full pass's frequency, memory
 clock, temperature, load, power and voltage from `IDLE_METRICS_CACHE` (`:80`, `:2306-2313`) and issues
-no NVML call, so the kernel's autosuspend timer can expire. `GetGpuInfoFull`
-(`daemon/src/dbus_interface.rs:99`) arms `FULL_NVML_REFRESH_REQUESTED` (`daemon/src/main.rs:46`) for
-one forced pass that may wake a suspended card. PR #105 replaces the gate with a three-tier model.
+no NVML call — the tier comment at `:46-55` gives the 20 s autosuspend timer as the reason.
+`GetGpuInfoFull` (`daemon/src/dbus_interface.rs:99`) arms `FULL_NVML_REFRESH_REQUESTED`
+(`daemon/src/main.rs:46`) for one forced pass that the comment at `:92-98` says
+deliberately wakes a suspended card. Hardware behaviour is not established by the diff. PR #105
+replaces the gate with a three-tier model.
 
 Files: `daemon/src/{dbus_interface,hardware_detection,main}.rs`
 
