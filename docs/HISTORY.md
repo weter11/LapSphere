@@ -1099,7 +1099,9 @@ adds `get_cpu_topology` (`lscpu`), `read_intel_pstate_status` with `has_intel_ps
 tray icon (`daemon/src/hardware_detection.rs:161`, `:483`, `:552`, `gui/src/system_tray.rs:187`).
 
 Files: `Cargo.lock`, `.github/workflows/rust.yml`, `common/{Cargo.toml,src/types.rs}`,
-`daemon/{Cargo.toml,src/{main,dbus_interface,hardware_control,hardware_detection,fan_daemon}}.rs`,
+`daemon/Cargo.toml`, `daemon/src/main.rs`, `daemon/src/dbus_interface.rs`,
+`daemon/src/hardware_control.rs`, `daemon/src/hardware_detection.rs`,
+`daemon/src/fan_daemon.rs`,
 `gui/{Cargo.toml,src/{app,dbus_client,main,system_tray,theme}.rs}`,
 `gui/src/pages/{profiles,settings,statistics,tuning}.rs`, `data/`, `debian/`
 
