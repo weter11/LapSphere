@@ -139,7 +139,7 @@ remaining 305 — 219 + 96 + 51 + 305 = 671, the commit count of `origin/lapsphe
 | 10 | 2026-09-30 → 2026-10-10 | 25 | unit 10: 25 = 16 named in the 4 entries above + 9 excluded |
 | 11a | 2026-10-10 → 2026-10-14 | 41 | unit 11a: 41 = 39 named in the 1 entry above + 2 excluded |
 | 11b | 2026-10-14 → 2026-10-16 | 43 | unit 11b: 43 = 31 named in the 6 entries above + 12 excluded |
-| 12 | 2026-10-23 | 8 | unit 12: 8 = 0 named in the 0 entries above + 8 excluded |
+| 12 | 2026-10-23 | 8 | unit 12: 8 = 2 named in the 1 entry above + 6 excluded |
 | final unit | 2026-10-25 | 3 | final unit: 3 = 0 named in the 0 entries above + 3 excluded |
 
 Unit 2 is split at `9cbecab`, the merge of PR #15, so the two halves are bounded by commit rather
@@ -1972,14 +1972,30 @@ Ten pull requests are merged in this half — #122, #123, #124, #126, #127, #128
 
 ## 2026-10-23 — Unit 12 (8 commits, every commit dated 2026-10-23)
 
-None of the four pull requests leaves the application producing anything it did not produce before: a
-README sync, the removal of a vendored tree no build referenced, a preparatory write in the fan path and
-a CI toolchain change. The tree that goes is one unit 5a records as an entry — `nvidia/`, first added by
-`4cc8df5` (2026-01-27) and grown to three files by the commits that follow it.
+One pull request leaves the application issuing calls it did not issue before — the Uniwill
+fan-ownership read and clear ahead of a speed write — and carries the entry below. The other three are a
+README sync, the removal of a vendored tree no build referenced and a CI toolchain change. The tree that
+goes is one unit 5a records as an entry — `nvidia/`, first added by `4cc8df5` (2026-01-27) and grown to
+three files by the commits that follow it.
+
+### 2026-10-23 — Uniwill fan-ownership bit cleared before each fan write (PR #135)
+
+SHAs: `80dee7a` `9667538`
+
+PR #135 (merge `80dee7a`, 2 files, +37/−1) adds calls at the ioctl boundary ahead of each Uniwill
+fan-speed write: `clear_fan_ownership` (`daemon/src/tuxedo_io.rs:204`) reads EC RAM `0x0751` with
+request `0x14` (`:205`) and, when bit `0x40` — `UNIWILL_FAN_OWNERSHIP_BIT` (`:20`) — is set, writes the
+value back with only that bit cleared through request `0x12` (`:211`, `:212`), called at `:571` before
+the speed write at `:573`; the comment on the const gives the reason as the driver's `uw_set_fan()`
+returning success without writing the EC while the bit is set. Unit 2a records that at `9cbecab` the
+Uniwill arm of `set_fan_speed` wrote nothing to the auto request. Hardware support is not established
+by the diff.
+
+Files: `daemon/src/tuxedo_io.rs`, `docs/subsystems/tuxedo-io.md`
 
 ### Unit 12 accounting
 
-8 commits = 0 named in the 0 entries above + 8 excluded:
+8 commits = 2 named in the 1 entry above + 6 excluded:
 
 - 2 commits of PR #133 — merge `75d8767` (+216/−175) and `cc17707` (+216/−175): `README.md` rewritten
   against the code and packaging on the base; one file, no source, Cargo, packaging or `docs/` change.
@@ -1990,17 +2006,12 @@ a CI toolchain change. The tree that goes is one unit 5a records as an entry —
   `docs/development/known-problems.md` and two comments in `daemon/src/hardware_detection.rs` (`:2380`,
   `:2429`). Nothing in the workspace referenced it: no `Cargo.toml` member, no module declaration, and
   `README.md:268` at the parent already called it "not a crate and not built".
-- 2 commits of PR #135 — merge `80dee7a` (+37/−1) and `9667538` (+37/−1): `clear_fan_ownership`
-  (`daemon/src/tuxedo_io.rs:204`) reads Uniwill mode `0x14` and writes it back through `0x12` with bit
-  `0x40` cleared before each fan-speed write (`:571`), with the ioctl table in
-  `docs/subsystems/tuxedo-io.md` updated to match; the speed ioctl itself, its arguments and the state it
-  runs in are unchanged. Hardware support is not established by the diff.
 - 2 commits of PR #136 — merge `2ff246f` (+6/−5) and `6543963` (+6/−5): `.github/workflows/rust.yml`
   moves the runner from `ubuntu-24.04` to `ubuntu-26.04`, drops `cargo` and `rustc` from the `apt` line
   for `dtolnay/rust-toolchain@stable`, builds with `dpkg-buildpackage -d` and renames the artifact.
 
-Four pull requests are merged in this block — #133, #134, #135 and #136 — and none of them carries an
-entry.
+Four pull requests are merged in this block — #133, #134, #135 and #136 — of which #135 carries the
+entry above and the other three are excluded.
 
 ## 2026-10-25 — Final unit (3 commits, every commit dated 2026-10-25)
 
